@@ -273,6 +273,23 @@ class Wallet:
             abi=ERC20_ABI,
         )
         
+        # Get gas price - try EIP-1559 first, fallback to legacy
+        try:
+            fee_data = self.w3.eth.fee_history(1, 'latest', [50])
+            base_fee = fee_data['baseFeePerGas'][0]
+            priority_fee = self.w3.eth.max_priority_fee_per_gas
+            # Add 20% buffer to base fee to ensure transaction goes through
+            max_fee = int(base_fee * 1.2) + priority_fee
+            gas_price_params = {
+                "maxFeePerGas": max_fee,
+                "maxPriorityFeePerGas": priority_fee,
+            }
+        except Exception:
+            # Fallback to legacy gas price
+            gas_price_params = {
+                "gasPrice": self.w3.eth.gas_price,
+            }
+        
         # Build transaction
         tx = token.functions.approve(
             Web3.to_checksum_address(spender_address),
@@ -281,8 +298,7 @@ class Wallet:
             "from": self.address,
             "nonce": self.w3.eth.get_transaction_count(self.address),
             "gas": 100000,  # Approve is typically ~45k gas
-            "maxFeePerGas": self.w3.eth.max_fee_per_gas,
-            "maxPriorityFeePerGas": self.w3.eth.max_priority_fee_per_gas,
+            **gas_price_params,
         })
         
         return self._send_transaction(tx, wait_for_receipt)
@@ -312,15 +328,16 @@ class Wallet:
             address=Web3.to_checksum_address(self.config.permit2_address),
             abi=PERMIT2_ABI,
         )
-        
+
         expiration = int(time.time()) + expiration_seconds
-        
+
         # Get gas price - try EIP-1559 first, fallback to legacy
         try:
             fee_data = self.w3.eth.fee_history(1, 'latest', [50])
             base_fee = fee_data['baseFeePerGas'][0]
             priority_fee = self.w3.eth.max_priority_fee_per_gas
-            max_fee = base_fee + priority_fee
+            # Add 20% buffer to base fee to ensure transaction goes through
+            max_fee = int(base_fee * 1.2) + priority_fee
             gas_price_params = {
                 "maxFeePerGas": max_fee,
                 "maxPriorityFeePerGas": priority_fee,

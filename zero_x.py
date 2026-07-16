@@ -67,9 +67,10 @@ class ZeroXClient:
         self.api_key = config.zero_x_api_key
         self.chain_id = config.chain_id
         
-        # Headers for API requests
+        # Headers for API requests (0x API v2)
         self.headers = {
             "0x-api-key": self.api_key,
+            "0x-version": "v2",
             "Content-Type": "application/json",
         }
         
@@ -133,7 +134,8 @@ class ZeroXClient:
             time.sleep(random.uniform(0.1, 0.5))
         
         try:
-            url = f"{self.base_url}/swap/v1/quote"
+            # Use 0x API v2 for Robinhood Chain support
+            url = f"{self.base_url}/swap/permit2/quote"
             
             self.logger.debug(f"Fetching quote: {params}")
             
@@ -147,24 +149,29 @@ class ZeroXClient:
             response.raise_for_status()
             data = response.json()
             
-            # Extract price and amounts
-            price = float(data.get("price", 0))
+            # Extract price and amounts (0x API v2 format)
+            buy_amount = int(data.get("buyAmount", 0))
+            sell_amount = int(data.get("sellAmount", 0))
+            price = buy_amount / sell_amount if sell_amount > 0 else 0
             
             # Apply jitter to price if requested
             if apply_jitter_to_price and self.config.anti_mev_jitter:
                 price = apply_jitter(price, jitter_percent=0.05)
             
+            # 0x v2 uses transaction object or permit2 flow
+            transaction = data.get("transaction", {})
+            
             return QuoteResult(
                 success=True,
                 price=price,
-                buy_amount=int(data.get("buyAmount", 0)),
-                sell_amount=int(data.get("sellAmount", 0)),
+                buy_amount=buy_amount,
+                sell_amount=sell_amount,
                 allowance_target=data.get("allowanceTarget"),
-                data=data.get("data"),
-                to=data.get("to"),
-                value=int(data.get("value", 0)),
-                gas=int(data.get("gas", 0)),
-                gas_price=int(data.get("gasPrice", 0)),
+                data=transaction.get("data") if transaction else None,
+                to=transaction.get("to") if transaction else data.get("allowanceTarget"),
+                value=int(transaction.get("value", 0)) if transaction else 0,
+                gas=int(transaction.get("gas", 0)) if transaction else 150000,
+                gas_price=int(transaction.get("gasPrice", 0)) if transaction else 0,
                 raw_response=data,
             )
         

@@ -92,6 +92,32 @@ class GridBot:
         self.logger.info("Shutdown signal received, stopping bot...")
         self.running = False
     
+    def _get_gas_price_params(self) -> dict:
+        """
+        Get gas price parameters, handling both EIP-1559 and legacy chains.
+        
+        Returns:
+            dict: Gas price parameters for transaction.
+        """
+        try:
+            # Try EIP-1559 first
+            fee_data = self.wallet.w3.eth.fee_history(1, 'latest', [50])
+            base_fee = fee_data['baseFeePerGas'][0]
+            priority_fee = self.wallet.w3.eth.max_priority_fee_per_gas
+            # Add 20% buffer to base fee to ensure transaction goes through
+            max_fee = int(base_fee * 1.2) + priority_fee
+            return {
+                "max_fee_per_gas": max_fee,
+                "max_priority_fee_per_gas": priority_fee,
+                "type": 2,  # EIP-1559
+            }
+        except Exception:
+            # Fallback to legacy gas price
+            return {
+                "gas_price": self.wallet.w3.eth.gas_price,
+                "type": 0,  # Legacy
+            }
+    
     def initialize(self) -> bool:
         """
         Initialize bot state and validate configuration.
@@ -172,6 +198,7 @@ class GridBot:
                 sell_token=self.weth_address,
                 buy_token=self.token_address,
                 sell_amount=quote_amount,
+                taker_address=self.wallet.address,
             )
             
             if quote.success and quote.price:
@@ -340,13 +367,27 @@ class GridBot:
                 return False
             
             # Build and send transaction
-            tx_params = self.zero_x.get_swap_transaction_params(
-                quote=quote,
-                from_address=self.wallet.address,
-                nonce=self.wallet.w3.eth.get_transaction_count(self.wallet.address),
-                max_fee_per_gas=self.wallet.w3.eth.max_fee_per_gas,
-                max_priority_fee_per_gas=self.wallet.w3.eth.max_priority_fee_per_gas,
-            )
+            gas_params = self._get_gas_price_params()
+            nonce = self.wallet.w3.eth.get_transaction_count(self.wallet.address)
+            
+            tx_params = {
+                "from": Web3.to_checksum_address(self.wallet.address),
+                "to": Web3.to_checksum_address(quote.to),
+                "data": quote.data,
+                "value": quote.value or 0,
+                "gas": int(quote.gas * 1.2),  # Add 20% buffer
+                "nonce": nonce,
+                "chainId": self.config.chain_id,
+            }
+            
+            # Add gas price params based on chain support
+            if gas_params.get("type") == 2:
+                tx_params["maxFeePerGas"] = gas_params["max_fee_per_gas"]
+                tx_params["maxPriorityFeePerGas"] = gas_params["max_priority_fee_per_gas"]
+                tx_params["type"] = 2
+            else:
+                tx_params["gasPrice"] = gas_params["gas_price"]
+                tx_params["type"] = 0
             
             # Send transaction
             result = self.wallet._send_transaction(tx_params)
@@ -436,13 +477,27 @@ class GridBot:
                 return False
             
             # Build and send transaction
-            tx_params = self.zero_x.get_swap_transaction_params(
-                quote=quote,
-                from_address=self.wallet.address,
-                nonce=self.wallet.w3.eth.get_transaction_count(self.wallet.address),
-                max_fee_per_gas=self.wallet.w3.eth.max_fee_per_gas,
-                max_priority_fee_per_gas=self.wallet.w3.eth.max_priority_fee_per_gas,
-            )
+            gas_params = self._get_gas_price_params()
+            nonce = self.wallet.w3.eth.get_transaction_count(self.wallet.address)
+            
+            tx_params = {
+                "from": Web3.to_checksum_address(self.wallet.address),
+                "to": Web3.to_checksum_address(quote.to),
+                "data": quote.data,
+                "value": quote.value or 0,
+                "gas": int(quote.gas * 1.2),  # Add 20% buffer
+                "nonce": nonce,
+                "chainId": self.config.chain_id,
+            }
+            
+            # Add gas price params based on chain support
+            if gas_params.get("type") == 2:
+                tx_params["maxFeePerGas"] = gas_params["max_fee_per_gas"]
+                tx_params["maxPriorityFeePerGas"] = gas_params["max_priority_fee_per_gas"]
+                tx_params["type"] = 2
+            else:
+                tx_params["gasPrice"] = gas_params["gas_price"]
+                tx_params["type"] = 0
             
             # Send transaction
             result = self.wallet._send_transaction(tx_params)
@@ -522,13 +577,27 @@ class GridBot:
                 return False
             
             # Build and send transaction
-            tx_params = self.zero_x.get_swap_transaction_params(
-                quote=quote,
-                from_address=self.wallet.address,
-                nonce=self.wallet.w3.eth.get_transaction_count(self.wallet.address),
-                max_fee_per_gas=self.wallet.w3.eth.max_fee_per_gas,
-                max_priority_fee_per_gas=self.wallet.w3.eth.max_priority_fee_per_gas,
-            )
+            gas_params = self._get_gas_price_params()
+            nonce = self.wallet.w3.eth.get_transaction_count(self.wallet.address)
+            
+            tx_params = {
+                "from": Web3.to_checksum_address(self.wallet.address),
+                "to": Web3.to_checksum_address(quote.to),
+                "data": quote.data,
+                "value": quote.value or 0,
+                "gas": int(quote.gas * 1.2),  # Add 20% buffer
+                "nonce": nonce,
+                "chainId": self.config.chain_id,
+            }
+            
+            # Add gas price params based on chain support
+            if gas_params.get("type") == 2:
+                tx_params["maxFeePerGas"] = gas_params["max_fee_per_gas"]
+                tx_params["maxPriorityFeePerGas"] = gas_params["max_priority_fee_per_gas"]
+                tx_params["type"] = 2
+            else:
+                tx_params["gasPrice"] = gas_params["gas_price"]
+                tx_params["type"] = 0
             
             result = self.wallet._send_transaction(tx_params)
             
