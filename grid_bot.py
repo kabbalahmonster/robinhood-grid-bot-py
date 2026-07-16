@@ -124,6 +124,18 @@ class GridBot:
         
         logger.info(f"Buying position {pos_id}: {buy_amount_eth:.6f} WETH")
         
+        # Check Permit2 approval before swapping
+        allowance = self.wallet.check_allowance(
+            self.config.weth_address, 
+            self.config.zero_x_proxy, 
+            use_permit2=True
+        )
+        logger.info(f"WETH Permit2 allowance: {allowance}")
+        if allowance < buy_amount_wei:
+            logger.error(f"Insufficient Permit2 allowance. Have {allowance}, need {buy_amount_wei}")
+            logger.error("Please approve WETH to Permit2 first")
+            return
+        
         # Get quote
         quote = self.zero_x.build_swap_transaction(
             sell_token=self.config.weth_address,
