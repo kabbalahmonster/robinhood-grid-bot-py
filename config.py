@@ -1,0 +1,231 @@
+"""
+Configuration module for the Robinhood Chain Grid Trading Bot.
+
+Loads environment variables and provides validated configuration settings
+for bot operation across different EVM chains.
+"""
+
+import os
+from dataclasses import dataclass
+from typing import Optional
+from dotenv import load_dotenv
+
+# Contract addresses for supported chains
+CHAIN_CONFIG = {
+    4663: {  # Robinhood Chain
+        "name": "Robinhood",
+        "weth": "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73",
+        "permit2": "0x000000000022d473030f116ddee9f6b43ac78ba3",
+        "zero_x_proxy": "0xDef1C0ded9bec7F1a1670819833240f027b25EfF",
+        "default_max_positions": 20,
+    },
+    8453: {  # Base
+        "name": "Base",
+        "weth": "0x4200000000000000000000000000000000000006",
+        "permit2": "0x000000000022d473030f116ddee9f6b43ac78ba3",
+        "zero_x_proxy": "0xDef1C0ded9bec7F1a1670819833240f027b25EfF",
+        "default_max_positions": 10,
+    },
+    1: {  # Ethereum Mainnet
+        "name": "Mainnet",
+        "weth": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+        "permit2": "0x000000000022d473030f116ddee9f6b43ac78ba3",
+        "zero_x_proxy": "0xDef1C0ded9bec7F1a1670819833240f027b25EfF",
+        "default_max_positions": 10,
+    },
+}
+
+# 0x API base URLs by chain
+ZEROX_API_URLS = {
+    4663: "https://api.0x.org",  # Robinhood uses standard 0x API
+    8453: "https://api.0x.org",
+    1: "https://api.0x.org",
+}
+
+
+@dataclass
+class BotConfig:
+    """
+    Configuration dataclass for the grid trading bot.
+    
+    Contains all settings required for bot operation including
+    blockchain connection, trading parameters, and API keys.
+    """
+    
+    # Wallet and Connection
+    private_key: str
+    rpc_url: str
+    chain_id: int
+    
+    # API Keys
+    zero_x_api_key: str
+    
+    # Token Addresses
+    token_address: str
+    token_symbol: str
+    weth_address: str
+    usdg_address: str
+    permit2_address: str
+    zero_x_proxy: str
+    
+    # Trading Parameters
+    grid_spacing_percent: float
+    max_positions: int
+    min_profit_percent: float
+    initial_buy_amount: float
+    slippage_tolerance: float
+    bank_percentage: float
+    
+    # Bot Behavior
+    poll_interval_seconds: int
+    anti_mev_jitter: bool
+    log_level: str
+    state_file: str
+    
+    # Derived properties
+    @property
+    def chain_name(self) -> str:
+        """Get the human-readable chain name."""
+        return CHAIN_CONFIG.get(self.chain_id, {}).get("name", "Unknown")
+    
+    @property
+    def zero_x_api_url(self) -> str:
+        """Get the 0x API URL for the configured chain."""
+        return ZEROX_API_URLS.get(self.chain_id, "https://api.0x.org")
+    
+    def validate(self) -> None:
+        """
+        Validate the configuration settings.
+        
+        Raises:
+            ValueError: If any required configuration is missing or invalid.
+        """
+        # Check required fields
+        if not self.private_key or self.private_key == "0x...":
+            raise ValueError("PRIVATE_KEY is required and must be set")
+        
+        if not self.rpc_url or self.rpc_url == "https://...":
+            raise ValueError("RPC_URL is required and must be set")
+        
+        if not self.zero_x_api_key or self.zero_x_api_key == "...":
+            raise ValueError("ZEROX_API_KEY is required and must be set")
+        
+        if not self.token_address or self.token_address == "0x...":
+            raise ValueError("TOKEN_ADDRESS is required and must be set")
+        
+        # Validate chain ID
+        if self.chain_id not in CHAIN_CONFIG:
+            raise ValueError(f"Unsupported chain ID: {self.chain_id}")
+        
+        # Validate numeric ranges
+        if self.grid_spacing_percent <= 0:
+            raise ValueError("GRID_SPACING_PERCENT must be positive")
+        
+        if self.max_positions <= 0:
+            raise ValueError("MAX_POSITIONS must be positive")
+        
+        if not 0 <= self.bank_percentage <= 100:
+            raise ValueError("BANK_PERCENTAGE must be between 0 and 100")
+        
+        if self.poll_interval_seconds < 10:
+            raise ValueError("POLL_INTERVAL_SECONDS must be at least 10 seconds")
+
+
+def load_config(env_file: Optional[str] = None) -> BotConfig:
+    """
+    Load configuration from environment variables.
+    
+    Args:
+        env_file: Optional path to a .env file to load.
+        
+    Returns:
+        BotConfig: Validated configuration object.
+        
+    Raises:
+        ValueError: If configuration validation fails.
+    """
+    # Load environment file if specified
+    if env_file:
+        load_dotenv(env_file)
+    else:
+        load_dotenv()
+    
+    # Get chain ID first to determine defaults
+    chain_id = int(os.getenv("CHAIN_ID", "4663"))
+    chain_defaults = CHAIN_CONFIG.get(chain_id, {})
+    
+    # Build configuration from environment
+    config = BotConfig(
+        # Wallet and Connection
+        private_key=os.getenv("PRIVATE_KEY", ""),
+        rpc_url=os.getenv("RPC_URL", ""),
+        chain_id=chain_id,
+        
+        # API Keys
+        zero_x_api_key=os.getenv("ZEROX_API_KEY", ""),
+        
+        # Token Addresses
+        token_address=os.getenv("TOKEN_ADDRESS", ""),
+        token_symbol=os.getenv("TOKEN_SYMBOL", "TOKEN"),
+        weth_address=os.getenv(
+            "WETH_ADDRESS", 
+            chain_defaults.get("weth", "")
+        ),
+        usdg_address=os.getenv("USDG_ADDRESS", ""),
+        permit2_address=chain_defaults.get("permit2", ""),
+        zero_x_proxy=chain_defaults.get("zero_x_proxy", ""),
+        
+        # Trading Parameters
+        grid_spacing_percent=float(os.getenv("GRID_SPACING_PERCENT", "5.0")),
+        max_positions=int(os.getenv(
+            "MAX_POSITIONS", 
+            str(chain_defaults.get("default_max_positions", 20))
+        )),
+        min_profit_percent=float(os.getenv("MIN_PROFIT_PERCENT", "1.5")),
+        initial_buy_amount=float(os.getenv("INITIAL_BUY_AMOUNT", "0.01")),
+        slippage_tolerance=float(os.getenv("SLIPPAGE_TOLERANCE", "1.0")),
+        bank_percentage=float(os.getenv("BANK_PERCENTAGE", "50.0")),
+        
+        # Bot Behavior
+        poll_interval_seconds=int(os.getenv("POLL_INTERVAL_SECONDS", "30")),
+        anti_mev_jitter=os.getenv("ANTI_MEV_JITTER", "true").lower() == "true",
+        log_level=os.getenv("LOG_LEVEL", "INFO"),
+        state_file=os.getenv("STATE_FILE", "./data/positions.json"),
+    )
+    
+    # Validate the configuration
+    config.validate()
+    
+    return config
+
+
+# Global config instance (lazy loaded)
+_config: Optional[BotConfig] = None
+
+
+def get_config() -> BotConfig:
+    """
+    Get the global configuration instance.
+    
+    Returns:
+        BotConfig: The cached configuration object.
+    """
+    global _config
+    if _config is None:
+        _config = load_config()
+    return _config
+
+
+def reload_config(env_file: Optional[str] = None) -> BotConfig:
+    """
+    Reload the configuration from environment.
+    
+    Args:
+        env_file: Optional path to a .env file to load.
+        
+    Returns:
+        BotConfig: The newly loaded configuration.
+    """
+    global _config
+    _config = load_config(env_file)
+    return _config
