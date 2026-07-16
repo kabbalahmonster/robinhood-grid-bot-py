@@ -73,7 +73,7 @@ class ZeroXClient:
             "Content-Type": "application/json",
         }
         
-        self.logger.info(f"0x Client initialized for chain {chain_id}")
+        self.logger.info(f"0x Client initialized for chain {self.chain_id}")
     
     def get_quote(
         self,

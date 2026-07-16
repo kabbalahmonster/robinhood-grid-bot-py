@@ -89,7 +89,6 @@ WETH_ABI = [
 PERMIT2_ABI = [
     {
         "inputs": [
-            {"internalType": "address", "name": "owner", "type": "address"},
             {"internalType": "address", "name": "token", "type": "address"},
             {"internalType": "address", "name": "spender", "type": "address"},
             {"internalType": "uint160", "name": "amount", "type": "uint160"},
@@ -316,6 +315,22 @@ class Wallet:
         
         expiration = int(time.time()) + expiration_seconds
         
+        # Get gas price - try EIP-1559 first, fallback to legacy
+        try:
+            fee_data = self.w3.eth.fee_history(1, 'latest', [50])
+            base_fee = fee_data['baseFeePerGas'][0]
+            priority_fee = self.w3.eth.max_priority_fee_per_gas
+            max_fee = base_fee + priority_fee
+            gas_price_params = {
+                "maxFeePerGas": max_fee,
+                "maxPriorityFeePerGas": priority_fee,
+            }
+        except Exception:
+            # Fallback to legacy gas price
+            gas_price_params = {
+                "gasPrice": self.w3.eth.gas_price,
+            }
+        
         tx = permit2.functions.approve(
             Web3.to_checksum_address(token_address),
             Web3.to_checksum_address(spender_address),
@@ -325,8 +340,7 @@ class Wallet:
             "from": self.address,
             "nonce": self.w3.eth.get_transaction_count(self.address),
             "gas": 100000,
-            "maxFeePerGas": self.w3.eth.max_fee_per_gas,
-            "maxPriorityFeePerGas": self.w3.eth.max_priority_fee_per_gas,
+            **gas_price_params,
         })
         
         return self._send_transaction(tx, wait_for_receipt)
@@ -430,7 +444,7 @@ class Wallet:
             signed_tx = self.account.sign_transaction(tx)
             
             # Send transaction
-            tx_hash = self.w3.eth.send_raw_transaction(signed_tx.rawTransaction)
+            tx_hash = self.w3.eth.send_raw_transaction(signed_tx.raw_transaction)
             tx_hash_hex = tx_hash.hex()
             
             self.logger.debug(f"Transaction sent: {tx_hash_hex}")
