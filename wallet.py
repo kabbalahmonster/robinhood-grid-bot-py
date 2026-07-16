@@ -456,7 +456,7 @@ class Wallet:
             
             # Wait for receipt
             receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
-            
+
             if receipt["status"] == 1:
                 return TransactionResult(
                     success=True,
@@ -466,13 +466,27 @@ class Wallet:
                     effective_gas_price=receipt.get("effectiveGasPrice"),
                 )
             else:
+                # Try to get revert reason
+                error_msg = "Transaction failed (status=0)"
+                try:
+                    # Replay transaction to get revert reason
+                    tx_data = self.w3.eth.get_transaction(tx_hash)
+                    self.w3.eth.call({
+                        "from": tx_data["from"],
+                        "to": tx_data["to"],
+                        "data": tx_data["input"],
+                        "value": tx_data.get("value", 0),
+                    }, receipt["blockNumber"])
+                except Exception as call_e:
+                    error_msg = f"Transaction reverted: {str(call_e)}"
+
                 return TransactionResult(
                     success=False,
                     tx_hash=tx_hash_hex,
                     receipt=receipt,
-                    error="Transaction failed (status=0)",
+                    error=error_msg,
                 )
-        
+
         except Exception as e:
             self.logger.error(f"Transaction failed: {e}")
             return TransactionResult(success=False, error=str(e))
