@@ -24,12 +24,18 @@ def get_current_price():
     config = load_config()
     zero_x = ZeroXClient(config)
     
+    # Get wallet address from private key
+    from web3 import Web3
+    from eth_account import Account
+    account = Account.from_key(config.private_key)
+    taker = account.address
+    
     # Get quote for small amount to determine price
     quote = zero_x.get_quote(
         sell_token=config.weth_address,
         buy_token=config.token_address,
         sell_amount=10**15,  # 0.001 WETH
-        taker_address=config.private_key,  # Just need an address format
+        taker_address=taker,
     )
     
     if quote.success and quote.buy_amount:
