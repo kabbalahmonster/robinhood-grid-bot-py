@@ -278,8 +278,8 @@ class Wallet:
             fee_data = self.w3.eth.fee_history(1, 'latest', [50])
             base_fee = fee_data['baseFeePerGas'][0]
             priority_fee = self.w3.eth.max_priority_fee_per_gas
-            # Add 20% buffer to base fee to ensure transaction goes through
-            max_fee = int(base_fee * 1.2) + priority_fee
+            # Add 50% buffer to base fee to ensure transaction goes through
+            max_fee = int(base_fee * 1.5) + priority_fee
             gas_price_params = {
                 "maxFeePerGas": max_fee,
                 "maxPriorityFeePerGas": priority_fee,
@@ -336,8 +336,8 @@ class Wallet:
             fee_data = self.w3.eth.fee_history(1, 'latest', [50])
             base_fee = fee_data['baseFeePerGas'][0]
             priority_fee = self.w3.eth.max_priority_fee_per_gas
-            # Add 20% buffer to base fee to ensure transaction goes through
-            max_fee = int(base_fee * 1.2) + priority_fee
+            # Add 50% buffer to base fee to ensure transaction goes through
+            max_fee = int(base_fee * 1.5) + priority_fee
             gas_price_params = {
                 "maxFeePerGas": max_fee,
                 "maxPriorityFeePerGas": priority_fee,
