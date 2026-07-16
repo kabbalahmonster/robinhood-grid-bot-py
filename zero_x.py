@@ -150,27 +150,35 @@ class ZeroXClient:
             data = response.json()
             
             # Extract price and amounts (0x API v2 format)
-            buy_amount = int(data.get("buyAmount", 0))
-            sell_amount = int(data.get("sellAmount", 0))
+            buy_amount = int(data.get("buyAmount", 0)) if data.get("buyAmount") else 0
+            sell_amount = int(data.get("sellAmount", 0)) if data.get("sellAmount") else 0
             price = buy_amount / sell_amount if sell_amount > 0 else 0
-            
+
             # Apply jitter to price if requested
             if apply_jitter_to_price and self.config.anti_mev_jitter:
                 price = apply_jitter(price, jitter_percent=0.05)
-            
-            # 0x v2 uses transaction object or permit2 flow
+
+            # 0x v2 may have transaction object OR we need to use the 0x Exchange Proxy
             transaction = data.get("transaction", {})
-            
+
+            # If no transaction object, use the permit2 allowanceTarget as to address
+            # The 0x Exchange Proxy is the actual executor
+            to_address = transaction.get("to") if transaction else self.config.zero_x_proxy
+            tx_data = transaction.get("data") if transaction else None
+
+            # Log what we got
+            self.logger.debug(f"0x quote: buy={buy_amount}, sell={sell_amount}, to={to_address}")
+
             return QuoteResult(
                 success=True,
                 price=price,
                 buy_amount=buy_amount,
                 sell_amount=sell_amount,
                 allowance_target=data.get("allowanceTarget"),
-                data=transaction.get("data") if transaction else None,
-                to=transaction.get("to") if transaction else data.get("allowanceTarget"),
+                data=tx_data,
+                to=to_address,
                 value=int(transaction.get("value", 0)) if transaction else 0,
-                gas=int(transaction.get("gas", 0)) if transaction else 150000,
+                gas=int(transaction.get("gas", 0)) if transaction else 200000,
                 gas_price=int(transaction.get("gasPrice", 0)) if transaction else 0,
                 raw_response=data,
             )
