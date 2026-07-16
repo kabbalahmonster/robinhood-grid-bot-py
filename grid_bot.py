@@ -151,11 +151,12 @@ class GridBot:
             return
         
         # Execute swap with checksummed addresses
-        from web3 import Web3
-        gas_limit = int(quote.gas * 1.5) if quote.gas else 300000  # 50% buffer, default 300k
-        gas_price = int(self.wallet.w3.eth.gas_price * 1.3)  # 30% buffer
+        # Use 0x provided gas limit or default
+        gas_limit = int(quote.gas * 1.2) if quote.gas else 350000
+        gas_price = int(self.wallet.w3.eth.gas_price * 1.2)
         
-        result = self.wallet._send_transaction({
+        from web3 import Web3
+        tx_params = {
             "from": Web3.to_checksum_address(self.wallet.address),
             "to": Web3.to_checksum_address(quote.to),
             "data": quote.data,
@@ -164,7 +165,10 @@ class GridBot:
             "gasPrice": gas_price,
             "nonce": self.wallet.w3.eth.get_transaction_count(self.wallet.address),
             "chainId": self.config.chain_id,
-        })
+        }
+        
+        logger.info(f"Sending tx to {quote.to} with gas {gas_limit}")
+        result = self.wallet._send_transaction(tx_params)
         
         if result.success:
             # Update position - store cost in nano-WETH
