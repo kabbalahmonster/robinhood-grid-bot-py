@@ -71,6 +71,7 @@ class BotConfig:
     # Trading Parameters
     grid_spacing_percent: float
     max_positions: int
+    max_active_positions: int
     min_profit_percent: float
     initial_buy_amount: float
     slippage_tolerance: float
@@ -178,9 +179,10 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
         # Trading Parameters
         grid_spacing_percent=float(os.getenv("GRID_SPACING_PERCENT", "5.0")),
         max_positions=int(os.getenv(
-            "MAX_POSITIONS", 
+            "MAX_POSITIONS",
             str(chain_defaults.get("default_max_positions", 20))
         )),
+        max_active_positions=int(os.getenv("MAX_ACTIVE_POSITIONS", "10")),
         min_profit_percent=float(os.getenv("MIN_PROFIT_PERCENT", "1.5")),
         initial_buy_amount=float(os.getenv("INITIAL_BUY_AMOUNT", "0.01")),
         slippage_tolerance=float(os.getenv("SLIPPAGE_TOLERANCE", "1.0")),

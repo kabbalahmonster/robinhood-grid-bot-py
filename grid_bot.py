@@ -34,6 +34,7 @@ class GridBot:
         logger.info(f"Grid Bot initialized")
         logger.info(f"Wallet: {self.wallet.address}")
         logger.info(f"Trading: {self.config.token_symbol}")
+        logger.info(f"Max active positions: {self.config.max_active_positions}")
     
     def load_positions(self):
         """Load positions from JSON file."""
@@ -70,6 +71,12 @@ class GridBot:
         weth_balance, _ = self.wallet.get_token_balance(self.config.weth_address)
         if weth_balance < 0.001:
             logger.warning(f"Low WETH balance: {weth_balance:.6f}")
+            return
+        
+        # Check max active positions limit
+        active_positions = sum(1 for p in self.positions.values() if p['balance'] > 0)
+        if active_positions >= self.config.max_active_positions:
+            logger.debug(f"Max active positions reached ({active_positions}/{self.config.max_active_positions})")
             return
         
         # Find empty positions where price is in buy range
