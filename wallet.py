@@ -273,22 +273,13 @@ class Wallet:
             abi=ERC20_ABI,
         )
         
-        # Get gas price - try EIP-1559 first, fallback to legacy
-        try:
-            fee_data = self.w3.eth.fee_history(1, 'latest', [50])
-            base_fee = fee_data['baseFeePerGas'][0]
-            priority_fee = self.w3.eth.max_priority_fee_per_gas
-            # Add 50% buffer to base fee to ensure transaction goes through
-            max_fee = int(base_fee * 1.5) + priority_fee
-            gas_price_params = {
-                "maxFeePerGas": max_fee,
-                "maxPriorityFeePerGas": priority_fee,
-            }
-        except Exception:
-            # Fallback to legacy gas price
-            gas_price_params = {
-                "gasPrice": self.w3.eth.gas_price,
-            }
+        # Use legacy gas pricing for Robinhood Chain to avoid base fee volatility
+        gas_price = self.w3.eth.gas_price
+        # Add 20% buffer
+        gas_price = int(gas_price * 1.2)
+        gas_price_params = {
+            "gasPrice": gas_price,
+        }
         
         # Build transaction
         tx = token.functions.approve(
@@ -331,22 +322,13 @@ class Wallet:
 
         expiration = int(time.time()) + expiration_seconds
 
-        # Get gas price - try EIP-1559 first, fallback to legacy
-        try:
-            fee_data = self.w3.eth.fee_history(1, 'latest', [50])
-            base_fee = fee_data['baseFeePerGas'][0]
-            priority_fee = self.w3.eth.max_priority_fee_per_gas
-            # Add 50% buffer to base fee to ensure transaction goes through
-            max_fee = int(base_fee * 1.5) + priority_fee
-            gas_price_params = {
-                "maxFeePerGas": max_fee,
-                "maxPriorityFeePerGas": priority_fee,
-            }
-        except Exception:
-            # Fallback to legacy gas price
-            gas_price_params = {
-                "gasPrice": self.w3.eth.gas_price,
-            }
+        # Use legacy gas pricing for Robinhood Chain to avoid base fee volatility
+        gas_price = self.w3.eth.gas_price
+        # Add 20% buffer
+        gas_price = int(gas_price * 1.2)
+        gas_price_params = {
+            "gasPrice": gas_price,
+        }
         
         tx = permit2.functions.approve(
             Web3.to_checksum_address(token_address),

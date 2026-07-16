@@ -94,29 +94,20 @@ class GridBot:
     
     def _get_gas_price_params(self) -> dict:
         """
-        Get gas price parameters, handling both EIP-1559 and legacy chains.
+        Get gas price parameters.
+        Uses legacy gas pricing for Robinhood Chain to avoid base fee volatility.
         
         Returns:
             dict: Gas price parameters for transaction.
         """
-        try:
-            # Try EIP-1559 first
-            fee_data = self.wallet.w3.eth.fee_history(1, 'latest', [50])
-            base_fee = fee_data['baseFeePerGas'][0]
-            priority_fee = self.wallet.w3.eth.max_priority_fee_per_gas
-            # Add 50% buffer to base fee to ensure transaction goes through
-            max_fee = int(base_fee * 1.5) + priority_fee
-            return {
-                "max_fee_per_gas": max_fee,
-                "max_priority_fee_per_gas": priority_fee,
-                "type": 2,  # EIP-1559
-            }
-        except Exception:
-            # Fallback to legacy gas price
-            return {
-                "gas_price": self.wallet.w3.eth.gas_price,
-                "type": 0,  # Legacy
-            }
+        # Use legacy gas pricing for Robinhood Chain
+        gas_price = self.wallet.w3.eth.gas_price
+        # Add 20% buffer to ensure transaction goes through
+        gas_price = int(gas_price * 1.2)
+        return {
+            "gas_price": gas_price,
+            "type": 0,  # Legacy
+        }
     
     def initialize(self) -> bool:
         """
