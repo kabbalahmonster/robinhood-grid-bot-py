@@ -137,10 +137,11 @@ class GridBot:
             logger.error(f"Quote failed: {quote.error}")
             return
         
-        # Execute swap
+        # Execute swap with checksummed addresses
+        from web3 import Web3
         result = self.wallet._send_transaction({
-            "from": self.wallet.address,
-            "to": quote.to,
+            "from": Web3.to_checksum_address(self.wallet.address),
+            "to": Web3.to_checksum_address(quote.to),
             "data": quote.data,
             "value": quote.value or 0,
             "gas": int(quote.gas * 1.2),
@@ -186,10 +187,10 @@ class GridBot:
             logger.error(f"Quote failed: {quote.error}")
             return
         
-        # Execute swap
+        # Execute swap with checksummed addresses
         result = self.wallet._send_transaction({
-            "from": self.wallet.address,
-            "to": quote.to,
+            "from": Web3.to_checksum_address(self.wallet.address),
+            "to": Web3.to_checksum_address(quote.to),
             "data": quote.data,
             "value": quote.value or 0,
             "gas": int(quote.gas * 1.2),
