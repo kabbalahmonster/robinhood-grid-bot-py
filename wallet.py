@@ -460,8 +460,11 @@ class Wallet:
             # Sign transaction
             signed_tx = self.account.sign_transaction(tx)
             
-            # Send transaction
-            tx_hash = self.w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+            # Send transaction - handle both old and new eth-account versions
+            raw_tx = getattr(signed_tx, 'raw_transaction', getattr(signed_tx, 'rawTransaction', None))
+            if raw_tx is None:
+                raise AttributeError("SignedTransaction has no raw_transaction attribute")
+            tx_hash = self.w3.eth.send_raw_transaction(raw_tx)
             tx_hash_hex = tx_hash.hex()
             
             self.logger.debug(f"Transaction sent: {tx_hash_hex}")
@@ -508,7 +511,11 @@ class Wallet:
             TransactionResult: Transaction result.
         """
         try:
-            tx_hash = self.w3.eth.send_raw_transaction(signed_tx.rawTransaction)
+            # Handle both old and new eth-account versions
+            raw_tx = getattr(signed_tx, 'raw_transaction', getattr(signed_tx, 'rawTransaction', None))
+            if raw_tx is None:
+                raise AttributeError("SignedTransaction has no raw_transaction attribute")
+            tx_hash = self.w3.eth.send_raw_transaction(raw_tx)
             tx_hash_hex = tx_hash.hex()
             
             if not wait_for_receipt:
