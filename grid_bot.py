@@ -75,11 +75,16 @@ class GridBot:
         # Find empty positions where price is in buy range
         for pos_id, pos in self.positions.items():
             if pos['balance'] == 0:  # Empty position
+                # Scale: 10^9 (nano-WETH)
                 buy_min = pos['buyMin'] / 10**9
                 buy_max = pos['buyMax'] / 10**9
                 
+                # Handle first position with buyMin = 0
+                if buy_min == 0:
+                    buy_min = 0
+                
                 if buy_min <= price <= buy_max:
-                    logger.info(f"Buy trigger: Position {pos_id} at price {price:.10f}")
+                    logger.info(f"Buy trigger: Position {pos_id} at price {price:.10f} (range: {buy_min:.10f} - {buy_max:.10f})")
                     self.execute_buy(pos_id, price)
                     return  # One buy per cycle
     
@@ -87,10 +92,11 @@ class GridBot:
         """Check for sell opportunities."""
         for pos_id, pos in self.positions.items():
             if pos['balance'] > 0:  # Has tokens
+                # Scale: 10^9 (nano-WETH)
                 sell_min = pos['sellMin'] / 10**9
                 
                 if price >= sell_min:
-                    logger.info(f"Sell trigger: Position {pos_id} at price {price:.10f}")
+                    logger.info(f"Sell trigger: Position {pos_id} at price {price:.10f} (sellMin: {sell_min:.10f})")
                     self.execute_sell(pos_id, price)
                     return  # One sell per cycle
     
@@ -137,10 +143,10 @@ class GridBot:
         })
         
         if result.success:
-            # Update position
+            # Update position - store cost in nano-WETH
             tokens_received = quote.buy_amount
             self.positions[pos_id]['balance'] = tokens_received
-            self.positions[pos_id]['cost'] = int(price * 10**9)
+            self.positions[pos_id]['cost'] = int(price * 10**9)  # nano-WETH
             self.save_positions()
             logger.info(f"✅ Buy successful: {tokens_received / 10**18:.6f} tokens (tx: {result.tx_hash[:20]}...)")
         else:
@@ -150,11 +156,15 @@ class GridBot:
         """Execute a sell order."""
         pos = self.positions[pos_id]
         sell_amount = pos['balance']
+        # Cost is stored in nano-WETH
         cost_basis = pos['cost'] / 10**9
         
         # Calculate profit
-        profit_percent = ((price - cost_basis) / cost_basis) * 100
-        logger.info(f"Selling position {pos_id}: Profit {profit_percent:.2f}%")
+        if cost_basis > 0:
+            profit_percent = ((price - cost_basis) / cost_basis) * 100
+        else:
+            profit_percent = 0
+        logger.info(f"Selling position {pos_id}: Cost basis {cost_basis:.10f}, Current {price:.10f}, Profit {profit_percent:.2f}%")
         
         # Get quote
         quote = self.zero_x.build_swap_transaction(

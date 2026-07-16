@@ -14,7 +14,7 @@ def generate_grid_positions(
     profit_target: float = 0.10,  # 10%
     stoploss: float = 0.20,  # 20% below buy
 ):
-    """Generate positions in the original format."""
+    """Generate positions in the original format with contiguous bands."""
     
     positions = {}
     current_buy_max = start_price
@@ -22,19 +22,26 @@ def generate_grid_positions(
     for i in range(1, num_positions + 1):
         # Calculate bands
         buy_max = current_buy_max
-        buy_min = buy_max / (1 + grid_spacing)
-        sell_min = buy_max * (1 + profit_target)
-        stoploss_price = buy_min * (1 - stoploss)
+        # buyMin is the previous position's buyMin (or 0 for first)
+        if i == 1:
+            buy_min = 0  # First position buys from 0 to buyMax
+        else:
+            buy_min = buy_max / (1 + grid_spacing)
         
-        # Store in format matching user's example
+        sell_min = buy_max * (1 + profit_target)
+        stoploss_price = buy_min * (1 - stoploss) if buy_min > 0 else buy_max * (1 - stoploss)
+        
+        # Store in format matching user's example (scale: 10^12 for micro-WETH)
+        # Looking at user's data: 600000 = 0.0006 WETH, so scale is 10^9
+        scale = 10**9
         positions[str(i)] = {
             "id": str(i),
             "balance": 0,
-            "buyMax": int(buy_max * 10**9),  # Convert to nano-WETH like user's format
-            "buyMin": int(buy_min * 10**9),
-            "sellMin": int(sell_min * 10**9),
+            "buyMax": int(buy_max * scale),
+            "buyMin": int(buy_min * scale),
+            "sellMin": int(sell_min * scale),
             "cost": 0,
-            "stoploss": int(stoploss_price * 10**9),
+            "stoploss": int(stoploss_price * scale),
         }
         
         # Next position's buyMax is this position's buyMin
