@@ -79,6 +79,7 @@ class BotConfig:
     moonbag_percentage: float
     bank_min_amount: float
     fast_profit: bool
+    tradeable_balance_percent: float
     
     # Bot Behavior
     poll_interval_seconds: int
@@ -193,6 +194,7 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
         moonbag_percentage=float(os.getenv("MOONBAG_PERCENTAGE", "0.0")),
         bank_min_amount=float(os.getenv("BANK_MIN_AMOUNT", "0.5")),
         fast_profit=os.getenv("FAST_PROFIT", "false").lower() == "true",
+        tradeable_balance_percent=float(os.getenv("TRADEABLE_BALANCE_PERCENT", "90.0")),
         
         # Bot Behavior
         poll_interval_seconds=int(os.getenv("POLL_INTERVAL_SECONDS", "30")),

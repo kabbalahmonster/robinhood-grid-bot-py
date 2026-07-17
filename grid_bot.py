@@ -158,8 +158,9 @@ class GridBot:
         if empty_positions == 0:
             return
         
-        # Use 90% of available WETH divided by empty positions
-        buy_amount_eth = (weth_balance * 0.9) / empty_positions
+        # Use configured % of available WETH divided by empty positions
+        tradeable_pct = getattr(self.config, 'tradeable_balance_percent', 90.0) / 100.0
+        buy_amount_eth = (weth_balance * tradeable_pct) / empty_positions
         buy_amount_wei = int(buy_amount_eth * 10**18)
         
         logger.info(f"Buying position {pos_id}: {buy_amount_eth:.6f} WETH")
