@@ -128,8 +128,8 @@ class BotConfig:
         if not 0 <= self.bank_percentage <= 100:
             raise ValueError("BANK_PERCENTAGE must be between 0 and 100")
         
-        if self.poll_interval_seconds < 10:
-            raise ValueError("POLL_INTERVAL_SECONDS must be at least 10 seconds")
+        if self.poll_interval_seconds < 1:
+            raise ValueError("POLL_INTERVAL_SECONDS must be at least 1 second")
 
 
 def load_config(env_file: Optional[str] = None) -> BotConfig:
