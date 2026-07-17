@@ -451,6 +451,10 @@ class GridBot:
         active = sum(1 for p in self.positions.values() if p['balance'] > 0)
         empty = sum(1 for p in self.positions.values() if p['balance'] == 0)
         
+        # Calculate moonbag (tokens in wallet not in positions)
+        position_balance_total = sum(p['balance'] for p in self.positions.values()) / 10**18
+        moonbag_balance = token_bal - position_balance_total
+        
         # Get price
         price = self.get_token_price()
         if price is None:
@@ -462,7 +466,7 @@ class GridBot:
         logger.info(f"ROUND #{self.round_count} | {self.config.token_symbol} | Elapsed: {elapsed:.0f}s")
         logger.info("=" * 70)
         logger.info(f"💰 WETH Balance: {weth_bal:.6f}")
-        logger.info(f"🪙 Token Balance: {token_bal:.6f}")
+        logger.info(f"🪙 Token Balance: {token_bal:.6f} (in positions: {position_balance_total:.4f}, moonbag: {moonbag_balance:.4f})")
         logger.info(f"📊 Price: 1 {self.config.token_symbol} = {price:.10f} WETH")
         logger.info(f"📈 Positions: {active} active / {empty} empty (max active: {self.config.max_active_positions})")
         logger.info(f"📊 Session: {self.session_buys} buys, {self.session_sells} sells, {self.session_profit_weth:.6f} WETH profit")
