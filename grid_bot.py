@@ -103,6 +103,8 @@ class GridBot:
     def check_sells(self, price):
         """Check for sell opportunities."""
         min_profit_percent = getattr(self.config, 'min_profit_percent', 2.0)  # Default 2% minimum profit
+        slippage_buffer = 1.5  # Require extra 1.5% to cover slippage
+        effective_min_profit = min_profit_percent + slippage_buffer
         
         for pos_id, pos in self.positions.items():
             if pos['balance'] > 0:  # Has tokens
@@ -115,13 +117,15 @@ class GridBot:
                 buy_price = cost_weth / tokens if tokens > 0 else 0
                 current_profit = ((price - buy_price) / buy_price * 100) if buy_price > 0 else 0
                 
-                if price >= sell_min:
-                    # Check if we have enough profit to cover slippage
-                    if current_profit < min_profit_percent:
-                        logger.info(f"Sell blocked: Position {pos_id} at {price:.10f} - only {current_profit:.2f}% profit (need {min_profit_percent}%)")
-                        continue
-                    
-                    logger.info(f"Sell trigger: Position {pos_id} at price {price:.10f} (sellMin: {sell_min:.10f}, profit: {current_profit:.2f}%)")
+                # Use higher of sellMin or min profit + buffer
+                required_price = max(sell_min, buy_price * (1 + effective_min_profit / 100))
+                
+                if price >= required_price:
+                    logger.info(f"Sell trigger: Position {pos_id} at price {price:.10f} (required: {required_price:.10f}, profit: {current_profit:.2f}%)")
+                    self.execute_sell(pos_id, price)
+                    return  # One sell per cycle
+                elif price >= sell_min:
+                    logger.info(f"Sell blocked: Position {pos_id} at {price:.10f} - profit {current_profit:.2f}% < required {effective_min_profit}% (buffer for slippage)")
                     self.execute_sell(pos_id, price)
                     return  # One sell per cycle
     
