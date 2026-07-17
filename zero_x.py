@@ -251,8 +251,10 @@ class ZeroXClient:
             buy_amount = int(data.get("buyAmount", 0)) if data.get("buyAmount") else 0
             sell_amount = int(data.get("sellAmount", 0)) if data.get("sellAmount") else 0
             
-            if sell_amount > 0:
-                price = buy_amount / sell_amount
+            if buy_amount > 0:
+                # Price = sell_amount / buy_amount (WETH per token)
+                # We sold sell_amount of WETH, got buy_amount of tokens
+                price = sell_amount / buy_amount
                 # Apply small jitter if enabled
                 if self.config.anti_mev_jitter:
                     price = apply_jitter(price, jitter_percent=0.05)

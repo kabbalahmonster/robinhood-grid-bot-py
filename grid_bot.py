@@ -75,10 +75,8 @@ class GridBot:
             buy_token=self.config.token_address,
             sell_amount=10**15,  # 0.001 WETH
         )
-        if price:
-            # Price = WETH / tokens
-            return 10**15 / price
-        return None
+        # get_price now returns WETH per token directly
+        return price
     
     def check_buys(self, price):
         """Check for buy opportunities."""
