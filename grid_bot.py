@@ -177,12 +177,14 @@ class GridBot:
         result = self.wallet._send_transaction(tx_params)
         
         if result.success:
-            # Update position - store cost in nano-WETH
+            # Update position - store actual WETH cost (not price) in nano-WETH
             tokens_received = quote.buy_amount
             self.positions[pos_id]['balance'] = tokens_received
-            self.positions[pos_id]['cost'] = int(price * 10**9)  # nano-WETH
+            # Cost = actual WETH spent for profit calculation
+            cost_nano = int(buy_amount_eth * 10**9)
+            self.positions[pos_id]['cost'] = cost_nano
             self.save_positions()
-            logger.info(f"✅ Buy successful: {tokens_received / 10**18:.6f} tokens (tx: {result.tx_hash[:20]}...)")
+            logger.info(f"✅ Buy successful: {tokens_received / 10**18:.6f} tokens for {buy_amount_eth:.6f} WETH (tx: {result.tx_hash[:20]}...)")
         else:
             logger.error(f"❌ Buy failed: {result.error}")
     
@@ -190,15 +192,16 @@ class GridBot:
         """Execute a sell order."""
         pos = self.positions[pos_id]
         sell_amount = pos['balance']
-        # Cost is stored in nano-WETH
-        cost_basis = pos['cost'] / 10**9
+        # Cost is WETH spent (in nano-WETH)
+        cost_weth = pos['cost'] / 10**9
         
-        # Calculate profit
-        if cost_basis > 0:
-            profit_percent = ((price - cost_basis) / cost_basis) * 100
+        # Calculate expected profit based on current price vs buy price
+        buy_price = cost_weth / (sell_amount / 10**18) if sell_amount > 0 else 0
+        if buy_price > 0:
+            profit_percent = ((price - buy_price) / buy_price) * 100
         else:
             profit_percent = 0
-        logger.info(f"Selling position {pos_id}: Cost basis {cost_basis:.10f}, Current {price:.10f}, Profit {profit_percent:.2f}%")
+        logger.info(f"Selling position {pos_id}: Buy price {buy_price:.10f}, Current {price:.10f}, Cost {cost_weth:.6f} WETH, Profit {profit_percent:.2f}%")
         
         # Get quote
         quote = self.zero_x.build_swap_transaction(
