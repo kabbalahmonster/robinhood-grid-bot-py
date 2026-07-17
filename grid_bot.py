@@ -116,6 +116,7 @@ class GridBot:
         min_profit_percent = getattr(self.config, 'min_profit_percent', 2.0)  # Default 2% minimum profit
         slippage_buffer = 1.5  # Require extra 1.5% to cover slippage
         effective_min_profit = min_profit_percent + slippage_buffer
+        fast_profit = getattr(self.config, 'fast_profit', False)
         
         for pos_id, pos in self.positions.items():
             if pos['balance'] > 0:  # Has tokens
@@ -128,7 +129,13 @@ class GridBot:
                 buy_price = cost_weth / tokens if tokens > 0 else 0
                 current_profit = ((price - buy_price) / buy_price * 100) if buy_price > 0 else 0
                 
-                # Use higher of sellMin or min profit + buffer
+                # FAST PROFIT MODE: Sell if profit exceeds minimum, regardless of sellMin
+                if fast_profit and current_profit >= effective_min_profit:
+                    logger.info(f"🚀 Fast profit trigger: Position {pos_id} at {price:.10f} (profit: {current_profit:.2f}%, sellMin: {sell_min:.10f})")
+                    self.execute_sell(pos_id, price)
+                    return  # One sell per cycle
+                
+                # STANDARD MODE: Use higher of sellMin or min profit + buffer
                 required_price = max(sell_min, buy_price * (1 + effective_min_profit / 100))
                 
                 if price >= required_price:
