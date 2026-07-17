@@ -458,6 +458,37 @@ class GridBot:
                     price_pct = (price_diff / price * 100) if price > 0 else 0
                     logger.info(f"   #{pos_id}: {tokens:.4f} tokens | Buy: {buy_price:.10f} | Sell@: {sell_min:.10f} | P&L: {pnl:+.2f}% (need +{price_pct:.1f}% more to sell)")
         
+        # Show next buy trigger (lowest empty position buy range)
+        if empty > 0:
+            next_buy = None
+            for pos_id, pos in self.positions.items():
+                if pos['balance'] == 0:  # Empty position
+                    buy_max = pos['buyMax'] / 10**9
+                    buy_min = pos['buyMin'] / 10**9
+                    # Find the highest buyMax below current price (closest buy trigger)
+                    if buy_max <= price:
+                        if next_buy is None or buy_max > next_buy['buy_max']:
+                            next_buy = {
+                                'pos_id': pos_id,
+                                'buy_min': buy_min,
+                                'buy_max': buy_max
+                            }
+            
+            if next_buy:
+                drop_pct = (price - next_buy['buy_max']) / price * 100
+                logger.info(f"🛒 Next Buy: Position #{next_buy['pos_id']} at {next_buy['buy_min']:.10f}-{next_buy['buy_max']:.10f} (need -{drop_pct:.1f}% drop)")
+            else:
+                # All empty positions are above current price, find lowest
+                lowest_buy = None
+                for pos_id, pos in self.positions.items():
+                    if pos['balance'] == 0:
+                        buy_max = pos['buyMax'] / 10**9
+                        if lowest_buy is None or buy_max < lowest_buy['buy_max']:
+                            lowest_buy = {'pos_id': pos_id, 'buy_max': buy_max}
+                if lowest_buy:
+                    rise_pct = (lowest_buy['buy_max'] - price) / price * 100
+                    logger.info(f"🛒 Next Buy: Position #{lowest_buy['pos_id']} at {lowest_buy['buy_max']:.10f} (need +{rise_pct:.1f}% rise to enter range)")
+        
         logger.info("-" * 70)
         
         # Check sells first (take profits)
