@@ -179,12 +179,22 @@ class GridBot:
         if result.success:
             # Update position - store actual WETH cost (not price) in nano-WETH
             tokens_received = quote.buy_amount
+            tokens = tokens_received / 10**18
             self.positions[pos_id]['balance'] = tokens_received
             # Cost = actual WETH spent for profit calculation
             cost_nano = int(buy_amount_eth * 10**9)
             self.positions[pos_id]['cost'] = cost_nano
             self.save_positions()
-            logger.info(f"✅ Buy successful: {tokens_received / 10**18:.6f} tokens for {buy_amount_eth:.6f} WETH (tx: {result.tx_hash[:20]}...)")
+            
+            # Calculate buy price for logging
+            buy_price = buy_amount_eth / tokens if tokens > 0 else 0
+            
+            logger.info(f"✅ Buy successful!")
+            logger.info(f"   Position: #{pos_id}")
+            logger.info(f"   Tokens: {tokens:.6f} {self.config.token_symbol}")
+            logger.info(f"   Cost: {buy_amount_eth:.6f} WETH")
+            logger.info(f"   Buy price: {buy_price:.10f} WETH per token")
+            logger.info(f"   Tx: {result.tx_hash[:30]}...")
         else:
             logger.error(f"❌ Buy failed: {result.error}")
     
@@ -194,14 +204,26 @@ class GridBot:
         sell_amount = pos['balance']
         # Cost is WETH spent (in nano-WETH)
         cost_weth = pos['cost'] / 10**9
+        tokens = sell_amount / 10**18
+        buy_price = cost_weth / tokens if tokens > 0 else 0
         
-        # Calculate expected profit based on current price vs buy price
-        buy_price = cost_weth / (sell_amount / 10**18) if sell_amount > 0 else 0
+        # Calculate profit
         if buy_price > 0:
             profit_percent = ((price - buy_price) / buy_price) * 100
         else:
             profit_percent = 0
-        logger.info(f"Selling position {pos_id}: Buy price {buy_price:.10f}, Current {price:.10f}, Cost {cost_weth:.6f} WETH, Profit {profit_percent:.2f}%")
+        
+        # Calculate expected WETH return
+        expected_weth = tokens * price
+        profit_weth = expected_weth - cost_weth
+        
+        logger.info(f"💰 Selling position {pos_id}:")
+        logger.info(f"   Tokens: {tokens:.6f}")
+        logger.info(f"   Buy price: {buy_price:.10f} WETH")
+        logger.info(f"   Current: {price:.10f} WETH")
+        logger.info(f"   Cost: {cost_weth:.6f} WETH")
+        logger.info(f"   Expected return: {expected_weth:.6f} WETH")
+        logger.info(f"   Profit: {profit_weth:.6f} WETH ({profit_percent:+.2f}%)")
         
         # Get quote
         quote = self.zero_x.build_swap_transaction(
@@ -259,12 +281,41 @@ class GridBot:
     
     def run_cycle(self):
         """Run one trading cycle."""
+        # Get balances
+        weth_bal, _ = self.wallet.get_token_balance(self.config.weth_address)
+        token_bal, _ = self.wallet.get_token_balance(self.config.token_address)
+        
+        # Count positions
+        active = sum(1 for p in self.positions.values() if p['balance'] > 0)
+        empty = sum(1 for p in self.positions.values() if p['balance'] == 0)
+        
+        # Get price
         price = self.get_token_price()
         if price is None:
             logger.warning("Could not get price")
             return
         
-        logger.info(f"Price: 1 {self.config.token_symbol} = {price:.10f} WETH")
+        # Verbose round summary
+        logger.info("=" * 60)
+        logger.info(f"ROUND SUMMARY | {self.config.token_symbol}")
+        logger.info("=" * 60)
+        logger.info(f"💰 WETH Balance: {weth_bal:.6f}")
+        logger.info(f"🪙 Token Balance: {token_bal / 10**18:.6f}")
+        logger.info(f"📊 Price: 1 {self.config.token_symbol} = {price:.10f} WETH")
+        logger.info(f"📈 Positions: {active} active / {empty} empty")
+        
+        # Show active positions with P&L
+        if active > 0:
+            logger.info("🎯 Active Positions:")
+            for pos_id, pos in self.positions.items():
+                if pos['balance'] > 0:
+                    tokens = pos['balance'] / 10**18
+                    cost_weth = pos['cost'] / 10**9
+                    buy_price = cost_weth / tokens if tokens > 0 else 0
+                    pnl = ((price - buy_price) / buy_price * 100) if buy_price > 0 else 0
+                    logger.info(f"   #{pos_id}: {tokens:.4f} tokens @ {buy_price:.10f} | P&L: {pnl:+.2f}%")
+        
+        logger.info("-" * 60)
         
         # Check sells first (take profits)
         self.check_sells(price)
