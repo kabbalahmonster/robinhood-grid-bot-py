@@ -368,6 +368,12 @@ class GridBot:
         if weth_amount <= 0:
             return
         
+        # Check minimum bank amount
+        bank_min = getattr(self.config, 'bank_min_amount', 0.5)
+        if weth_amount < bank_min:
+            logger.info(f"🏦 Banking skipped: {weth_amount:.6f} WETH below minimum {bank_min} WETH")
+            return
+        
         # Convert to wei
         weth_wei = int(weth_amount * 10**18)
         
