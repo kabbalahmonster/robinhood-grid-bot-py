@@ -210,7 +210,10 @@ class ZeroXClient:
         sell_amount: int,
     ) -> Optional[float]:
         """
-        Get current price for a token pair.
+        Get current price for a token pair using the lighter /price endpoint.
+        
+        This endpoint is for price discovery only and doesn't count against
+        quote-to-trade conversion metrics.
         
         Args:
             sell_token: Address of token to sell.
@@ -220,15 +223,48 @@ class ZeroXClient:
         Returns:
             Optional[float]: Price ratio or None if failed.
         """
-        result = self.get_quote(
-            sell_token=sell_token,
-            buy_token=buy_token,
-            sell_amount=sell_amount,
-        )
+        # Build query parameters
+        params = {
+            "chainId": self.chain_id,
+            "sellToken": sell_token,
+            "buyToken": buy_token,
+            "sellAmount": str(sell_amount),
+        }
         
-        if result.success:
-            return result.price
-        return None
+        try:
+            # Use /price endpoint for price discovery (lighter weight than /quote)
+            url = f"{self.base_url}/swap/allowance-holder/price"
+            
+            self.logger.debug(f"Fetching price: {params}")
+            
+            response = requests.get(
+                url,
+                headers=self.headers,
+                params=params,
+                timeout=30,
+            )
+            
+            response.raise_for_status()
+            data = response.json()
+            
+            # Extract price from response
+            buy_amount = int(data.get("buyAmount", 0)) if data.get("buyAmount") else 0
+            sell_amount = int(data.get("sellAmount", 0)) if data.get("sellAmount") else 0
+            
+            if sell_amount > 0:
+                price = buy_amount / sell_amount
+                # Apply small jitter if enabled
+                if self.config.anti_mev_jitter:
+                    price = apply_jitter(price, jitter_percent=0.05)
+                return price
+            return None
+        
+        except requests.exceptions.RequestException as e:
+            self.logger.debug(f"Price fetch failed: {e}")
+            return None
+        except Exception as e:
+            self.logger.debug(f"Unexpected error fetching price: {e}")
+            return None
     
     def build_swap_transaction(
         self,

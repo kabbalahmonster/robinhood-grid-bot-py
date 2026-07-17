@@ -68,17 +68,16 @@ class GridBot:
             json.dump(self.positions, f, indent=2)
     
     def get_token_price(self):
-        """Get current token price in WETH."""
-        # Get quote for small amount to determine price
-        quote = self.zero_x.get_quote(
+        """Get current token price in WETH using the lighter /price endpoint."""
+        # Use /price endpoint for price discovery (doesn't count against quote-to-trade metrics)
+        price = self.zero_x.get_price(
             sell_token=self.config.weth_address,
             buy_token=self.config.token_address,
             sell_amount=10**15,  # 0.001 WETH
-            taker_address=self.wallet.address,
         )
-        if quote.success and quote.buy_amount:
+        if price:
             # Price = WETH / tokens
-            return 10**15 / quote.buy_amount
+            return 10**15 / price
         return None
     
     def check_buys(self, price):
