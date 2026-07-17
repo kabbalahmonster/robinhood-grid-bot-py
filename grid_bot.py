@@ -368,16 +368,10 @@ class GridBot:
         if weth_amount <= 0:
             return
         
-        # Check minimum bank amount
-        bank_min = getattr(self.config, 'bank_min_amount', 0.5)
-        if weth_amount < bank_min:
-            logger.info(f"🏦 Banking skipped: {weth_amount:.6f} WETH below minimum {bank_min} WETH")
-            return
-        
         # Convert to wei
         weth_wei = int(weth_amount * 10**18)
         
-        logger.info(f"🏦 Banking {weth_amount:.6f} WETH → USDG...")
+        logger.info(f"🏦 Getting quote for banking {weth_amount:.6f} WETH → USDG...")
         
         # Get quote for WETH -> USDG
         quote = self.zero_x.build_swap_transaction(
@@ -391,6 +385,16 @@ class GridBot:
         if not quote.success:
             logger.error(f"Banking quote failed: {quote.error}")
             return
+        
+        # Check minimum bank amount (in USDG - 6 decimals)
+        bank_min_usdg = getattr(self.config, 'bank_min_amount', 0.5)  # Default 0.5 USDG
+        expected_usdg = quote.buy_amount / 10**6 if quote.buy_amount else 0
+        
+        if expected_usdg < bank_min_usdg:
+            logger.info(f"🏦 Banking skipped: {expected_usdg:.2f} USDG below minimum {bank_min_usdg} USDG")
+            return
+        
+        logger.info(f"🏦 Banking {weth_amount:.6f} WETH → ~{expected_usdg:.2f} USDG...")
         
         # Check/approve WETH for swapping
         weth_allowance = self.wallet.check_allowance(
