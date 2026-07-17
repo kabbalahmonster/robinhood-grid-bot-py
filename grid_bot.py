@@ -102,13 +102,26 @@ class GridBot:
     
     def check_sells(self, price):
         """Check for sell opportunities."""
+        min_profit_percent = getattr(self.config, 'min_profit_percent', 2.0)  # Default 2% minimum profit
+        
         for pos_id, pos in self.positions.items():
             if pos['balance'] > 0:  # Has tokens
                 # Scale: 10^9 (nano-WETH)
                 sell_min = pos['sellMin'] / 10**9
                 
+                # Calculate actual profit %
+                tokens = pos['balance'] / 10**18
+                cost_weth = pos['cost'] / 10**9
+                buy_price = cost_weth / tokens if tokens > 0 else 0
+                current_profit = ((price - buy_price) / buy_price * 100) if buy_price > 0 else 0
+                
                 if price >= sell_min:
-                    logger.info(f"Sell trigger: Position {pos_id} at price {price:.10f} (sellMin: {sell_min:.10f})")
+                    # Check if we have enough profit to cover slippage
+                    if current_profit < min_profit_percent:
+                        logger.info(f"Sell blocked: Position {pos_id} at {price:.10f} - only {current_profit:.2f}% profit (need {min_profit_percent}%)")
+                        continue
+                    
+                    logger.info(f"Sell trigger: Position {pos_id} at price {price:.10f} (sellMin: {sell_min:.10f}, profit: {current_profit:.2f}%)")
                     self.execute_sell(pos_id, price)
                     return  # One sell per cycle
     
