@@ -341,7 +341,7 @@ class GridBot:
         logger.info(f"📈 Positions: {active} active / {empty} empty (max active: {self.config.max_active_positions})")
         logger.info(f"📊 Session: {self.session_buys} buys, {self.session_sells} sells, {self.session_profit_weth:.6f} WETH profit")
         
-        # Show active positions with P&L
+        # Show active positions with P&L and sell targets
         if active > 0:
             logger.info("🎯 Active Positions:")
             for pos_id, pos in self.positions.items():
@@ -350,17 +350,15 @@ class GridBot:
                     cost_raw = pos['cost']
                     tokens = balance_raw / 10**18
                     cost_weth = cost_raw / 10**9
-                    # Debug logging to help diagnose calculation issues
-                    logger.info(f"   [DEBUG #{pos_id}] raw_balance={balance_raw}, raw_cost={cost_raw}")
-                    logger.info(f"   [DEBUG #{pos_id}] tokens={tokens:.6f}, cost_weth={cost_weth:.10f}")
+                    sell_min = pos['sellMin'] / 10**9
                     # Buy price = WETH spent / tokens received
                     if tokens > 0 and cost_weth > 0:
                         buy_price = cost_weth / tokens
-                        logger.info(f"   [DEBUG #{pos_id}] buy_price calc: {cost_weth:.10f} / {tokens:.6f} = {buy_price:.10f}")
                     else:
                         buy_price = 0
                     pnl = ((price - buy_price) / buy_price * 100) if buy_price > 0 else 0
-                    logger.info(f"   #{pos_id}: {tokens:.4f} tokens | Cost: {cost_weth:.6f} WETH | Buy: {buy_price:.10f} | P&L: {pnl:+.2f}%")
+                    progress = ((price - buy_price) / (sell_min - buy_price) * 100) if sell_min > buy_price > 0 else 0
+                    logger.info(f"   #{pos_id}: {tokens:.4f} tokens | Buy: {buy_price:.10f} | Sell@: {sell_min:.10f} | P&L: {pnl:+.2f}% ({progress:.0f}% to target)")
         
         logger.info("-" * 70)
         
