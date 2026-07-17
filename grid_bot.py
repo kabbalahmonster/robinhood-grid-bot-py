@@ -148,16 +148,18 @@ class GridBot:
         """Execute a buy order."""
         pos = self.positions[pos_id]
         
-        # Calculate buy amount (divide available WETH by empty positions)
+        # Calculate buy amount (divide available WETH by available slots up to max_active_positions)
         weth_balance, _ = self.wallet.get_token_balance(self.config.weth_address)
-        empty_positions = sum(1 for p in self.positions.values() if p['balance'] == 0)
+        active_positions = sum(1 for p in self.positions.values() if p['balance'] > 0)
+        available_slots = self.config.max_active_positions - active_positions
         
-        if empty_positions == 0:
+        if available_slots <= 0:
+            logger.debug(f"Max active positions reached ({active_positions}/{self.config.max_active_positions})")
             return
         
-        # Use configured % of available WETH divided by empty positions
+        # Use configured % of available WETH divided by available slots
         tradeable_pct = getattr(self.config, 'tradeable_balance_percent', 90.0) / 100.0
-        buy_amount_eth = (weth_balance * tradeable_pct) / empty_positions
+        buy_amount_eth = (weth_balance * tradeable_pct) / available_slots
         buy_amount_wei = int(buy_amount_eth * 10**18)
         
         logger.info(f"Buying position {pos_id}: {buy_amount_eth:.6f} WETH")
