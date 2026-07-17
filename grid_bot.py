@@ -32,6 +32,9 @@ class GridBot:
         self.running = True
         self.round_count = 0
         self.start_time = time.time()
+        self.session_buys = 0
+        self.session_sells = 0
+        self.session_profit_weth = 0.0
         
         logger.info(f"Grid Bot initialized")
         logger.info(f"Wallet: {self.wallet.address}")
@@ -191,6 +194,9 @@ class GridBot:
             # Calculate buy price for logging
             buy_price = buy_amount_eth / tokens if tokens > 0 else 0
             
+            # Track session stats
+            self.session_buys += 1
+            
             logger.info(f"✅ Buy successful!")
             logger.info(f"   Position: #{pos_id}")
             logger.info(f"   Tokens: {tokens:.6f} {self.config.token_symbol}")
@@ -273,11 +279,20 @@ class GridBot:
         })
         
         if result.success:
+            # Calculate profit before clearing position
+            weth_received = quote.buy_amount / 10**18 if quote.buy_amount else 0
+            profit_weth = weth_received - cost_weth
+            
+            # Track session stats
+            self.session_sells += 1
+            self.session_profit_weth += profit_weth
+            
             # Update position
             self.positions[pos_id]['balance'] = 0
             self.positions[pos_id]['cost'] = 0
             self.save_positions()
-            logger.info(f"✅ Sell successful (tx: {result.tx_hash[:20]}...)")
+            logger.info(f"✅ Sell successful! Profit: {profit_weth:.6f} WETH")
+            logger.info(f"   Tx: {result.tx_hash[:30]}...")
         else:
             logger.error(f"❌ Sell failed: {result.error}")
     
@@ -304,10 +319,11 @@ class GridBot:
         logger.info("=" * 70)
         logger.info(f"ROUND #{self.round_count} | {self.config.token_symbol} | Elapsed: {elapsed:.0f}s")
         logger.info("=" * 70)
-        logger.info(f"💰 WETH Balance: {weth_bal:.6f} (raw: {weth_raw})")
-        logger.info(f"🪙 Token Balance: {token_bal:.6f} (raw: {token_raw})")
+        logger.info(f"💰 WETH Balance: {weth_bal:.6f}")
+        logger.info(f"🪙 Token Balance: {token_bal:.6f}")
         logger.info(f"📊 Price: 1 {self.config.token_symbol} = {price:.10f} WETH")
-        logger.info(f"📈 Positions: {active} active / {empty} empty")
+        logger.info(f"📈 Positions: {active} active / {empty} empty (max active: {self.config.max_active_positions})")
+        logger.info(f"📊 Session: {self.session_buys} buys, {self.session_sells} sells, {self.session_profit_weth:.6f} WETH profit")
         
         # Show active positions with P&L
         if active > 0:
