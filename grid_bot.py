@@ -162,7 +162,7 @@ class GridBot:
         buy_amount_eth = (weth_balance * tradeable_pct) / available_slots
         buy_amount_wei = int(buy_amount_eth * 10**18)
         
-        logger.info(f"Buying position {pos_id}: {buy_amount_eth:.6f} WETH")
+        logger.info(f"Buying position {pos_id}: {buy_amount_eth:.6f} WETH ({weth_balance:.6f} WETH × {tradeable_pct*100:.0f}% / {available_slots} slots)")
         
         # Check ERC20 approval to AllowanceHolder
         allowance = self.wallet.check_allowance(
