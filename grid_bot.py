@@ -279,7 +279,7 @@ class GridBot:
         })
         
         if result.success:
-            # Calculate profit before clearing position
+            # Get actual WETH received from transaction
             weth_received = quote.buy_amount / 10**18 if quote.buy_amount else 0
             profit_weth = weth_received - cost_weth
             
@@ -291,7 +291,10 @@ class GridBot:
             self.positions[pos_id]['balance'] = 0
             self.positions[pos_id]['cost'] = 0
             self.save_positions()
-            logger.info(f"✅ Sell successful! Profit: {profit_weth:.6f} WETH")
+            
+            logger.info(f"✅ Sell successful!")
+            logger.info(f"   Actual return: {weth_received:.6f} WETH")
+            logger.info(f"   Profit: {profit_weth:.6f} WETH ({(profit_weth/cost_weth*100) if cost_weth > 0 else 0:+.2f}%)")
             logger.info(f"   Tx: {result.tx_hash[:30]}...")
         else:
             logger.error(f"❌ Sell failed: {result.error}")
