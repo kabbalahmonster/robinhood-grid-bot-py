@@ -224,13 +224,14 @@ class GridBot:
             logger.error(f"❌ Buy failed: {result.error}")
     
     def execute_sell(self, pos_id, price):
-        """Execute a sell order."""
+        """Execute a sell order with moonbag and banking."""
         pos = self.positions[pos_id]
-        sell_amount = pos['balance']
+        total_balance = pos['balance']
+        total_tokens = total_balance / 10**18
+        
         # Cost is WETH spent (in nano-WETH)
         cost_weth = pos['cost'] / 10**9
-        tokens = sell_amount / 10**18
-        buy_price = cost_weth / tokens if tokens > 0 else 0
+        buy_price = cost_weth / total_tokens if total_tokens > 0 else 0
         
         # Calculate profit
         if buy_price > 0:
@@ -238,15 +239,30 @@ class GridBot:
         else:
             profit_percent = 0
         
-        # Calculate expected WETH return
-        expected_weth = tokens * price
-        profit_weth = expected_weth - cost_weth
+        # Moonbag: Keep X% of tokens, sell the rest
+        moonbag_pct = getattr(self.config, 'moonbag_percentage', 0)
+        if moonbag_pct > 0:
+            moonbag_tokens = int(total_balance * moonbag_pct / 100)
+            sell_amount = total_balance - moonbag_tokens
+            sell_tokens = sell_amount / 10**18
+            logger.info(f"🌙 Moonbag: Keeping {moonbag_tokens / 10**18:.4f} tokens ({moonbag_pct}%), selling {sell_tokens:.4f}")
+        else:
+            sell_amount = total_balance
+            sell_tokens = total_tokens
+            moonbag_tokens = 0
+        
+        # Calculate expected WETH return (proportional to sold amount)
+        expected_weth = sell_tokens * price
+        # Cost basis for sold portion only
+        sold_cost_weth = cost_weth * (sell_tokens / total_tokens) if total_tokens > 0 else 0
+        profit_weth = expected_weth - sold_cost_weth
         
         logger.info(f"💰 Selling position {pos_id}:")
-        logger.info(f"   Tokens: {tokens:.6f}")
+        logger.info(f"   Total tokens: {total_tokens:.6f}")
+        logger.info(f"   Selling: {sell_tokens:.6f}")
         logger.info(f"   Buy price: {buy_price:.10f} WETH")
         logger.info(f"   Current: {price:.10f} WETH")
-        logger.info(f"   Cost: {cost_weth:.6f} WETH")
+        logger.info(f"   Cost basis (sold): {sold_cost_weth:.6f} WETH")
         logger.info(f"   Expected return: {expected_weth:.6f} WETH")
         logger.info(f"   Profit: {profit_weth:.6f} WETH ({profit_percent:+.2f}%)")
         
@@ -298,23 +314,99 @@ class GridBot:
         if result.success:
             # Get actual WETH received from transaction
             weth_received = quote.buy_amount / 10**18 if quote.buy_amount else 0
-            profit_weth = weth_received - cost_weth
+            actual_profit_weth = weth_received - sold_cost_weth
             
             # Track session stats
             self.session_sells += 1
-            self.session_profit_weth += profit_weth
+            self.session_profit_weth += actual_profit_weth
             
-            # Update position
-            self.positions[pos_id]['balance'] = 0
-            self.positions[pos_id]['cost'] = 0
+            # Update position - keep moonbag if any
+            if moonbag_tokens > 0:
+                # Keep moonbag tokens, update cost basis proportionally
+                self.positions[pos_id]['balance'] = moonbag_tokens
+                moonbag_cost = int(pos['cost'] * moonbag_pct / 100)
+                self.positions[pos_id]['cost'] = moonbag_cost
+                logger.info(f"   Moonbag: {moonbag_tokens / 10**18:.4f} tokens kept (cost: {moonbag_cost / 10**9:.6f} WETH)")
+            else:
+                self.positions[pos_id]['balance'] = 0
+                self.positions[pos_id]['cost'] = 0
             self.save_positions()
             
             logger.info(f"✅ Sell successful!")
             logger.info(f"   Actual return: {weth_received:.6f} WETH")
-            logger.info(f"   Profit: {profit_weth:.6f} WETH ({(profit_weth/cost_weth*100) if cost_weth > 0 else 0:+.2f}%)")
+            logger.info(f"   Profit: {actual_profit_weth:.6f} WETH ({(actual_profit_weth/sold_cost_weth*100) if sold_cost_weth > 0 else 0:+.2f}%)")
+            
+            # Banking: Swap % of profit to USDG
+            bank_pct = getattr(self.config, 'bank_percentage', 0)
+            if bank_pct > 0 and actual_profit_weth > 0:
+                bank_amount = actual_profit_weth * bank_pct / 100
+                logger.info(f"🏦 Banking: Swapping {bank_pct}% of profit = {bank_amount:.6f} WETH → USDG")
+                self.bank_profit(bank_amount)
+            
             logger.info(f"   Tx: {result.tx_hash[:30]}...")
         else:
             logger.error(f"❌ Sell failed: {result.error}")
+    
+    def bank_profit(self, weth_amount):
+        """Swap WETH profit to USDG for banking."""
+        if weth_amount <= 0:
+            return
+        
+        # Convert to wei
+        weth_wei = int(weth_amount * 10**18)
+        
+        logger.info(f"🏦 Banking {weth_amount:.6f} WETH → USDG...")
+        
+        # Get quote for WETH -> USDG
+        quote = self.zero_x.build_swap_transaction(
+            sell_token=self.config.weth_address,
+            buy_token=self.config.usdg_address,
+            sell_amount=weth_wei,
+            taker_address=self.wallet.address,
+            slippage_percentage=0.01,  # 1% slippage for stable swaps
+        )
+        
+        if not quote.success:
+            logger.error(f"Banking quote failed: {quote.error}")
+            return
+        
+        # Check/approve WETH for swapping
+        weth_allowance = self.wallet.check_allowance(
+            self.config.weth_address,
+            self.config.zero_x_proxy,
+            use_permit2=False
+        )
+        if weth_allowance < weth_wei:
+            logger.info(f"Approving WETH to AllowanceHolder for banking...")
+            result = self.wallet.approve_token(
+                self.config.weth_address,
+                self.config.zero_x_proxy,
+                2**256 - 1
+            )
+            if not result.success:
+                logger.error(f"WETH approval for banking failed: {result.error}")
+                return
+        
+        # Execute banking swap
+        gas_limit = int(quote.gas * 1.5) if quote.gas else 300000
+        gas_price = int(self.wallet.w3.eth.gas_price * 1.3)
+        
+        result = self.wallet._send_transaction({
+            "from": Web3.to_checksum_address(self.wallet.address),
+            "to": Web3.to_checksum_address(quote.to),
+            "data": quote.data,
+            "value": quote.value or 0,
+            "gas": gas_limit,
+            "gasPrice": gas_price,
+            "nonce": self.wallet.w3.eth.get_transaction_count(self.wallet.address),
+            "chainId": self.config.chain_id,
+        })
+        
+        if result.success:
+            usdg_received = quote.buy_amount / 10**6 if quote.buy_amount else 0  # USDG is 6 decimals
+            logger.info(f"✅ Banked! Received {usdg_received:.2f} USDG")
+        else:
+            logger.error(f"❌ Banking failed: {result.error}")
     
     def run_cycle(self):
         """Run one trading cycle."""
@@ -361,8 +453,10 @@ class GridBot:
                     else:
                         buy_price = 0
                     pnl = ((price - buy_price) / buy_price * 100) if buy_price > 0 else 0
-                    progress = ((price - buy_price) / (sell_min - buy_price) * 100) if sell_min > buy_price > 0 else 0
-                    logger.info(f"   #{pos_id}: {tokens:.4f} tokens | Buy: {buy_price:.10f} | Sell@: {sell_min:.10f} | P&L: {pnl:+.2f}% ({progress:.0f}% to target)")
+                    # Show how much more price needs to rise to hit sell target
+                    price_diff = sell_min - price
+                    price_pct = (price_diff / price * 100) if price > 0 else 0
+                    logger.info(f"   #{pos_id}: {tokens:.4f} tokens | Buy: {buy_price:.10f} | Sell@: {sell_min:.10f} | P&L: {pnl:+.2f}% (need +{price_pct:.1f}% more to sell)")
         
         logger.info("-" * 70)
         

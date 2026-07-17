@@ -76,6 +76,7 @@ class BotConfig:
     initial_buy_amount: float
     slippage_tolerance: float
     bank_percentage: float
+    moonbag_percentage: float
     
     # Bot Behavior
     poll_interval_seconds: int
@@ -186,7 +187,8 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
         min_profit_percent=float(os.getenv("MIN_PROFIT_PERCENT", "1.5")),
         initial_buy_amount=float(os.getenv("INITIAL_BUY_AMOUNT", "0.01")),
         slippage_tolerance=float(os.getenv("SLIPPAGE_TOLERANCE", "1.0")),
-        bank_percentage=float(os.getenv("BANK_PERCENTAGE", "50.0")),
+        bank_percentage=float(os.getenv("BANK_PERCENTAGE", "0.0")),
+        moonbag_percentage=float(os.getenv("MOONBAG_PERCENTAGE", "0.0")),
         
         # Bot Behavior
         poll_interval_seconds=int(os.getenv("POLL_INTERVAL_SECONDS", "30")),
