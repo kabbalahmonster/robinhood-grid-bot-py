@@ -343,17 +343,14 @@ class GridBot:
             self.session_sells += 1
             self.session_profit_weth += actual_profit_weth
             
-            # Update position - keep moonbag if any
-            if moonbag_tokens > 0:
-                # Keep moonbag tokens, update cost basis proportionally
-                self.positions[pos_id]['balance'] = moonbag_tokens
-                moonbag_cost = max(1, int(pos['cost'] * moonbag_pct / 100))  # Ensure at least 1 nano-weth
-                self.positions[pos_id]['cost'] = moonbag_cost
-                logger.info(f"   Moonbag: {moonbag_tokens / 10**18:.4f} tokens kept (cost: {moonbag_cost / 10**9:.6f} WETH)")
-            else:
-                self.positions[pos_id]['balance'] = 0
-                self.positions[pos_id]['cost'] = 0
+            # Position is always cleared to 0 after sell
+            # Moonbag tokens go to wallet balance (not tracked in position)
+            self.positions[pos_id]['balance'] = 0
+            self.positions[pos_id]['cost'] = 0
             self.save_positions()
+            
+            if moonbag_tokens > 0:
+                logger.info(f"   Moonbag: {moonbag_tokens / 10**18:.4f} tokens added to wallet balance")
             
             logger.info(f"✅ Sell successful!")
             logger.info(f"   Actual return: {weth_received:.6f} WETH")
