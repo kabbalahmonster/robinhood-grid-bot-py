@@ -182,7 +182,7 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
             "MAX_POSITIONS",
             str(chain_defaults.get("default_max_positions", 20))
         )),
-        max_active_positions=int(os.getenv("MAX_ACTIVE_POSITIONS", "10")),
+        max_active_positions=int(os.getenv("MAX_ACTIVE_POSITIONS", os.getenv("MAX_POSITIONS", "10"))),
         min_profit_percent=float(os.getenv("MIN_PROFIT_PERCENT", "1.5")),
         initial_buy_amount=float(os.getenv("INITIAL_BUY_AMOUNT", "0.01")),
         slippage_tolerance=float(os.getenv("SLIPPAGE_TOLERANCE", "1.0")),
