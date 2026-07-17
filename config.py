@@ -16,7 +16,7 @@ CHAIN_CONFIG = {
         "name": "Robinhood",
         "weth": "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73",
         "permit2": "0x000000000022d473030f116ddee9f6b43ac78ba3",
-        "zero_x_proxy": "0xe72688f7d25d7318b9a81f21edda640ca948c83b",  # 0x API v2 on Robinhood
+        "zero_x_proxy": "0x0000000000001ff3684f28c67538d4d072c22734",  # 0x AllowanceHolder
         "default_max_positions": 20,
     },
     8453: {  # Base

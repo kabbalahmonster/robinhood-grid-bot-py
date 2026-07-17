@@ -134,8 +134,8 @@ class ZeroXClient:
             time.sleep(random.uniform(0.1, 0.5))
         
         try:
-            # Use 0x API v2 for Robinhood Chain support
-            url = f"{self.base_url}/swap/permit2/quote"
+            # Use 0x AllowanceHolder endpoint (no Permit2 signatures needed!)
+            url = f"{self.base_url}/swap/allowance-holder/quote"
             
             self.logger.debug(f"Fetching quote: {params}")
             

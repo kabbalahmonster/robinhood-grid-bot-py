@@ -124,17 +124,23 @@ class GridBot:
         
         logger.info(f"Buying position {pos_id}: {buy_amount_eth:.6f} WETH")
         
-        # Check Permit2 approval before swapping
+        # Check ERC20 approval to AllowanceHolder
         allowance = self.wallet.check_allowance(
             self.config.weth_address,
-            self.config.zero_x_proxy,
-            use_permit2=True
+            self.config.zero_x_proxy,  # This is now the AllowanceHolder address
+            use_permit2=False  # Standard ERC20 approval
         )
-        logger.info(f"WETH Permit2 allowance: {allowance}")
+        logger.info(f"WETH AllowanceHolder allowance: {allowance}")
         if allowance < buy_amount_wei:
-            logger.error(f"Insufficient Permit2 allowance. Have {allowance}, need {buy_amount_wei}")
-            logger.error("Please approve WETH to Permit2 first")
-            return
+            logger.info(f"Approving WETH to AllowanceHolder...")
+            result = self.wallet.approve_token(
+                self.config.weth_address,
+                self.config.zero_x_proxy,
+                2**256 - 1  # Max approval
+            )
+            if not result.success:
+                logger.error(f"Approval failed: {result.error}")
+                return
 
         # Get quote FIRST, then execute immediately (quote expires fast)
         logger.info("Getting 0x quote...")
@@ -207,9 +213,26 @@ class GridBot:
             logger.error(f"Quote failed: {quote.error}")
             return
         
+        # Check/approve token for selling
+        token_allowance = self.wallet.check_allowance(
+            self.config.token_address,
+            self.config.zero_x_proxy,
+            use_permit2=False
+        )
+        if token_allowance < sell_amount:
+            logger.info(f"Approving {self.config.token_symbol} to AllowanceHolder...")
+            result = self.wallet.approve_token(
+                self.config.token_address,
+                self.config.zero_x_proxy,
+                2**256 - 1
+            )
+            if not result.success:
+                logger.error(f"Token approval failed: {result.error}")
+                return
+        
         # Execute swap with checksummed addresses
-        gas_limit = int(quote.gas * 1.5) if quote.gas else 300000  # 50% buffer, default 300k
-        gas_price = int(self.wallet.w3.eth.gas_price * 1.3)  # 30% buffer
+        gas_limit = int(quote.gas * 1.5) if quote.gas else 300000
+        gas_price = int(self.wallet.w3.eth.gas_price * 1.3)
         
         result = self.wallet._send_transaction({
             "from": Web3.to_checksum_address(self.wallet.address),
