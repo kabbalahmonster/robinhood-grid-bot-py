@@ -118,7 +118,7 @@ class GridBot:
         effective_min_profit = min_profit_percent + slippage_buffer
         
         for pos_id, pos in self.positions.items():
-            if pos['balance'] > 0 and pos['cost'] > 0:  # Has tokens AND cost basis
+            if pos['balance'] > 0:  # Has tokens
                 # Scale: 10^9 (nano-WETH)
                 sell_min = pos['sellMin'] / 10**9
                 
@@ -340,7 +340,7 @@ class GridBot:
             if moonbag_tokens > 0:
                 # Keep moonbag tokens, update cost basis proportionally
                 self.positions[pos_id]['balance'] = moonbag_tokens
-                moonbag_cost = int(pos['cost'] * moonbag_pct / 100)
+                moonbag_cost = max(1, int(pos['cost'] * moonbag_pct / 100))  # Ensure at least 1 nano-weth
                 self.positions[pos_id]['cost'] = moonbag_cost
                 logger.info(f"   Moonbag: {moonbag_tokens / 10**18:.4f} tokens kept (cost: {moonbag_cost / 10**9:.6f} WETH)")
             else:
@@ -433,9 +433,9 @@ class GridBot:
         weth_bal, weth_raw = self.wallet.get_token_balance(self.config.weth_address)
         token_bal, token_raw = self.wallet.get_token_balance(self.config.token_address)
         
-        # Count positions - must have BOTH balance > 0 AND cost > 0 to be active
-        active = sum(1 for p in self.positions.values() if p['balance'] > 0 and p['cost'] > 0)
-        empty = sum(1 for p in self.positions.values() if p['balance'] == 0 or p['cost'] == 0)
+        # Count positions - balance > 0 means active (even if cost is 0, could be moonbag)
+        active = sum(1 for p in self.positions.values() if p['balance'] > 0)
+        empty = sum(1 for p in self.positions.values() if p['balance'] == 0)
         
         # Get price
         price = self.get_token_price()
@@ -457,7 +457,7 @@ class GridBot:
         if active > 0:
             logger.info("🎯 Active Positions:")
             for pos_id, pos in self.positions.items():
-                if pos['balance'] > 0 and pos['cost'] > 0:
+                if pos['balance'] > 0:
                     balance_raw = pos['balance']
                     cost_raw = pos['cost']
                     tokens = balance_raw / 10**18
@@ -466,13 +466,16 @@ class GridBot:
                     # Buy price = WETH spent / tokens received
                     if tokens > 0 and cost_weth > 0:
                         buy_price = cost_weth / tokens
+                        pnl = ((price - buy_price) / buy_price * 100)
+                        # Show how much more price needs to rise to hit sell target
+                        price_diff = sell_min - price
+                        price_pct = (price_diff / price * 100) if price > 0 else 0
+                        logger.info(f"   #{pos_id}: {tokens:.4f} tokens | Buy: {buy_price:.10f} | Sell@: {sell_min:.10f} | P&L: {pnl:+.2f}% (need +{price_pct:.1f}% more to sell)")
                     else:
-                        buy_price = 0
-                    pnl = ((price - buy_price) / buy_price * 100) if buy_price > 0 else 0
-                    # Show how much more price needs to rise to hit sell target
-                    price_diff = sell_min - price
-                    price_pct = (price_diff / price * 100) if price > 0 else 0
-                    logger.info(f"   #{pos_id}: {tokens:.4f} tokens | Buy: {buy_price:.10f} | Sell@: {sell_min:.10f} | P&L: {pnl:+.2f}% (need +{price_pct:.1f}% more to sell)")
+                        # Moonbag or dust position with unknown cost
+                        price_diff = sell_min - price
+                        price_pct = (price_diff / price * 100) if price > 0 else 0
+                        logger.info(f"   #{pos_id}: {tokens:.4f} tokens | Buy: moonbag | Sell@: {sell_min:.10f} | P&L: N/A (need +{price_pct:.1f}% more to sell)")
         
         # Show next buy trigger (lowest empty position buy range)
         if empty > 0:
