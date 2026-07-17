@@ -107,7 +107,7 @@ class GridBot:
         effective_min_profit = min_profit_percent + slippage_buffer
         
         for pos_id, pos in self.positions.items():
-            if pos['balance'] > 0:  # Has tokens
+            if pos['balance'] > 0 and pos['cost'] > 0:  # Has tokens AND cost basis
                 # Scale: 10^9 (nano-WETH)
                 sell_min = pos['sellMin'] / 10**9
                 
@@ -228,6 +228,11 @@ class GridBot:
         pos = self.positions[pos_id]
         total_balance = pos['balance']
         total_tokens = total_balance / 10**18
+        
+        # Validate position has tokens and cost basis
+        if total_balance <= 0 or pos['cost'] <= 0:
+            logger.warning(f"Skipping sell for position {pos_id}: balance={total_balance}, cost={pos['cost']}")
+            return
         
         # Cost is WETH spent (in nano-WETH)
         cost_weth = pos['cost'] / 10**9
@@ -417,9 +422,9 @@ class GridBot:
         weth_bal, weth_raw = self.wallet.get_token_balance(self.config.weth_address)
         token_bal, token_raw = self.wallet.get_token_balance(self.config.token_address)
         
-        # Count positions
-        active = sum(1 for p in self.positions.values() if p['balance'] > 0)
-        empty = sum(1 for p in self.positions.values() if p['balance'] == 0)
+        # Count positions - must have BOTH balance > 0 AND cost > 0 to be active
+        active = sum(1 for p in self.positions.values() if p['balance'] > 0 and p['cost'] > 0)
+        empty = sum(1 for p in self.positions.values() if p['balance'] == 0 or p['cost'] == 0)
         
         # Get price
         price = self.get_token_price()
@@ -441,7 +446,7 @@ class GridBot:
         if active > 0:
             logger.info("🎯 Active Positions:")
             for pos_id, pos in self.positions.items():
-                if pos['balance'] > 0:
+                if pos['balance'] > 0 and pos['cost'] > 0:
                     balance_raw = pos['balance']
                     cost_raw = pos['cost']
                     tokens = balance_raw / 10**18
