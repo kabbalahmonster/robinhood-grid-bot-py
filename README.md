@@ -1,17 +1,265 @@
 # Robinhood Chain Grid Trading Bot (Python)
 
-A sophisticated grid trading bot for Robinhood Chain and other EVM networks, implemented in Python using web3.py. Uses the 0x Protocol for optimal DEX aggregation and supports dynamic position sizing with profit banking to USDG.
+A production-grade grid trading bot for Robinhood Chain and other EVM networks, implemented in Python using web3.py. Uses the 0x Protocol for optimal DEX aggregation with features like dynamic position sizing, moonbag retention, profit banking to stablecoins, and session tracking.
 
 ## Features
 
 - **Dynamic Grid Trading**: Automatically places buy orders at decreasing price levels
-- **Cost Basis Tracking**: Each position tracks its own cost basis for accurate profit calculations
-- **Profit Banking**: Automatically banks profits to USDG (stablecoin)
-- **0x Protocol Integration**: Best price execution across multiple DEXs
-- **Anti-MEV Protection**: Jitter on quotes to protect against front-running
-- **Permit2 Approvals**: Efficient token approvals using Uniswap's Permit2
+- **Cost Basis Tracking**: Each position tracks actual WETH spent for accurate P&L
+- **Moonbag Support**: Retain a percentage of tokens after each sell
+- **Profit Banking**: Automatically banks profits to USDG/USDC stablecoin
+- **Session Statistics**: Track total buys, sells, and accumulated profit
+- **0x Protocol Integration**: Best price execution via 0x AllowanceHolder API
+- **Anti-MEV Protection**: Jitter on timing to protect against front-running
+- **Multi-Position Support**: Multiple active positions with individual tracking
 - **Persistent State**: Survives restarts with position recovery
 - **Multi-Chain Support**: Robinhood Chain (4663), Base (8453), Ethereum Mainnet (1)
+
+## Quick Start
+
+### Prerequisites
+
+- Python 3.9+
+- pip
+- A wallet with ETH/WETH for trading
+- 0x API key (free at [0x.org](https://0x.org/))
+- Alchemy or other RPC provider API key
+
+### Installation
+
+1. Clone the repository:
+```bash
+git clone https://github.com/kabbalahmonster/robinhood-grid-bot-py.git
+cd robinhood-grid-bot-py
+```
+
+2. Install dependencies:
+```bash
+pip install -r requirements.txt
+```
+
+3. Generate grid positions:
+```bash
+# For Robinhood Chain (recommended for testing)
+python generate_grid_dynamic.py --low 0.2 --high 3.0 --positions 24
+
+# For Base or Mainnet
+python generate_grid_dynamic.py --low 0.5 --high 2.0 --positions 10
+```
+
+4. Configure environment:
+```bash
+# Copy the appropriate environment file for your chain
+cp .env.robinhood .env
+
+# Edit .env with your settings
+nano .env
+```
+
+5. Run the bot:
+```bash
+python grid_bot.py
+```
+
+## Configuration
+
+### Environment Variables
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| **Wallet & Connection** ||||
+| `PRIVATE_KEY` | Yes | - | Wallet private key (with 0x prefix) |
+| `RPC_URL` | Yes | - | RPC endpoint URL (Alchemy recommended) |
+| `CHAIN_ID` | Yes | 4663 | Chain ID (4663=Robinhood, 8453=Base, 1=Mainnet) |
+| `ZEROX_API_KEY` | Yes | - | 0x API key from 0x.org |
+| **Token Configuration** ||||
+| `TOKEN_ADDRESS` | Yes | - | Token address to trade |
+| `TOKEN_SYMBOL` | No | TOKEN | Token symbol for logging |
+| `WETH_ADDRESS` | Auto | Chain | WETH address (auto-set per chain) |
+| `USDG_ADDRESS` | Yes | - | Stablecoin address for profit banking |
+| **Grid Parameters** ||||
+| `GRID_SPACING_PERCENT` | No | 6.0 | Grid spacing percentage between levels |
+| `MAX_POSITIONS` | No | 24 | Total number of grid positions to create |
+| `MAX_ACTIVE_POSITIONS` | No | 6 | Maximum positions that can be active at once |
+| **Trading Settings** ||||
+| `MIN_PROFIT_PERCENT` | No | 5.0 | Minimum profit % before selling (includes 1.5% slippage buffer) |
+| `INITIAL_BUY_AMOUNT` | No | 0.001 | Initial WETH amount for first buys |
+| `SLIPPAGE_TOLERANCE` | No | 2.0 | Slippage tolerance % for swaps |
+| **Profit Distribution** ||||
+| `BANK_PERCENTAGE` | No | 0.0 | % of profit to swap to stablecoin (0 to disable) |
+| `MOONBAG_PERCENTAGE` | No | 0.0 | % of tokens to keep after sell (0 to disable) |
+| **Bot Behavior** ||||
+| `POLL_INTERVAL_SECONDS` | No | 1 | Price check interval in seconds |
+| `ANTI_MEV_JITTER` | No | true | Enable anti-MEV timing jitter |
+| `LOG_LEVEL` | No | INFO | Logging level (DEBUG/INFO/WARNING/ERROR) |
+| `STATE_FILE` | No | ./data/positions.json | Position state file path |
+
+### Chain-Specific Configuration
+
+Three template files are provided:
+
+#### Robinhood Chain (4663) - `.env.robinhood`
+```bash
+CHAIN_ID=4663
+RPC_URL=https://robinhood-mainnet.g.alchemy.com/v2/YOUR_KEY
+WETH_ADDRESS=0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73
+USDG_ADDRESS=0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168
+POLL_INTERVAL_SECONDS=1      # Fast chain, can poll every 1s
+MAX_POSITIONS=24             # More positions for volatile tokens
+```
+
+#### Base (8453) - `.env.base`
+```bash
+CHAIN_ID=8453
+RPC_URL=https://base-mainnet.g.alchemy.com/v2/YOUR_KEY
+WETH_ADDRESS=0x4200000000000000000000000000000000000006
+USDG_ADDRESS=0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913
+POLL_INTERVAL_SECONDS=10     # Base block time ~2s
+MAX_POSITIONS=10
+```
+
+#### Ethereum Mainnet (1) - `.env.mainnet`
+```bash
+CHAIN_ID=1
+RPC_URL=https://eth-mainnet.g.alchemy.com/v2/YOUR_KEY
+WETH_ADDRESS=0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2
+USDG_ADDRESS=0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48
+POLL_INTERVAL_SECONDS=15     # Mainnet block time ~12s
+MAX_POSITIONS=10
+INITIAL_BUY_AMOUNT=0.01      # Higher amounts due to gas costs
+```
+
+## Usage
+
+### Generate Grid Positions
+
+Before running the bot, generate your grid positions:
+
+```bash
+# Generate grid from current price
+python generate_grid_dynamic.py --low 0.2 --high 3.0 --positions 24
+
+# Options:
+# --low: Lowest price multiplier (0.2 = 20% of current price)
+# --high: Highest price multiplier (3.0 = 300% of current price)
+# --positions: Number of grid levels to create
+```
+
+This creates `data/positions.json` with buy/sell ranges for each level.
+
+### Run the Bot
+
+```bash
+# Using default .env file
+python grid_bot.py
+
+# The bot will:
+# 1. Load positions from data/positions.json
+# 2. Check current price
+# 3. Execute buys when price enters grid levels
+# 4. Execute sells when profit targets are met
+# 5. Bank profits to stablecoin (if enabled)
+# 6. Log session statistics
+```
+
+### Example Session Output
+
+```
+======================================================================
+ROUND #506 | TENDIES | Elapsed: 1128s
+======================================================================
+💰 WETH Balance: 0.006016
+🪙 Token Balance: 54.274311
+📊 Price: 1 TENDIES = 0.0000088332 WETH
+📈 Positions: 2 active / 22 empty (max active: 12)
+📊 Session: 1 buys, 2 sells, 0.000029 WETH profit
+🎯 Active Positions:
+   #12: 31.2606 tokens | Buy: 0.0000077616 | Sell@: 0.0000095110 | P&L: +13.81% (need +7.7% more to sell)
+   #13: 23.0137 tokens | Buy: 0.0000004204 | Sell@: 0.0000106990 | P&L: +2001.34% (need +21.1% more to sell)
+----------------------------------------------------------------------
+```
+
+### Understanding the Output
+
+- **ROUND #X**: Incrementing counter for each price check
+- **Elapsed**: Seconds since bot started
+- **WETH Balance**: Available WETH for buying
+- **Token Balance**: Tokens in wallet (not in positions)
+- **Price**: Current token price in WETH
+- **Positions**: Active (have tokens) / Empty (available for buys)
+- **Session**: Total buys, sells, and accumulated WETH profit
+- **Active Positions**: Each shows tokens held, buy price, sell target, P&L, and % needed to reach sell target
+
+## How It Works
+
+### Grid Strategy
+
+1. **Grid Initialization**: Creates price levels below current market price
+   - Spacing: `GRID_SPACING_PERCENT` between levels (default 6%)
+   - Range: From `current_price * low_factor` to `current_price * high_factor`
+   - Each position has: buyMin, buyMax, sellMin, stoploss
+
+2. **Buy Execution**:
+   - Monitors price for grid level triggers (buyMin ≤ price ≤ buyMax)
+   - Calculates dynamic buy amount: `available_WETH / empty_positions`
+   - Executes swap via 0x AllowanceHolder API
+   - Records position with actual WETH cost (nano-WETH)
+
+3. **Sell Execution**:
+   - Monitors positions for sell targets
+   - Requires profit ≥ `MIN_PROFIT_PERCENT` + 1.5% slippage buffer
+   - Applies moonbag: keeps X% of tokens, sells rest
+   - Banks profit: swaps Y% of profit to stablecoin
+   - Updates session statistics
+
+4. **Dynamic Sizing**:
+   - Buy amounts adjust based on available WETH and empty positions
+   - Ensures even distribution across grid levels
+   - Automatically compounds as positions fill/empty
+
+### Position Tracking
+
+```json
+{
+  "1": {
+    "buyMin": 0,
+    "buyMax": 2368000000,
+    "sellMin": 2605000000,
+    "stoploss": 1894000000,
+    "balance": 28431726788596754770,
+    "cost": 245094000
+  }
+}
+```
+
+- `buyMin/buyMax`: Price range to trigger buy (in nano-WETH)
+- `sellMin`: Price target to trigger sell (in nano-WETH)
+- `stoploss`: Price to emergency exit (optional)
+- `balance`: Tokens held (in wei)
+- `cost`: WETH spent (in nano-WETH)
+
+### Key Features Explained
+
+**Moonbag**: After selling, retains a percentage of tokens in the position
+- Set `MOONBAG_PERCENTAGE=10` to keep 10% of tokens
+- Cost basis is proportionally reduced
+- Position remains "active" with remaining tokens
+
+**Banking**: Swaps a percentage of WETH profit to stablecoin
+- Set `BANK_PERCENTAGE=20` to bank 20% of each profit
+- Happens immediately after successful sell
+- Protects gains in volatile markets
+
+**Session Stats**: Tracks performance across bot lifetime
+- `session_buys`: Total buy transactions
+- `session_sells`: Total sell transactions
+- `session_profit_weth`: Accumulated WETH profit
+- Resets when bot restarts
+
+**Minimum Profit**: Prevents selling at a loss due to slippage
+- Set `MIN_PROFIT_PERCENT=5` for 5% minimum
+- Adds 1.5% buffer (so requires 6.5% actual profit)
+- Blocks sells until price reaches threshold
 
 ## Architecture
 
@@ -36,283 +284,79 @@ A sophisticated grid trading bot for Robinhood Chain and other EVM networks, imp
 └─────────────────────────────────────────────────────────────┘
 ```
 
-## Installation
-
-### Prerequisites
-
-- Python 3.9+
-- pip
-- A wallet with ETH/WETH for trading
-- 0x API key (free at [0x.org](https://0x.org/))
-
-### Setup
-
-1. Clone the repository:
-```bash
-git clone https://github.com/kabbalahmonster/robinhood-grid-bot-py.git
-cd robinhood-grid-bot-py
-```
-
-2. Install dependencies:
-```bash
-pip install -r requirements.txt
-```
-
-3. Configure environment:
-```bash
-# Copy the appropriate environment file for your chain
-cp .env.robinhood .env
-
-# Edit .env with your settings
-nano .env
-```
-
-## Configuration
-
-### Environment Variables
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `PRIVATE_KEY` | Yes | - | Wallet private key (with 0x prefix) |
-| `RPC_URL` | Yes | - | RPC endpoint URL |
-| `CHAIN_ID` | Yes | 4663 | Chain ID (4663/8453/1) |
-| `ZEROX_API_KEY` | Yes | - | 0x API key |
-| `TOKEN_ADDRESS` | Yes | - | Token address to trade |
-| `TOKEN_SYMBOL` | No | TOKEN | Token symbol for logging |
-| `USDG_ADDRESS` | Yes | - | USDG/stablecoin address for profit banking |
-| `GRID_SPACING_PERCENT` | No | 5.0 | Grid spacing percentage |
-| `MAX_POSITIONS` | No | 20 | Maximum number of grid positions |
-| `MIN_PROFIT_PERCENT` | No | 1.5 | Minimum profit % before selling |
-| `INITIAL_BUY_AMOUNT` | No | 0.01 | Initial WETH buy amount |
-| `SLIPPAGE_TOLERANCE` | No | 1.0 | Slippage tolerance % |
-| `BANK_PERCENTAGE` | No | 50.0 | % of profits to bank to USDG |
-| `POLL_INTERVAL_SECONDS` | No | 30 | Price check interval |
-| `ANTI_MEV_JITTER` | No | true | Enable anti-MEV quote jitter |
-| `LOG_LEVEL` | No | INFO | Logging level |
-| `STATE_FILE` | No | ./data/positions.json | State file path |
-
-### Chain-Specific Configuration
-
-#### Robinhood Chain (4663)
-```bash
-CHAIN_ID=4663
-RPC_URL=https://robinhood.robinhoodchain.com
-WETH_ADDRESS=0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73
-MAX_POSITIONS=20
-```
-
-#### Base (8453)
-```bash
-CHAIN_ID=8453
-RPC_URL=https://mainnet.base.org
-WETH_ADDRESS=0x4200000000000000000000000000000000000006
-MAX_POSITIONS=10
-```
-
-#### Ethereum Mainnet (1)
-```bash
-CHAIN_ID=1
-RPC_URL=https://eth-mainnet.g.alchemy.com/v2/YOUR_KEY
-WETH_ADDRESS=0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2
-MAX_POSITIONS=10
-```
-
-## Usage
-
-### Start the Bot
-
-```bash
-# Using default .env file
-python bot.py
-
-# Using specific environment file
-python bot.py --env .env.robinhood
-
-# Run single iteration (for testing)
-python bot.py --once
-```
-
-### Example Session
-
-```
-2024-01-15 10:30:00 | INFO     | grid_bot | Initializing Grid Bot for Robinhood
-2024-01-15 10:30:00 | INFO     | grid_bot | Trading TOKEN against WETH
-2024-01-15 10:30:01 | INFO     | grid_bot.wallet | Wallet initialized: 0x1234...5678
-2024-01-15 10:30:02 | INFO     | grid_bot | Token: TOKEN (18 decimals)
-2024-01-15 10:30:02 | INFO     | grid_bot | WETH Balance: 1.500000
-2024-01-15 10:30:02 | INFO     | grid_bot | Initialized 20 grid levels
-2024-01-15 10:30:02 | INFO     | grid_bot | Price range: 0.000100 - 0.000400 ETH
-2024-01-15 10:30:02 | INFO     | grid_bot | Initialization complete
-2024-01-15 10:30:02 | INFO     | grid_bot | Starting Grid Bot main loop
-2024-01-15 10:30:35 | INFO     | grid_bot | Executing BUY at 0.000380 ETH with 0.075000 WETH
-2024-01-15 10:31:12 | INFO     | grid_bot | BUY successful: 197.368421 tokens for 0.075000 WETH
-2024-01-15 10:31:45 | INFO     | grid_bot | Executing BUY at 0.000361 ETH with 0.075000 WETH
-...
-2024-01-15 14:22:10 | INFO     | grid_bot | Executing SELL for position 1 (bought at 0.000380)
-2024-01-15 14:22:45 | INFO     | grid_bot | SELL successful: Position 1 closed for 0.077500 WETH (profit: 0.002500 WETH, 3.33%)
-2024-01-15 14:22:46 | INFO     | grid_bot | Banking 0.001250 WETH to USDG
-```
-
-## How It Works
-
-### Grid Strategy
-
-1. **Grid Initialization**: Creates price levels below current market price
-   - Default spacing: 5% between levels
-   - Example levels at $100: $95, $90.25, $85.74, ...
-
-2. **Buy Execution**:
-   - Monitors price for grid level triggers
-   - Calculates dynamic buy amount (WETH balance / empty positions)
-   - Executes swap via 0x Protocol
-   - Records position with cost basis
-
-3. **Sell Execution**:
-   - Monitors positions for profit targets
-   - Sells when profit ≥ `MIN_PROFIT_PERCENT`
-   - Banks portion of profit to USDG
-   - Frees up grid level for rebuy
-
-4. **Profit Banking**:
-   - Configurable percentage of profits
-   - Automatic swap to USDG/stablecoin
-   - Preserves capital in stable asset
-
-### Position Tracking
-
-```python
-Position {
-    id: 1,
-    buy_price: 0.000380,      # Price when bought
-    buy_amount_token: 197.37,  # Tokens acquired
-    buy_amount_eth: 0.075,     # WETH spent
-    status: "open",            # open/closed/banking
-    cost_basis: 0.000380       # ETH per token
-}
-```
-
-### Dynamic Sizing
-
-Buy amounts are calculated dynamically:
-```python
-buy_amount = available_weth / empty_positions
-```
-
-This ensures:
-- Even distribution across grid levels
-- Automatic adjustment as positions fill
-- No manual rebalancing needed
-
-## File Structure
+### File Structure
 
 ```
 robinhood-grid-bot-py/
-├── README.md              # This file
-├── requirements.txt       # Python dependencies
-├── .env.example          # Example environment variables
-├── .env.robinhood        # Robinhood Chain config
-├── .env.base             # Base Chain config
-├── .env.mainnet          # Ethereum Mainnet config
-├── config.py             # Configuration management
-├── bot.py                # Main bot logic
-├── wallet.py             # Wallet & transaction handling
-├── zero_x.py             # 0x API integration
-├── storage.py            # Position persistence
-├── utils.py              # Utility functions
-└── logs/                 # Log files
+├── README.md                   # This documentation
+├── requirements.txt            # Python dependencies
+├── .env.robinhood             # Robinhood Chain config template
+├── .env.base                  # Base Chain config template
+├── .env.mainnet               # Ethereum Mainnet config template
+├── config.py                  # Configuration management
+├── grid_bot.py                # Main bot logic
+├── wallet.py                  # Wallet & transaction handling
+├── zero_x.py                  # 0x API integration
+├── generate_grid_dynamic.py   # Grid position generator
+├── data/                      # Data directory
+│   └── positions.json         # Position state file
+└── logs/                      # Log files (created at runtime)
 ```
 
-## API Reference
+### Module Descriptions
 
-### BotConfig
+**config.py**: Loads and validates environment variables, provides chain-specific defaults
 
-Configuration dataclass loaded from environment.
+**wallet.py**: Handles Web3 connections, token approvals, transaction signing, balance checks
 
-```python
-config = load_config(".env")
-print(config.chain_name)  # "Robinhood"
-print(config.max_positions)  # 20
-```
+**zero_x.py**: Integrates with 0x API for price quotes and swap transactions
 
-### Wallet
+**grid_bot.py**: Main trading logic - grid management, buy/sell decisions, profit tracking
 
-```python
-wallet = Wallet(config)
-
-# Get balances
-eth = wallet.get_eth_balance()
-weth = wallet.get_token_balance(config.weth_address)
-
-# Ensure approvals
-wallet.ensure_approval(token, spender, amount)
-
-# Send transaction
-result = wallet._send_transaction(tx_params)
-```
-
-### ZeroXClient
-
-```python
-client = ZeroXClient(config)
-
-# Get quote
-quote = client.get_quote(
-    sell_token=weth,
-    buy_token=token,
-    sell_amount=wei_amount,
-)
-
-# Build swap
-tx_params = client.get_swap_transaction_params(
-    quote, from_address, nonce, gas_params
-)
-```
-
-### Storage
-
-```python
-storage = Storage("./data/positions.json")
-
-# Save position
-storage.add_position(position)
-
-# Get open positions
-open_pos = storage.get_open_positions()
-
-# Get stats
-stats = storage.get_stats()
-```
+**generate_grid_dynamic.py**: Creates grid positions based on current market price
 
 ## Safety Features
 
-1. **Profit Thresholds**: Only sells when profit > `MIN_PROFIT_PERCENT`
-2. **Slippage Protection**: Configurable slippage tolerance
-3. **Gas Estimation**: 20% buffer on gas estimates
-4. **Atomic State Saves**: Prevents data corruption
-5. **Backup Files**: Automatic backup before state updates
-6. **Approval Checks**: Verifies token approvals before trading
+1. **Profit Protection**: Only sells when profit ≥ `MIN_PROFIT_PERCENT` + slippage buffer
+2. **Slippage Protection**: Configurable slippage tolerance on all swaps
+3. **Gas Estimation**: 50% buffer on gas estimates for reliability
+4. **Atomic State Saves**: Position state saved after every trade
+5. **Approval Checks**: Verifies token approvals before trading
+6. **Error Handling**: Graceful failures with detailed logging
+7. **Session Tracking**: Monitors cumulative performance
 
 ## Troubleshooting
 
 ### "Failed to connect to RPC"
 - Verify RPC URL in .env file
 - Check network connectivity
-- Try alternative RPC endpoint
+- Try alternative RPC endpoint (Alchemy, QuickNode, etc.)
 
 ### "Insufficient allowance"
-- The bot will auto-approve tokens
-- Check wallet has ETH for gas
-- Verify token contract addresses
+- The bot will auto-approve tokens on first use
+- Check wallet has ETH for gas fees
+- Verify token contract addresses are correct
 
 ### "Quote failed"
-- Check 0x API key is valid
-- Verify token has liquidity
-- Increase slippage tolerance if volatile
+- Check 0x API key is valid and not rate-limited
+- Verify token has liquidity on the chain
+- Increase `SLIPPAGE_TOLERANCE` if token is volatile
 
 ### "Transaction failed"
-- Check gas prices (may be too low)
+- Check gas prices (may be too low during congestion)
 - Verify sufficient ETH for gas
-- Check token approvals
+- Check token approvals haven't expired
+
+### "Position cost seems wrong"
+- Check the transaction on block explorer
+- Verify the `cost` field in positions.json matches actual WETH spent
+- The buy price is calculated as: `cost / (balance / 10^18)`
+
+### Bot not buying/selling
+- Check `MAX_ACTIVE_POSITIONS` hasn't been reached
+- Verify price is within grid ranges
+- Check `MIN_PROFIT_PERCENT` isn't blocking sells
+- Review logs for specific error messages
 
 ## Development
 
@@ -320,13 +364,13 @@ stats = storage.get_stats()
 
 ```bash
 # Test imports
-python -c "from bot import GridBot; print('OK')"
+python -c "from grid_bot import GridBot; print('OK')"
 
 # Test configuration
-python -c "from config import load_config; c = load_config('.env'); print(c.chain_name)"
+python -c "from config import load_config; c = load_config('.env'); print(f'Chain: {c.chain_name}')"
 
-# Single iteration
-python bot.py --env .env --once
+# Test wallet connection
+python -c "from config import load_config; from wallet import Wallet; c = load_config('.env'); w = Wallet(c); print(f'Balance: {w.get_eth_balance()}')"
 ```
 
 ### Adding New Chains
@@ -344,17 +388,113 @@ CHAIN_CONFIG = {
 }
 ```
 
-2. Create `.env.newchain` file
-3. Update documentation
+2. Create `.env.newchain` file with appropriate settings
+
+3. Update README with chain information
+
+### Contributing
+
+1. Fork the repository
+2. Create a feature branch: `git checkout -b feature/my-feature`
+3. Commit your changes: `git commit -am 'Add new feature'`
+4. Push to the branch: `git push origin feature/my-feature`
+5. Submit a pull request
 
 ## Security Considerations
 
 ⚠️ **Important**:
-- Never commit `.env` files with private keys
-- Use dedicated trading wallets
-- Start with small amounts
-- Monitor gas costs on mainnet
-- Review and understand the code before running
+- **Never commit `.env` files with private keys**
+- Use dedicated trading wallets (not your main wallet)
+- Start with small amounts to test
+- Monitor gas costs, especially on mainnet
+- Review and understand the code before running with significant funds
+- Keep your 0x API key private
+- Use hardware wallets when possible for production
+
+## API Reference
+
+### BotConfig
+
+Configuration dataclass loaded from environment.
+
+```python
+from config import load_config
+
+config = load_config(".env")
+print(config.chain_name)        # "Robinhood"
+print(config.max_positions)     # 24
+print(config.bank_percentage)   # 20.0
+```
+
+### Wallet
+
+```python
+from config import load_config
+from wallet import Wallet
+
+config = load_config(".env")
+wallet = Wallet(config)
+
+# Get balances
+eth_balance = wallet.get_eth_balance()
+weth_balance, weth_raw = wallet.get_token_balance(config.weth_address)
+
+# Approve tokens
+result = wallet.approve_token(token_address, spender, amount)
+
+# Send transaction
+result = wallet._send_transaction(tx_params)
+```
+
+### ZeroXClient
+
+```python
+from config import load_config
+from zero_x import ZeroXClient
+
+config = load_config(".env")
+client = ZeroXClient(config)
+
+# Get quote
+quote = client.build_swap_transaction(
+    sell_token=weth_address,
+    buy_token=token_address,
+    sell_amount=wei_amount,
+    taker_address=wallet_address,
+    slippage_percentage=0.02,
+)
+```
+
+## Performance Tips
+
+1. **Use Private RPCs**: Public RPCs have strict rate limits
+   - Alchemy, Infura, QuickNode recommended
+   - Set in `.env`: `RPC_URL=https://...`
+
+2. **Optimize Polling**:
+   - Robinhood: 1-5 seconds (fast chain)
+   - Base: 5-10 seconds
+   - Mainnet: 12-15 seconds (match block time)
+
+3. **Grid Density**:
+   - More positions = more opportunities but smaller sizes
+   - Fewer positions = larger sizes but fewer trades
+   - 10-24 positions is a good balance
+
+4. **Profit Settings**:
+   - Lower `MIN_PROFIT_PERCENT` = more frequent trades, smaller profits
+   - Higher = fewer trades, larger profits
+   - 5-10% is typical for volatile tokens
+
+## Changelog
+
+### v1.0.0 - Initial Release
+- Dynamic grid generation from current price
+- 0x AllowanceHolder API integration
+- Multi-position support with cost tracking
+- Session statistics (buys, sells, profit)
+- Moonbag and banking features
+- Multi-chain support (Robinhood, Base, Mainnet)
 
 ## License
 
@@ -366,6 +506,6 @@ For issues and feature requests, please open a GitHub issue.
 
 ## Acknowledgments
 
-- 0x Protocol for DEX aggregation
-- Uniswap for Permit2
+- 0x Protocol for DEX aggregation API
 - web3.py team for Ethereum integration
+- Robinhood Chain team for L2 infrastructure
