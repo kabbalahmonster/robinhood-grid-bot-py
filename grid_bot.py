@@ -30,6 +30,8 @@ class GridBot:
         self.positions_file = "data/positions.json"
         self.positions = {}
         self.running = True
+        self.round_count = 0
+        self.start_time = time.time()
         
         logger.info(f"Grid Bot initialized")
         logger.info(f"Wallet: {self.wallet.address}")
@@ -281,9 +283,12 @@ class GridBot:
     
     def run_cycle(self):
         """Run one trading cycle."""
+        self.round_count += 1
+        elapsed = time.time() - self.start_time
+        
         # Get balances
-        weth_bal, _ = self.wallet.get_token_balance(self.config.weth_address)
-        token_bal, _ = self.wallet.get_token_balance(self.config.token_address)
+        weth_bal, weth_raw = self.wallet.get_token_balance(self.config.weth_address)
+        token_bal, token_raw = self.wallet.get_token_balance(self.config.token_address)
         
         # Count positions
         active = sum(1 for p in self.positions.values() if p['balance'] > 0)
@@ -296,11 +301,11 @@ class GridBot:
             return
         
         # Verbose round summary
-        logger.info("=" * 60)
-        logger.info(f"ROUND SUMMARY | {self.config.token_symbol}")
-        logger.info("=" * 60)
-        logger.info(f"💰 WETH Balance: {weth_bal:.6f}")
-        logger.info(f"🪙 Token Balance: {token_bal / 10**18:.6f}")
+        logger.info("=" * 70)
+        logger.info(f"ROUND #{self.round_count} | {self.config.token_symbol} | Elapsed: {elapsed:.0f}s")
+        logger.info("=" * 70)
+        logger.info(f"💰 WETH Balance: {weth_bal:.6f} (raw: {weth_raw})")
+        logger.info(f"🪙 Token Balance: {token_bal:.6f} (raw: {token_raw})")
         logger.info(f"📊 Price: 1 {self.config.token_symbol} = {price:.10f} WETH")
         logger.info(f"📈 Positions: {active} active / {empty} empty")
         
@@ -310,12 +315,14 @@ class GridBot:
             for pos_id, pos in self.positions.items():
                 if pos['balance'] > 0:
                     tokens = pos['balance'] / 10**18
-                    cost_weth = pos['cost'] / 10**9
+                    cost_nano = pos['cost']  # nano-WETH
+                    cost_weth = cost_nano / 10**9  # Convert to WETH
+                    # Buy price = WETH spent / tokens received
                     buy_price = cost_weth / tokens if tokens > 0 else 0
                     pnl = ((price - buy_price) / buy_price * 100) if buy_price > 0 else 0
-                    logger.info(f"   #{pos_id}: {tokens:.4f} tokens @ {buy_price:.10f} | P&L: {pnl:+.2f}%")
+                    logger.info(f"   #{pos_id}: {tokens:.4f} tokens | Cost: {cost_weth:.6f} WETH | Buy: {buy_price:.10f} | P&L: {pnl:+.2f}%")
         
-        logger.info("-" * 60)
+        logger.info("-" * 70)
         
         # Check sells first (take profits)
         self.check_sells(price)
