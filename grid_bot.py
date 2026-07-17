@@ -272,12 +272,13 @@ class GridBot:
     def run(self):
         """Main bot loop."""
         self.load_positions()
-        
-        logger.info("Starting main loop...")
+
+        poll_interval = getattr(self.config, 'poll_interval_seconds', 30)
+        logger.info(f"Starting main loop (polling every {poll_interval}s)...")
         while self.running:
             try:
                 self.run_cycle()
-                time.sleep(30)  # 30 second intervals
+                time.sleep(poll_interval)
             except KeyboardInterrupt:
                 logger.info("Stopping bot...")
                 self.running = False
