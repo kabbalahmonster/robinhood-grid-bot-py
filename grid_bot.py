@@ -7,6 +7,8 @@ Uses positions.json format compatible with original bot
 import json
 import time
 import logging
+import os
+from datetime import datetime
 from decimal import Decimal
 from web3 import Web3
 
@@ -14,13 +16,22 @@ from config import load_config
 from wallet import Wallet
 from zero_x import ZeroXClient
 
-# Setup logging
+# Setup logging with file output
+log_dir = "logs"
+os.makedirs(log_dir, exist_ok=True)
+log_filename = os.path.join(log_dir, f"bot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s | %(levelname)s | %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
+    datefmt='%Y-%m-%d %H:%M:%S',
+    handlers=[
+        logging.FileHandler(log_filename),
+        logging.StreamHandler()
+    ]
 )
 logger = logging.getLogger('grid_bot')
+logger.info(f"Logging to: {log_filename}")
 
 class GridBot:
     def __init__(self):
