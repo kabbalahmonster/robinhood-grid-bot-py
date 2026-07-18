@@ -491,28 +491,30 @@ class GridBot:
         compact_mode = getattr(self.config, 'compact_mode', False)
         
         if compact_mode:
-            # Ultra-compact output for tmux multi-pane view - fits narrow panes
+            # Ultra-compact output for tmux multi-pane view
             from datetime import datetime
             time_str = datetime.now().strftime('%H:%M')
             
-            # Single line: Time Token | W T | Pos B S P
-            status_line = f"{time_str} {self.config.token_symbol} W:{weth_bal:.3f} T:{token_bal:.0f} | Pos:{active}/{active+empty} B:{self.session_buys} S:{self.session_sells} P:{self.session_profit_weth:.3f}"
+            # One-line status: Time Token W T Pos B S PnL
+            status_line = f"{time_str} {self.config.token_symbol:8s} W{weth_bal:.3f} T{token_bal:4.0f} {active}/{active+empty} B{self.session_buys} S{self.session_sells} P{self.session_profit_weth:.2f}"
             logger.info(status_line)
             
-            # Positions on same line (max 2, ultra short)
+            # Positions on second line (ultra compact)
             active_positions = [(pid, p) for pid, p in self.positions.items() if p['balance'] > 0]
             if active_positions:
-                pos_lines = []
-                for pos_id, pos in active_positions[:2]:
+                pos_parts = []
+                for pos_id, pos in active_positions[:3]:
                     tokens = pos['balance'] / 10**18
                     cost_weth = pos['cost'] / 10**9
                     if tokens > 0 and cost_weth > 0:
                         buy_price = cost_weth / tokens
                         pnl = ((price - buy_price) / buy_price * 100)
-                        pos_lines.append(f"#{pos_id}:{tokens:.1f} P&L{pnl:+.0f}%")
-                if len(active_positions) > 2:
-                    pos_lines.append(f"+{len(active_positions)-2}more")
-                logger.info(" | ".join(pos_lines))
+                        pos_parts.append(f"#{pos_id}:{tokens:.0f} {pnl:+.0f}%")
+                    else:
+                        pos_parts.append(f"#{pos_id}:{tokens:.0f} MB")
+                if len(active_positions) > 3:
+                    pos_parts.append(f"+{len(active_positions)-3}")
+                logger.info(" ".join(pos_parts))
         else:
             # Verbose round summary (original format)
             logger.info("=" * 70)
