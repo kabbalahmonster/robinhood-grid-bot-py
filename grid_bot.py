@@ -315,7 +315,7 @@ class GridBot:
             logger.info(f"   Tokens: {tokens:.6f} {self.config.token_symbol}")
             logger.info(f"   Cost: {buy_amount_eth:.6f} WETH")
             logger.info(f"   Buy price: {buy_price:.10f} WETH per token")
-            logger.info(f"   Tx: {result.tx_hash[:30]}...")
+            logger.info(f"   Tx: {result.tx_hash}")
         else:
             logger.error(f"❌ Buy failed: {result.error}")
     
@@ -476,7 +476,7 @@ class GridBot:
                 logger.info(f"🏦 Banking: Swapping {bank_pct}% of profit = {bank_amount:.6f} WETH → USDG")
                 self.bank_profit(bank_amount)
             
-            logger.info(f"   Tx: {result.tx_hash[:30]}...")
+            logger.info(f"   Tx: {result.tx_hash}")
         else:
             logger.error(f"❌ Sell failed: {result.error}")
     
