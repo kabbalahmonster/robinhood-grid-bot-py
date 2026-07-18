@@ -16,22 +16,8 @@ from config import load_config
 from wallet import Wallet
 from zero_x import ZeroXClient
 
-# Setup logging with file output
-log_dir = "logs"
-os.makedirs(log_dir, exist_ok=True)
-log_filename = os.path.join(log_dir, f"bot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
-
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s | %(levelname)s | %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S',
-    handlers=[
-        logging.FileHandler(log_filename),
-        logging.StreamHandler()
-    ]
-)
+# Global logger - will be configured by GridBot
 logger = logging.getLogger('grid_bot')
-logger.info(f"Logging to: {log_filename}")
 
 class GridBot:
     def __init__(self):
@@ -56,15 +42,23 @@ class GridBot:
         logger.info(f"Max active positions: {self.config.max_active_positions}")
     
     def _setup_logging(self):
-        """Reconfigure logging based on config settings."""
+        """Configure logging based on config settings."""
         minimal = getattr(self.config, 'minimal_logs', False)
         
-        # Clear existing handlers and re-add with appropriate formatters
+        # Setup log file path
+        log_dir = "logs"
+        os.makedirs(log_dir, exist_ok=True)
+        self.log_filename = os.path.join(log_dir, f"bot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
+        
+        # Set logger level
+        logger.setLevel(logging.INFO)
+        
+        # Clear any existing handlers
         for handler in logger.handlers[:]:
             logger.removeHandler(handler)
         
         # File handler always gets full timestamps
-        file_handler = logging.FileHandler(log_filename)
+        file_handler = logging.FileHandler(self.log_filename)
         file_handler.setFormatter(logging.Formatter(
             '%(asctime)s | %(levelname)s | %(message)s',
             datefmt='%Y-%m-%d %H:%M:%S'
@@ -81,6 +75,8 @@ class GridBot:
                 datefmt='%Y-%m-%d %H:%M:%S'
             ))
         logger.addHandler(console_handler)
+        
+        logger.info(f"Logging to: {self.log_filename}")
     
     def load_positions(self):
         """Load positions from JSON file."""
