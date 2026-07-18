@@ -416,9 +416,27 @@ class GridBot:
                     logger.error(f"Refreshed quote failed: {quote.error}")
                     return
         
-        # Execute swap with checksummed addresses
+        # Validate quote meets minimum profit requirement (NEVER sell at loss)
+        # Minimum return = cost + gas + min_profit%
         gas_limit = int(quote.gas * 1.5) if quote.gas else 300000
         gas_price = int(self.wallet.w3.eth.gas_price * 1.3)
+        gas_cost_eth = (gas_limit * gas_price) / 10**18
+        
+        min_profit_percent = getattr(self.config, 'min_profit_percent', 2.0)
+        min_profit_eth = sold_cost_weth * (min_profit_percent / 100)
+        min_return_eth = sold_cost_weth + gas_cost_eth + min_profit_eth
+        
+        # quote.buy_amount is in wei
+        quote_return_eth = quote.buy_amount / 10**18 if quote.buy_amount else 0
+        
+        if quote_return_eth < min_return_eth:
+            logger.warning(f"❌ Sell ABORTED: Quote return ({quote_return_eth:.6f} WETH) < minimum ({min_return_eth:.6f} WETH)")
+            logger.warning(f"   Cost: {sold_cost_weth:.6f}, Gas: {gas_cost_eth:.6f}, Min profit: {min_profit_eth:.6f}")
+            return  # Abort - never sell at loss
+        
+        logger.info(f"✅ Quote validated: {quote_return_eth:.6f} WETH >= {min_return_eth:.6f} WETH minimum")
+        
+        # Execute swap with checksummed addresses
         
         result = self.wallet._send_transaction({
             "from": Web3.to_checksum_address(self.wallet.address),
