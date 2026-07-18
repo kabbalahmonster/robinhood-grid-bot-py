@@ -138,6 +138,8 @@ class ZeroXClient:
             url = f"{self.base_url}/swap/allowance-holder/quote"
             
             self.logger.debug(f"Fetching quote: {params}")
+            self.logger.debug(f"0x API URL: {url}")
+            self.logger.debug(f"Chain ID: {self.chain_id}")
             
             response = requests.get(
                 url,
@@ -145,6 +147,17 @@ class ZeroXClient:
                 params=params,
                 timeout=30,
             )
+            
+            # Log response status for debugging
+            self.logger.debug(f"0x API response status: {response.status_code}")
+            
+            if response.status_code != 200:
+                self.logger.error(f"0x API error: Status {response.status_code}")
+                self.logger.error(f"Response: {response.text[:500]}")
+                return QuoteResult(
+                    success=False,
+                    error=f"0x API returned status {response.status_code}: {response.text[:200]}",
+                )
             
             response.raise_for_status()
             data = response.json()
@@ -187,14 +200,20 @@ class ZeroXClient:
             error_msg = f"Request failed: {e}"
             self.logger.error(error_msg)
             
-            # Try to extract more error details
-            if hasattr(e.response, "text"):
+            # Try to extract more error details from response
+            if hasattr(e, 'response') and e.response is not None:
+                self.logger.error(f"Response status: {e.response.status_code}")
+                self.logger.error(f"Response headers: {dict(e.response.headers)}")
                 try:
+                    error_text = e.response.text[:500]
+                    self.logger.error(f"Response body: {error_text}")
                     error_data = e.response.json()
                     if "reason" in error_data:
                         error_msg = f"0x API error: {error_data['reason']}"
-                except:
-                    pass
+                    elif "error" in error_data:
+                        error_msg = f"0x API error: {error_data['error']}"
+                except Exception as parse_err:
+                    self.logger.error(f"Could not parse error response: {parse_err}")
             
             return QuoteResult(success=False, error=error_msg)
         
@@ -236,6 +255,7 @@ class ZeroXClient:
             url = f"{self.base_url}/swap/allowance-holder/price"
             
             self.logger.debug(f"Fetching price: {params}")
+            self.logger.debug(f"0x API URL: {url}")
             
             response = requests.get(
                 url,
@@ -243,6 +263,13 @@ class ZeroXClient:
                 params=params,
                 timeout=30,
             )
+            
+            self.logger.debug(f"0x price API status: {response.status_code}")
+            
+            if response.status_code != 200:
+                self.logger.error(f"0x price API error: Status {response.status_code}")
+                self.logger.error(f"Response: {response.text[:500]}")
+                return None
             
             response.raise_for_status()
             data = response.json()
@@ -262,10 +289,13 @@ class ZeroXClient:
             return None
         
         except requests.exceptions.RequestException as e:
-            self.logger.debug(f"Price fetch failed: {e}")
+            self.logger.error(f"Price fetch failed: {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                self.logger.error(f"Status: {e.response.status_code}")
+                self.logger.error(f"Response: {e.response.text[:300]}")
             return None
         except Exception as e:
-            self.logger.debug(f"Unexpected error fetching price: {e}")
+            self.logger.error(f"Unexpected error fetching price: {e}")
             return None
     
     def build_swap_transaction(
