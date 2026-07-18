@@ -49,8 +49,11 @@ class GridBot:
         
         # Reconfigure logging for minimal output if requested
         if getattr(self.config, 'minimal_logs', False):
+            # Remove timestamp from console output only (keep file logging intact)
+            import sys
             for handler in logger.handlers:
-                if isinstance(handler, logging.StreamHandler):
+                # Only modify stdout/stderr handlers (console), not file handlers
+                if isinstance(handler, logging.StreamHandler) and handler.stream in (sys.stdout, sys.stderr):
                     handler.setFormatter(logging.Formatter('%(message)s'))
         
         logger.info(f"Grid Bot initialized")
