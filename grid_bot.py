@@ -119,7 +119,10 @@ class GridBot:
                 apply_jitter_to_price=False,
             )
             if result.success and result.price:
+                logger.debug(f"LI.FI price: {result.price}")
                 return result.price
+            else:
+                logger.debug(f"LI.FI price failed: success={result.success}, price={result.price}, error={result.error}")
             return None
         else:
             # 0x price endpoint doesn't require taker
