@@ -188,11 +188,11 @@ class LiFiClient:
             action = data.get("action", {})
             estimate = data.get("estimate", {})
             
-            # Parse amounts - LI.FI returns hex strings like "0x1234"
+            # Parse amounts - LI.FI returns strings
             from_amount_str = action.get("fromAmount", "0")
             to_amount_str = action.get("toAmount", "0")
             
-            # Convert hex to int if needed
+            # Convert to int (handle both hex and decimal strings)
             if isinstance(from_amount_str, str) and from_amount_str.startswith("0x"):
                 from_amount = int(from_amount_str, 16)
             else:
@@ -203,8 +203,16 @@ class LiFiClient:
             else:
                 to_amount = int(to_amount_str)
             
+            # Check if quote is valid
+            if to_amount == 0:
+                self.logger.error(f"LI.FI returned zero tokens for this swap - no liquidity or unsupported pair")
+                return QuoteResult(
+                    success=False,
+                    error="LI.FI returned zero tokens - no liquidity for this pair",
+                )
+            
             # Calculate price (sell/buy ratio)
-            price = from_amount / to_amount if to_amount > 0 else 0
+            price = from_amount / to_amount
             
             # Apply jitter to price if requested
             if apply_jitter_to_price and self.config.anti_mev_jitter:
