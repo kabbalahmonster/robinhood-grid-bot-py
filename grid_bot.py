@@ -571,7 +571,7 @@ class GridBot:
             logger.info(f"{time_str} R#{self.round_count} | {self.config.token_symbol}")
             
             # Line 2 & 3: W/T/Pos and B/S/P stats
-            logger.info(f"W:{weth_bal:.3f} T:{token_bal:.0f} {active}/{active+empty}")
+            logger.info(f"W:{weth_bal:.3f} T:{token_bal:.0f} {active}/{self.config.max_active_positions}/{active+empty}")
             logger.info(f"B:{self.session_buys} S:{self.session_sells} P:{self.session_profit_weth:.6f}")
             
             # Separator matches 26 char width
