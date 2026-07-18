@@ -62,8 +62,9 @@ class GridBot:
         os.makedirs(log_dir, exist_ok=True)
         self.log_filename = os.path.join(log_dir, f"bot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
         
-        # Set logger level
-        logger.setLevel(logging.INFO)
+        # Set logger level from config
+        log_level = getattr(self.config, 'log_level', 'INFO')
+        logger.setLevel(getattr(logging, log_level.upper(), logging.INFO))
         
         # Clear any existing handlers
         for handler in logger.handlers[:]:
@@ -71,6 +72,7 @@ class GridBot:
         
         # File handler always gets full timestamps
         file_handler = logging.FileHandler(self.log_filename)
+        file_handler.setLevel(getattr(logging, log_level.upper(), logging.INFO))
         file_handler.setFormatter(logging.Formatter(
             '%(asctime)s | %(levelname)s | %(message)s',
             datefmt='%Y-%m-%d %H:%M:%S'
@@ -79,6 +81,7 @@ class GridBot:
         
         # Console handler - minimal or full format
         console_handler = logging.StreamHandler()
+        console_handler.setLevel(getattr(logging, log_level.upper(), logging.INFO))
         if minimal:
             console_handler.setFormatter(logging.Formatter('%(message)s'))
         else:
