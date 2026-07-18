@@ -498,12 +498,12 @@ class GridBot:
             # Line 1: Time, round, token
             logger.info(f"{time_str} R#{self.round_count} | {self.config.token_symbol}")
             
-            # Line 2 & 3: Both exactly 17 characters wide
+            # Line 2 & 3: W/T/Pos and B/S/P stats
             logger.info(f"W:{weth_bal:.3f} T:{token_bal:.0f} {active}/{active+empty}")
             logger.info(f"B:{self.session_buys} S:{self.session_sells} P:{self.session_profit_weth:.3f}")
             
-            # Separator matches 17 char width
-            logger.info("-----------------")
+            # Separator matches 26 char width
+            logger.info("-" * 26)
             
             # Each position on its own line (max 3), no price shown
             active_positions = [(pid, p) for pid, p in self.positions.items() if p['balance'] > 0]
@@ -518,6 +518,9 @@ class GridBot:
                     logger.info(f"#{pos_id}: {tokens:.1f} | moonbag")
             if len(active_positions) > 3:
                 logger.info(f"... and {len(active_positions) - 3} more")
+            
+            # Final separator
+            logger.info("-" * 26)
         else:
             # Verbose round summary (original format)
             logger.info("=" * 70)
