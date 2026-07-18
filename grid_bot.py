@@ -491,30 +491,32 @@ class GridBot:
         compact_mode = getattr(self.config, 'compact_mode', False)
         
         if compact_mode:
-            # Ultra-compact output for tmux multi-pane view
+            # Compact output for tmux multi-pane view
             from datetime import datetime
             time_str = datetime.now().strftime('%H:%M')
             
-            # One-line status: Time Token W T Pos B S PnL
-            status_line = f"{time_str} {self.config.token_symbol:8s} W{weth_bal:.3f} T{token_bal:4.0f} {active}/{active+empty} B{self.session_buys} S{self.session_sells} P{self.session_profit_weth:.2f}"
-            logger.info(status_line)
+            # Line 1: Time, round, token
+            logger.info(f"{time_str} R#{self.round_count} | {self.config.token_symbol}")
             
-            # Positions on second line (ultra compact)
+            # Line 2: WETH, Token, Pos/B/S/P
+            logger.info(f"W:{weth_bal:.3f} | T:{token_bal:.0f} | {active}/{active+empty} | B:{self.session_buys} | S:{self.session_sells} | P:{self.session_profit_weth:.3f}")
+            
+            # Short separator
+            logger.info("-" * 30)
+            
+            # Each position on its own line (max 3)
             active_positions = [(pid, p) for pid, p in self.positions.items() if p['balance'] > 0]
-            if active_positions:
-                pos_parts = []
-                for pos_id, pos in active_positions[:3]:
-                    tokens = pos['balance'] / 10**18
-                    cost_weth = pos['cost'] / 10**9
-                    if tokens > 0 and cost_weth > 0:
-                        buy_price = cost_weth / tokens
-                        pnl = ((price - buy_price) / buy_price * 100)
-                        pos_parts.append(f"#{pos_id}:{tokens:.0f} {pnl:+.0f}%")
-                    else:
-                        pos_parts.append(f"#{pos_id}:{tokens:.0f} MB")
-                if len(active_positions) > 3:
-                    pos_parts.append(f"+{len(active_positions)-3}")
-                logger.info(" ".join(pos_parts))
+            for pos_id, pos in active_positions[:3]:
+                tokens = pos['balance'] / 10**18
+                cost_weth = pos['cost'] / 10**9
+                if tokens > 0 and cost_weth > 0:
+                    buy_price = cost_weth / tokens
+                    pnl = ((price - buy_price) / buy_price * 100)
+                    logger.info(f"#{pos_id}: {tokens:.1f} @ {buy_price:.2e} | P&L: {pnl:+.1f}%")
+                else:
+                    logger.info(f"#{pos_id}: {tokens:.1f} | moonbag")
+            if len(active_positions) > 3:
+                logger.info(f"... and {len(active_positions) - 3} more")
         else:
             # Verbose round summary (original format)
             logger.info("=" * 70)
