@@ -47,6 +47,12 @@ class GridBot:
         self.session_sells = 0
         self.session_profit_weth = 0.0
         
+        # Reconfigure logging for minimal output if requested
+        if getattr(self.config, 'minimal_logs', False):
+            for handler in logger.handlers:
+                if isinstance(handler, logging.StreamHandler):
+                    handler.setFormatter(logging.Formatter('%(message)s'))
+        
         logger.info(f"Grid Bot initialized")
         logger.info(f"Wallet: {self.wallet.address}")
         logger.info(f"Trading: {self.config.token_symbol}")
@@ -466,8 +472,10 @@ class GridBot:
         
         if compact_mode:
             # Compact single-line output for tmux multi-pane view
-            # Format: R#123 | TOKEN | W:0.015 T:93.4 | 2/24 | B:9 S:9 P:0.0003
-            status_line = f"R#{self.round_count} | {self.config.token_symbol} | W:{weth_bal:.4f} T:{token_bal:.1f} | {active}/{active+empty} | B:{self.session_buys} S:{self.session_sells} P:{self.session_profit_weth:.4f}"
+            # Format: HH:MM R#123 | TOKEN | W:0.015 T:93.4 | 2/24 | B:9 S:9 P:0.0003
+            from datetime import datetime
+            time_str = datetime.now().strftime('%H:%M')
+            status_line = f"{time_str} R#{self.round_count} | {self.config.token_symbol} | W:{weth_bal:.4f} T:{token_bal:.1f} | {active}/{active+empty} | B:{self.session_buys} S:{self.session_sells} P:{self.session_profit_weth:.4f}"
             logger.info(status_line)
             
             # Show active positions on one line each (max 3 for compactness)

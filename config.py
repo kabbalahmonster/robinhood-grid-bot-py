@@ -87,6 +87,7 @@ class BotConfig:
     log_level: str
     state_file: str
     compact_mode: bool
+    minimal_logs: bool
     
     # Derived properties
     @property
@@ -203,6 +204,7 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
         log_level=os.getenv("LOG_LEVEL", "INFO"),
         state_file=os.getenv("STATE_FILE", "./data/positions.json"),
         compact_mode=os.getenv("COMPACT_MODE", "false").lower() == "true",
+        minimal_logs=os.getenv("MINIMAL_LOGS", "false").lower() == "true",
     )
     
     # Validate the configuration
