@@ -503,7 +503,7 @@ class GridBot:
             logger.info(status_line)
             
             # Line 2: Stats (shortened format)
-            stats_line = f"{active}/{active+empty} | B:{self.session_buys} | S:{self.session_sells} | P:{self.session_profit_weth:.4f}"
+            stats_line = f"Pos: {active}/{active+empty} | B:{self.session_buys} | S:{self.session_sells} | P:{self.session_profit_weth:.4f}"
             logger.info(stats_line)
             
             # Show active positions (P&L only, no sell target details)
