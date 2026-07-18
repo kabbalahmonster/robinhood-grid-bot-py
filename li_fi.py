@@ -173,12 +173,24 @@ class LiFiClient:
             data = response.json()
             
             # Extract quote information from LI.FI response
-            # LI.FI returns action object with from/to amounts
+            # LI.FI returns action object with from/to amounts (as hex strings)
             action = data.get("action", {})
             estimate = data.get("estimate", {})
             
-            from_amount = int(action.get("fromAmount", 0))
-            to_amount = int(action.get("toAmount", 0))
+            # Parse amounts - LI.FI returns hex strings like "0x1234"
+            from_amount_str = action.get("fromAmount", "0")
+            to_amount_str = action.get("toAmount", "0")
+            
+            # Convert hex to int if needed
+            if isinstance(from_amount_str, str) and from_amount_str.startswith("0x"):
+                from_amount = int(from_amount_str, 16)
+            else:
+                from_amount = int(from_amount_str)
+            
+            if isinstance(to_amount_str, str) and to_amount_str.startswith("0x"):
+                to_amount = int(to_amount_str, 16)
+            else:
+                to_amount = int(to_amount_str)
             
             # Calculate price (sell/buy ratio)
             price = from_amount / to_amount if to_amount > 0 else 0
@@ -192,6 +204,14 @@ class LiFiClient:
             
             self.logger.debug(f"LI.FI quote: buy={to_amount}, sell={from_amount}")
             
+            # Parse transaction values (may be hex strings)
+            def parse_hex_or_int(val, default=0):
+                if val is None:
+                    return default
+                if isinstance(val, str) and val.startswith("0x"):
+                    return int(val, 16)
+                return int(val)
+            
             return QuoteResult(
                 success=True,
                 price=price,
@@ -200,9 +220,9 @@ class LiFiClient:
                 allowance_target=transaction_request.get("to"),
                 data=transaction_request.get("data"),
                 to=transaction_request.get("to"),
-                value=int(transaction_request.get("value", 0)),
-                gas=int(transaction_request.get("gasLimit", 200000)),
-                gas_price=int(transaction_request.get("gasPrice", 0)),
+                value=parse_hex_or_int(transaction_request.get("value"), 0),
+                gas=parse_hex_or_int(transaction_request.get("gasLimit"), 200000),
+                gas_price=parse_hex_or_int(transaction_request.get("gasPrice"), 0),
                 raw_response=data,
             )
         
