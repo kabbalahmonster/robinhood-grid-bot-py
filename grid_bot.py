@@ -47,19 +47,40 @@ class GridBot:
         self.session_sells = 0
         self.session_profit_weth = 0.0
         
-        # Reconfigure logging for minimal output if requested
-        if getattr(self.config, 'minimal_logs', False):
-            # Remove timestamp from console output only (keep file logging intact)
-            import sys
-            for handler in logger.handlers:
-                # Only modify stdout/stderr handlers (console), not file handlers
-                if isinstance(handler, logging.StreamHandler) and handler.stream in (sys.stdout, sys.stderr):
-                    handler.setFormatter(logging.Formatter('%(message)s'))
+        # Reconfigure logging based on config (must happen after config load)
+        self._setup_logging()
         
         logger.info(f"Grid Bot initialized")
         logger.info(f"Wallet: {self.wallet.address}")
         logger.info(f"Trading: {self.config.token_symbol}")
         logger.info(f"Max active positions: {self.config.max_active_positions}")
+    
+    def _setup_logging(self):
+        """Reconfigure logging based on config settings."""
+        minimal = getattr(self.config, 'minimal_logs', False)
+        
+        # Clear existing handlers and re-add with appropriate formatters
+        for handler in logger.handlers[:]:
+            logger.removeHandler(handler)
+        
+        # File handler always gets full timestamps
+        file_handler = logging.FileHandler(log_filename)
+        file_handler.setFormatter(logging.Formatter(
+            '%(asctime)s | %(levelname)s | %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'
+        ))
+        logger.addHandler(file_handler)
+        
+        # Console handler - minimal or full format
+        console_handler = logging.StreamHandler()
+        if minimal:
+            console_handler.setFormatter(logging.Formatter('%(message)s'))
+        else:
+            console_handler.setFormatter(logging.Formatter(
+                '%(asctime)s | %(levelname)s | %(message)s',
+                datefmt='%Y-%m-%d %H:%M:%S'
+            ))
+        logger.addHandler(console_handler)
     
     def load_positions(self):
         """Load positions from JSON file."""
