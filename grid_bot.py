@@ -586,8 +586,8 @@ class GridBot:
                     if lowest_buy:
                         rise_pct = (lowest_buy['buy_max'] - price) / price * 100
                         logger.info(f"🛒 Next Buy: Position #{lowest_buy['pos_id']} at {lowest_buy['buy_max']:.10f} (need +{rise_pct:.1f}% rise to enter range)")
-        
-        logger.info("-" * 70)
+            
+            logger.info("-" * 70)
         
         # Check sells first (take profits)
         self.check_sells(price)
