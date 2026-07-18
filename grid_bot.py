@@ -108,13 +108,27 @@ class GridBot:
     def get_token_price(self):
         """Get current token price in WETH using the lighter /price endpoint."""
         # Use /price endpoint for price discovery (doesn't count against quote-to-trade metrics)
-        price = self.zero_x.get_price(
-            sell_token=self.config.weth_address,
-            buy_token=self.config.token_address,
-            sell_amount=10**15,  # 0.001 WETH
-        )
-        # get_price now returns WETH per token directly
-        return price
+        # For LI.FI, we need to pass the wallet address
+        if getattr(self.config, 'use_li_fi', False):
+            # LI.FI requires fromAddress, so use get_quote instead
+            result = self.api_client.get_quote(
+                sell_token=self.config.weth_address,
+                buy_token=self.config.token_address,
+                sell_amount=10**15,  # 0.001 WETH
+                taker_address=self.wallet.address,
+                apply_jitter_to_price=False,
+            )
+            if result.success and result.price:
+                return result.price
+            return None
+        else:
+            # 0x price endpoint doesn't require taker
+            price = self.zero_x.get_price(
+                sell_token=self.config.weth_address,
+                buy_token=self.config.token_address,
+                sell_amount=10**15,  # 0.001 WETH
+            )
+            return price
     
     def check_buys(self, price):
         """Check for buy opportunities."""
