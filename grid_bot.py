@@ -503,7 +503,7 @@ class GridBot:
             logger.info(pos_line)
             
             # Line 3: Buys, Sells, Profit
-            bsp_line = f"B:{self.session_buys} | S:{self.session_sells} | P:{self.session_profit_weth:.3f}"
+            bsp_line = f"B:{self.session_buys} | S:{self.session_sells} | P:{self.session_profit_weth:.5f}"
             logger.info(bsp_line)
             
             # Separator matches bsp_line length
