@@ -502,12 +502,11 @@ class GridBot:
             pos_line = f"W:{weth_bal:.3f} | T:{token_bal:.0f} | {active}/{active+empty}"
             logger.info(pos_line)
             
-            # Line 3: Buys, Sells, Profit - fixed width for alignment
-            bsp_line = f"B:{self.session_buys:2d} | S:{self.session_sells:2d} | P:{self.session_profit_weth:.5f}"
-            logger.info(bsp_line)
+            # Line 3: Buys, Sells, Profit
+            logger.info(f"B:{self.session_buys:2d} | S:{self.session_sells:2d} | P:{self.session_profit_weth:.5f}")
             
-            # Separator exactly matches B/S/P line length (23 chars)
-            logger.info("-----------------------")
+            # Blank line separator
+            logger.info("")
             
             # Each position on its own line (max 3), no price shown
             active_positions = [(pid, p) for pid, p in self.positions.items() if p['balance'] > 0]
