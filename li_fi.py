@@ -76,16 +76,21 @@ class LiFiClient:
         if self.api_key:
             self.headers["x-lifi-api-key"] = self.api_key
         
-        self.logger.info(f"LI.FI Client initialized for chain {self.chain_id}")
+        lifi_chain = self._get_lifi_chain_id(self.chain_id)
+        self.logger.info(f"LI.FI Client initialized for chain {self.chain_id} -> {lifi_chain}")
     
     def _get_lifi_chain_id(self, chain_id: int) -> str:
         """Map internal chain ID to LI.FI chain ID."""
+        # LI.FI chain keys from https://docs.li.fi/
         chain_map = {
             1: "eth",           # Ethereum
-            8453: "bas",        # Base
-            4663: "roh",        # Robinhood (may need custom handling)
+            8453: "base",       # Base (correct key is "base" not "bas")
+            # Note: Robinhood (4663) is NOT supported by LI.FI
         }
-        return chain_map.get(chain_id, str(chain_id))
+        if chain_id not in chain_map:
+            self.logger.error(f"Chain {chain_id} not supported by LI.FI. Supported: {list(chain_map.keys())}")
+            return str(chain_id)  # Will likely fail but let's see the error
+        return chain_map[chain_id]
     
     def get_quote(
         self,
