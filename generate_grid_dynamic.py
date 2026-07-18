@@ -87,6 +87,9 @@ def generate_positions(levels, use_stoploss=False):
 
 def save_positions(positions):
     """Save positions to JSON file."""
+    import os
+    # Create directory if it doesn't exist
+    os.makedirs(os.path.dirname(POSITIONS_FILE), exist_ok=True)
     with open(POSITIONS_FILE, "w") as file:
         json.dump(positions, file, indent=4)
     print(f"\n✅ Saved {len(positions)} positions to {POSITIONS_FILE}")

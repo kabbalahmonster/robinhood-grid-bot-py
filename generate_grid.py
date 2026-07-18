@@ -66,7 +66,9 @@ if __name__ == "__main__":
     positions = generate_grid_positions(start_price)
     
     # Save to file
+    import os
     filename = "data/positions.json"
+    os.makedirs(os.path.dirname(filename), exist_ok=True)
     with open(filename, "w") as f:
         json.dump(positions, f, indent=2)
     
