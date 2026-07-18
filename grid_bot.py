@@ -568,14 +568,14 @@ class GridBot:
                 else:
                     # All empty positions are above current price, find lowest
                     lowest_buy = None
-                for pos_id, pos in self.positions.items():
-                    if pos['balance'] == 0:
-                        buy_max = pos['buyMax'] / 10**9
-                        if lowest_buy is None or buy_max < lowest_buy['buy_max']:
-                            lowest_buy = {'pos_id': pos_id, 'buy_max': buy_max}
-                if lowest_buy:
-                    rise_pct = (lowest_buy['buy_max'] - price) / price * 100
-                    logger.info(f"🛒 Next Buy: Position #{lowest_buy['pos_id']} at {lowest_buy['buy_max']:.10f} (need +{rise_pct:.1f}% rise to enter range)")
+                    for pos_id, pos in self.positions.items():
+                        if pos['balance'] == 0:
+                            buy_max = pos['buyMax'] / 10**9
+                            if lowest_buy is None or buy_max < lowest_buy['buy_max']:
+                                lowest_buy = {'pos_id': pos_id, 'buy_max': buy_max}
+                    if lowest_buy:
+                        rise_pct = (lowest_buy['buy_max'] - price) / price * 100
+                        logger.info(f"🛒 Next Buy: Position #{lowest_buy['pos_id']} at {lowest_buy['buy_max']:.10f} (need +{rise_pct:.1f}% rise to enter range)")
         
         logger.info("-" * 70)
         
