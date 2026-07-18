@@ -199,8 +199,7 @@ class GridBot:
                     return  # One sell per cycle
                 elif price >= sell_min:
                     logger.info(f"Sell blocked: Position {pos_id} at {price:.10f} - profit {current_profit:.2f}% < required {effective_min_profit}% (buffer for slippage)")
-                    self.execute_sell(pos_id, price)
-                    return  # One sell per cycle
+                    return  # Blocked - do not sell
     
     def execute_buy(self, pos_id, price):
         """Execute a buy order."""
