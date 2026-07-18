@@ -499,7 +499,7 @@ class GridBot:
             logger.info(f"{time_str} R#{self.round_count} | {self.config.token_symbol}")
             
             # Line 2: WETH, Token, Positions
-            pos_line = f"W:{weth_bal:.3f} | T:{token_bal:.0f} | Pos:{active}/{active+empty}"
+            pos_line = f"W:{weth_bal:.3f} | T:{token_bal:.0f} | {active}/{active+empty}"
             logger.info(pos_line)
             
             # Line 3: Buys, Sells, Profit
