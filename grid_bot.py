@@ -461,62 +461,85 @@ class GridBot:
             logger.warning("Could not get price")
             return
         
-        # Verbose round summary
-        logger.info("=" * 70)
-        logger.info(f"ROUND #{self.round_count} | {self.config.token_symbol} | Elapsed: {elapsed:.0f}s")
-        logger.info("=" * 70)
-        logger.info(f"💰 WETH Balance: {weth_bal:.6f}")
-        logger.info(f"🪙 Token Balance: {token_bal:.6f} (in positions: {position_balance_total:.4f}, moonbag: {moonbag_balance:.4f})")
-        logger.info(f"📊 Price: 1 {self.config.token_symbol} = {price:.10f} WETH")
-        logger.info(f"📈 Positions: {active} active / {empty} empty (max active: {self.config.max_active_positions})")
-        logger.info(f"📊 Session: {self.session_buys} buys, {self.session_sells} sells, {self.session_profit_weth:.6f} WETH profit")
+        # Check for compact mode (tmux-friendly output)
+        compact_mode = getattr(self.config, 'compact_mode', False)
         
-        # Show active positions with P&L and sell targets
-        if active > 0:
-            logger.info("🎯 Active Positions:")
-            for pos_id, pos in self.positions.items():
-                if pos['balance'] > 0:
-                    balance_raw = pos['balance']
-                    cost_raw = pos['cost']
-                    tokens = balance_raw / 10**18
-                    cost_weth = cost_raw / 10**9
-                    sell_min = pos['sellMin'] / 10**9
-                    # Buy price = WETH spent / tokens received
-                    if tokens > 0 and cost_weth > 0:
-                        buy_price = cost_weth / tokens
-                        pnl = ((price - buy_price) / buy_price * 100)
-                        # Show how much more price needs to rise to hit sell target
-                        price_diff = sell_min - price
-                        price_pct = (price_diff / price * 100) if price > 0 else 0
-                        logger.info(f"   #{pos_id}: {tokens:.4f} tokens | Buy: {buy_price:.10f} | Sell@: {sell_min:.10f} | P&L: {pnl:+.2f}% (need +{price_pct:.1f}% more to sell)")
-                    else:
-                        # Moonbag or dust position with unknown cost
-                        price_diff = sell_min - price
-                        price_pct = (price_diff / price * 100) if price > 0 else 0
-                        logger.info(f"   #{pos_id}: {tokens:.4f} tokens | Buy: moonbag | Sell@: {sell_min:.10f} | P&L: N/A (need +{price_pct:.1f}% more to sell)")
-        
-        # Show next buy trigger (lowest empty position buy range)
-        if empty > 0:
-            next_buy = None
-            for pos_id, pos in self.positions.items():
-                if pos['balance'] == 0:  # Empty position
-                    buy_max = pos['buyMax'] / 10**9
-                    buy_min = pos['buyMin'] / 10**9
-                    # Find the highest buyMax below current price (closest buy trigger)
-                    if buy_max <= price:
-                        if next_buy is None or buy_max > next_buy['buy_max']:
-                            next_buy = {
-                                'pos_id': pos_id,
-                                'buy_min': buy_min,
-                                'buy_max': buy_max
-                            }
+        if compact_mode:
+            # Compact single-line output for tmux multi-pane view
+            # Format: R#123 | TOKEN | W:0.015 T:93.4 | 2/24 | B:9 S:9 P:0.0003
+            status_line = f"R#{self.round_count} | {self.config.token_symbol} | W:{weth_bal:.4f} T:{token_bal:.1f} | {active}/{active+empty} | B:{self.session_buys} S:{self.session_sells} P:{self.session_profit_weth:.4f}"
+            logger.info(status_line)
             
-            if next_buy:
-                drop_pct = (price - next_buy['buy_max']) / price * 100
-                logger.info(f"🛒 Next Buy: Position #{next_buy['pos_id']} at {next_buy['buy_min']:.10f}-{next_buy['buy_max']:.10f} (need -{drop_pct:.1f}% drop)")
-            else:
-                # All empty positions are above current price, find lowest
-                lowest_buy = None
+            # Show active positions on one line each (max 3 for compactness)
+            active_positions = [(pid, p) for pid, p in self.positions.items() if p['balance'] > 0]
+            for pos_id, pos in active_positions[:3]:
+                tokens = pos['balance'] / 10**18
+                cost_weth = pos['cost'] / 10**9
+                sell_min = pos['sellMin'] / 10**9
+                if tokens > 0 and cost_weth > 0:
+                    buy_price = cost_weth / tokens
+                    pnl = ((price - buy_price) / buy_price * 100)
+                    to_sell = ((sell_min - price) / price * 100) if price > 0 else 0
+                    logger.info(f"  #{pos_id}: {tokens:.2f}@{buy_price:.2e} P&L:{pnl:+.1f}% Sell@{sell_min:.2e} +{to_sell:.1f}%")
+            if len(active_positions) > 3:
+                logger.info(f"  ... and {len(active_positions) - 3} more positions")
+        else:
+            # Verbose round summary (original format)
+            logger.info("=" * 70)
+            logger.info(f"ROUND #{self.round_count} | {self.config.token_symbol} | Elapsed: {elapsed:.0f}s")
+            logger.info("=" * 70)
+            logger.info(f"💰 WETH Balance: {weth_bal:.6f}")
+            logger.info(f"🪙 Token Balance: {token_bal:.6f} (in positions: {position_balance_total:.4f}, moonbag: {moonbag_balance:.4f})")
+            logger.info(f"📊 Price: 1 {self.config.token_symbol} = {price:.10f} WETH")
+            logger.info(f"📈 Positions: {active} active / {empty} empty (max active: {self.config.max_active_positions})")
+            logger.info(f"📊 Session: {self.session_buys} buys, {self.session_sells} sells, {self.session_profit_weth:.6f} WETH profit")
+            
+            # Show active positions with P&L and sell targets
+            if active > 0:
+                logger.info("🎯 Active Positions:")
+                for pos_id, pos in self.positions.items():
+                    if pos['balance'] > 0:
+                        balance_raw = pos['balance']
+                        cost_raw = pos['cost']
+                        tokens = balance_raw / 10**18
+                        cost_weth = cost_raw / 10**9
+                        sell_min = pos['sellMin'] / 10**9
+                        # Buy price = WETH spent / tokens received
+                        if tokens > 0 and cost_weth > 0:
+                            buy_price = cost_weth / tokens
+                            pnl = ((price - buy_price) / buy_price * 100)
+                            # Show how much more price needs to rise to hit sell target
+                            price_diff = sell_min - price
+                            price_pct = (price_diff / price * 100) if price > 0 else 0
+                            logger.info(f"   #{pos_id}: {tokens:.4f} tokens | Buy: {buy_price:.10f} | Sell@: {sell_min:.10f} | P&L: {pnl:+.2f}% (need +{price_pct:.1f}% more to sell)")
+                        else:
+                            # Moonbag or dust position with unknown cost
+                            price_diff = sell_min - price
+                            price_pct = (price_diff / price * 100) if price > 0 else 0
+                            logger.info(f"   #{pos_id}: {tokens:.4f} tokens | Buy: moonbag | Sell@: {sell_min:.10f} | P&L: N/A (need +{price_pct:.1f}% more to sell)")
+            
+            # Show next buy trigger (lowest empty position buy range)
+            if empty > 0:
+                next_buy = None
+                for pos_id, pos in self.positions.items():
+                    if pos['balance'] == 0:  # Empty position
+                        buy_max = pos['buyMax'] / 10**9
+                        buy_min = pos['buyMin'] / 10**9
+                        # Find the highest buyMax below current price (closest buy trigger)
+                        if buy_max <= price:
+                            if next_buy is None or buy_max > next_buy['buy_max']:
+                                next_buy = {
+                                    'pos_id': pos_id,
+                                    'buy_min': buy_min,
+                                    'buy_max': buy_max
+                                }
+                
+                if next_buy:
+                    drop_pct = (price - next_buy['buy_max']) / price * 100
+                    logger.info(f"🛒 Next Buy: Position #{next_buy['pos_id']} at {next_buy['buy_min']:.10f}-{next_buy['buy_max']:.10f} (need -{drop_pct:.1f}% drop)")
+                else:
+                    # All empty positions are above current price, find lowest
+                    lowest_buy = None
                 for pos_id, pos in self.positions.items():
                     if pos['balance'] == 0:
                         buy_max = pos['buyMax'] / 10**9
