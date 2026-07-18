@@ -15,6 +15,7 @@ from web3 import Web3
 from config import load_config
 from wallet import Wallet
 from zero_x import ZeroXClient
+from li_fi import LiFiClient
 
 # Global logger - will be configured by GridBot
 logger = logging.getLogger('grid_bot')
@@ -23,7 +24,18 @@ class GridBot:
     def __init__(self):
         self.config = load_config()
         self.wallet = Wallet(self.config)
-        self.zero_x = ZeroXClient(self.config)
+        
+        # Use LI.FI or 0x based on config
+        if getattr(self.config, 'use_li_fi', False):
+            self.api_client = LiFiClient(self.config)
+            logger.info("Using LI.FI API for swaps")
+        else:
+            self.api_client = ZeroXClient(self.config)
+            logger.info("Using 0x API for swaps")
+        
+        # Keep zero_x reference for backward compatibility
+        self.zero_x = self.api_client
+        
         self.positions_file = "data/positions.json"
         self.positions = {}
         self.running = True

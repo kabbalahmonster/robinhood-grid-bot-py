@@ -89,6 +89,10 @@ class BotConfig:
     compact_mode: bool
     minimal_logs: bool
     
+    # API Provider Selection
+    use_li_fi: bool  # If True, use LI.FI instead of 0x
+    li_fi_api_key: str
+    
     # Derived properties
     @property
     def chain_name(self) -> str:
@@ -114,8 +118,13 @@ class BotConfig:
         if not self.rpc_url or self.rpc_url == "https://...":
             raise ValueError("RPC_URL is required and must be set")
         
-        if not self.zero_x_api_key or self.zero_x_api_key == "...":
-            raise ValueError("ZEROX_API_KEY is required and must be set")
+        # Check API keys - need either 0x or LI.FI
+        if self.use_li_fi:
+            if not self.li_fi_api_key:
+                raise ValueError("LI_FI_API_KEY is required when USE_LI_FI=true")
+        else:
+            if not self.zero_x_api_key or self.zero_x_api_key == "...":
+                raise ValueError("ZEROX_API_KEY is required when USE_LI_FI=false (default)")
         
         if not self.token_address or self.token_address == "0x...":
             raise ValueError("TOKEN_ADDRESS is required and must be set")
@@ -205,6 +214,10 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
         state_file=os.getenv("STATE_FILE", "./data/positions.json"),
         compact_mode=os.getenv("COMPACT_MODE", "false").lower() == "true",
         minimal_logs=os.getenv("MINIMAL_LOGS", "false").lower() == "true",
+        
+        # API Provider Selection
+        use_li_fi=os.getenv("USE_LI_FI", "false").lower() == "true",
+        li_fi_api_key=os.getenv("LI_FI_API_KEY", ""),
     )
     
     # Validate the configuration
