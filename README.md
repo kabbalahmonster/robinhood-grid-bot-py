@@ -38,7 +38,22 @@ cd robinhood-grid-bot-py
 pip install -r requirements.txt
 ```
 
-3. Generate grid positions:
+3. **Configure environment first** (required before grid generation):
+```bash
+# Copy the appropriate environment file for your chain
+cp .env.robinhood .env
+
+# Edit .env with your settings - MUST set TOKEN_ADDRESS and other required vars
+nano .env
+```
+
+**Required .env settings for grid generation:**
+- `TOKEN_ADDRESS` - The token you want to trade (needed to fetch current price)
+- `PRIVATE_KEY` - Your wallet private key
+- `RPC_URL` - RPC endpoint URL
+- `ZEROX_API_KEY` - 0x API key
+
+4. Generate grid positions (requires .env to be configured):
 ```bash
 # For Robinhood Chain (recommended for testing)
 python generate_grid_dynamic.py --low 0.2 --high 3.0 --positions 24
@@ -47,14 +62,7 @@ python generate_grid_dynamic.py --low 0.2 --high 3.0 --positions 24
 python generate_grid_dynamic.py --low 0.5 --high 2.0 --positions 10
 ```
 
-4. Configure environment:
-```bash
-# Copy the appropriate environment file for your chain
-cp .env.robinhood .env
-
-# Edit .env with your settings
-nano .env
-```
+**Note:** The grid generator reads `TOKEN_ADDRESS` from your `.env` file to fetch the current price from 0x API. If `.env` is not configured, the generator will fail.
 
 5. Run the bot:
 ```bash
@@ -133,10 +141,12 @@ INITIAL_BUY_AMOUNT=0.01      # Higher amounts due to gas costs
 
 ### Generate Grid Positions
 
+**Prerequisite:** You must configure your `.env` file first (see Installation step 3). The grid generator needs `TOKEN_ADDRESS` to fetch the current price from 0x API.
+
 Before running the bot, generate your grid positions:
 
 ```bash
-# Generate grid from current price
+# Generate grid from current price (requires .env to be configured)
 python generate_grid_dynamic.py --low 0.2 --high 3.0 --positions 24
 
 # Options:
@@ -146,6 +156,11 @@ python generate_grid_dynamic.py --low 0.2 --high 3.0 --positions 24
 ```
 
 This creates `data/positions.json` with buy/sell ranges for each level.
+
+**Troubleshooting:** If you get "Failed to get price from 0x", check that:
+- `TOKEN_ADDRESS` is set correctly in `.env`
+- `ZEROX_API_KEY` is valid
+- `RPC_URL` is accessible
 
 ### Run the Bot
 
