@@ -502,8 +502,8 @@ class GridBot:
             status_line = f"{time_str} R#{self.round_count} | {self.config.token_symbol} | W:{weth_bal:.4f} T:{token_bal:.1f}"
             logger.info(status_line)
             
-            # Line 2: Stats
-            stats_line = f"Pos: {active}/{active+empty} | Buys: {self.session_buys} | Sells: {self.session_sells} | Profit: {self.session_profit_weth:.4f}"
+            # Line 2: Stats (shortened format)
+            stats_line = f"{active}/{active+empty} | B:{self.session_buys} | S:{self.session_sells} | P:{self.session_profit_weth:.4f}"
             logger.info(stats_line)
             
             # Show active positions (P&L only, no sell target details)
