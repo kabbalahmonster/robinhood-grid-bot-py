@@ -1,6 +1,6 @@
 # Robinhood Chain Grid Trading Bot (Python)
 
-A production-grade grid trading bot for Robinhood Chain and other EVM networks, implemented in Python using web3.py. Uses the 0x Protocol for optimal DEX aggregation with features like dynamic position sizing, moonbag retention, profit banking to stablecoins, and session tracking.
+A production-grade grid trading bot for Robinhood Chain and other EVM networks, implemented in Python using web3.py. Supports both 0x Protocol and LI.FI API for optimal DEX aggregation with features like dynamic position sizing, moonbag retention, profit banking to stablecoins, and session tracking.
 
 ## Features
 
@@ -9,7 +9,7 @@ A production-grade grid trading bot for Robinhood Chain and other EVM networks, 
 - **Moonbag Support**: Retain a percentage of tokens after each sell
 - **Profit Banking**: Automatically banks profits to USDG/USDC stablecoin
 - **Session Statistics**: Track total buys, sells, and accumulated profit
-- **0x Protocol Integration**: Best price execution via 0x AllowanceHolder API
+- **Multi-DEX Aggregation**: 0x Protocol OR LI.FI API for best price execution
 - **Anti-MEV Protection**: Jitter on timing to protect against front-running
 - **Multi-Position Support**: Multiple active positions with individual tracking
 - **Persistent State**: Survives restarts with position recovery
@@ -22,7 +22,9 @@ A production-grade grid trading bot for Robinhood Chain and other EVM networks, 
 - Python 3.9+
 - pip
 - A wallet with ETH/WETH for trading
-- 0x API key (free at [0x.org](https://0x.org/))
+- DEX Aggregator API key:
+  - **0x** (free at [0x.org](https://0x.org/)) - default
+  - **LI.FI** (free at [li.fi](https://li.fi/)) - alternative
 - Alchemy or other RPC provider API key
 
 ### Installation
@@ -79,7 +81,9 @@ python grid_bot.py
 | `PRIVATE_KEY` | Yes | - | Wallet private key (with 0x prefix) |
 | `RPC_URL` | Yes | - | RPC endpoint URL (Alchemy recommended) |
 | `CHAIN_ID` | Yes | 4663 | Chain ID (4663=Robinhood, 8453=Base, 1=Mainnet) |
-| `ZEROX_API_KEY` | Yes | - | 0x API key from 0x.org |
+| `ZEROX_API_KEY` | Yes* | - | 0x API key from 0x.org (if using 0x) |
+| `LI_FI_API_KEY` | Yes* | - | LI.FI API key from li.fi (if using LI.FI) |
+| `USE_LI_FI` | No | false | Use LI.FI instead of 0x for swaps |
 | **Token Configuration** ||||
 | `TOKEN_ADDRESS` | Yes | - | Token address to trade |
 | `TOKEN_SYMBOL` | No | TOKEN | Token symbol for logging |
@@ -103,6 +107,30 @@ python grid_bot.py
 | `STATE_FILE` | No | ./data/positions.json | Position state file path |
 | `COMPACT_MODE` | No | false | Compact single-line output for tmux |
 | `MINIMAL_LOGS` | No | false | Remove timestamps from console output |
+
+### DEX Aggregation (0x vs LI.FI)
+
+The bot supports two DEX aggregators. Choose based on your needs:
+
+#### 0x Protocol (Default)
+- **Best for**: General use, widest liquidity
+- **Setup**: Get API key at [0x.org](https://0x.org/)
+- **Config**:
+```bash
+USE_LI_FI=false
+ZEROX_API_KEY=your_0x_key_here
+```
+
+#### LI.FI API (Alternative)
+- **Best for**: Multi-chain routing, when 0x is rate-limited
+- **Setup**: Get API key at [li.fi](https://li.fi/)
+- **Config**:
+```bash
+USE_LI_FI=true
+LI_FI_API_KEY=your_li_fi_key_here
+```
+
+**Switching**: Just change `USE_LI_FI` in your `.env`. Same bot, same config, different aggregator.
 
 ### Chain-Specific Configuration
 
