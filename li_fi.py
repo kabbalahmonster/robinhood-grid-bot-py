@@ -121,6 +121,10 @@ class LiFiClient:
             "toToken": buy_token,
         }
         
+        # Add integrator if configured (required by LI.FI)
+        if getattr(self.config, 'li_fi_integrator', None):
+            params["integrator"] = self.config.li_fi_integrator
+        
         # Must specify either fromAmount or toAmount
         if sell_amount:
             params["fromAmount"] = str(sell_amount)

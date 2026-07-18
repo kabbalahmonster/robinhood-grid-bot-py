@@ -92,6 +92,7 @@ class BotConfig:
     # API Provider Selection
     use_li_fi: bool  # If True, use LI.FI instead of 0x
     li_fi_api_key: str
+    li_fi_integrator: str  # Required integrator string for LI.FI API
     
     # Derived properties
     @property
@@ -218,6 +219,7 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
         # API Provider Selection
         use_li_fi=os.getenv("USE_LI_FI", "false").lower() == "true",
         li_fi_api_key=os.getenv("LI_FI_API_KEY", ""),
+        li_fi_integrator=os.getenv("LI_FI_INTEGRATOR", ""),
     )
     
     # Validate the configuration
