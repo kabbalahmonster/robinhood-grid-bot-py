@@ -101,6 +101,8 @@ python grid_bot.py
 | `ANTI_MEV_JITTER` | No | true | Enable anti-MEV timing jitter |
 | `LOG_LEVEL` | No | INFO | Logging level (DEBUG/INFO/WARNING/ERROR) |
 | `STATE_FILE` | No | ./data/positions.json | Position state file path |
+| `COMPACT_MODE` | No | false | Compact single-line output for tmux |
+| `MINIMAL_LOGS` | No | false | Remove timestamps from console output |
 
 ### Chain-Specific Configuration
 
@@ -162,6 +164,53 @@ This creates `data/positions.json` with buy/sell ranges for each level.
 - `ZEROX_API_KEY` is valid
 - `RPC_URL` is accessible
 
+### Migrate Grid (Refocus Without Losing Positions)
+
+If price moves outside your grid, you can regenerate it while preserving filled positions:
+
+```bash
+# Preview changes first (dry run)
+python migrate_grid.py --dry-run --low 0.5 --high 2.0 --positions 24
+
+# Apply migration
+python migrate_grid.py --low 0.5 --high 2.0 --positions 24
+```
+
+**What it does:**
+1. Extracts your current holdings (positions with balance > 0)
+2. Generates a new grid around current price
+3. Maps each holding to the best-matching new position
+4. Merges holdings if multiple map to same position
+5. Ensures sell prices never decrease (uses `max(old, new)`)
+6. Creates `positions.json.backup` before overwriting
+
+**Use cases:**
+- Price moved above/below your grid range
+- Want to tighten/expand grid spacing
+- Changing profit targets
+
+### Generate New Wallet
+
+Create a dedicated trading wallet:
+
+```bash
+# Generate and save to file
+python generate_wallet.py --output trading_wallet.txt
+
+# Generate without saving (console only)
+python generate_wallet.py --no-save
+```
+
+**Security features:**
+- Uses Python's `secrets` module (cryptographically secure)
+- Sets file permissions to 600 (owner read/write only)
+- Includes security warnings in output
+
+Then add the private key to your `.env`:
+```bash
+PRIVATE_KEY=0x...
+```
+
 ### Run the Bot
 
 ```bash
@@ -176,6 +225,30 @@ python grid_bot.py
 # 5. Bank profits to stablecoin (if enabled)
 # 6. Log session statistics
 ```
+
+### Compact Mode (Tmux-Friendly)
+
+For running multiple bots in tmux panes, enable compact output:
+
+```bash
+# Add to .env
+COMPACT_MODE=true
+MINIMAL_LOGS=true
+```
+
+**Compact output:**
+```
+01:58 R#123 | TENDIES | W:0.015 T:93.4 | 2/24 | B:9 S:9 P:0.0003
+  #18: 40.82@7.76e-06 P&L:+13.8% Sell@9.51e-06 +7.7%
+  #19: 23.01@7.73e-06 P&L:+11.7% Sell@1.07e-05 +41.9%
+```
+
+| Setting | Effect |
+|---------|--------|
+| `COMPACT_MODE=true` | Single-line status, top 3 positions only |
+| `MINIMAL_LOGS=true` | Remove timestamps from console output |
+
+File logs always retain full timestamps for debugging.
 
 ### Example Session Output
 
@@ -216,7 +289,8 @@ ROUND #506 | TENDIES | Elapsed: 1128s
 
 2. **Buy Execution**:
    - Monitors price for grid level triggers (buyMin ≤ price ≤ buyMax)
-   - Calculates dynamic buy amount: `available_WETH / empty_positions`
+   - Calculates dynamic buy amount: `available_WETH / available_slots`
+   - `available_slots = MAX_ACTIVE_POSITIONS - active_positions`
    - Executes swap via 0x AllowanceHolder API
    - Records position with actual WETH cost (nano-WETH)
 
@@ -312,7 +386,11 @@ robinhood-grid-bot-py/
 ├── grid_bot.py                # Main bot logic
 ├── wallet.py                  # Wallet & transaction handling
 ├── zero_x.py                  # 0x API integration
-├── generate_grid_dynamic.py   # Grid position generator
+├── generate_grid_dynamic.py   # Grid position generator (dynamic from price)
+├── generate_grid.py           # Grid position generator (legacy format)
+├── generate_positions.py      # Grid position generator (simple)
+├── migrate_grid.py            # Migrate holdings to new grid
+├── generate_wallet.py         # Generate new trading wallet
 ├── data/                      # Data directory
 │   └── positions.json         # Position state file
 └── logs/                      # Log files (created at runtime)
@@ -329,6 +407,10 @@ robinhood-grid-bot-py/
 **grid_bot.py**: Main trading logic - grid management, buy/sell decisions, profit tracking
 
 **generate_grid_dynamic.py**: Creates grid positions based on current market price
+
+**migrate_grid.py**: Regenerates grid while preserving filled positions and their sell prices
+
+**generate_wallet.py**: Creates cryptographically secure Ethereum wallets for trading
 
 ## Safety Features
 
@@ -502,6 +584,15 @@ quote = client.build_swap_transaction(
    - 5-10% is typical for volatile tokens
 
 ## Changelog
+
+### v1.1.0 - Latest
+- **Compact Mode**: Single-line output for tmux multi-pane view
+- **Minimal Logs**: Option to remove timestamps from console output
+- **Grid Migration Tool**: Regenerate grid while preserving positions
+- **Wallet Generator**: Create secure trading wallets
+- **Fixed Buy Calculation**: Now respects `MAX_ACTIVE_POSITIONS` properly
+- **Auto-create data directory**: Grid generators work on fresh clones
+- **Removed pydantic**: Cleaner dependency tree, Python 3.14 compatible
 
 ### v1.0.0 - Initial Release
 - Dynamic grid generation from current price
