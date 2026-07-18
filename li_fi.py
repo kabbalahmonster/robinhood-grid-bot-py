@@ -161,6 +161,13 @@ class LiFiClient:
             
             self.logger.debug(f"LI.FI API response status: {response.status_code}")
             
+            # Log full response for debugging
+            try:
+                debug_data = response.json()
+                self.logger.debug(f"LI.FI response: {json.dumps(debug_data, indent=2)[:1000]}")
+            except:
+                self.logger.debug(f"LI.FI raw response: {response.text[:500]}")
+            
             if response.status_code != 200:
                 self.logger.error(f"LI.FI API error: Status {response.status_code}")
                 self.logger.error(f"Response: {response.text[:500]}")
