@@ -491,24 +491,32 @@ class GridBot:
         compact_mode = getattr(self.config, 'compact_mode', False)
         
         if compact_mode:
-            # Compact single-line output for tmux multi-pane view
-            # Format: HH:MM R#123 | TOKEN | W:0.015 T:93.4 | 2/24 | B:9 S:9 P:0.0003
+            # Compact output for tmux multi-pane view
+            # Line 1: Time, round, token, balances
+            # Line 2: Positions, buys, sells, profit
+            # Line 3+: Active positions with P&L only
             from datetime import datetime
             time_str = datetime.now().strftime('%H:%M')
-            status_line = f"{time_str} R#{self.round_count} | {self.config.token_symbol} | W:{weth_bal:.4f} T:{token_bal:.1f} | {active}/{active+empty} | B:{self.session_buys} S:{self.session_sells} P:{self.session_profit_weth:.4f}"
+            
+            # Line 1: Basic info
+            status_line = f"{time_str} R#{self.round_count} | {self.config.token_symbol} | W:{weth_bal:.4f} T:{token_bal:.1f}"
             logger.info(status_line)
             
-            # Show active positions on one line each (max 3 for compactness)
+            # Line 2: Stats
+            stats_line = f"Pos: {active}/{active+empty} | Buys: {self.session_buys} | Sells: {self.session_sells} | Profit: {self.session_profit_weth:.4f}"
+            logger.info(stats_line)
+            
+            # Show active positions (P&L only, no sell target details)
             active_positions = [(pid, p) for pid, p in self.positions.items() if p['balance'] > 0]
             for pos_id, pos in active_positions[:3]:
                 tokens = pos['balance'] / 10**18
                 cost_weth = pos['cost'] / 10**9
-                sell_min = pos['sellMin'] / 10**9
                 if tokens > 0 and cost_weth > 0:
                     buy_price = cost_weth / tokens
                     pnl = ((price - buy_price) / buy_price * 100)
-                    to_sell = ((sell_min - price) / price * 100) if price > 0 else 0
-                    logger.info(f"  #{pos_id}: {tokens:.2f}@{buy_price:.2e} P&L:{pnl:+.1f}% Sell@{sell_min:.2e} +{to_sell:.1f}%")
+                    logger.info(f"  #{pos_id}: {tokens:.2f} @ {buy_price:.2e} | P&L: {pnl:+.1f}%")
+                else:
+                    logger.info(f"  #{pos_id}: {tokens:.2f} | moonbag")
             if len(active_positions) > 3:
                 logger.info(f"  ... and {len(active_positions) - 3} more positions")
         else:
