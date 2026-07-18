@@ -498,13 +498,18 @@ class GridBot:
             # Line 1: Time, round, token
             logger.info(f"{time_str} R#{self.round_count} | {self.config.token_symbol}")
             
-            # Line 2: WETH, Token, Pos/B/S/P
-            logger.info(f"W:{weth_bal:.3f} | T:{token_bal:.0f} | {active}/{active+empty} | B:{self.session_buys} | S:{self.session_sells} | P:{self.session_profit_weth:.3f}")
+            # Line 2: WETH, Token, Positions
+            pos_line = f"W:{weth_bal:.3f} | T:{token_bal:.0f} | Pos:{active}/{active+empty}"
+            logger.info(pos_line)
             
-            # Short separator
-            logger.info("-" * 30)
+            # Line 3: Buys, Sells, Profit
+            bsp_line = f"B:{self.session_buys} | S:{self.session_sells} | P:{self.session_profit_weth:.3f}"
+            logger.info(bsp_line)
             
-            # Each position on its own line (max 3)
+            # Separator matches pos_line length
+            logger.info("-" * len(pos_line))
+            
+            # Each position on its own line (max 3), no price shown
             active_positions = [(pid, p) for pid, p in self.positions.items() if p['balance'] > 0]
             for pos_id, pos in active_positions[:3]:
                 tokens = pos['balance'] / 10**18
@@ -512,7 +517,7 @@ class GridBot:
                 if tokens > 0 and cost_weth > 0:
                     buy_price = cost_weth / tokens
                     pnl = ((price - buy_price) / buy_price * 100)
-                    logger.info(f"#{pos_id}: {tokens:.1f} @ {buy_price:.2e} | P&L: {pnl:+.1f}%")
+                    logger.info(f"#{pos_id}: {tokens:.1f} | P&L: {pnl:+.1f}%")
                 else:
                     logger.info(f"#{pos_id}: {tokens:.1f} | moonbag")
             if len(active_positions) > 3:
