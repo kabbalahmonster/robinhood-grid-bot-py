@@ -222,33 +222,54 @@ class GridBot:
         
         logger.info(f"Buying position {pos_id}: {buy_amount_eth:.6f} WETH ({weth_balance:.6f} WETH × {tradeable_pct*100:.0f}% / {available_slots} slots)")
         
-        # Check ERC20 approval to AllowanceHolder
-        allowance = self.wallet.check_allowance(
-            self.config.weth_address,
-            self.config.zero_x_proxy,  # This is now the AllowanceHolder address
-            use_permit2=False  # Standard ERC20 approval
-        )
-        logger.info(f"WETH AllowanceHolder allowance: {allowance}")
-        if allowance < buy_amount_wei:
-            logger.info(f"Approving WETH to AllowanceHolder...")
-            result = self.wallet.approve_token(
-                self.config.weth_address,
-                self.config.zero_x_proxy,
-                2**256 - 1  # Max approval
-            )
-            if not result.success:
-                logger.error(f"Approval failed: {result.error}")
-                return
-
-        # Get quote FIRST, then execute immediately (quote expires fast)
-        logger.info("Getting 0x quote...")
-        quote = self.zero_x.build_swap_transaction(
+        # Get quote FIRST to know the approval spender
+        logger.info("Getting quote...")
+        quote = self.api_client.build_swap_transaction(
             sell_token=self.config.weth_address,
             buy_token=self.config.token_address,
             sell_amount=buy_amount_wei,
             taker_address=self.wallet.address,
             slippage_percentage=0.02,
         )
+        
+        if not quote.success:
+            logger.error(f"Quote failed: {quote.error}")
+            return
+        
+        # Determine approval spender - use quote's allowance_target if available (LI.FI)
+        spender = quote.allowance_target or self.config.zero_x_proxy
+        
+        # Check ERC20 approval
+        allowance = self.wallet.check_allowance(
+            self.config.weth_address,
+            spender,
+            use_permit2=False
+        )
+        logger.info(f"WETH allowance to {spender[:20]}...: {allowance}")
+        if allowance < buy_amount_wei:
+            logger.info(f"Approving WETH to {spender[:20]}...")
+            result = self.wallet.approve_token(
+                self.config.weth_address,
+                spender,
+                2**256 - 1
+            )
+            if not result.success:
+                logger.error(f"Approval failed: {result.error}")
+                return
+            
+            # IMPORTANT: For LI.FI, refresh quote after approval
+            if getattr(self.config, 'use_li_fi', False):
+                logger.info("Refreshing LI.FI quote after approval...")
+                quote = self.api_client.refresh_quote(
+                    sell_token=self.config.weth_address,
+                    buy_token=self.config.token_address,
+                    sell_amount=buy_amount_wei,
+                    taker_address=self.wallet.address,
+                    slippage_percentage=0.02,
+                )
+                if not quote.success:
+                    logger.error(f"Refreshed quote failed: {quote.error}")
+                    return
         
         if not quote.success:
             logger.error(f"Quote failed: {quote.error}")
@@ -360,22 +381,41 @@ class GridBot:
             logger.error(f"Quote failed: {quote.error}")
             return
         
+        # Determine approval spender - use quote's allowance_target if available (LI.FI)
+        # otherwise fall back to zero_x_proxy (0x Protocol)
+        spender = quote.allowance_target or self.config.zero_x_proxy
+        
         # Check/approve token for selling
         token_allowance = self.wallet.check_allowance(
             self.config.token_address,
-            self.config.zero_x_proxy,
+            spender,
             use_permit2=False
         )
         if token_allowance < sell_amount:
-            logger.info(f"Approving {self.config.token_symbol} to AllowanceHolder...")
+            logger.info(f"Approving {self.config.token_symbol} to {spender[:20]}...")
             result = self.wallet.approve_token(
                 self.config.token_address,
-                self.config.zero_x_proxy,
+                spender,
                 2**256 - 1
             )
             if not result.success:
                 logger.error(f"Token approval failed: {result.error}")
                 return
+            
+            # IMPORTANT: For LI.FI, refresh quote after approval
+            # Gas prices, calldata, and routes may have changed
+            if getattr(self.config, 'use_li_fi', False):
+                logger.info("Refreshing LI.FI quote after approval...")
+                quote = self.api_client.refresh_quote(
+                    sell_token=self.config.token_address,
+                    buy_token=self.config.weth_address,
+                    sell_amount=sell_amount,
+                    taker_address=self.wallet.address,
+                    slippage_percentage=0.02,
+                )
+                if not quote.success:
+                    logger.error(f"Refreshed quote failed: {quote.error}")
+                    return
         
         # Execute swap with checksummed addresses
         gas_limit = int(quote.gas * 1.5) if quote.gas else 300000

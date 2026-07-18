@@ -221,7 +221,11 @@ class LiFiClient:
             # Get transaction data if available
             transaction_request = data.get("transactionRequest", {})
             
+            # IMPORTANT: Use estimate.approvalAddress for ERC20 approvals (not Permit2!)
+            approval_address = estimate.get("approvalAddress")
+            
             self.logger.debug(f"LI.FI quote: buy={to_amount}, sell={from_amount}")
+            self.logger.debug(f"LI.FI approval address: {approval_address}")
             
             # Parse transaction values (may be hex strings)
             def parse_hex_or_int(val, default=0):
@@ -236,7 +240,7 @@ class LiFiClient:
                 price=price,
                 buy_amount=to_amount,
                 sell_amount=from_amount,
-                allowance_target=transaction_request.get("to"),
+                allowance_target=approval_address,  # Use estimate.approvalAddress
                 data=transaction_request.get("data"),
                 to=transaction_request.get("to"),
                 value=parse_hex_or_int(transaction_request.get("value"), 0),
@@ -317,6 +321,41 @@ class LiFiClient:
         Returns:
             QuoteResult: Transaction data or error.
         """
+        return self.get_quote(
+            sell_token=sell_token,
+            buy_token=buy_token,
+            sell_amount=sell_amount,
+            taker_address=taker_address,
+            slippage_percentage=slippage_percentage,
+            apply_jitter_to_price=True,
+        )
+    
+    def refresh_quote(
+        self,
+        sell_token: str,
+        buy_token: str,
+        sell_amount: int,
+        taker_address: str,
+        slippage_percentage: float = 0.02,
+    ) -> QuoteResult:
+        """
+        Refresh a quote after approval.
+        
+        IMPORTANT: Per LI.FI documentation, always refresh the quote after
+        waiting for token approval. Gas prices, calldata, and routes may
+        have changed while waiting for confirmation.
+        
+        Args:
+            sell_token: Address of token to sell.
+            buy_token: Address of token to buy.
+            sell_amount: Amount to sell (in base units).
+            taker_address: Address executing the swap.
+            slippage_percentage: Slippage tolerance.
+            
+        Returns:
+            QuoteResult: Fresh transaction data or error.
+        """
+        self.logger.info("Refreshing LI.FI quote after approval...")
         return self.get_quote(
             sell_token=sell_token,
             buy_token=buy_token,
