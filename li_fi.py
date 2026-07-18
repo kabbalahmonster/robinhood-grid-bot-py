@@ -184,13 +184,15 @@ class LiFiClient:
             data = response.json()
             
             # Extract quote information from LI.FI response
-            # LI.FI returns action object with from/to amounts (as hex strings)
+            # toAmount is in estimate, not action!
             action = data.get("action", {})
             estimate = data.get("estimate", {})
             
-            # Parse amounts - LI.FI returns strings
+            # Parse amounts - fromAmount is in action, toAmount is in estimate
             from_amount_str = action.get("fromAmount", "0")
-            to_amount_str = action.get("toAmount", "0")
+            to_amount_str = estimate.get("toAmount", "0")  # <-- FIXED: use estimate, not action
+            
+            self.logger.debug(f"LI.FI raw amounts - from: {from_amount_str}, to: {to_amount_str}")
             
             # Convert to int (handle both hex and decimal strings)
             if isinstance(from_amount_str, str) and from_amount_str.startswith("0x"):
@@ -205,10 +207,10 @@ class LiFiClient:
             
             # Check if quote is valid
             if to_amount == 0:
-                self.logger.error(f"LI.FI returned zero tokens for this swap - no liquidity or unsupported pair")
+                self.logger.error(f"LI.FI returned zero tokens - check estimate.toAmount in response")
                 return QuoteResult(
                     success=False,
-                    error="LI.FI returned zero tokens - no liquidity for this pair",
+                    error="LI.FI returned zero tokens",
                 )
             
             # Calculate price (sell/buy ratio)
