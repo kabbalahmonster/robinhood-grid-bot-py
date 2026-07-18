@@ -498,15 +498,15 @@ class GridBot:
             # Line 1: Time, round, token
             logger.info(f"{time_str} R#{self.round_count} | {self.config.token_symbol}")
             
-            # Line 2: WETH, Token, Positions
-            pos_line = f"W:{weth_bal:.3f} | T:{token_bal:.0f} | {active}/{active+empty}"
-            logger.info(pos_line)
+            # Line 2: WETH, Token, Positions - shortened to match B/S/P line
+            logger.info(f"W:{weth_bal:.3f} T:{token_bal:.0f} {active}/{active+empty}")
             
             # Line 3: Buys, Sells, Profit
-            logger.info(f"B:{self.session_buys:2d} | S:{self.session_sells:2d} | P:{self.session_profit_weth:.5f}")
+            bsp_line = f"B:{self.session_buys:2d} | S:{self.session_sells:2d} | P:{self.session_profit_weth:.5f}"
+            logger.info(bsp_line)
             
-            # Blank line separator
-            logger.info("")
+            # Separator
+            logger.info("-----------------------")
             
             # Each position on its own line (max 3), no price shown
             active_positions = [(pid, p) for pid, p in self.positions.items() if p['balance'] > 0]
