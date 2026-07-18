@@ -506,8 +506,8 @@ class GridBot:
             bsp_line = f"B:{self.session_buys:2d} | S:{self.session_sells:2d} | P:{self.session_profit_weth:.5f}"
             logger.info(bsp_line)
             
-            # Separator matches fixed width B/S/P line
-            logger.info("------------------------")
+            # Separator exactly matches B/S/P line length (23 chars)
+            logger.info("-----------------------")
             
             # Each position on its own line (max 3), no price shown
             active_positions = [(pid, p) for pid, p in self.positions.items() if p['balance'] > 0]
