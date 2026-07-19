@@ -902,8 +902,10 @@ class GridBot:
                 active_positions = [(pid, p) for pid, p in gridless_positions.items()]
                 for pos_id, pos in active_positions[:3]:
                     tokens = pos.get('balance', 0) / 10**18
-                    buy_price = pos.get('buy_price', 0)
-                    if tokens > 0 and buy_price > 0:
+                    cost = pos.get('cost', 0)
+                    cost_weth = cost / 10**9
+                    if tokens > 0 and cost_weth > 0:
+                        buy_price = cost_weth / tokens
                         pnl = ((price - buy_price) / buy_price * 100)
                         logger.info(f"#{pos_id}: {tokens:.1f} | P&L: {pnl:+.1f}%")
                     else:
@@ -940,21 +942,22 @@ class GridBot:
                 logger.info("🎯 Active Positions:")
                 if use_gridless:
                     # Display gridless positions
+                    sell_threshold = getattr(self.config, 'gridless_sell_threshold', 5.0)
                     for pos_id, pos in gridless_positions.items():
                         balance_raw = pos.get('balance', 0)
                         cost_raw = pos.get('cost', 0)
                         tokens = balance_raw / 10**18
                         cost_weth = cost_raw / 10**9
-                        buy_price = pos.get('buy_price', 0)
-                        sell_target = pos.get('sell_target', 0)
-                        if tokens > 0:
-                            if buy_price > 0:
-                                pnl = ((price - buy_price) / buy_price * 100)
-                                price_diff = sell_target - price
-                                price_pct = (price_diff / price * 100) if price > 0 else 0
-                                logger.info(f"   #{pos_id}: {tokens:.4f} tokens | Buy: {buy_price:.10f} | Sell@: {sell_target:.10f} | P&L: {pnl:+.2f}% (need +{price_pct:.1f}% more to sell)")
-                            else:
-                                logger.info(f"   #{pos_id}: {tokens:.4f} tokens | Buy: N/A | P&L: N/A")
+                        # Calculate buy_price from cost/balance
+                        if tokens > 0 and cost_weth > 0:
+                            buy_price = cost_weth / tokens
+                            sell_target = buy_price * (1 + sell_threshold / 100)
+                            pnl = ((price - buy_price) / buy_price * 100)
+                            price_diff = sell_target - price
+                            price_pct = (price_diff / price * 100) if price > 0 else 0
+                            logger.info(f"   #{pos_id}: {tokens:.4f} tokens | Buy: {buy_price:.10f} | Sell@: {sell_target:.10f} | P&L: {pnl:+.2f}% (need +{price_pct:.1f}% more to sell)")
+                        else:
+                            logger.info(f"   #{pos_id}: {tokens:.4f} tokens | Buy: N/A | P&L: N/A")
                 else:
                     # Display classic grid positions
                     for pos_id, pos in self.positions.items():
