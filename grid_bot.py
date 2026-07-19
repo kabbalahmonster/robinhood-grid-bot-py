@@ -138,6 +138,10 @@ class GridBot:
     
     def check_buys(self, price):
         """Check for buy opportunities."""
+        # Gridless mode
+        if getattr(self.config, 'use_gridless', False):
+            return self._check_buys_gridless(price)
+        
         # Get available WETH
         weth_balance, _ = self.wallet.get_token_balance(self.config.weth_address)
         if weth_balance < 0.001:
@@ -168,6 +172,10 @@ class GridBot:
     
     def check_sells(self, price):
         """Check for sell opportunities."""
+        # Gridless mode
+        if getattr(self.config, 'use_gridless', False):
+            return self._check_sells_gridless(price)
+        
         min_profit_percent = getattr(self.config, 'min_profit_percent', 2.0)  # Default 2% minimum profit
         slippage_buffer = 1.5  # Require extra 1.5% to cover slippage
         effective_min_profit = min_profit_percent + slippage_buffer
@@ -200,6 +208,284 @@ class GridBot:
                 elif price >= sell_min:
                     logger.info(f"Sell blocked: Position {pos_id} at {price:.10f} - profit {current_profit:.2f}% < required {effective_min_profit}% (buffer for slippage)")
                     return  # Blocked - do not sell
+    
+    def _check_buys_gridless(self, price):
+        """Gridless buy logic - buy when no positions or top position P&L <= threshold."""
+        from gridless import should_buy, load_positions, add_position
+        
+        # Load gridless positions
+        gridless_positions = load_positions()
+        
+        # Check if we should buy
+        if not should_buy(gridless_positions, price, self.config):
+            logger.debug("Gridless: No buy condition met")
+            return
+        
+        # Get available WETH
+        weth_balance, _ = self.wallet.get_token_balance(self.config.weth_address)
+        if weth_balance < 0.001:
+            logger.warning(f"Gridless: Low WETH balance: {weth_balance:.6f}")
+            return
+        
+        # Calculate buy amount
+        active_count = len(gridless_positions)
+        available_slots = self.config.max_active_positions - active_count
+        if available_slots <= 0:
+            logger.debug(f"Gridless: Max positions reached ({active_count}/{self.config.max_active_positions})")
+            return
+        
+        tradeable_pct = getattr(self.config, 'tradeable_balance_percent', 90.0) / 100.0
+        buy_amount_eth = (weth_balance * tradeable_pct) / available_slots
+        buy_amount_wei = int(buy_amount_eth * 10**18)
+        
+        logger.info(f"Gridless buy: {buy_amount_eth:.6f} WETH ({weth_balance:.6f} × {tradeable_pct*100:.0f}% / {available_slots} slots)")
+        
+        # Execute the buy via execute_buy_gridless
+        self._execute_buy_gridless(buy_amount_eth, buy_amount_wei, price)
+    
+    def _execute_buy_gridless(self, buy_amount_eth, buy_amount_wei, price):
+        """Execute a gridless buy order."""
+        from gridless import add_position
+        
+        # Get quote
+        quote = self.api_client.build_swap_transaction(
+            sell_token=self.config.weth_address,
+            buy_token=self.config.token_address,
+            sell_amount=buy_amount_wei,
+            taker_address=self.wallet.address,
+            slippage_percentage=0.02,
+        )
+        
+        if not quote.success:
+            logger.error(f"Gridless buy quote failed: {quote.error}")
+            return
+        
+        # Determine approval spender
+        spender = quote.allowance_target or self.config.zero_x_proxy
+        
+        # Check/approve WETH
+        allowance = self.wallet.check_allowance(self.config.weth_address, spender, use_permit2=False)
+        if allowance < buy_amount_wei:
+            logger.info(f"Approving WETH to {spender[:20]}...")
+            result = self.wallet.approve_token(self.config.weth_address, spender, 2**256 - 1)
+            if not result.success:
+                logger.error(f"Approval failed: {result.error}")
+                return
+            # Refresh quote after approval for LI.FI
+            if getattr(self.config, 'use_li_fi', False):
+                quote = self.api_client.refresh_quote(
+                    sell_token=self.config.weth_address,
+                    buy_token=self.config.token_address,
+                    sell_amount=buy_amount_wei,
+                    taker_address=self.wallet.address,
+                    slippage_percentage=0.02,
+                )
+                if not quote.success:
+                    logger.error(f"Refreshed quote failed: {quote.error}")
+                    return
+        
+        # Execute swap
+        gas_limit = int(quote.gas * 1.2) if quote.gas else 350000
+        gas_price = int(self.wallet.w3.eth.gas_price * 1.2)
+        
+        from web3 import Web3
+        tx_params = {
+            "from": Web3.to_checksum_address(self.wallet.address),
+            "to": Web3.to_checksum_address(quote.to),
+            "data": quote.data,
+            "value": quote.value or 0,
+            "gas": gas_limit,
+            "gasPrice": gas_price,
+            "nonce": self.wallet.w3.eth.get_transaction_count(self.wallet.address),
+            "chainId": self.config.chain_id,
+        }
+        
+        result = self.wallet._send_transaction(tx_params)
+        
+        if result.success:
+            # Record position in gridless format
+            tokens_received = quote.buy_amount if quote.buy_amount else 0
+            cost_nano = int(buy_amount_eth * 10**9)
+            pos_id = add_position(cost_nano, tokens_received)
+            
+            tokens = tokens_received / 10**18
+            buy_price = buy_amount_eth / tokens if tokens > 0 else 0
+            self.session_buys += 1
+            
+            logger.info(f"✅ Gridless buy successful! Position #{pos_id}")
+            logger.info(f"   Tokens: {tokens:.6f} {self.config.token_symbol}")
+            logger.info(f"   Cost: {buy_amount_eth:.6f} WETH")
+            logger.info(f"   Buy price: {buy_price:.10f} WETH/token")
+            logger.info(f"   Tx: {result.tx_hash}")
+        else:
+            logger.error(f"❌ Gridless buy failed: {result.error}")
+    
+    def _check_sells_gridless(self, price):
+        """Gridless sell logic - sell when P&L >= threshold or stoploss triggered."""
+        from gridless import load_positions, find_sell_candidate, calculate_pnl, remove_position
+        
+        # Load gridless positions
+        gridless_positions = load_positions()
+        if not gridless_positions:
+            return
+        
+        # Get quote for profit estimation (use a representative sell amount)
+        total_balance = sum(p.get('balance', 0) for p in gridless_positions.values())
+        if total_balance == 0:
+            return
+        
+        # Get quote for selling all tokens to estimate profit
+        quote = self.api_client.build_swap_transaction(
+            sell_token=self.config.token_address,
+            buy_token=self.config.weth_address,
+            sell_amount=total_balance,
+            taker_address=self.wallet.address,
+            slippage_percentage=0.02,
+        )
+        
+        quote_profit_eth = 0.0
+        if quote.success and quote.buy_amount:
+            # Calculate total cost
+            total_cost = sum(p.get('cost', 0) for p in gridless_positions.values()) / 1e9
+            quote_return_eth = quote.buy_amount / 10**18
+            quote_profit_eth = quote_return_eth - total_cost
+        
+        # Find sell candidate
+        candidate = find_sell_candidate(gridless_positions, price, self.config, quote_profit_eth)
+        if candidate is None:
+            return
+        
+        pos_id, pos, reason = candidate
+        logger.info(f"Gridless sell trigger: Position #{pos_id} - {reason}")
+        self._execute_sell_gridless(pos_id, pos, price)
+    
+    def _execute_sell_gridless(self, pos_id, pos, price):
+        """Execute a gridless sell order."""
+        from gridless import remove_position, calculate_pnl
+        
+        balance = pos.get('balance', 0)
+        cost = pos.get('cost', 0)
+        
+        if balance <= 0 or cost <= 0:
+            logger.warning(f"Invalid position #{pos_id}: balance={balance}, cost={cost}")
+            return
+        
+        tokens = balance / 10**18
+        cost_weth = cost / 1e9
+        buy_price = cost_weth / tokens if tokens > 0 else 0
+        pnl = calculate_pnl(pos, price)
+        
+        # Moonbag logic
+        moonbag_pct = getattr(self.config, 'moonbag_percentage', 0)
+        if moonbag_pct > 0:
+            moonbag_tokens = int(balance * moonbag_pct / 100)
+            sell_amount = balance - moonbag_tokens
+            sell_tokens = sell_amount / 10**18
+            logger.info(f"🌙 Moonbag: Keeping {moonbag_tokens/1e18:.4f} ({moonbag_pct}%), selling {sell_tokens:.4f}")
+        else:
+            sell_amount = balance
+            sell_tokens = tokens
+            moonbag_tokens = 0
+        
+        sold_cost_weth = cost_weth * (sell_tokens / tokens) if tokens > 0 else 0
+        expected_weth = sell_tokens * price
+        profit_weth = expected_weth - sold_cost_weth
+        
+        logger.info(f"💰 Gridless sell position #{pos_id}:")
+        logger.info(f"   Selling: {sell_tokens:.6f} tokens")
+        logger.info(f"   Buy price: {buy_price:.10f}, Current: {price:.10f}")
+        logger.info(f"   Expected: {expected_weth:.6f} WETH, Profit: {profit_weth:.6f} ({pnl:+.2f}%)")
+        
+        # Get quote
+        quote = self.api_client.build_swap_transaction(
+            sell_token=self.config.token_address,
+            buy_token=self.config.weth_address,
+            sell_amount=sell_amount,
+            taker_address=self.wallet.address,
+            slippage_percentage=0.02,
+        )
+        
+        if not quote.success:
+            logger.error(f"Gridless sell quote failed: {quote.error}")
+            return
+        
+        # Validate minimum profit
+        min_profit = getattr(self.config, 'min_profit_percent', 1.5)
+        min_profit_eth = sold_cost_weth * (min_profit / 100)
+        min_return_eth = sold_cost_weth + min_profit_eth
+        quote_return_eth = quote.buy_amount / 10**18 if quote.buy_amount else 0
+        
+        # Skip min_profit check for stoploss
+        stoploss_enabled = getattr(self.config, 'gridless_stoploss_enabled', False)
+        stoploss_threshold = getattr(self.config, 'gridless_stoploss_threshold', -25.0)
+        is_stoploss = stoploss_enabled and pnl <= stoploss_threshold
+        
+        if not is_stoploss and quote_return_eth < min_return_eth:
+            logger.warning(f"❌ Sell aborted: Quote ({quote_return_eth:.6f}) < min ({min_return_eth:.6f})")
+            return
+        
+        # Check/approve token
+        spender = quote.allowance_target or self.config.zero_x_proxy
+        token_allowance = self.wallet.check_allowance(self.config.token_address, spender, use_permit2=False)
+        if token_allowance < sell_amount:
+            logger.info(f"Approving {self.config.token_symbol} to {spender[:20]}...")
+            result = self.wallet.approve_token(self.config.token_address, spender, 2**256 - 1)
+            if not result.success:
+                logger.error(f"Approval failed: {result.error}")
+                return
+            if getattr(self.config, 'use_li_fi', False):
+                quote = self.api_client.refresh_quote(
+                    sell_token=self.config.token_address,
+                    buy_token=self.config.weth_address,
+                    sell_amount=sell_amount,
+                    taker_address=self.wallet.address,
+                    slippage_percentage=0.02,
+                )
+                if not quote.success:
+                    logger.error(f"Refreshed quote failed: {quote.error}")
+                    return
+        
+        # Execute swap
+        gas_limit = int(quote.gas * 1.5) if quote.gas else 300000
+        gas_price = int(self.wallet.w3.eth.gas_price * 1.3)
+        
+        from web3 import Web3
+        result = self.wallet._send_transaction({
+            "from": Web3.to_checksum_address(self.wallet.address),
+            "to": Web3.to_checksum_address(quote.to),
+            "data": quote.data,
+            "value": quote.value or 0,
+            "gas": gas_limit,
+            "gasPrice": gas_price,
+            "nonce": self.wallet.w3.eth.get_transaction_count(self.wallet.address),
+            "chainId": self.config.chain_id,
+        })
+        
+        if result.success:
+            weth_received = quote.buy_amount / 10**18 if quote.buy_amount else 0
+            actual_profit = weth_received - sold_cost_weth
+            
+            self.session_sells += 1
+            self.session_profit_weth += actual_profit
+            
+            # Remove position
+            remove_position(pos_id)
+            
+            if moonbag_tokens > 0:
+                logger.info(f"   Moonbag: {moonbag_tokens/1e18:.4f} tokens to wallet")
+            
+            logger.info(f"✅ Gridless sell successful! Profit: {actual_profit:.6f} WETH")
+            
+            # Banking
+            bank_pct = getattr(self.config, 'bank_percentage', 0)
+            if bank_pct > 0 and actual_profit > 0:
+                bank_amount = actual_profit * bank_pct / 100
+                logger.info(f"🏦 Banking {bank_pct}% of profit = {bank_amount:.6f} WETH → USDG")
+                self.bank_profit(bank_amount)
+            
+            logger.info(f"   Tx: {result.tx_hash}")
+        else:
+            logger.error(f"❌ Gridless sell failed: {result.error}")
     
     def execute_buy(self, pos_id, price):
         """Execute a buy order."""

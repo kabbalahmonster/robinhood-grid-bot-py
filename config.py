@@ -94,6 +94,13 @@ class BotConfig:
     li_fi_api_key: str
     li_fi_integrator: str  # Required integrator string for LI.FI API
     
+    # Gridless Trading Mode
+    use_gridless: bool  # If True, use gridless position-based trading
+    gridless_buy_threshold: float  # P&L % to trigger new buy (default: -10.0)
+    gridless_sell_threshold: float  # P&L % to trigger sell (default: 5.0)
+    gridless_stoploss_threshold: float  # P&L % for stoploss (default: -25.0)
+    gridless_stoploss_enabled: bool  # Enable stoploss sells
+    
     # Derived properties
     @property
     def chain_name(self) -> str:
@@ -220,6 +227,13 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
         use_li_fi=os.getenv("USE_LI_FI", "false").lower() == "true",
         li_fi_api_key=os.getenv("LI_FI_API_KEY", ""),
         li_fi_integrator=os.getenv("LI_FI_INTEGRATOR", ""),
+        
+        # Gridless Trading Mode
+        use_gridless=os.getenv("USE_GRIDLESS", "false").lower() == "true",
+        gridless_buy_threshold=float(os.getenv("GRIDLESS_BUY_THRESHOLD", "-10.0")),
+        gridless_sell_threshold=float(os.getenv("GRIDLESS_SELL_THRESHOLD", "5.0")),
+        gridless_stoploss_threshold=float(os.getenv("GRIDLESS_STOPLOSS_THRESHOLD", "-25.0")),
+        gridless_stoploss_enabled=os.getenv("GRIDLESS_STOPLOSS_ENABLED", "false").lower() == "true",
     )
     
     # Validate the configuration
