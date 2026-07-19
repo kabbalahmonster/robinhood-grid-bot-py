@@ -95,6 +95,14 @@ class GridBot:
     
     def load_positions(self):
         """Load positions from JSON file."""
+        # Check if gridless mode is enabled
+        if getattr(self.config, 'use_gridless', False):
+            # In gridless mode, initialize empty positions (loaded dynamically)
+            self.positions = {}
+            logger.info("Gridless mode: positions loaded dynamically")
+            return
+        
+        # Classic grid mode - load from file
         try:
             with open(self.positions_file, 'r') as f:
                 self.positions = json.load(f)
