@@ -225,8 +225,9 @@ class GridBot:
         gridless_positions = load_positions()
         
         # Check if we should buy
-        if not should_buy(gridless_positions, price, self.config):
-            logger.debug("Gridless: No buy condition met")
+        should_buy_flag, reason = should_buy(gridless_positions, price, self.config)
+        if not should_buy_flag:
+            logger.debug(f"Gridless: No buy - {reason}")
             return
         
         # Get available WETH
@@ -246,7 +247,8 @@ class GridBot:
         buy_amount_eth = (weth_balance * tradeable_pct) / available_slots
         buy_amount_wei = int(buy_amount_eth * 10**18)
         
-        logger.info(f"Gridless buy: {buy_amount_eth:.6f} WETH ({weth_balance:.6f} × {tradeable_pct*100:.0f}% / {available_slots} slots)")
+        logger.info(f"🎯 Gridless buy triggered: {reason}")
+        logger.info(f"   Amount: {buy_amount_eth:.6f} WETH ({weth_balance:.6f} × {tradeable_pct*100:.0f}% / {available_slots} slots)")
         
         # Execute the buy via execute_buy_gridless
         self._execute_buy_gridless(buy_amount_eth, buy_amount_wei, price)

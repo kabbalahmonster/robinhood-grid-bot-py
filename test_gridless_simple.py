@@ -56,47 +56,96 @@ class TestShouldBuy(unittest.TestCase):
         config = MagicMock()
         config.max_active_positions = 5
         config.gridless_buy_threshold = -10.0
+        config.gridless_sell_threshold = 5.0
+        config.gridless_leading_edge = False
         
         positions = {}
-        self.assertTrue(gridless.should_buy(positions, 1.0, config))
+        should_buy, reason = gridless.should_buy(positions, 1.0, config)
+        self.assertTrue(should_buy)
+        self.assertIn("Initial", reason)
     
     def test_buy_when_under_max_and_threshold_met(self):
         """Should buy when under max positions and top position at threshold."""
         config = MagicMock()
         config.max_active_positions = 5
         config.gridless_buy_threshold = -10.0
+        config.gridless_sell_threshold = 5.0
+        config.gridless_leading_edge = False
         
         # Position at -10% P&L
         positions = {
             '0': {'cost': 1_000_000_000, 'balance': 10_000_000_000_000_000_000}
         }
         current_price = 0.09  # -10% from 0.1 buy price
-        self.assertTrue(gridless.should_buy(positions, current_price, config))
+        should_buy, reason = gridless.should_buy(positions, current_price, config)
+        self.assertTrue(should_buy)
+        self.assertIn("threshold", reason)
     
     def test_no_buy_when_max_reached(self):
         """Should not buy when max positions reached."""
         config = MagicMock()
         config.max_active_positions = 2
         config.gridless_buy_threshold = -10.0
+        config.gridless_sell_threshold = 5.0
+        config.gridless_leading_edge = False
         
         positions = {
             '0': {'cost': 1_000_000_000, 'balance': 10_000_000_000_000_000_000},
             '1': {'cost': 1_000_000_000, 'balance': 10_000_000_000_000_000_000},
         }
-        self.assertFalse(gridless.should_buy(positions, 0.09, config))
+        should_buy, reason = gridless.should_buy(positions, 0.09, config)
+        self.assertFalse(should_buy)
+        self.assertIn("Max", reason)
     
     def test_no_buy_when_above_threshold(self):
         """Should not buy when top position P&L above threshold."""
         config = MagicMock()
         config.max_active_positions = 5
         config.gridless_buy_threshold = -10.0
+        config.gridless_sell_threshold = 5.0
+        config.gridless_leading_edge = False
         
         # Position at -5% P&L (better than -10% threshold)
         positions = {
             '0': {'cost': 1_000_000_000, 'balance': 10_000_000_000_000_000_000}
         }
         current_price = 0.095  # -5% from 0.1 buy price
-        self.assertFalse(gridless.should_buy(positions, current_price, config))
+        should_buy, reason = gridless.should_buy(positions, current_price, config)
+        self.assertFalse(should_buy)
+    
+    def test_leading_edge_buy(self):
+        """Should buy on leading edge when single position is up 50% of sell threshold."""
+        config = MagicMock()
+        config.max_active_positions = 5
+        config.gridless_buy_threshold = -10.0
+        config.gridless_sell_threshold = 5.0  # Sell at +5%
+        config.gridless_leading_edge = True
+        
+        # Single position, buy price = 0.1
+        positions = {
+            '0': {'cost': 1_000_000_000, 'balance': 10_000_000_000_000_000_000}
+        }
+        # Price at 0.1025 = +2.5% P&L (50% of 5% sell threshold)
+        current_price = 0.1025
+        should_buy, reason = gridless.should_buy(positions, current_price, config)
+        self.assertTrue(should_buy)
+        self.assertIn("Leading edge", reason)
+    
+    def test_no_leading_edge_when_disabled(self):
+        """Should not buy on leading edge when feature disabled."""
+        config = MagicMock()
+        config.max_active_positions = 5
+        config.gridless_buy_threshold = -10.0
+        config.gridless_sell_threshold = 5.0
+        config.gridless_leading_edge = False  # Disabled
+        
+        positions = {
+            '0': {'cost': 1_000_000_000, 'balance': 10_000_000_000_000_000_000}
+        }
+        # Price at 0.1025 = +2.5% P&L
+        current_price = 0.1025
+        should_buy, reason = gridless.should_buy(positions, current_price, config)
+        self.assertFalse(should_buy)
 
 
 class TestShouldSell(unittest.TestCase):

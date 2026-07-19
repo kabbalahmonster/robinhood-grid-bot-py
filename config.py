@@ -100,6 +100,7 @@ class BotConfig:
     gridless_sell_threshold: float  # P&L % to trigger sell (default: 5.0)
     gridless_stoploss_threshold: float  # P&L % for stoploss (default: -25.0)
     gridless_stoploss_enabled: bool  # Enable stoploss sells
+    gridless_leading_edge: bool  # Enable leading edge buys (buy into strength)
     
     # Derived properties
     @property
@@ -234,6 +235,7 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
         gridless_sell_threshold=float(os.getenv("GRIDLESS_SELL_THRESHOLD", "5.0")),
         gridless_stoploss_threshold=float(os.getenv("GRIDLESS_STOPLOSS_THRESHOLD", "-25.0")),
         gridless_stoploss_enabled=os.getenv("GRIDLESS_STOPLOSS_ENABLED", "false").lower() == "true",
+        gridless_leading_edge=os.getenv("GRIDLESS_LEADING_EDGE", "false").lower() == "true",
     )
     
     # Validate the configuration

@@ -46,18 +46,42 @@ def get_top_position(positions: Dict[str, Dict]) -> Optional[Tuple[str, Dict]]:
     return (top_id, top_pos) if top_id else None
 
 
-def should_buy(positions: Dict[str, Dict], current_price: float, config: Any) -> bool:
-    """Check buy rules: no positions OR (under max AND top_pnl <= threshold)."""
+def should_buy(positions: Dict[str, Dict], current_price: float, config: Any) -> Tuple[bool, str]:
+    """Check buy rules with leading edge support.
+    
+    Standard buy: no positions OR (under max AND top_pnl <= buy_threshold)
+    Leading edge: only 1 position AND room for more AND pnl >= 50% of sell_threshold
+    """
     max_active = getattr(config, 'max_active_positions', 10)
     buy_threshold = getattr(config, 'gridless_buy_threshold', -10.0)
+    sell_threshold = getattr(config, 'gridless_sell_threshold', 5.0)
+    leading_edge_enabled = getattr(config, 'gridless_leading_edge', False)
+    
+    # No positions - initial buy
     if len(positions) == 0 and max_active > 0:
-        return True
+        return (True, "Initial buy (no positions)")
+    
+    # Max positions reached
     if len(positions) >= max_active:
-        return False
+        return (False, f"Max positions reached ({len(positions)}/{max_active})")
+    
+    # Standard dip-buying logic
     top = get_top_position(positions)
     if top is None:
-        return True
-    return calculate_pnl(top[1], current_price) <= buy_threshold
+        return (True, "No holding positions found")
+    
+    top_pnl = calculate_pnl(top[1], current_price)
+    if top_pnl <= buy_threshold:
+        return (True, f"Top position P&L {top_pnl:.2f}% <= threshold {buy_threshold}%")
+    
+    # Leading edge: buy into strength when single position is climbing
+    # Trigger at 50% of sell threshold (e.g., if sell=5%, buy at +2.5%)
+    if leading_edge_enabled and len(positions) == 1:
+        leading_edge_trigger = sell_threshold * 0.5
+        if top_pnl >= leading_edge_trigger:
+            return (True, f"Leading edge: P&L {top_pnl:.2f}% >= 50% of sell ({leading_edge_trigger}%)")
+    
+    return (False, f"Top position P&L {top_pnl:.2f}% > threshold {buy_threshold}%")
 
 
 def should_sell(position: Dict[str, int], current_price: float, config: Any,
