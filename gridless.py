@@ -157,3 +157,56 @@ def migrate_from_grid(grid_positions: Dict[str, Dict]) -> Dict[str, Dict[str, in
             gridless[str(next_id)] = {'cost': int(pos.get('cost', 0)), 'balance': int(pos['balance'])}
             next_id += 1
     return gridless
+
+
+def migrate_to_grid(gridless_positions: Dict[str, Dict[str, int]], 
+                    grid_spacing_percent: float = 6.0) -> Dict[str, Dict]:
+    """Migrate gridless positions back to grid format.
+    
+    Args:
+        gridless_positions: Gridless position dict {id: {cost, balance}}
+        grid_spacing_percent: Grid spacing % for calculating ranges
+        
+    Returns:
+        Grid format positions dict
+    """
+    import math
+    grid_positions = {}
+    
+    for pos_id, pos in gridless_positions.items():
+        balance = pos.get('balance', 0)
+        cost = pos.get('cost', 0)
+        if balance <= 0:
+            continue
+        
+        # Calculate buy price
+        buy_price = (cost / 1e9) / (balance / 1e18)
+        
+        # Calculate grid range based on buy price
+        # Position covers range around its buy price
+        range_pct = grid_spacing_percent / 100
+        
+        # Scale to nano-WETH (10^9)
+        buy_price_nano = int(buy_price * 1e9)
+        
+        # Create grid position
+        grid_pos = {
+            'buyMin': int(buy_price_nano * (1 - range_pct)),
+            'buyMax': int(buy_price_nano * (1 + range_pct)),
+            'sellMin': int(buy_price_nano * (1 + range_pct * 2)),  # ~2x spacing for sell
+            'cost': cost,
+            'balance': balance
+        }
+        
+        grid_positions[pos_id] = grid_pos
+    
+    return grid_positions
+
+
+def save_grid_positions(grid_positions: Dict[str, Dict], filepath: str = "data/positions.json") -> None:
+    """Save grid positions to JSON file (atomic write)."""
+    os.makedirs(os.path.dirname(filepath), exist_ok=True)
+    temp_file = filepath + '.tmp'
+    with open(temp_file, 'w') as f:
+        json.dump(grid_positions, f, indent=2)
+    os.replace(temp_file, filepath)
