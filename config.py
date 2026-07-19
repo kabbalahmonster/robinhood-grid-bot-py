@@ -81,6 +81,13 @@ class BotConfig:
     fast_profit: bool
     tradeable_balance_percent: float
     
+    # Dynamic Grid Mode Parameters
+    use_dynamic_grid: bool  # Enable P&L-based dynamic grid mode
+    dynamic_buy_threshold: float  # Buy when top position down X% (e.g., -10)
+    dynamic_sell_threshold: float  # Sell at X% profit (e.g., 8)
+    dynamic_stop_loss: float  # Stop loss % (0 = disabled)
+    dynamic_min_buy_interval: int  # Minimum seconds between buys
+    
     # Bot Behavior
     poll_interval_seconds: int
     anti_mev_jitter: bool
@@ -207,6 +214,13 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
         bank_min_amount=float(os.getenv("BANK_MIN_AMOUNT", "0.5")),
         fast_profit=os.getenv("FAST_PROFIT", "false").lower() == "true",
         tradeable_balance_percent=float(os.getenv("TRADEABLE_BALANCE_PERCENT", "90.0")),
+        
+        # Dynamic Grid Mode
+        use_dynamic_grid=os.getenv("USE_DYNAMIC_GRID", "false").lower() == "true",
+        dynamic_buy_threshold=float(os.getenv("DYNAMIC_BUY_THRESHOLD", "-10.0")),
+        dynamic_sell_threshold=float(os.getenv("DYNAMIC_SELL_THRESHOLD", "8.0")),
+        dynamic_stop_loss=float(os.getenv("DYNAMIC_STOP_LOSS", "0.0")),
+        dynamic_min_buy_interval=int(os.getenv("DYNAMIC_MIN_BUY_INTERVAL", "30")),
         
         # Bot Behavior
         poll_interval_seconds=int(os.getenv("POLL_INTERVAL_SECONDS", "30")),

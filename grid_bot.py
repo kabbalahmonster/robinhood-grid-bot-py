@@ -2,6 +2,7 @@
 """
 Robinhood Chain Grid Trading Bot
 Uses positions.json format compatible with original bot
+Now with Dynamic Grid Mode support!
 """
 
 import json
@@ -16,6 +17,9 @@ from config import load_config
 from wallet import Wallet
 from zero_x import ZeroXClient
 from li_fi import LiFiClient
+from dynamic_grid import (
+    DynamicGridCalculator, DynamicGridConfig, DynamicGridState, DynamicPosition
+)
 
 # Global logger - will be configured by GridBot
 logger = logging.getLogger('grid_bot')
@@ -45,8 +49,30 @@ class GridBot:
         self.session_sells = 0
         self.session_profit_weth = 0.0
         
+        # Initialize Dynamic Grid Mode
+        self.dynamic_config = DynamicGridConfig(
+            enabled=getattr(self.config, 'use_dynamic_grid', False),
+            buy_threshold_percent=getattr(self.config, 'dynamic_buy_threshold', -10.0),
+            sell_threshold_percent=getattr(self.config, 'dynamic_sell_threshold', 8.0),
+            stop_loss_percent=getattr(self.config, 'dynamic_stop_loss', 0.0),
+            max_active_positions=self.config.max_active_positions,
+            min_buy_interval_seconds=getattr(self.config, 'dynamic_min_buy_interval', 30),
+        )
+        self.dynamic_state: Optional[DynamicGridState] = None
+        self.calculator = DynamicGridCalculator()
+        
         # Reconfigure logging based on config (must happen after config load)
         self._setup_logging()
+        
+        # Log mode
+        if self.dynamic_config.enabled:
+            logger.info("🎯 DYNAMIC GRID MODE ENABLED")
+            logger.info(f"   Buy threshold: {self.dynamic_config.buy_threshold_percent}%")
+            logger.info(f"   Sell threshold: {self.dynamic_config.sell_threshold_percent}%")
+            if self.dynamic_config.stop_loss_percent > 0:
+                logger.info(f"   Stop loss: {self.dynamic_config.stop_loss_percent}%")
+        else:
+            logger.info("📊 Standard grid mode")
         
         logger.info(f"Grid Bot initialized")
         logger.info(f"Wallet: {self.wallet.address}")
@@ -138,6 +164,12 @@ class GridBot:
     
     def check_buys(self, price):
         """Check for buy opportunities."""
+        # DYNAMIC GRID MODE
+        if self.dynamic_config.enabled:
+            self._check_buys_dynamic(price)
+            return
+        
+        # STANDARD GRID MODE
         # Get available WETH
         weth_balance, _ = self.wallet.get_token_balance(self.config.weth_address)
         if weth_balance < 0.001:
@@ -166,8 +198,51 @@ class GridBot:
                     self.execute_buy(pos_id, price)
                     return  # One buy per cycle
     
+    def _check_buys_dynamic(self, price):
+        """Check for buy opportunities in dynamic grid mode."""
+        # Initialize dynamic state if needed
+        if self.dynamic_state is None:
+            self._init_dynamic_state()
+        
+        # Get available WETH
+        weth_balance, _ = self.wallet.get_token_balance(self.config.weth_address)
+        if weth_balance < 0.001:
+            logger.warning(f"Low WETH balance: {weth_balance:.6f}")
+            return
+        
+        # Update P&L for all positions
+        self.dynamic_state.update_all_pnl(price)
+        
+        # Check if we should buy
+        should_buy, reason, top_position = self.calculator.should_buy(
+            self.dynamic_state.positions,
+            price,
+            self.dynamic_config,
+            self.dynamic_state.last_buy_time
+        )
+        
+        if should_buy:
+            # Create new dynamic position
+            position = self.dynamic_state.create_new_position(price)
+            logger.info(f"🎯 Dynamic buy: Position {position.id} at {price:.10f}")
+            logger.info(f"   Reason: {reason}")
+            if top_position:
+                top_pnl = self.calculator.calculate_pnl_percent(top_position.buy_price, price)
+                logger.info(f"   Top position P&L: {self.calculator.format_pnl(top_pnl)}")
+            
+            # Execute the buy
+            self._execute_buy_dynamic(position, price)
+        else:
+            logger.debug(f"Dynamic buy check: {reason}")
+    
     def check_sells(self, price):
         """Check for sell opportunities."""
+        # DYNAMIC GRID MODE
+        if self.dynamic_config.enabled:
+            self._check_sells_dynamic(price)
+            return
+        
+        # STANDARD GRID MODE
         min_profit_percent = getattr(self.config, 'min_profit_percent', 2.0)  # Default 2% minimum profit
         slippage_buffer = 1.5  # Require extra 1.5% to cover slippage
         effective_min_profit = min_profit_percent + slippage_buffer
@@ -200,6 +275,33 @@ class GridBot:
                 elif price >= sell_min:
                     logger.info(f"Sell blocked: Position {pos_id} at {price:.10f} - profit {current_profit:.2f}% < required {effective_min_profit}% (buffer for slippage)")
                     return  # Blocked - do not sell
+    
+    def _check_sells_dynamic(self, price):
+        """Check for sell opportunities in dynamic grid mode."""
+        if self.dynamic_state is None:
+            return
+        
+        # Update P&L for all positions
+        self.dynamic_state.update_all_pnl(price)
+        
+        # Find sellable positions
+        sellable = self.calculator.find_sellable_positions(
+            self.dynamic_state.positions,
+            price,
+            self.dynamic_config
+        )
+        
+        for pos_id, reason in sellable:
+            position = self.dynamic_state.positions[pos_id]
+            pnl = self.calculator.calculate_pnl_percent(position.buy_price, price)
+            
+            logger.info(f"💰 Dynamic sell: Position {pos_id} at {price:.10f}")
+            logger.info(f"   Reason: {reason}")
+            logger.info(f"   P&L: {self.calculator.format_pnl(pnl)}")
+            
+            # Execute the sell
+            self._execute_sell_dynamic(position, price)
+            return  # One sell per cycle
     
     def execute_buy(self, pos_id, price):
         """Execute a buy order."""
@@ -698,6 +800,240 @@ class GridBot:
             except Exception as e:
                 logger.error(f"Error in cycle: {e}")
                 time.sleep(10)
+
+    # ==================== DYNAMIC GRID MODE METHODS ====================
+    
+    def _init_dynamic_state(self):
+        """Initialize or load dynamic grid state."""
+        dynamic_file = "data/dynamic_state.json"
+        
+        try:
+            with open(dynamic_file, 'r') as f:
+                data = json.load(f)
+                self.dynamic_state = DynamicGridState.from_dict(data)
+                logger.info(f"Loaded dynamic state with {len(self.dynamic_state.positions)} positions")
+        except FileNotFoundError:
+            self.dynamic_state = DynamicGridState(self.dynamic_config)
+            logger.info("Initialized new dynamic grid state")
+    
+    def _save_dynamic_state(self):
+        """Save dynamic grid state to file atomically."""
+        if self.dynamic_state is None:
+            return
+        
+        dynamic_file = "data/dynamic_state.json"
+        temp_file = dynamic_file + ".tmp"
+        os.makedirs(os.path.dirname(dynamic_file), exist_ok=True)
+        
+        # Write to temp file first, then atomically rename
+        with open(temp_file, 'w') as f:
+            json.dump(self.dynamic_state.to_dict(), f, indent=2)
+        
+        # Atomic rename (on POSIX systems)
+        os.replace(temp_file, dynamic_file)
+    
+    def _execute_buy_dynamic(self, position: DynamicPosition, price: float):
+        """Execute a buy for dynamic grid mode."""
+        # Calculate buy amount based on available WETH
+        weth_balance, weth_raw = self.wallet.get_token_balance(self.config.weth_address)
+        
+        # Reserve some WETH for gas
+        gas_reserve = 0.001
+        available_weth = max(0, weth_balance - gas_reserve)
+        
+        # Count remaining slots
+        active_count = self.dynamic_state.get_active_count()
+        remaining_slots = self.config.max_active_positions - active_count
+        
+        if remaining_slots <= 0:
+            logger.warning("No remaining position slots")
+            return
+        
+        # Calculate buy amount per position
+        buy_amount_weth = available_weth / remaining_slots
+        
+        # Apply tradeable balance percentage
+        tradeable_pct = getattr(self.config, 'tradeable_balance_percent', 90.0)
+        buy_amount_weth = buy_amount_weth * (tradeable_pct / 100)
+        
+        if buy_amount_weth < 0.0001:
+            logger.warning(f"Buy amount too small: {buy_amount_weth:.6f} WETH")
+            return
+        
+        buy_amount_wei = int(buy_amount_weth * 10**18)
+        
+        logger.info(f"Executing dynamic buy: {buy_amount_weth:.6f} WETH")
+        
+        # Get quote
+        quote = self.zero_x.build_swap_transaction(
+            sell_token=self.config.weth_address,
+            buy_token=self.config.token_address,
+            sell_amount=buy_amount_wei,
+            taker_address=self.wallet.address,
+            slippage_percentage=self.config.slippage_tolerance / 100,
+        )
+        
+        if not quote.success:
+            logger.error(f"Buy quote failed: {quote.error}")
+            return
+        
+        expected_tokens = quote.buy_amount / 10**18 if quote.buy_amount else 0
+        logger.info(f"Quote: {buy_amount_weth:.6f} WETH → ~{expected_tokens:.4f} tokens")
+        
+        # Check/approve WETH
+        weth_allowance = self.wallet.check_allowance(
+            self.config.weth_address,
+            self.config.zero_x_proxy,
+            use_permit2=False
+        )
+        if weth_allowance < buy_amount_wei:
+            logger.info("Approving WETH...")
+            result = self.wallet.approve_token(
+                self.config.weth_address,
+                self.config.zero_x_proxy,
+                2**256 - 1
+            )
+            if not result.success:
+                logger.error(f"WETH approval failed: {result.error}")
+                return
+        
+        # Execute buy
+        gas_limit = int(quote.gas * 1.5) if quote.gas else 300000
+        gas_price = int(self.wallet.w3.eth.gas_price * 1.3)
+        
+        result = self.wallet._send_transaction({
+            "from": Web3.to_checksum_address(self.wallet.address),
+            "to": Web3.to_checksum_address(quote.to),
+            "data": quote.data,
+            "value": quote.value or 0,
+            "gas": gas_limit,
+            "gasPrice": gas_price,
+            "nonce": self.wallet.w3.eth.get_transaction_count(self.wallet.address),
+            "chainId": self.config.chain_id,
+        })
+        
+        if result.success:
+            # Update position with actual data
+            actual_tokens = quote.buy_amount if quote.buy_amount else 0
+            position.balance = actual_tokens
+            position.cost = buy_amount_wei // 1000  # Convert to nano-WETH
+            position.status = "HOLDING"
+            position.buy_tx = result.tx_hash
+            
+            self.session_buys += 1
+            self._save_dynamic_state()
+            
+            logger.info(f"✅ Dynamic buy successful!")
+            logger.info(f"   Position {position.id}: {actual_tokens / 10**18:.4f} tokens")
+            logger.info(f"   Cost: {buy_amount_weth:.6f} WETH")
+            logger.info(f"   Target sell: {position.sell_target:.10f} ({self.dynamic_config.sell_threshold_percent}% profit)")
+            logger.info(f"   Tx: {result.tx_hash}")
+        else:
+            logger.error(f"❌ Dynamic buy failed: {result.error}")
+    
+    def _execute_sell_dynamic(self, position: DynamicPosition, price: float):
+        """Execute a sell for dynamic grid mode."""
+        if position.balance <= 0:
+            logger.warning(f"Position {position.id} has no balance to sell")
+            return
+        
+        # Calculate moonbag
+        moonbag_pct = getattr(self.config, 'moonbag_percentage', 0)
+        moonbag_tokens = int(position.balance * moonbag_pct / 100)
+        sell_tokens = position.balance - moonbag_tokens
+        
+        if sell_tokens <= 0:
+            logger.warning(f"Sell amount too small after moonbag")
+            return
+        
+        sell_tokens_eth = sell_tokens / 10**18
+        logger.info(f"Executing dynamic sell: {sell_tokens_eth:.4f} tokens from position {position.id}")
+        
+        if moonbag_tokens > 0:
+            logger.info(f"   Moonbag: {moonbag_tokens / 10**18:.4f} tokens ({moonbag_pct}%)")
+        
+        # Get quote
+        quote = self.zero_x.build_swap_transaction(
+            sell_token=self.config.token_address,
+            buy_token=self.config.weth_address,
+            sell_amount=sell_tokens,
+            taker_address=self.wallet.address,
+            slippage_percentage=self.config.slippage_tolerance / 100,
+        )
+        
+        if not quote.success:
+            logger.error(f"Sell quote failed: {quote.error}")
+            return
+        
+        expected_weth = quote.buy_amount / 10**18 if quote.buy_amount else 0
+        logger.info(f"Quote: ~{expected_weth:.6f} WETH")
+        
+        # Check token approval
+        token_allowance = self.wallet.check_allowance(
+            self.config.token_address,
+            self.config.zero_x_proxy,
+            use_permit2=False
+        )
+        if token_allowance < sell_tokens:
+            logger.info("Approving tokens...")
+            result = self.wallet.approve_token(
+                self.config.token_address,
+                self.config.zero_x_proxy,
+                2**256 - 1
+            )
+            if not result.success:
+                logger.error(f"Token approval failed: {result.error}")
+                return
+        
+        # Calculate cost basis for profit
+        cost_weth = position.cost / 10**9  # nano-WETH to WETH
+        
+        # Execute sell
+        gas_limit = int(quote.gas * 1.5) if quote.gas else 300000
+        gas_price = int(self.wallet.w3.eth.gas_price * 1.3)
+        
+        result = self.wallet._send_transaction({
+            "from": Web3.to_checksum_address(self.wallet.address),
+            "to": Web3.to_checksum_address(quote.to),
+            "data": quote.data,
+            "value": quote.value or 0,
+            "gas": gas_limit,
+            "gasPrice": gas_price,
+            "nonce": self.wallet.w3.eth.get_transaction_count(self.wallet.address),
+            "chainId": self.config.chain_id,
+        })
+        
+        if result.success:
+            # Calculate actual profit
+            weth_received = quote.buy_amount / 10**18 if quote.buy_amount else 0
+            actual_profit = weth_received - cost_weth
+            pnl_percent = (actual_profit / cost_weth * 100) if cost_weth > 0 else 0
+            
+            # Update session stats
+            self.session_sells += 1
+            self.session_profit_weth += actual_profit
+            
+            # Close position
+            self.dynamic_state.close_position(
+                position.id, price, actual_profit, result.tx_hash
+            )
+            self._save_dynamic_state()
+            
+            logger.info(f"✅ Dynamic sell successful!")
+            logger.info(f"   Position {position.id} closed")
+            logger.info(f"   Received: {weth_received:.6f} WETH")
+            logger.info(f"   Profit: {actual_profit:.6f} WETH ({pnl_percent:+.2f}%)")
+            logger.info(f"   Tx: {result.tx_hash}")
+            
+            # Banking
+            bank_pct = getattr(self.config, 'bank_percentage', 0)
+            if bank_pct > 0 and actual_profit > 0:
+                bank_amount = actual_profit * bank_pct / 100
+                logger.info(f"🏦 Banking {bank_pct}% of profit = {bank_amount:.6f} WETH → USDG")
+                self.bank_profit(bank_amount)
+        else:
+            logger.error(f"❌ Dynamic sell failed: {result.error}")
+
 
 if __name__ == "__main__":
     bot = GridBot()
