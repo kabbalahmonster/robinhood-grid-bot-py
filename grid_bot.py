@@ -854,12 +854,23 @@ class GridBot:
         weth_bal, weth_raw = self.wallet.get_token_balance(self.config.weth_address)
         token_bal, token_raw = self.wallet.get_token_balance(self.config.token_address)
         
+        # Check if gridless mode is enabled
+        use_gridless = getattr(self.config, 'use_gridless', False)
+        
         # Count positions - balance > 0 means active (even if cost is 0, could be moonbag)
-        active = sum(1 for p in self.positions.values() if p['balance'] > 0)
-        empty = sum(1 for p in self.positions.values() if p['balance'] == 0)
+        if use_gridless:
+            # Load gridless positions for display
+            from gridless import load_positions
+            gridless_positions = load_positions()
+            active = len(gridless_positions)
+            empty = 0  # Gridless doesn't have empty slots
+            position_balance_total = sum(p.get('balance', 0) for p in gridless_positions.values()) / 10**18
+        else:
+            active = sum(1 for p in self.positions.values() if p['balance'] > 0)
+            empty = sum(1 for p in self.positions.values() if p['balance'] == 0)
+            position_balance_total = sum(p['balance'] for p in self.positions.values()) / 10**18
         
         # Calculate moonbag (tokens in wallet not in positions)
-        position_balance_total = sum(p['balance'] for p in self.positions.values()) / 10**18
         moonbag_balance = token_bal - position_balance_total
         
         # Get price
@@ -887,16 +898,27 @@ class GridBot:
             logger.info("-" * 26)
             
             # Each position on its own line (max 3), no price shown
-            active_positions = [(pid, p) for pid, p in self.positions.items() if p['balance'] > 0]
-            for pos_id, pos in active_positions[:3]:
-                tokens = pos['balance'] / 10**18
-                cost_weth = pos['cost'] / 10**9
-                if tokens > 0 and cost_weth > 0:
-                    buy_price = cost_weth / tokens
-                    pnl = ((price - buy_price) / buy_price * 100)
-                    logger.info(f"#{pos_id}: {tokens:.1f} | P&L: {pnl:+.1f}%")
-                else:
-                    logger.info(f"#{pos_id}: {tokens:.1f} | moonbag")
+            if use_gridless:
+                active_positions = [(pid, p) for pid, p in gridless_positions.items()]
+                for pos_id, pos in active_positions[:3]:
+                    tokens = pos.get('balance', 0) / 10**18
+                    buy_price = pos.get('buy_price', 0)
+                    if tokens > 0 and buy_price > 0:
+                        pnl = ((price - buy_price) / buy_price * 100)
+                        logger.info(f"#{pos_id}: {tokens:.1f} | P&L: {pnl:+.1f}%")
+                    else:
+                        logger.info(f"#{pos_id}: {tokens:.1f} | N/A")
+            else:
+                active_positions = [(pid, p) for pid, p in self.positions.items() if p['balance'] > 0]
+                for pos_id, pos in active_positions[:3]:
+                    tokens = pos['balance'] / 10**18
+                    cost_weth = pos['cost'] / 10**9
+                    if tokens > 0 and cost_weth > 0:
+                        buy_price = cost_weth / tokens
+                        pnl = ((price - buy_price) / buy_price * 100)
+                        logger.info(f"#{pos_id}: {tokens:.1f} | P&L: {pnl:+.1f}%")
+                    else:
+                        logger.info(f"#{pos_id}: {tokens:.1f} | moonbag")
             if len(active_positions) > 3:
                 logger.info(f"... and {len(active_positions) - 3} more")
             
@@ -916,26 +938,45 @@ class GridBot:
             # Show active positions with P&L and sell targets
             if active > 0:
                 logger.info("🎯 Active Positions:")
-                for pos_id, pos in self.positions.items():
-                    if pos['balance'] > 0:
-                        balance_raw = pos['balance']
-                        cost_raw = pos['cost']
+                if use_gridless:
+                    # Display gridless positions
+                    for pos_id, pos in gridless_positions.items():
+                        balance_raw = pos.get('balance', 0)
+                        cost_raw = pos.get('cost', 0)
                         tokens = balance_raw / 10**18
                         cost_weth = cost_raw / 10**9
-                        sell_min = pos['sellMin'] / 10**9
-                        # Buy price = WETH spent / tokens received
-                        if tokens > 0 and cost_weth > 0:
-                            buy_price = cost_weth / tokens
-                            pnl = ((price - buy_price) / buy_price * 100)
-                            # Show how much more price needs to rise to hit sell target
-                            price_diff = sell_min - price
-                            price_pct = (price_diff / price * 100) if price > 0 else 0
-                            logger.info(f"   #{pos_id}: {tokens:.4f} tokens | Buy: {buy_price:.10f} | Sell@: {sell_min:.10f} | P&L: {pnl:+.2f}% (need +{price_pct:.1f}% more to sell)")
-                        else:
-                            # Moonbag or dust position with unknown cost
-                            price_diff = sell_min - price
-                            price_pct = (price_diff / price * 100) if price > 0 else 0
-                            logger.info(f"   #{pos_id}: {tokens:.4f} tokens | Buy: moonbag | Sell@: {sell_min:.10f} | P&L: N/A (need +{price_pct:.1f}% more to sell)")
+                        buy_price = pos.get('buy_price', 0)
+                        sell_target = pos.get('sell_target', 0)
+                        if tokens > 0:
+                            if buy_price > 0:
+                                pnl = ((price - buy_price) / buy_price * 100)
+                                price_diff = sell_target - price
+                                price_pct = (price_diff / price * 100) if price > 0 else 0
+                                logger.info(f"   #{pos_id}: {tokens:.4f} tokens | Buy: {buy_price:.10f} | Sell@: {sell_target:.10f} | P&L: {pnl:+.2f}% (need +{price_pct:.1f}% more to sell)")
+                            else:
+                                logger.info(f"   #{pos_id}: {tokens:.4f} tokens | Buy: N/A | P&L: N/A")
+                else:
+                    # Display classic grid positions
+                    for pos_id, pos in self.positions.items():
+                        if pos['balance'] > 0:
+                            balance_raw = pos['balance']
+                            cost_raw = pos['cost']
+                            tokens = balance_raw / 10**18
+                            cost_weth = cost_raw / 10**9
+                            sell_min = pos['sellMin'] / 10**9
+                            # Buy price = WETH spent / tokens received
+                            if tokens > 0 and cost_weth > 0:
+                                buy_price = cost_weth / tokens
+                                pnl = ((price - buy_price) / buy_price * 100)
+                                # Show how much more price needs to rise to hit sell target
+                                price_diff = sell_min - price
+                                price_pct = (price_diff / price * 100) if price > 0 else 0
+                                logger.info(f"   #{pos_id}: {tokens:.4f} tokens | Buy: {buy_price:.10f} | Sell@: {sell_min:.10f} | P&L: {pnl:+.2f}% (need +{price_pct:.1f}% more to sell)")
+                            else:
+                                # Moonbag or dust position with unknown cost
+                                price_diff = sell_min - price
+                                price_pct = (price_diff / price * 100) if price > 0 else 0
+                                logger.info(f"   #{pos_id}: {tokens:.4f} tokens | Buy: moonbag | Sell@: {sell_min:.10f} | P&L: N/A (need +{price_pct:.1f}% more to sell)")
             
             # Show next buy trigger (lowest empty position buy range)
             if empty > 0:
