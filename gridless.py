@@ -155,9 +155,15 @@ def save_positions(positions: Dict[str, Dict[str, int]]) -> None:
 
 
 def add_position(cost: int, balance: int) -> str:
-    """Add new position with auto-incrementing ID."""
+    """Add new position with lowest available ID (fills gaps)."""
     positions = load_positions()
-    next_id = max((int(k) for k in positions.keys()), default=-1) + 1
+    
+    # Find the lowest unused ID
+    existing_ids = {int(k) for k in positions.keys()}
+    next_id = 0
+    while next_id in existing_ids:
+        next_id += 1
+    
     positions[str(next_id)] = {'cost': cost, 'balance': balance}
     save_positions(positions)
     return str(next_id)
