@@ -538,6 +538,10 @@ class GridBot:
             profit_pct = (actual_profit / sold_cost_weth * 100) if sold_cost_weth > 0 else 0
             logger.info(f"✅ Gridless sell successful! Profit: {actual_profit:.6f} WETH ({profit_pct:+.2f}%)")
             
+            # Reset buy cooldown so we can buy again immediately after selling
+            self.last_buy_time = 0
+            logger.debug(f"🔄 Buy cooldown reset after sell")
+            
             # Banking
             bank_pct = getattr(self.config, 'bank_percentage', 0)
             if bank_pct > 0 and actual_profit > 0:
