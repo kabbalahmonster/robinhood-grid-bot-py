@@ -31,11 +31,16 @@ def generate_wallet():
 
 
 def save_wallet(wallet: dict, filepath: str, chmod: bool = True):
-    """Save wallet to file with restricted permissions."""
+    """Save wallet to file with restricted permissions. Appends if file exists."""
     # Ensure directory exists
     os.makedirs(os.path.dirname(filepath) if os.path.dirname(filepath) else '.', exist_ok=True)
     
-    content = f"""# Ethereum Wallet - Generated {wallet['created_at']}
+    file_exists = os.path.exists(filepath)
+    
+    content = f"""
+# {'='*60}
+# Ethereum Wallet #{get_wallet_count(filepath) + 1} - Generated {wallet['created_at']}
+# {'='*60}
 # WARNING: Keep this file secure. Never share the private key.
 # Anyone with the private key has full control of this wallet.
 
@@ -47,19 +52,28 @@ PrivateKey: {wallet['private_key']}
 # Or use this wallet address to receive funds.
 """
     
-    # Check if file already exists
-    if os.path.exists(filepath):
-        raise FileExistsError(f"File already exists: {filepath}")
-    
-    # Write file
-    with open(filepath, 'w') as f:
+    # Append to file if it exists, create if it doesn't
+    mode = 'a' if file_exists else 'w'
+    with open(filepath, mode) as f:
         f.write(content)
     
-    # Set restrictive permissions (owner read/write only)
-    if chmod:
+    # Set restrictive permissions (owner read/write only) only on new files
+    if chmod and not file_exists:
         os.chmod(filepath, 0o600)
     
     return filepath
+
+
+def get_wallet_count(filepath: str) -> int:
+    """Count existing wallets in the file by counting 'Ethereum Wallet #' headers."""
+    if not os.path.exists(filepath):
+        return 0
+    try:
+        with open(filepath, 'r') as f:
+            content = f.read()
+            return content.count('Ethereum Wallet #')
+    except:
+        return 0
 
 
 def main():
@@ -68,8 +82,11 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Generate wallet and save to file
+  # Generate wallet and save to file (appends if file exists)
   python generate_wallet.py --output my_wallet.txt
+  
+  # Generate and create a new file (never append)
+  python generate_wallet.py --output my_wallet.txt --new-file
   
   # Generate without saving (output to console only)
   python generate_wallet.py --no-save
@@ -82,6 +99,7 @@ Security Notes:
   - Output files are created with 600 permissions (owner read/write only)
   - Never commit wallet files to git or share private keys
   - Always verify the address matches the private key before sending funds
+  - Multiple wallets in one file are numbered for easy reference
         """
     )
     parser.add_argument('--output', '-o', type=str, default='wallet.txt',
@@ -90,8 +108,8 @@ Security Notes:
                         help='Print to console only, do not save to file')
     parser.add_argument('--no-chmod', action='store_true',
                         help='Do not set restrictive file permissions')
-    parser.add_argument('--force', '-f', action='store_true',
-                        help='Overwrite existing file if it exists')
+    parser.add_argument('--new-file', '-n', action='store_true',
+                        help='Create a new file instead of appending to existing')
     
     args = parser.parse_args()
     
@@ -129,11 +147,23 @@ Security Notes:
         print("   Copy the address and private key above to your .env file")
         return
     
-    # Handle existing file
-    if os.path.exists(args.output) and not args.force:
-        print(f"❌ File already exists: {args.output}")
-        print("   Use --force to overwrite or choose a different filename")
-        sys.exit(1)
+    # Handle existing file - append instead of overwrite
+    file_exists = os.path.exists(args.output)
+    if file_exists and args.new_file:
+        # Find a unique filename
+        base, ext = os.path.splitext(args.output)
+        counter = 1
+        new_filepath = f"{base}_{counter}{ext}"
+        while os.path.exists(new_filepath):
+            counter += 1
+            new_filepath = f"{base}_{counter}{ext}"
+        args.output = new_filepath
+        print(f"📁 Creating new file: {args.output}")
+    elif file_exists:
+        wallet_num = get_wallet_count(args.output) + 1
+        print(f"📁 Appending to existing file: {args.output} (Wallet #{wallet_num})")
+    else:
+        print(f"📁 Creating new file: {args.output}")
     
     # Save wallet
     try:
