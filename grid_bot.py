@@ -396,7 +396,8 @@ class GridBot:
         
         if quote_profit_eth < min_profit_eth:
             buy_price = get_buy_price(pos)
-            logger.info(f"⏸️  Position #{pos_id} at {pnl:.1f}% P&L but quote profit ({quote_profit_eth:.6f}) < min ({min_profit_eth:.6f}) - skipping")
+            pnl_at_check = calculate_pnl(pos, price)
+            logger.info(f"⏸️  Position #{pos_id} at {pnl_at_check:.1f}% P&L but quote profit ({quote_profit_eth:.6f}) < min ({min_profit_eth:.6f}) - skipping")
             return
         
         logger.info(f"🎯 Gridless sell trigger: Position #{pos_id} - {reason}")
@@ -435,6 +436,8 @@ class GridBot:
         profit_weth = expected_weth - sold_cost_weth
         
         logger.info(f"💰 Gridless sell position #{pos_id}:")
+        logger.info(f"   Position data: cost={cost} nano-WETH, balance={balance} wei")
+        logger.info(f"   Calculated: cost_weth={cost_weth:.6f}, tokens={tokens:.6f}, buy_price={buy_price:.10f}")
         logger.info(f"   Selling: {sell_tokens:.6f} tokens")
         logger.info(f"   Buy price: {buy_price:.10f}, Current: {price:.10f}")
         logger.info(f"   Expected: {expected_weth:.6f} WETH, Profit: {profit_weth:.6f} ({pnl:+.2f}%)")
