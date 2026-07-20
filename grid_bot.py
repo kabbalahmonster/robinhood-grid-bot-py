@@ -281,7 +281,7 @@ class GridBot:
             return
         
         # Validate execution price is still within buy threshold margin
-        execution_margin = getattr(self.config, 'gridless_buy_execution_margin', 2.0)  # Default 2%
+        execution_margin = getattr(self.config, 'gridless_buy_execution_margin', 4.0)  # Default 4%
         if quote.buy_amount and quote.buy_amount > 0:
             from gridless import load_positions, get_buy_price, calculate_pnl
             gridless_positions = load_positions()
