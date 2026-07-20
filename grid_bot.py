@@ -332,44 +332,77 @@ class GridBot:
     
     def _check_sells_gridless(self, price):
         """Gridless sell logic - sell when P&L >= threshold or stoploss triggered."""
-        from gridless import load_positions, find_sell_candidate, calculate_pnl, remove_position
+        from gridless import load_positions, find_sell_candidate, calculate_pnl, remove_position, get_buy_price
         
         # Load gridless positions
         gridless_positions = load_positions()
         if not gridless_positions:
             return
         
-        # Get quote for profit estimation (use a representative sell amount)
-        total_balance = sum(p.get('balance', 0) for p in gridless_positions.values())
-        if total_balance == 0:
+        # Find best sell candidate based on P&L only (quote checked at execution)
+        # This allows profitable positions to sell even when aggregate portfolio is down
+        sell_threshold = getattr(self.config, 'gridless_sell_threshold', 5.0)
+        stoploss_enabled = getattr(self.config, 'gridless_stoploss_enabled', False)
+        stoploss_threshold = getattr(self.config, 'gridless_stoploss_threshold', -25.0)
+        
+        best_candidate = None
+        best_priority = 999
+        best_pnl = float('-inf')
+        
+        for pos_id, pos in gridless_positions.items():
+            pnl = calculate_pnl(pos, price)
+            
+            # Check stoploss first (highest priority)
+            if stoploss_enabled and pnl <= stoploss_threshold:
+                if best_priority > 0 or pnl > best_pnl:
+                    best_candidate = (pos_id, pos, f"STOPLOSS: {pnl:.1f}%")
+                    best_priority = 0
+                    best_pnl = pnl
+            # Check profit target
+            elif pnl >= sell_threshold:
+                if best_priority > 1 or pnl > best_pnl:
+                    best_candidate = (pos_id, pos, f"PROFIT: {pnl:.1f}%")
+                    best_priority = 1
+                    best_pnl = pnl
+        
+        if best_candidate is None:
             return
         
-        # Get quote for selling all tokens to estimate profit
+        pos_id, pos, reason = best_candidate
+        
+        # Verify with individual position quote before executing
+        balance = pos.get('balance', 0)
+        if balance <= 0:
+            return
+            
         quote = self.api_client.build_swap_transaction(
             sell_token=self.config.token_address,
             buy_token=self.config.weth_address,
-            sell_amount=total_balance,
+            sell_amount=balance,
             taker_address=self.wallet.address,
             slippage_percentage=0.02,
         )
         
-        quote_profit_eth = 0.0
-        if quote.success and quote.buy_amount:
-            # Calculate total cost
-            total_cost = sum(p.get('cost', 0) for p in gridless_positions.values()) / 1e9
-            quote_return_eth = quote.buy_amount / 10**18
-            quote_profit_eth = quote_return_eth - total_cost
-        
-        # Find sell candidate
-        candidate = find_sell_candidate(gridless_positions, price, self.config, quote_profit_eth)
-        if candidate is None:
+        if not quote.success:
+            logger.debug(f"Sell candidate #{pos_id} but quote failed: {quote.error}")
             return
         
-        pos_id, pos, reason = candidate
-        logger.info(f"Gridless sell trigger: Position #{pos_id} - {reason}")
-        self._execute_sell_gridless(pos_id, pos, price)
+        # Check min profit requirement against individual position quote
+        cost_weth = pos.get('cost', 0) / 1e9
+        min_profit = getattr(self.config, 'min_profit_percent', 1.5)
+        min_profit_eth = cost_weth * (min_profit / 100)
+        quote_return_eth = quote.buy_amount / 10**18 if quote.buy_amount else 0
+        quote_profit_eth = quote_return_eth - cost_weth
+        
+        if quote_profit_eth < min_profit_eth:
+            buy_price = get_buy_price(pos)
+            logger.info(f"⏸️  Position #{pos_id} at {pnl:.1f}% P&L but quote profit ({quote_profit_eth:.6f}) < min ({min_profit_eth:.6f}) - skipping")
+            return
+        
+        logger.info(f"🎯 Gridless sell trigger: Position #{pos_id} - {reason}")
+        self._execute_sell_gridless(pos_id, pos, price, quote)
     
-    def _execute_sell_gridless(self, pos_id, pos, price):
+    def _execute_sell_gridless(self, pos_id, pos, price, pre_fetched_quote=None):
         """Execute a gridless sell order."""
         from gridless import remove_position, calculate_pnl
         
@@ -406,14 +439,18 @@ class GridBot:
         logger.info(f"   Buy price: {buy_price:.10f}, Current: {price:.10f}")
         logger.info(f"   Expected: {expected_weth:.6f} WETH, Profit: {profit_weth:.6f} ({pnl:+.2f}%)")
         
-        # Get quote
-        quote = self.api_client.build_swap_transaction(
-            sell_token=self.config.token_address,
-            buy_token=self.config.weth_address,
-            sell_amount=sell_amount,
-            taker_address=self.wallet.address,
-            slippage_percentage=0.02,
-        )
+        # Use pre-fetched quote if available (for moonbag, need to re-quote with different amount)
+        if pre_fetched_quote and moonbag_pct == 0 and sell_amount == balance:
+            quote = pre_fetched_quote
+        else:
+            # Get fresh quote (for moonbag or if no pre-fetched quote)
+            quote = self.api_client.build_swap_transaction(
+                sell_token=self.config.token_address,
+                buy_token=self.config.weth_address,
+                sell_amount=sell_amount,
+                taker_address=self.wallet.address,
+                slippage_percentage=0.02,
+            )
         
         if not quote.success:
             logger.error(f"Gridless sell quote failed: {quote.error}")
