@@ -4,6 +4,9 @@ A production-grade grid trading bot for Robinhood Chain and other EVM networks, 
 
 ## Features
 
+- **Two Trading Modes**:
+  - **Classic Grid**: Fixed price levels with buy/sell ranges
+  - **Gridless**: Dynamic position-based trading without fixed grid levels
 - **Dynamic Grid Trading**: Automatically places buy orders at decreasing price levels
 - **Cost Basis Tracking**: Each position tracks actual WETH spent for accurate P&L
 - **Moonbag Support**: Retain a percentage of tokens after each sell
@@ -107,6 +110,13 @@ python grid_bot.py
 | `STATE_FILE` | No | ./data/positions.json | Position state file path |
 | `COMPACT_MODE` | No | false | Compact single-line output for tmux |
 | `MINIMAL_LOGS` | No | false | Remove timestamps from console output |
+| **Gridless Mode** ||||
+| `USE_GRIDLESS` | No | false | Enable gridless trading mode |
+| `GRIDLESS_BUY_THRESHOLD` | No | -10.0 | Buy when top position P&L ≤ this % |
+| `GRIDLESS_SELL_THRESHOLD` | No | 5.0 | Sell when position P&L ≥ this % |
+| `GRIDLESS_LEADING_EDGE` | No | false | Buy into strength (single position climbing) |
+| `GRIDLESS_STOPLOSS_ENABLED` | No | false | Enable stoploss in gridless mode |
+| `GRIDLESS_STOPLOSS_THRESHOLD` | No | -25.0 | Stoploss trigger % |
 
 ### DEX Aggregation (0x vs LI.FI)
 
@@ -306,6 +316,80 @@ ROUND #506 | TENDIES | Elapsed: 1128s
 - **Session**: Total buys, sells, and accumulated WETH profit
 - **Active Positions**: Each shows tokens held, buy price, sell target, P&L, and % needed to reach sell target
 
+## Gridless Mode
+
+Gridless mode is an alternative trading strategy that doesn't use fixed price levels. Instead, it dynamically manages positions based on P&L thresholds.
+
+### When to Use Gridless
+
+| Use Classic Grid When | Use Gridless When |
+|----------------------|-------------------|
+| Price moves in predictable ranges | Price is highly volatile or trending |
+| You want defined entry/exit points | You want P&L-based exits |
+| Token has clear support/resistance levels | You want simpler position management |
+
+### Enabling Gridless Mode
+
+```bash
+# Add to .env
+USE_GRIDLESS=true
+GRIDLESS_SELL_THRESHOLD=5.0      # Sell at +5% P&L
+GRIDLESS_BUY_THRESHOLD=-10.0     # Buy more when top position at -10%
+MAX_ACTIVE_POSITIONS=6           # Max positions to hold
+```
+
+### Gridless Buy Logic
+
+Buys are triggered when:
+1. **No positions exist** - Initial buy to start
+2. **Top position P&L ≤ buy_threshold** - Buy the dip
+3. **Leading edge** (optional) - Buy into strength when single position climbing
+
+Buy amount: `available_WETH / available_slots`
+
+### Gridless Sell Logic
+
+Sells are triggered when:
+1. **P&L ≥ sell_threshold** - Take profit
+2. **Stoploss triggered** - Emergency exit (optional)
+
+Each position is evaluated independently - a profitable position can sell even if others are underwater.
+
+### Gridless vs Classic Grid
+
+| Feature | Classic Grid | Gridless |
+|---------|-------------|----------|
+| Price levels | Fixed ranges | Dynamic |
+| Buy trigger | Price enters range | Top position P&L threshold |
+| Sell trigger | Price hits sellMin | P&L threshold |
+| Stoploss | Per-position | Per-position |
+| Configuration | Grid spacing % | P&L thresholds |
+
+### Migrating Between Modes
+
+Use `migrate_grid_mode.py` to switch between trading modes without losing positions:
+
+```bash
+# Check current status
+python migrate_grid_mode.py status
+
+# Migrate classic grid → gridless
+python migrate_grid_mode.py to-gridless
+
+# Migrate gridless → classic grid
+python migrate_grid_mode.py to-grid
+```
+
+**What happens during migration:**
+- Position data is converted between formats
+- Balances and cost basis are preserved
+- For grid migration, you'll be prompted for grid spacing %
+- Original files are kept as backup
+
+**After migration:**
+- Update `USE_GRIDLESS` in your `.env` file
+- Restart the bot
+
 ## How It Works
 
 ### Grid Strategy
@@ -439,6 +523,121 @@ robinhood-grid-bot-py/
 **migrate_grid.py**: Regenerates grid while preserving filled positions and their sell prices
 
 **generate_wallet.py**: Creates cryptographically secure Ethereum wallets for trading
+
+## Utility Scripts Reference
+
+### Generate Wallet (`generate_wallet.py`)
+
+Create dedicated trading wallets with secure key generation:
+
+```bash
+# Generate wallet and save to file (appends if exists)
+python generate_wallet.py --output my_wallet.txt
+
+# Create new file (auto-increments: wallet_1.txt, wallet_2.txt, etc.)
+python generate_wallet.py --output my_wallet.txt --new-file
+
+# Generate without saving (console only)
+python generate_wallet.py --no-save
+
+# Skip setting file permissions
+python generate_wallet.py --no-chmod
+```
+
+**Features:**
+- Uses Python's `secrets` module (cryptographically secure randomness)
+- Creates files with 600 permissions (owner read/write only)
+- Appends to existing files (numbered wallets: #1, #2, #3...)
+- Includes warnings and next steps in output
+
+**Example output file:**
+```
+# ============================================================
+# Ethereum Wallet #1 - Generated 2026-07-20T11:51:00Z
+# ============================================================
+Address:    0x...
+PrivateKey: 0x...
+```
+
+### Migrate Grid (`migrate_grid.py`)
+
+Regenerate grid while preserving filled positions:
+
+```bash
+# Preview changes first (dry run)
+python migrate_grid.py --dry-run --low 0.5 --high 2.0 --positions 24
+
+# Apply migration
+python migrate_grid.py --low 0.5 --high 2.0 --positions 24
+```
+
+**What it does:**
+1. Extracts current holdings (balance > 0)
+2. Generates new grid around current price
+3. Maps holdings to best-matching new positions
+4. Merges if multiple map to same position
+5. Ensures sell prices never decrease
+6. Creates `positions.json.backup` before overwriting
+
+**Use cases:**
+- Price moved outside your grid range
+- Want to tighten/expand grid spacing
+- Changing profit targets
+
+### Migrate Grid Mode (`migrate_grid_mode.py`)
+
+Switch between classic grid and gridless modes:
+
+```bash
+# Check status of both modes
+python migrate_grid_mode.py status
+
+# Migrate classic grid → gridless
+python migrate_grid_mode.py to-gridless
+
+# Migrate gridless → classic grid
+python migrate_grid_mode.py to-grid
+```
+
+**After migration:**
+1. Update `USE_GRIDLESS` in your `.env`
+2. Restart the bot
+
+**Important:** Original files are kept as backup. You can switch back anytime.
+
+### Generate Grid (`generate_grid_dynamic.py`)
+
+Create grid positions based on current market price:
+
+```bash
+# Generate grid from current price
+python generate_grid_dynamic.py --low 0.2 --high 3.0 --positions 24
+
+# Options:
+# --low: Lowest price multiplier (0.2 = 20% of current)
+# --high: Highest price multiplier (3.0 = 300% of current)
+# --positions: Number of grid levels
+```
+
+**Requirements:**
+- `.env` must be configured with `TOKEN_ADDRESS`
+- `ZEROX_API_KEY` required to fetch current price
+
+### Test Gridless (`test_gridless_simple.py`)
+
+Run unit tests for gridless trading logic:
+
+```bash
+# Run all tests
+python test_gridless_simple.py
+
+# Tests cover:
+# - P&L calculations
+# - Buy/sell decision logic
+# - Stoploss triggers
+# - Leading edge buys
+# - Position validation
+```
 
 ## Safety Features
 
@@ -613,7 +812,16 @@ quote = client.build_swap_transaction(
 
 ## Changelog
 
-### v1.1.0 - Latest
+### v1.2.0 - Latest
+- **Gridless Trading Mode**: Dynamic position-based trading without fixed grid levels
+- **Grid Mode Migration**: `migrate_grid_mode.py` to switch between classic/gridless
+- **Individual Position Quotes**: Gridless sells use per-position quotes (not aggregate)
+- **Aligned Position Display**: Consistent column formatting for position output
+- **Wallet Append**: Generate multiple wallets to same file (numbered)
+- **Position Sorting**: Gridless positions display sorted by buy price ascending
+- **LI.FI API Support**: Alternative DEX aggregator to 0x
+
+### v1.1.0
 - **Compact Mode**: Single-line output for tmux multi-pane view
 - **Minimal Logs**: Option to remove timestamps from console output
 - **Grid Migration Tool**: Regenerate grid while preserving positions
