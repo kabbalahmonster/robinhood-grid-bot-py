@@ -45,6 +45,10 @@ class GridBot:
         self.session_sells = 0
         self.session_profit_weth = 0.0
         
+        # Cooldown tracking for gridless buys
+        self.last_buy_time = 0
+        self.gridless_buy_cooldown = getattr(self.config, 'gridless_buy_cooldown_seconds', 300)  # Default 5 min
+        
         # Reconfigure logging based on config (must happen after config load)
         self._setup_logging()
         
@@ -221,6 +225,12 @@ class GridBot:
         """Gridless buy logic - buy when no positions or top position P&L <= threshold."""
         from gridless import should_buy, load_positions, add_position
         
+        # Check cooldown
+        time_since_last_buy = time.time() - self.last_buy_time
+        if time_since_last_buy < self.gridless_buy_cooldown:
+            logger.debug(f"Gridless: Buy cooldown active ({time_since_last_buy:.0f}s < {self.gridless_buy_cooldown}s)")
+            return
+        
         # Load gridless positions
         gridless_positions = load_positions()
         
@@ -321,6 +331,7 @@ class GridBot:
             tokens = tokens_received / 10**18
             buy_price = buy_amount_eth / tokens if tokens > 0 else 0
             self.session_buys += 1
+            self.last_buy_time = time.time()  # Update cooldown timer
             
             logger.info(f"✅ Gridless buy successful! Position #{pos_id}")
             logger.info(f"   Tokens: {tokens:.6f} {self.config.token_symbol}")

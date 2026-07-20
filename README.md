@@ -117,6 +117,7 @@ python grid_bot.py
 | `GRIDLESS_LEADING_EDGE` | No | false | Buy into strength (single position climbing) |
 | `GRIDLESS_STOPLOSS_ENABLED` | No | false | Enable stoploss in gridless mode |
 | `GRIDLESS_STOPLOSS_THRESHOLD` | No | -25.0 | Stoploss trigger % |
+| `GRIDLESS_BUY_COOLDOWN_SECONDS` | No | 300 | Cooldown between gridless buys (default 5 min) |
 
 ### DEX Aggregation (0x vs LI.FI)
 
