@@ -118,7 +118,7 @@ python grid_bot.py
 | `GRIDLESS_STOPLOSS_ENABLED` | No | false | Enable stoploss in gridless mode |
 | `GRIDLESS_STOPLOSS_THRESHOLD` | No | -25.0 | Stoploss trigger % |
 | `GRIDLESS_BUY_COOLDOWN_SECONDS` | No | 300 | Cooldown between gridless buys (default 5 min) |
-| `GRIDLESS_BUY_EXECUTION_MARGIN` | No | 4.0 | Execution margin - blocks buy if quote P&L > threshold + margin (e.g., -10% trigger + 4% = block above -6%) |
+| `GRIDLESS_BUY_EXECUTION_MARGIN` | No | 50 | Execution margin % - blocks buy if quote P&L recovered past threshold + (abs(threshold) * margin%) (e.g., -10% trigger + 50% = block above -5%) |
 
 ### DEX Aggregation (0x vs LI.FI)
 

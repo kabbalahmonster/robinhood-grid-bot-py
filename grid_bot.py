@@ -281,7 +281,7 @@ class GridBot:
             return
         
         # Validate execution price is still within buy threshold margin
-        execution_margin = getattr(self.config, 'gridless_buy_execution_margin', 4.0)  # Default 4%
+        execution_margin_pct = getattr(self.config, 'gridless_buy_execution_margin', 50.0)  # Default 50%
         if quote.buy_amount and quote.buy_amount > 0:
             from gridless import load_positions, get_buy_price, calculate_pnl
             gridless_positions = load_positions()
@@ -301,10 +301,15 @@ class GridBot:
                 pnl_at_quote = calculate_pnl(top[1], quote_buy_price)
                 buy_threshold = getattr(self.config, 'gridless_buy_threshold', -10.0)
                 
-                # Allow buy if P&L is within margin of threshold
-                # e.g., if threshold is -10% and margin is 2%, allows -8% to -12%
-                if pnl_at_quote > buy_threshold + execution_margin:
-                    logger.info(f"⏸️ Buy aborted: Quote P&L ({pnl_at_quote:.1f}%) > threshold + margin ({buy_threshold}% + {execution_margin}%)")
+                # Calculate block threshold as percentage of threshold distance from 0
+                # e.g., -10% threshold with 50% margin = -10 + (10 * 0.5) = -5%
+                distance_from_zero = abs(buy_threshold)
+                max_recovery = distance_from_zero * (execution_margin_pct / 100.0)
+                block_threshold = buy_threshold + max_recovery
+                
+                # Block if price recovered too much (quote P&L above block threshold)
+                if pnl_at_quote > block_threshold:
+                    logger.info(f"⏸️ Buy aborted: Quote P&L ({pnl_at_quote:.1f}%) recovered past {execution_margin_pct}% margin (block above {block_threshold:.1f}%)")
                     logger.info(f"   Price moved from trigger. Buy price: {quote_buy_price:.10f}, Top position buy: {get_buy_price(top[1]):.10f}")
                     return
         
