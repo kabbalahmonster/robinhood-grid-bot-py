@@ -484,7 +484,8 @@ class GridBot:
             if moonbag_tokens > 0:
                 logger.info(f"   Moonbag: {moonbag_tokens/1e18:.4f} tokens to wallet")
             
-            logger.info(f"✅ Gridless sell successful! Profit: {actual_profit:.6f} WETH")
+            profit_pct = (actual_profit / sold_cost_weth * 100) if sold_cost_weth > 0 else 0
+            logger.info(f"✅ Gridless sell successful! Profit: {actual_profit:.6f} WETH ({profit_pct:+.2f}%)")
             
             # Banking
             bank_pct = getattr(self.config, 'bank_percentage', 0)
