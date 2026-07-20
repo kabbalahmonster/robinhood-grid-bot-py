@@ -915,9 +915,9 @@ class GridBot:
                     if tokens > 0 and cost_weth > 0:
                         buy_price = cost_weth / tokens
                         pnl = ((price - buy_price) / buy_price * 100)
-                        logger.info(f"#{pos_id}: {tokens:.1f} | P&L: {pnl:+.1f}%")
+                        logger.info(f"#{pos_id:>3}: {tokens:>6.1f} | P&L: {pnl:>+5.1f}%")
                     else:
-                        logger.info(f"#{pos_id}: {tokens:.1f} | N/A")
+                        logger.info(f"#{pos_id:>3}: {tokens:>6.1f} | N/A")
             else:
                 active_positions = [(pid, p) for pid, p in self.positions.items() if p['balance'] > 0]
                 for pos_id, pos in active_positions[:3]:
@@ -926,9 +926,9 @@ class GridBot:
                     if tokens > 0 and cost_weth > 0:
                         buy_price = cost_weth / tokens
                         pnl = ((price - buy_price) / buy_price * 100)
-                        logger.info(f"#{pos_id}: {tokens:.1f} | P&L: {pnl:+.1f}%")
+                        logger.info(f"#{pos_id:>3}: {tokens:>6.1f} | P&L: {pnl:>+5.1f}%")
                     else:
-                        logger.info(f"#{pos_id}: {tokens:.1f} | moonbag")
+                        logger.info(f"#{pos_id:>3}: {tokens:>6.1f} | moonbag")
             if len(active_positions) > 3:
                 logger.info(f"... and {len(active_positions) - 3} more")
             
@@ -968,9 +968,9 @@ class GridBot:
                             pnl = ((price - buy_price) / buy_price * 100)
                             price_diff = sell_target - price
                             price_pct = (price_diff / price * 100) if price > 0 else 0
-                            logger.info(f"   #{pos_id}: {tokens:.4f} tokens | Buy: {buy_price:.10f} | Sell@: {sell_target:.10f} | P&L: {pnl:+.2f}% (need +{price_pct:.1f}% more to sell)")
+                            logger.info(f"   #{pos_id:>3}: {tokens:>8.4f} tokens | Buy: {buy_price:>12.10f} | Sell@: {sell_target:>12.10f} | P&L: {pnl:>+6.2f}% (need +{price_pct:>5.1f}% more to sell)")
                         else:
-                            logger.info(f"   #{pos_id}: {tokens:.4f} tokens | Buy: N/A | P&L: N/A")
+                            logger.info(f"   #{pos_id:>3}: {tokens:>8.4f} tokens | Buy: N/A | P&L: N/A")
                 else:
                     # Display classic grid positions
                     for pos_id, pos in self.positions.items():
@@ -987,12 +987,12 @@ class GridBot:
                                 # Show how much more price needs to rise to hit sell target
                                 price_diff = sell_min - price
                                 price_pct = (price_diff / price * 100) if price > 0 else 0
-                                logger.info(f"   #{pos_id}: {tokens:.4f} tokens | Buy: {buy_price:.10f} | Sell@: {sell_min:.10f} | P&L: {pnl:+.2f}% (need +{price_pct:.1f}% more to sell)")
+                                logger.info(f"   #{pos_id:>3}: {tokens:>8.4f} tokens | Buy: {buy_price:>12.10f} | Sell@: {sell_min:>12.10f} | P&L: {pnl:>+6.2f}% (need +{price_pct:>5.1f}% more to sell)")
                             else:
                                 # Moonbag or dust position with unknown cost
                                 price_diff = sell_min - price
                                 price_pct = (price_diff / price * 100) if price > 0 else 0
-                                logger.info(f"   #{pos_id}: {tokens:.4f} tokens | Buy: moonbag | Sell@: {sell_min:.10f} | P&L: N/A (need +{price_pct:.1f}% more to sell)")
+                                logger.info(f"   #{pos_id:>3}: {tokens:>8.4f} tokens | Buy: moonbag | Sell@: {sell_min:>12.10f} | P&L: N/A (need +{price_pct:>5.1f}% more to sell)")
             
             # Show next buy trigger (lowest empty position buy range)
             if empty > 0:
