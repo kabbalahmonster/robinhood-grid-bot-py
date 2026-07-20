@@ -902,7 +902,12 @@ class GridBot:
             
             # Each position on its own line (max 3), no price shown
             if use_gridless:
-                active_positions = [(pid, p) for pid, p in gridless_positions.items()]
+                # Sort by buy price ascending for consistent display
+                from gridless import get_buy_price
+                active_positions = sorted(
+                    [(pid, p) for pid, p in gridless_positions.items()],
+                    key=lambda x: get_buy_price(x[1])
+                )
                 for pos_id, pos in active_positions[:3]:
                     tokens = pos.get('balance', 0) / 10**18
                     cost = pos.get('cost', 0)
@@ -944,9 +949,14 @@ class GridBot:
             if active > 0:
                 logger.info("🎯 Active Positions:")
                 if use_gridless:
-                    # Display gridless positions
+                    # Display gridless positions sorted by buy price ascending
+                    from gridless import get_buy_price
                     sell_threshold = getattr(self.config, 'gridless_sell_threshold', 5.0)
-                    for pos_id, pos in gridless_positions.items():
+                    sorted_positions = sorted(
+                        gridless_positions.items(),
+                        key=lambda x: get_buy_price(x[1])
+                    )
+                    for pos_id, pos in sorted_positions:
                         balance_raw = pos.get('balance', 0)
                         cost_raw = pos.get('cost', 0)
                         tokens = balance_raw / 10**18
