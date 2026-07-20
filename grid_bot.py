@@ -280,6 +280,34 @@ class GridBot:
             logger.error(f"Gridless buy quote failed: {quote.error}")
             return
         
+        # Validate execution price is still within buy threshold margin
+        execution_margin = getattr(self.config, 'gridless_buy_execution_margin', 2.0)  # Default 2%
+        if quote.buy_amount and quote.buy_amount > 0:
+            from gridless import load_positions, get_buy_price, calculate_pnl
+            gridless_positions = load_positions()
+            top = None
+            if gridless_positions:
+                top_id, top_pos, top_price = None, None, float('inf')
+                for pos_id, pos in gridless_positions.items():
+                    buy_price = get_buy_price(pos)
+                    if buy_price > 0 and buy_price < top_price:
+                        top_price, top_id, top_pos = buy_price, pos_id, pos
+                top = (top_id, top_pos) if top_id else None
+            
+            if top:
+                # Calculate what the P&L would be at the quoted price
+                tokens_at_quote = quote.buy_amount / 1e18
+                quote_buy_price = buy_amount_eth / tokens_at_quote if tokens_at_quote > 0 else 0
+                pnl_at_quote = calculate_pnl(top[1], quote_buy_price)
+                buy_threshold = getattr(self.config, 'gridless_buy_threshold', -10.0)
+                
+                # Allow buy if P&L is within margin of threshold
+                # e.g., if threshold is -10% and margin is 2%, allows -8% to -12%
+                if pnl_at_quote > buy_threshold + execution_margin:
+                    logger.info(f"⏸️ Buy aborted: Quote P&L ({pnl_at_quote:.1f}%) > threshold + margin ({buy_threshold}% + {execution_margin}%)")
+                    logger.info(f"   Price moved from trigger. Buy price: {quote_buy_price:.10f}, Top position buy: {get_buy_price(top[1]):.10f}")
+                    return
+        
         # Determine approval spender
         spender = quote.allowance_target or self.config.zero_x_proxy
         
