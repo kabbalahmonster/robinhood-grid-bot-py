@@ -137,9 +137,9 @@ class LiFiClient:
             params["fromAddress"] = taker_address
             params["toAddress"] = taker_address  # Same as fromAddress for single-chain swaps
         
-        # Add integrator for proper API key attribution and dashboard tracking
-        if getattr(self.config, 'li_fi_integrator', None):
-            params["integrator"] = self.config.li_fi_integrator
+        # Note: integrator parameter may cause issues - only add if explicitly needed
+        # if getattr(self.config, 'li_fi_integrator', None):
+        #     params["integrator"] = self.config.li_fi_integrator
         
         # Add anti-MEV jitter if enabled
         if apply_jitter_to_price and self.config.anti_mev_jitter:
