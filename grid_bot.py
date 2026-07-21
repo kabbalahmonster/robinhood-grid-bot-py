@@ -23,11 +23,16 @@ logger = logging.getLogger('grid_bot')
 class GridBot:
     def __init__(self):
         self.config = load_config()
+        
+        # Setup logging FIRST so we capture all initialization logs
+        self._setup_logging()
+        
         self.wallet = Wallet(self.config)
         
         # Use LI.FI or 0x based on config
         if getattr(self.config, 'use_li_fi', False):
             self.api_client = LiFiClient(self.config)
+            print(f"DEBUG: use_li_fi={self.config.use_li_fi}, api_key={self.config.li_fi_api_key[:20]}...")
             logger.info("Using LI.FI API for swaps")
         else:
             self.api_client = ZeroXClient(self.config)
@@ -48,9 +53,6 @@ class GridBot:
         # Cooldown tracking for gridless buys
         self.last_buy_time = 0
         self.gridless_buy_cooldown = getattr(self.config, 'gridless_buy_cooldown_seconds', 300)  # Default 5 min
-        
-        # Reconfigure logging based on config (must happen after config load)
-        self._setup_logging()
         
         logger.info(f"Grid Bot initialized")
         logger.info(f"Wallet: {self.wallet.address}")
