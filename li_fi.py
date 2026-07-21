@@ -153,6 +153,12 @@ class LiFiClient:
             
             self.logger.debug(f"Fetching LI.FI quote: {params}")
             self.logger.debug(f"LI.FI API URL: {url}")
+            # Debug: show headers (redact API key partially)
+            debug_headers = self.headers.copy()
+            if 'x-lifi-api-key' in debug_headers:
+                key = debug_headers['x-lifi-api-key']
+                debug_headers['x-lifi-api-key'] = key[:10] + '...' + key[-4:] if len(key) > 14 else '***'
+            self.logger.debug(f"LI.FI headers: {debug_headers}")
             
             response = requests.get(
                 url,
