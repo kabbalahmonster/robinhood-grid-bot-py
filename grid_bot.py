@@ -282,6 +282,10 @@ class GridBot:
             logger.error(f"Gridless buy quote failed: {quote.error}")
             return
         
+        # Load positions for execution margin check and leading edge detection
+        from gridless import load_positions as reload_positions
+        gridless_positions = reload_positions()
+        
         # Validate execution price is still within buy threshold margin
         # Skip for leading edge buys (buying into strength with single position)
         execution_margin_pct = getattr(self.config, 'gridless_buy_execution_margin', 50.0)  # Default 50%
@@ -289,8 +293,7 @@ class GridBot:
         is_leading_edge_buy = leading_edge_enabled and len(gridless_positions) == 1
         
         if quote.buy_amount and quote.buy_amount > 0 and not is_leading_edge_buy:
-            from gridless import load_positions, get_buy_price, calculate_pnl
-            gridless_positions = load_positions()
+            from gridless import get_buy_price, calculate_pnl
             top = None
             if gridless_positions:
                 top_id, top_pos, top_price = None, None, float('inf')
