@@ -283,8 +283,12 @@ class GridBot:
             return
         
         # Validate execution price is still within buy threshold margin
+        # Skip for leading edge buys (buying into strength with single position)
         execution_margin_pct = getattr(self.config, 'gridless_buy_execution_margin', 50.0)  # Default 50%
-        if quote.buy_amount and quote.buy_amount > 0:
+        leading_edge_enabled = getattr(self.config, 'gridless_leading_edge', False)
+        is_leading_edge_buy = leading_edge_enabled and len(gridless_positions) == 1
+        
+        if quote.buy_amount and quote.buy_amount > 0 and not is_leading_edge_buy:
             from gridless import load_positions, get_buy_price, calculate_pnl
             gridless_positions = load_positions()
             top = None
