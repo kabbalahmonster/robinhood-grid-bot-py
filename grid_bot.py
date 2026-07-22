@@ -263,9 +263,10 @@ class GridBot:
         logger.info(f"   Amount: {buy_amount_eth:.6f} WETH ({weth_balance:.6f} × {tradeable_pct*100:.0f}% / {available_slots} slots)")
         
         # Execute the buy via execute_buy_gridless
-        self._execute_buy_gridless(buy_amount_eth, buy_amount_wei, price)
+        is_leading_edge_buy = "Leading edge" in reason
+        self._execute_buy_gridless(buy_amount_eth, buy_amount_wei, price, is_leading_edge_buy)
     
-    def _execute_buy_gridless(self, buy_amount_eth, buy_amount_wei, price):
+    def _execute_buy_gridless(self, buy_amount_eth, buy_amount_wei, price, is_leading_edge_buy=False):
         """Execute a gridless buy order."""
         from gridless import add_position
         
@@ -282,17 +283,15 @@ class GridBot:
             logger.error(f"Gridless buy quote failed: {quote.error}")
             return
         
-        # Load positions for execution margin check and leading edge detection
+        # Load positions for execution margin check
         from gridless import load_positions as reload_positions
         gridless_positions = reload_positions()
         
         # Validate execution price is still within buy threshold margin
         # Skip for leading edge buys (buying into strength with single position)
         execution_margin_pct = getattr(self.config, 'gridless_buy_execution_margin', 50.0)  # Default 50%
-        leading_edge_enabled = getattr(self.config, 'gridless_leading_edge', False)
-        is_leading_edge_buy = leading_edge_enabled and len(gridless_positions) == 1
         
-        if quote.buy_amount and quote.buy_amount > 0 and not is_leading_edge_buy:
+        if quote.buy_amount and quote.buy_amount > 0:
             from gridless import get_buy_price, calculate_pnl
             top = None
             if gridless_positions:
