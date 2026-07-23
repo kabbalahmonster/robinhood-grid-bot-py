@@ -1031,7 +1031,8 @@ class GridBot:
             logger.info(f"{time_str} R#{self.round_count} | {self.config.token_symbol}")
             
             # Line 2 & 3: W/T/Pos and B/S/P stats
-            logger.info(f"W:{weth_bal:.3f} T:{token_bal:.0f} {active}/{self.config.max_active_positions}/{active+empty}")
+            balance_letter = "E" if getattr(self.config, 'use_eth_trading', False) else "W"
+            logger.info(f"{balance_letter}:{weth_bal:.3f} T:{token_bal:.0f} {active}/{self.config.max_active_positions}/{active+empty}")
             logger.info(f"B:{self.session_buys} S:{self.session_sells} P:{self.session_profit_weth:.6f}")
             
             # Separator matches 26 char width
@@ -1073,14 +1074,15 @@ class GridBot:
             logger.info("-" * 26)
         else:
             # Verbose round summary (original format)
+            balance_label = "ETH" if getattr(self.config, 'use_eth_trading', False) else "WETH"
             logger.info("=" * 70)
             logger.info(f"ROUND #{self.round_count} | {self.config.token_symbol} | Elapsed: {elapsed:.0f}s")
             logger.info("=" * 70)
-            logger.info(f"💰 WETH Balance: {weth_bal:.6f}")
+            logger.info(f"💰 {balance_label} Balance: {weth_bal:.6f}")
             logger.info(f"🪙 Token Balance: {token_bal:.6f} (in positions: {position_balance_total:.4f}, moonbag: {moonbag_balance:.4f})")
-            logger.info(f"📊 Price: 1 {self.config.token_symbol} = {price:.10f} WETH")
+            logger.info(f"📊 Price: 1 {self.config.token_symbol} = {price:.10f} {balance_label}")
             logger.info(f"📈 Positions: {active} active / {empty} empty (max active: {self.config.max_active_positions})")
-            logger.info(f"📊 Session: {self.session_buys} buys, {self.session_sells} sells, {self.session_profit_weth:.6f} WETH profit")
+            logger.info(f"📊 Session: {self.session_buys} buys, {self.session_sells} sells, {self.session_profit_weth:.6f} {balance_label} profit")
             
             # Show active positions with P&L and sell targets
             if active > 0:
