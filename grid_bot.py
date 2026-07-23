@@ -553,13 +553,13 @@ class GridBot:
             sell_tokens = tokens
             moonbag_tokens = 0
         
-        sold_cost_eth = cost_weth * (sell_tokens / tokens) if tokens > 0 else 0
+        sold_cost_eth = cost_eth * (sell_tokens / tokens) if tokens > 0 else 0
         expected_eth = sell_tokens * price
         profit_eth = expected_eth - sold_cost_eth
         
         logger.info(f"💰 Gridless sell position #{pos_id}:")
-        logger.info(f"   Position data: cost={cost} nano-{self.trade_token_name}, balance={balance} wei")
-        logger.info(f"   Calculated: cost={cost_weth:.6f} {self.trade_token_name}, tokens={tokens:.6f}, buy_price={buy_price:.10f}")
+        logger.info(f"   Position data: cost_wei={cost_wei}, balance={balance} wei")
+        logger.info(f"   Calculated: cost={cost_eth:.6f} {self.trade_token_name}, tokens={tokens:.6f}, buy_price={buy_price:.10f}")
         logger.info(f"   Selling: {sell_tokens:.6f} tokens")
         logger.info(f"   Buy price: {buy_price:.10f}, Current: {price:.10f}")
         logger.info(f"   Expected: {expected_eth:.6f} {self.trade_token_name}, Profit: {profit_eth:.6f} ({pnl:+.2f}%)")
