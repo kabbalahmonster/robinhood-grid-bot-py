@@ -19,7 +19,10 @@ from li_fi import LiFiClient
 from uniswap_api import UniswapAPIClient
 
 # Native ETH address for 0x API (used when trading with native ETH instead of WETH)
+# Native ETH address for 0x API
 ETH_ADDRESS = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
+# Native ETH address for Uniswap API (zero address)
+UNISWAP_ETH_ADDRESS = "0x0000000000000000000000000000000000000000"
 
 # Global logger - will be configured by GridBot
 logger = logging.getLogger('grid_bot')
@@ -64,7 +67,11 @@ class GridBot:
         
         # Trading token setup (WETH or native ETH)
         if getattr(self.config, 'use_eth_trading', False):
-            self.trade_token_address = ETH_ADDRESS
+            # Uniswap API uses different native ETH address format
+            if getattr(self.config, 'use_uniswap_api', False):
+                self.trade_token_address = UNISWAP_ETH_ADDRESS
+            else:
+                self.trade_token_address = ETH_ADDRESS
             self.trade_token_name = "ETH"
             logger.info("Trading mode: Native ETH")
         else:
