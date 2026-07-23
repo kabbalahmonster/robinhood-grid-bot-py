@@ -334,17 +334,26 @@ class UniswapAPIClient:
             url = f"{self.BASE_URL}/swap"
             
             # Build payload according to Uniswap API spec
-            # Try sending the FULL quote response (not just nested quote)
-            # The /swap endpoint might need requestId, routing, isTokenApprovalApplicable + quote
+            # Transform the quote to match expected schema
+            if isinstance(quote_data, dict) and 'quote' in quote_data:
+                # Create a copy and transform tradeType -> type
+                swap_quote = quote_data.copy()
+                nested = swap_quote.get('quote', {}).copy()
+                if 'tradeType' in nested:
+                    nested['type'] = nested.pop('tradeType')
+                swap_quote['quote'] = nested
+            else:
+                swap_quote = quote_data
+            
             payload = {
-                "quote": quote_data,
+                "quote": swap_quote,
             }
             # Debug: log what we're sending
-            if isinstance(quote_data, dict):
-                self.logger.debug(f"Sending full quote keys: {list(quote_data.keys())}")
-                if 'quote' in quote_data:
-                    nested = quote_data['quote']
-                    self.logger.debug(f"Nested quote has keys: {list(nested.keys()) if isinstance(nested, dict) else 'not a dict'}")
+            if isinstance(swap_quote, dict):
+                self.logger.debug(f"Sending full quote keys: {list(swap_quote.keys())}")
+                nested = swap_quote.get('quote', {})
+                if isinstance(nested, dict):
+                    self.logger.debug(f"Nested quote has keys: {list(nested.keys())}")
             
             self.logger.debug(f"Fetching Uniswap swap transaction")
             self.logger.debug(f"Swap payload quote keys: {list(quote_data.keys()) if isinstance(quote_data, dict) else 'not dict'}")
