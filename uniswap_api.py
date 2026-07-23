@@ -334,17 +334,18 @@ class UniswapAPIClient:
             url = f"{self.BASE_URL}/swap"
             
             # Build payload according to Uniswap API spec
-            # Try sending the quote data directly - the API might expect the full response object
-            # including requestId, routing, isTokenApprovalApplicable, and the nested quote
+            # The /swap endpoint expects the nested "quote" object from the /quote response
+            # which contains chainId, swapper, route, input, output, etc.
+            nested_quote = quote_data.get('quote', {}) if isinstance(quote_data, dict) else {}
             payload = {
-                "quote": quote_data,
+                "quote": nested_quote if nested_quote else quote_data,
                 "refreshGasPrice": True,
                 "simulateTransaction": True,
                 "safetyMode": "SAFE",
             }
-            # Debug: log the actual payload structure
+            # Debug: log what we're sending
             import json
-            self.logger.debug(f"Swap payload structure: {json.dumps({k: type(v).__name__ for k, v in payload.items()})}")
+            self.logger.debug(f"Sending nested quote keys: {list(nested_quote.keys()) if nested_quote else 'using full data'}")
             
             self.logger.debug(f"Fetching Uniswap swap transaction")
             self.logger.debug(f"Swap payload quote keys: {list(quote_data.keys()) if isinstance(quote_data, dict) else 'not dict'}")
