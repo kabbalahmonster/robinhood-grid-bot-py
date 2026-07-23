@@ -17,6 +17,9 @@ from wallet import Wallet
 from zero_x import ZeroXClient
 from li_fi import LiFiClient
 
+# Native ETH address for 0x API (used when trading with native ETH instead of WETH)
+ETH_ADDRESS = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
+
 # Global logger - will be configured by GridBot
 logger = logging.getLogger('grid_bot')
 
@@ -53,6 +56,16 @@ class GridBot:
         # Cooldown tracking for gridless buys
         self.last_buy_time = 0
         self.gridless_buy_cooldown = getattr(self.config, 'gridless_buy_cooldown_seconds', 300)  # Default 5 min
+        
+        # Trading token setup (WETH or native ETH)
+        if getattr(self.config, 'use_eth_trading', False):
+            self.trade_token_address = ETH_ADDRESS
+            self.trade_token_name = "ETH"
+            logger.info("Trading mode: Native ETH")
+        else:
+            self.trade_token_address = self.config.weth_address
+            self.trade_token_name = "WETH"
+            logger.info("Trading mode: WETH")
         
         logger.info(f"Grid Bot initialized")
         logger.info(f"Wallet: {self.wallet.address}")
@@ -123,15 +136,15 @@ class GridBot:
             json.dump(self.positions, f, indent=2)
     
     def get_token_price(self):
-        """Get current token price in WETH using the lighter /price endpoint."""
+        """Get current token price in ETH/WETH using the lighter /price endpoint."""
         # Use /price endpoint for price discovery (doesn't count against quote-to-trade metrics)
         # For LI.FI, we need to pass the wallet address
         if getattr(self.config, 'use_li_fi', False):
             # LI.FI requires fromAddress, so use get_quote instead
             result = self.api_client.get_quote(
-                sell_token=self.config.weth_address,
+                sell_token=self.trade_token_address,
                 buy_token=self.config.token_address,
-                sell_amount=10**15,  # 0.001 WETH
+                sell_amount=10**15,  # 0.001 ETH/WETH
                 taker_address=self.wallet.address,
                 apply_jitter_to_price=False,
             )
@@ -144,9 +157,9 @@ class GridBot:
         else:
             # 0x price endpoint doesn't require taker
             price = self.zero_x.get_price(
-                sell_token=self.config.weth_address,
+                sell_token=self.trade_token_address,
                 buy_token=self.config.token_address,
-                sell_amount=10**15,  # 0.001 WETH
+                sell_amount=10**15,  # 0.001 ETH/WETH
             )
             return price
     
@@ -156,10 +169,16 @@ class GridBot:
         if getattr(self.config, 'use_gridless', False):
             return self._check_buys_gridless(price)
         
-        # Get available WETH
-        weth_balance, _ = self.wallet.get_token_balance(self.config.weth_address)
-        if weth_balance < 0.001:
-            logger.warning(f"Low WETH balance: {weth_balance:.6f}")
+        # Get available ETH/WETH
+        if getattr(self.config, 'use_eth_trading', False):
+            trade_balance = self.wallet.get_eth_balance()
+            gas_reserve = getattr(self.config, 'eth_gas_reserve', 0.001)
+            trade_balance = max(0, trade_balance - gas_reserve)
+        else:
+            trade_balance, _ = self.wallet.get_token_balance(self.config.weth_address)
+        
+        if trade_balance < 0.001:
+            logger.warning(f"Low {self.trade_token_name} balance: {trade_balance:.6f}")
             return
         
         # Check max active positions limit
@@ -242,10 +261,16 @@ class GridBot:
             logger.debug(f"Gridless: No buy - {reason}")
             return
         
-        # Get available WETH
-        weth_balance, _ = self.wallet.get_token_balance(self.config.weth_address)
-        if weth_balance < 0.001:
-            logger.warning(f"Gridless: Low WETH balance: {weth_balance:.6f}")
+        # Get available ETH/WETH
+        if getattr(self.config, 'use_eth_trading', False):
+            eth_balance = self.wallet.get_eth_balance()
+            gas_reserve = getattr(self.config, 'eth_gas_reserve', 0.001)
+            trade_balance = max(0, eth_balance - gas_reserve)
+        else:
+            trade_balance, _ = self.wallet.get_token_balance(self.config.weth_address)
+        
+        if trade_balance < 0.001:
+            logger.warning(f"Gridless: Low {self.trade_token_name} balance: {trade_balance:.6f}")
             return
         
         # Calculate buy amount
@@ -256,11 +281,11 @@ class GridBot:
             return
         
         tradeable_pct = getattr(self.config, 'tradeable_balance_percent', 90.0) / 100.0
-        buy_amount_eth = (weth_balance * tradeable_pct) / available_slots
+        buy_amount_eth = (trade_balance * tradeable_pct) / available_slots
         buy_amount_wei = int(buy_amount_eth * 10**18)
         
         logger.info(f"🎯 Gridless buy triggered: {reason}")
-        logger.info(f"   Amount: {buy_amount_eth:.6f} WETH ({weth_balance:.6f} × {tradeable_pct*100:.0f}% / {available_slots} slots)")
+        logger.info(f"   Amount: {buy_amount_eth:.6f} {self.trade_token_name} ({trade_balance:.6f} × {tradeable_pct*100:.0f}% / {available_slots} slots)")
         
         # Execute the buy via execute_buy_gridless
         is_leading_edge_buy = "Leading edge" in reason
@@ -272,7 +297,7 @@ class GridBot:
         
         # Get quote
         quote = self.api_client.build_swap_transaction(
-            sell_token=self.config.weth_address,
+            sell_token=self.trade_token_address,
             buy_token=self.config.token_address,
             sell_amount=buy_amount_wei,
             taker_address=self.wallet.address,
@@ -327,24 +352,27 @@ class GridBot:
         
         # Check/approve WETH
         allowance = self.wallet.check_allowance(self.config.weth_address, spender, use_permit2=False)
-        if allowance < buy_amount_wei:
-            logger.info(f"Approving WETH to {spender[:20]}...")
-            result = self.wallet.approve_token(self.config.weth_address, spender, 2**256 - 1)
-            if not result.success:
-                logger.error(f"Approval failed: {result.error}")
-                return
-            # Refresh quote after approval for LI.FI
-            if getattr(self.config, 'use_li_fi', False):
-                quote = self.api_client.refresh_quote(
-                    sell_token=self.config.weth_address,
-                    buy_token=self.config.token_address,
-                    sell_amount=buy_amount_wei,
-                    taker_address=self.wallet.address,
-                    slippage_percentage=0.02,
-                )
-                if not quote.success:
-                    logger.error(f"Refreshed quote failed: {quote.error}")
+        # Check/approve WETH (skip for native ETH - it doesn't need approval)
+        if not getattr(self.config, 'use_eth_trading', False):
+            allowance = self.wallet.check_allowance(self.config.weth_address, spender, use_permit2=False)
+            if allowance < buy_amount_wei:
+                logger.info(f"Approving WETH to {spender[:20]}...")
+                result = self.wallet.approve_token(self.config.weth_address, spender, 2**256 - 1)
+                if not result.success:
+                    logger.error(f"Approval failed: {result.error}")
                     return
+                # Refresh quote after approval for LI.FI
+                if getattr(self.config, 'use_li_fi', False):
+                    quote = self.api_client.refresh_quote(
+                        sell_token=self.config.weth_address,
+                        buy_token=self.config.token_address,
+                        sell_amount=buy_amount_wei,
+                        taker_address=self.wallet.address,
+                        slippage_percentage=0.02,
+                    )
+                    if not quote.success:
+                        logger.error(f"Refreshed quote failed: {quote.error}")
+                        return
         
         # Execute swap
         gas_limit = int(quote.gas * 1.2) if quote.gas else 350000
@@ -377,8 +405,8 @@ class GridBot:
             
             logger.info(f"✅ Gridless buy successful! Position #{pos_id}")
             logger.info(f"   Tokens: {tokens:.6f} {self.config.token_symbol}")
-            logger.info(f"   Cost: {buy_amount_eth:.6f} WETH")
-            logger.info(f"   Buy price: {buy_price:.10f} WETH/token")
+            logger.info(f"   Cost: {buy_amount_eth:.6f} {self.trade_token_name}")
+            logger.info(f"   Buy price: {buy_price:.10f} {self.trade_token_name}/token")
             logger.info(f"   Tx: {result.tx_hash}")
         else:
             logger.error(f"❌ Gridless buy failed: {result.error}")
@@ -430,7 +458,7 @@ class GridBot:
             
         quote = self.api_client.build_swap_transaction(
             sell_token=self.config.token_address,
-            buy_token=self.config.weth_address,
+            buy_token=self.trade_token_address,
             sell_amount=balance,
             taker_address=self.wallet.address,
             slippage_percentage=0.02,
@@ -484,16 +512,16 @@ class GridBot:
             sell_tokens = tokens
             moonbag_tokens = 0
         
-        sold_cost_weth = cost_weth * (sell_tokens / tokens) if tokens > 0 else 0
-        expected_weth = sell_tokens * price
-        profit_weth = expected_weth - sold_cost_weth
+        sold_cost_eth = cost_weth * (sell_tokens / tokens) if tokens > 0 else 0
+        expected_eth = sell_tokens * price
+        profit_eth = expected_eth - sold_cost_eth
         
         logger.info(f"💰 Gridless sell position #{pos_id}:")
-        logger.info(f"   Position data: cost={cost} nano-WETH, balance={balance} wei")
-        logger.info(f"   Calculated: cost_weth={cost_weth:.6f}, tokens={tokens:.6f}, buy_price={buy_price:.10f}")
+        logger.info(f"   Position data: cost={cost} nano-{self.trade_token_name}, balance={balance} wei")
+        logger.info(f"   Calculated: cost={cost_weth:.6f} {self.trade_token_name}, tokens={tokens:.6f}, buy_price={buy_price:.10f}")
         logger.info(f"   Selling: {sell_tokens:.6f} tokens")
         logger.info(f"   Buy price: {buy_price:.10f}, Current: {price:.10f}")
-        logger.info(f"   Expected: {expected_weth:.6f} WETH, Profit: {profit_weth:.6f} ({pnl:+.2f}%)")
+        logger.info(f"   Expected: {expected_eth:.6f} {self.trade_token_name}, Profit: {profit_eth:.6f} ({pnl:+.2f}%)")
         
         # Use pre-fetched quote if available (for moonbag, need to re-quote with different amount)
         if pre_fetched_quote and moonbag_pct == 0 and sell_amount == balance:
@@ -502,7 +530,7 @@ class GridBot:
             # Get fresh quote (for moonbag or if no pre-fetched quote)
             quote = self.api_client.build_swap_transaction(
                 sell_token=self.config.token_address,
-                buy_token=self.config.weth_address,
+                buy_token=self.trade_token_address,
                 sell_amount=sell_amount,
                 taker_address=self.wallet.address,
                 slippage_percentage=0.02,
@@ -514,8 +542,8 @@ class GridBot:
         
         # Validate minimum profit
         min_profit = getattr(self.config, 'min_profit_percent', 1.5)
-        min_profit_eth = sold_cost_weth * (min_profit / 100)
-        min_return_eth = sold_cost_weth + min_profit_eth
+        min_profit_eth = sold_cost_eth * (min_profit / 100)
+        min_return_eth = sold_cost_eth + min_profit_eth
         quote_return_eth = quote.buy_amount / 10**18 if quote.buy_amount else 0
         
         # Skip min_profit check for stoploss
@@ -539,7 +567,7 @@ class GridBot:
             if getattr(self.config, 'use_li_fi', False):
                 quote = self.api_client.refresh_quote(
                     sell_token=self.config.token_address,
-                    buy_token=self.config.weth_address,
+                    buy_token=self.trade_token_address,
                     sell_amount=sell_amount,
                     taker_address=self.wallet.address,
                     slippage_percentage=0.02,
@@ -565,8 +593,8 @@ class GridBot:
         })
         
         if result.success:
-            weth_received = quote.buy_amount / 10**18 if quote.buy_amount else 0
-            actual_profit = weth_received - sold_cost_weth
+            eth_received = quote.buy_amount / 10**18 if quote.buy_amount else 0
+            actual_profit = eth_received - sold_cost_eth
             
             self.session_sells += 1
             self.session_profit_weth += actual_profit
@@ -577,8 +605,8 @@ class GridBot:
             if moonbag_tokens > 0:
                 logger.info(f"   Moonbag: {moonbag_tokens/1e18:.4f} tokens to wallet")
             
-            profit_pct = (actual_profit / sold_cost_weth * 100) if sold_cost_weth > 0 else 0
-            logger.info(f"✅ Gridless sell successful! Profit: {actual_profit:.6f} WETH ({profit_pct:+.2f}%)")
+            profit_pct = (actual_profit / sold_cost_eth * 100) if sold_cost_eth > 0 else 0
+            logger.info(f"✅ Gridless sell successful! Profit: {actual_profit:.6f} {self.trade_token_name} ({profit_pct:+.2f}%)")
             
             # Reset buy cooldown so we can buy again immediately after selling
             self.last_buy_time = 0
@@ -588,7 +616,7 @@ class GridBot:
             bank_pct = getattr(self.config, 'bank_percentage', 0)
             if bank_pct > 0 and actual_profit > 0:
                 bank_amount = actual_profit * bank_pct / 100
-                logger.info(f"🏦 Banking {bank_pct}% of profit = {bank_amount:.6f} WETH → USDG")
+                logger.info(f"🏦 Banking {bank_pct}% of profit = {bank_amount:.6f} {self.trade_token_name} → USDG")
                 self.bank_profit(bank_amount)
             
             logger.info(f"   Tx: {result.tx_hash}")
@@ -599,8 +627,14 @@ class GridBot:
         """Execute a buy order."""
         pos = self.positions[pos_id]
         
-        # Calculate buy amount (divide available WETH by available slots up to max_active_positions)
-        weth_balance, _ = self.wallet.get_token_balance(self.config.weth_address)
+        # Calculate buy amount (divide available ETH/WETH by available slots up to max_active_positions)
+        if getattr(self.config, 'use_eth_trading', False):
+            eth_balance = self.wallet.get_eth_balance()
+            gas_reserve = getattr(self.config, 'eth_gas_reserve', 0.001)
+            trade_balance = max(0, eth_balance - gas_reserve)
+        else:
+            trade_balance, _ = self.wallet.get_token_balance(self.config.weth_address)
+        
         active_positions = sum(1 for p in self.positions.values() if p['balance'] > 0)
         available_slots = self.config.max_active_positions - active_positions
         
@@ -608,17 +642,17 @@ class GridBot:
             logger.debug(f"Max active positions reached ({active_positions}/{self.config.max_active_positions})")
             return
         
-        # Use configured % of available WETH divided by available slots
+        # Use configured % of available balance divided by available slots
         tradeable_pct = getattr(self.config, 'tradeable_balance_percent', 90.0) / 100.0
-        buy_amount_eth = (weth_balance * tradeable_pct) / available_slots
+        buy_amount_eth = (trade_balance * tradeable_pct) / available_slots
         buy_amount_wei = int(buy_amount_eth * 10**18)
         
-        logger.info(f"Buying position {pos_id}: {buy_amount_eth:.6f} WETH ({weth_balance:.6f} WETH × {tradeable_pct*100:.0f}% / {available_slots} slots)")
+        logger.info(f"Buying position {pos_id}: {buy_amount_eth:.6f} {self.trade_token_name} ({trade_balance:.6f} {self.trade_token_name} × {tradeable_pct*100:.0f}% / {available_slots} slots)")
         
         # Get quote FIRST to know the approval spender
         logger.info("Getting quote...")
         quote = self.api_client.build_swap_transaction(
-            sell_token=self.config.weth_address,
+            sell_token=self.trade_token_address,
             buy_token=self.config.token_address,
             sell_amount=buy_amount_wei,
             taker_address=self.wallet.address,
@@ -632,37 +666,38 @@ class GridBot:
         # Determine approval spender - use quote's allowance_target if available (LI.FI)
         spender = quote.allowance_target or self.config.zero_x_proxy
         
-        # Check ERC20 approval
-        allowance = self.wallet.check_allowance(
-            self.config.weth_address,
-            spender,
-            use_permit2=False
-        )
-        logger.info(f"WETH allowance to {spender[:20]}...: {allowance}")
-        if allowance < buy_amount_wei:
-            logger.info(f"Approving WETH to {spender[:20]}...")
-            result = self.wallet.approve_token(
+        # Check ERC20 approval (skip for native ETH - it doesn't need approval)
+        if not getattr(self.config, 'use_eth_trading', False):
+            allowance = self.wallet.check_allowance(
                 self.config.weth_address,
                 spender,
-                2**256 - 1
+                use_permit2=False
             )
-            if not result.success:
-                logger.error(f"Approval failed: {result.error}")
-                return
-            
-            # IMPORTANT: For LI.FI, refresh quote after approval
-            if getattr(self.config, 'use_li_fi', False):
-                logger.info("Refreshing LI.FI quote after approval...")
-                quote = self.api_client.refresh_quote(
-                    sell_token=self.config.weth_address,
-                    buy_token=self.config.token_address,
-                    sell_amount=buy_amount_wei,
-                    taker_address=self.wallet.address,
-                    slippage_percentage=0.02,
+            logger.info(f"WETH allowance to {spender[:20]}...: {allowance}")
+            if allowance < buy_amount_wei:
+                logger.info(f"Approving WETH to {spender[:20]}...")
+                result = self.wallet.approve_token(
+                    self.config.weth_address,
+                    spender,
+                    2**256 - 1
                 )
-                if not quote.success:
-                    logger.error(f"Refreshed quote failed: {quote.error}")
+                if not result.success:
+                    logger.error(f"Approval failed: {result.error}")
                     return
+                
+                # IMPORTANT: For LI.FI, refresh quote after approval
+                if getattr(self.config, 'use_li_fi', False):
+                    logger.info("Refreshing LI.FI quote after approval...")
+                    quote = self.api_client.refresh_quote(
+                        sell_token=self.config.weth_address,
+                        buy_token=self.config.token_address,
+                        sell_amount=buy_amount_wei,
+                        taker_address=self.wallet.address,
+                        slippage_percentage=0.02,
+                    )
+                    if not quote.success:
+                        logger.error(f"Refreshed quote failed: {quote.error}")
+                        return
         
         if not quote.success:
             logger.error(f"Quote failed: {quote.error}")
@@ -707,8 +742,8 @@ class GridBot:
             logger.info(f"✅ Buy successful!")
             logger.info(f"   Position: #{pos_id}")
             logger.info(f"   Tokens: {tokens:.6f} {self.config.token_symbol}")
-            logger.info(f"   Cost: {buy_amount_eth:.6f} WETH")
-            logger.info(f"   Buy price: {buy_price:.10f} WETH per token")
+            logger.info(f"   Cost: {buy_amount_eth:.6f} {self.trade_token_name}")
+            logger.info(f"   Buy price: {buy_price:.10f} {self.trade_token_name} per token")
             logger.info(f"   Tx: {result.tx_hash}")
         else:
             logger.error(f"❌ Buy failed: {result.error}")
@@ -724,9 +759,9 @@ class GridBot:
             logger.warning(f"Skipping sell for position {pos_id}: balance={total_balance}, cost={pos['cost']}")
             return
         
-        # Cost is WETH spent (in nano-WETH)
-        cost_weth = pos['cost'] / 10**9
-        buy_price = cost_weth / total_tokens if total_tokens > 0 else 0
+        # Cost is ETH/WETH spent (in nano-ETH/WETH)
+        cost_eth = pos['cost'] / 10**9
+        buy_price = cost_eth / total_tokens if total_tokens > 0 else 0
         
         # Calculate profit
         if buy_price > 0:
@@ -746,25 +781,25 @@ class GridBot:
             sell_tokens = total_tokens
             moonbag_tokens = 0
         
-        # Calculate expected WETH return (proportional to sold amount)
-        expected_weth = sell_tokens * price
+        # Calculate expected ETH/WETH return (proportional to sold amount)
+        expected_eth = sell_tokens * price
         # Cost basis for sold portion only
-        sold_cost_weth = cost_weth * (sell_tokens / total_tokens) if total_tokens > 0 else 0
-        profit_weth = expected_weth - sold_cost_weth
+        sold_cost_eth = cost_eth * (sell_tokens / total_tokens) if total_tokens > 0 else 0
+        profit_eth = expected_eth - sold_cost_eth
         
         logger.info(f"💰 Selling position {pos_id}:")
         logger.info(f"   Total tokens: {total_tokens:.6f}")
         logger.info(f"   Selling: {sell_tokens:.6f}")
-        logger.info(f"   Buy price: {buy_price:.10f} WETH")
-        logger.info(f"   Current: {price:.10f} WETH")
-        logger.info(f"   Cost basis (sold): {sold_cost_weth:.6f} WETH")
-        logger.info(f"   Expected return: {expected_weth:.6f} WETH")
-        logger.info(f"   Profit: {profit_weth:.6f} WETH ({profit_percent:+.2f}%)")
+        logger.info(f"   Buy price: {buy_price:.10f} {self.trade_token_name}")
+        logger.info(f"   Current: {price:.10f} {self.trade_token_name}")
+        logger.info(f"   Cost basis (sold): {sold_cost_eth:.6f} {self.trade_token_name}")
+        logger.info(f"   Expected return: {expected_eth:.6f} {self.trade_token_name}")
+        logger.info(f"   Profit: {profit_eth:.6f} {self.trade_token_name} ({profit_percent:+.2f}%)")
         
         # Get quote
         quote = self.zero_x.build_swap_transaction(
             sell_token=self.config.token_address,
-            buy_token=self.config.weth_address,
+            buy_token=self.trade_token_address,
             sell_amount=sell_amount,
             taker_address=self.wallet.address,
             slippage_percentage=0.02,
@@ -801,7 +836,7 @@ class GridBot:
                 logger.info("Refreshing LI.FI quote after approval...")
                 quote = self.api_client.refresh_quote(
                     sell_token=self.config.token_address,
-                    buy_token=self.config.weth_address,
+                    buy_token=self.trade_token_address,
                     sell_amount=sell_amount,
                     taker_address=self.wallet.address,
                     slippage_percentage=0.02,
@@ -813,18 +848,18 @@ class GridBot:
         # Validate quote meets minimum profit requirement (NEVER sell at loss)
         # Minimum return = cost + min_profit% (gas excluded for now)
         min_profit_percent = getattr(self.config, 'min_profit_percent', 2.0)
-        min_profit_eth = sold_cost_weth * (min_profit_percent / 100)
-        min_return_eth = sold_cost_weth + min_profit_eth
+        min_profit_eth = sold_cost_eth * (min_profit_percent / 100)
+        min_return_eth = sold_cost_eth + min_profit_eth
         
         # quote.buy_amount is in wei
         quote_return_eth = quote.buy_amount / 10**18 if quote.buy_amount else 0
         
         if quote_return_eth < min_return_eth:
-            logger.warning(f"❌ Sell ABORTED: Quote return ({quote_return_eth:.6f} WETH) < minimum ({min_return_eth:.6f} WETH)")
-            logger.warning(f"   Cost: {sold_cost_weth:.6f}, Min profit: {min_profit_eth:.6f}")
+            logger.warning(f"❌ Sell ABORTED: Quote return ({quote_return_eth:.6f} {self.trade_token_name}) < minimum ({min_return_eth:.6f} {self.trade_token_name})")
+            logger.warning(f"   Cost: {sold_cost_eth:.6f}, Min profit: {min_profit_eth:.6f}")
             return  # Abort - never sell at loss
         
-        logger.info(f"✅ Quote validated: {quote_return_eth:.6f} WETH >= {min_return_eth:.6f} WETH minimum")
+        logger.info(f"✅ Quote validated: {quote_return_eth:.6f} {self.trade_token_name} >= {min_return_eth:.6f} {self.trade_token_name} minimum")
         
         # Execute swap with checksummed addresses
         gas_limit = int(quote.gas * 1.5) if quote.gas else 300000
@@ -842,13 +877,13 @@ class GridBot:
         })
         
         if result.success:
-            # Get actual WETH received from transaction
-            weth_received = quote.buy_amount / 10**18 if quote.buy_amount else 0
-            actual_profit_weth = weth_received - sold_cost_weth
+            # Get actual ETH/WETH received from transaction
+            eth_received = quote.buy_amount / 10**18 if quote.buy_amount else 0
+            actual_profit_eth = eth_received - sold_cost_eth
             
             # Track session stats
             self.session_sells += 1
-            self.session_profit_weth += actual_profit_weth
+            self.session_profit_weth += actual_profit_eth
             
             # Position is always cleared to 0 after sell
             # Moonbag tokens go to wallet balance (not tracked in position)
@@ -860,35 +895,35 @@ class GridBot:
                 logger.info(f"   Moonbag: {moonbag_tokens / 10**18:.4f} tokens added to wallet balance")
             
             logger.info(f"✅ Sell successful!")
-            logger.info(f"   Actual return: {weth_received:.6f} WETH")
-            logger.info(f"   Profit: {actual_profit_weth:.6f} WETH ({(actual_profit_weth/sold_cost_weth*100) if sold_cost_weth > 0 else 0:+.2f}%)")
+            logger.info(f"   Actual return: {eth_received:.6f} {self.trade_token_name}")
+            logger.info(f"   Profit: {actual_profit_eth:.6f} {self.trade_token_name} ({(actual_profit_eth/sold_cost_eth*100) if sold_cost_eth > 0 else 0:+.2f}%)")
             
             # Banking: Swap % of profit to USDG
             bank_pct = getattr(self.config, 'bank_percentage', 0)
-            if bank_pct > 0 and actual_profit_weth > 0:
-                bank_amount = actual_profit_weth * bank_pct / 100
-                logger.info(f"🏦 Banking: Swapping {bank_pct}% of profit = {bank_amount:.6f} WETH → USDG")
+            if bank_pct > 0 and actual_profit_eth > 0:
+                bank_amount = actual_profit_eth * bank_pct / 100
+                logger.info(f"🏦 Banking: Swapping {bank_pct}% of profit = {bank_amount:.6f} {self.trade_token_name} → USDG")
                 self.bank_profit(bank_amount)
             
             logger.info(f"   Tx: {result.tx_hash}")
         else:
             logger.error(f"❌ Sell failed: {result.error}")
     
-    def bank_profit(self, weth_amount):
-        """Swap WETH profit to USDG for banking."""
-        if weth_amount <= 0:
+    def bank_profit(self, eth_amount):
+        """Swap ETH/WETH profit to USDG for banking."""
+        if eth_amount <= 0:
             return
         
         # Convert to wei
-        weth_wei = int(weth_amount * 10**18)
+        eth_wei = int(eth_amount * 10**18)
         
-        logger.info(f"🏦 Getting quote for banking {weth_amount:.6f} WETH → USDG...")
+        logger.info(f"🏦 Getting quote for banking {eth_amount:.6f} {self.trade_token_name} → USDG...")
         
-        # Get quote for WETH -> USDG
+        # Get quote for ETH/WETH -> USDG
         quote = self.zero_x.build_swap_transaction(
-            sell_token=self.config.weth_address,
+            sell_token=self.trade_token_address,
             buy_token=self.config.usdg_address,
-            sell_amount=weth_wei,
+            sell_amount=eth_wei,
             taker_address=self.wallet.address,
             slippage_percentage=0.01,  # 1% slippage for stable swaps
         )
@@ -905,24 +940,25 @@ class GridBot:
             logger.info(f"🏦 Banking skipped: {expected_usdg:.2f} USDG below minimum {bank_min_usdg} USDG")
             return
         
-        logger.info(f"🏦 Banking {weth_amount:.6f} WETH → ~{expected_usdg:.2f} USDG...")
+        logger.info(f"🏦 Banking {eth_amount:.6f} {self.trade_token_name} → ~{expected_usdg:.2f} USDG...")
         
-        # Check/approve WETH for swapping
-        weth_allowance = self.wallet.check_allowance(
-            self.config.weth_address,
-            self.config.zero_x_proxy,
-            use_permit2=False
-        )
-        if weth_allowance < weth_wei:
-            logger.info(f"Approving WETH to AllowanceHolder for banking...")
-            result = self.wallet.approve_token(
+        # Check/approve WETH for swapping (skip for native ETH)
+        if not getattr(self.config, 'use_eth_trading', False):
+            weth_allowance = self.wallet.check_allowance(
                 self.config.weth_address,
                 self.config.zero_x_proxy,
-                2**256 - 1
+                use_permit2=False
             )
-            if not result.success:
-                logger.error(f"WETH approval for banking failed: {result.error}")
-                return
+            if weth_allowance < eth_wei:
+                logger.info(f"Approving WETH to AllowanceHolder for banking...")
+                result = self.wallet.approve_token(
+                    self.config.weth_address,
+                    self.config.zero_x_proxy,
+                    2**256 - 1
+                )
+                if not result.success:
+                    logger.error(f"WETH approval for banking failed: {result.error}")
+                    return
         
         # Execute banking swap
         gas_limit = int(quote.gas * 1.5) if quote.gas else 300000
@@ -951,7 +987,11 @@ class GridBot:
         elapsed = time.time() - self.start_time
         
         # Get balances
-        weth_bal, weth_raw = self.wallet.get_token_balance(self.config.weth_address)
+        if getattr(self.config, 'use_eth_trading', False):
+            eth_bal = self.wallet.get_eth_balance()
+            weth_bal = eth_bal  # Use ETH balance for display
+        else:
+            weth_bal, weth_raw = self.wallet.get_token_balance(self.config.weth_address)
         token_bal, token_raw = self.wallet.get_token_balance(self.config.token_address)
         
         # Check if gridless mode is enabled
