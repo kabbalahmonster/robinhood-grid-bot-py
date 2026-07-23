@@ -375,10 +375,14 @@ class GridBot:
                         return
         
         # Execute swap with configurable gas multipliers
+        # Use API's gas price estimate if available (more accurate than network average)
         gas_limit_mult = getattr(self.config, 'gas_limit_multiplier', 1.05)
         gas_price_mult = getattr(self.config, 'gas_price_multiplier', 1.05)
         gas_limit = int(quote.gas * gas_limit_mult) if quote.gas else 350000
-        gas_price = int(self.wallet.w3.eth.gas_price * gas_price_mult)
+        if quote.gas_price and quote.gas_price > 0:
+            gas_price = int(quote.gas_price * gas_price_mult)
+        else:
+            gas_price = int(self.wallet.w3.eth.gas_price * gas_price_mult)
         
         from web3 import Web3
         tx_params = {
@@ -579,10 +583,14 @@ class GridBot:
                     return
         
         # Execute swap with configurable gas multipliers
+        # Use API's gas price estimate if available (more accurate than network average)
         gas_limit_mult = getattr(self.config, 'gas_limit_multiplier', 1.05)
         gas_price_mult = getattr(self.config, 'gas_price_multiplier', 1.05)
         gas_limit = int(quote.gas * gas_limit_mult) if quote.gas else 300000
-        gas_price = int(self.wallet.w3.eth.gas_price * gas_price_mult)
+        if quote.gas_price and quote.gas_price > 0:
+            gas_price = int(quote.gas_price * gas_price_mult)
+        else:
+            gas_price = int(self.wallet.w3.eth.gas_price * gas_price_mult)
         
         from web3 import Web3
         result = self.wallet._send_transaction({
@@ -708,10 +716,14 @@ class GridBot:
             return
         
         # Execute swap with checksummed addresses and configurable gas multipliers
+        # Use API's gas price estimate if available (more accurate than network average)
         gas_limit_mult = getattr(self.config, 'gas_limit_multiplier', 1.05)
         gas_price_mult = getattr(self.config, 'gas_price_multiplier', 1.05)
         gas_limit = int(quote.gas * gas_limit_mult) if quote.gas else 350000
-        gas_price = int(self.wallet.w3.eth.gas_price * gas_price_mult)
+        if quote.gas_price and quote.gas_price > 0:
+            gas_price = int(quote.gas_price * gas_price_mult)
+        else:
+            gas_price = int(self.wallet.w3.eth.gas_price * gas_price_mult)
         
         from web3 import Web3
         tx_params = {
@@ -867,10 +879,14 @@ class GridBot:
         logger.info(f"✅ Quote validated: {quote_return_eth:.6f} {self.trade_token_name} >= {min_return_eth:.6f} {self.trade_token_name} minimum")
         
         # Execute swap with checksummed addresses and configurable gas multipliers
+        # Use API's gas price estimate if available (more accurate than network average)
         gas_limit_mult = getattr(self.config, 'gas_limit_multiplier', 1.05)
         gas_price_mult = getattr(self.config, 'gas_price_multiplier', 1.05)
         gas_limit = int(quote.gas * gas_limit_mult) if quote.gas else 300000
-        gas_price = int(self.wallet.w3.eth.gas_price * gas_price_mult)
+        if quote.gas_price and quote.gas_price > 0:
+            gas_price = int(quote.gas_price * gas_price_mult)
+        else:
+            gas_price = int(self.wallet.w3.eth.gas_price * gas_price_mult)
         
         result = self.wallet._send_transaction({
             "from": Web3.to_checksum_address(self.wallet.address),
@@ -968,10 +984,14 @@ class GridBot:
                     return
         
         # Execute banking swap with configurable gas multipliers
+        # Use API's gas price estimate if available (more accurate than network average)
         gas_limit_mult = getattr(self.config, 'gas_limit_multiplier', 1.05)
         gas_price_mult = getattr(self.config, 'gas_price_multiplier', 1.05)
         gas_limit = int(quote.gas * gas_limit_mult) if quote.gas else 300000
-        gas_price = int(self.wallet.w3.eth.gas_price * gas_price_mult)
+        if quote.gas_price and quote.gas_price > 0:
+            gas_price = int(quote.gas_price * gas_price_mult)
+        else:
+            gas_price = int(self.wallet.w3.eth.gas_price * gas_price_mult)
         
         result = self.wallet._send_transaction({
             "from": Web3.to_checksum_address(self.wallet.address),
