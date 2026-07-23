@@ -332,13 +332,13 @@ class UniswapAPIClient:
         try:
             url = f"{self.BASE_URL}/swap"
             
-            # Build payload with quote and options
+            # Build payload according to Uniswap API spec
+            # Send the complete quote object unchanged
             payload = {
-                "x-permit2-disabled": self.permit2_disabled,
-                "x-universal-router-version": "2.1.1",
-                "routing": quote_data.get("routing", "CLASSIC"),
-                "isTokenApprovalApplicable": quote_data.get("isTokenApprovalApplicable", True),
-                "quote": quote_data.get("quote", {}),
+                "quote": quote_data,
+                "refreshGasPrice": True,
+                "simulateTransaction": True,
+                "safetyMode": "SAFE",
             }
             
             self.logger.debug(f"Fetching Uniswap swap transaction")
@@ -363,25 +363,37 @@ class UniswapAPIClient:
             
             data = response.json()
             
-            # Extract transaction data
-            tx_data = data.get("tx", {})
+            # Extract transaction data from "swap" field (not "tx")
+            swap_data = data.get("swap", {})
             
             # Get quote data for amounts
             quote = data.get("quote", {})
             buy_amount = int(quote.get("output", {}).get("amount", 0)) if quote.get("output") else 0
             sell_amount = int(quote.get("input", {}).get("amount", 0)) if quote.get("input") else 0
             
+            # Parse values that may be strings
+            def parse_int(value):
+                if value is None:
+                    return 0
+                if isinstance(value, int):
+                    return value
+                if isinstance(value, str):
+                    if value.startswith("0x"):
+                        return int(value, 16)
+                    return int(value, 10)
+                return 0
+            
             return QuoteResult(
                 success=True,
                 price=buy_amount / sell_amount if sell_amount > 0 else 0,
                 buy_amount=buy_amount,
                 sell_amount=sell_amount,
-                allowance_target=tx_data.get("to"),
-                data=tx_data.get("data"),
-                to=tx_data.get("to"),
-                value=int(tx_data.get("value", 0)) if tx_data.get("value") else 0,
-                gas=int(tx_data.get("gasLimit", 300000)),
-                gas_price=int(tx_data.get("gasPrice")) if tx_data.get("gasPrice") else None,
+                allowance_target=swap_data.get("to"),
+                data=swap_data.get("data"),
+                to=swap_data.get("to"),
+                value=parse_int(swap_data.get("value")),
+                gas=parse_int(swap_data.get("gasLimit")) or 300000,
+                gas_price=parse_int(swap_data.get("gasPrice")) or None,
                 raw_response=data,
             )
         
