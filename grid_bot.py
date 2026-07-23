@@ -420,15 +420,13 @@ class GridBot:
         if result.success:
             # Record position in gridless format
             tokens_received = quote.buy_amount if quote.buy_amount else 0
-            # Use the actual sell amount from the quote to avoid float precision issues
-            # quote.sell_amount is in wei, convert to nano-WETH (10^9)
-            sell_amount_wei = quote.sell_amount if quote.sell_amount else buy_amount_wei
-            cost_nano = sell_amount_wei // 10**9
+            # Use the actual sell amount from the quote in wei for precision
+            cost_wei = quote.sell_amount if quote.sell_amount else buy_amount_wei
             
-            logger.debug(f"Recording position: cost_nano={cost_nano}, tokens_received={tokens_received}")
+            logger.debug(f"Recording position: cost_wei={cost_wei}, tokens_received={tokens_received}")
             logger.debug(f"Quote buy_amount: {quote.buy_amount}, sell_amount: {quote.sell_amount}")
             
-            pos_id = add_position(cost_nano, tokens_received)
+            pos_id = add_position(cost_wei, tokens_received)
             
             tokens = tokens_received / 10**18
             buy_price = buy_amount_eth / tokens if tokens > 0 else 0
@@ -791,11 +789,11 @@ class GridBot:
             tokens_received = quote.buy_amount
             tokens = tokens_received / 10**18
             self.positions[pos_id]['balance'] = tokens_received
-            # Cost = actual WETH spent for profit calculation
-            # Use the actual sell amount from the quote to avoid float precision issues
-            sell_amount_wei = quote.sell_amount if quote.sell_amount else buy_amount_wei
-            cost_nano = sell_amount_wei // 10**9
-            self.positions[pos_id]['cost'] = cost_nano
+            # Cost = actual WETH spent for profit calculation (in wei for precision)
+            cost_wei = quote.sell_amount if quote.sell_amount else buy_amount_wei
+            self.positions[pos_id]['cost_wei'] = cost_wei
+            # Keep legacy 'cost' field for backward compatibility
+            self.positions[pos_id]['cost'] = cost_wei // 10**9
             self.save_positions()
             
             # Calculate buy price for logging
@@ -820,12 +818,13 @@ class GridBot:
         total_tokens = total_balance / 10**18
         
         # Validate position has tokens and cost basis
-        if total_balance <= 0 or pos['cost'] <= 0:
-            logger.warning(f"Skipping sell for position {pos_id}: balance={total_balance}, cost={pos['cost']}")
+        cost_wei = pos.get('cost_wei', pos.get('cost', 0) * 10**9)
+        if total_balance <= 0 or cost_wei <= 0:
+            logger.warning(f"Skipping sell for position {pos_id}: balance={total_balance}, cost_wei={cost_wei}")
             return
         
-        # Cost is ETH/WETH spent (in nano-ETH/WETH)
-        cost_eth = pos['cost'] / 10**9
+        # Cost is ETH/WETH spent (in wei)
+        cost_eth = cost_wei / 10**18
         buy_price = cost_eth / total_tokens if total_tokens > 0 else 0
         
         # Calculate profit

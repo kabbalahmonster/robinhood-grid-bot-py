@@ -12,30 +12,43 @@ POSITIONS_FILE = "data/gridless_positions.json"
 
 
 def calculate_pnl(position: Dict[str, int], current_price: float) -> float:
-    """Calculate P&L: ((current_price - buy_price) / buy_price) * 100"""
-    cost = position.get('cost', 0)
+    """Calculate P&L using wei units throughout for precision.
+    
+    Args:
+        position: Dict with 'cost_wei' (wei spent) and 'balance' (wei tokens received)
+        current_price: Current price in ETH per token (for display comparison only)
+    
+    Returns:
+        P&L percentage
+    """
+    cost_wei = position.get('cost_wei', 0)
     balance = position.get('balance', 0)
-    if balance <= 0 or cost <= 0:
+    if balance <= 0 or cost_wei <= 0:
         return 0.0
-    cost_weth = cost / 1e9  # nano-WETH to WETH
-    tokens = balance / 1e18  # wei to tokens
-    buy_price = cost_weth / tokens
-    if buy_price <= 0:
+    
+    # Calculate buy price in wei per wei-token for precise comparison
+    # buy_price_wei_per_token_wei = cost_wei / balance
+    # This gives us the ratio to compare against current market
+    buy_price_eth_per_token = (cost_wei / 1e18) / (balance / 1e18)
+    
+    if buy_price_eth_per_token <= 0:
         return 0.0
+    
     # Debug
     import logging
     logger = logging.getLogger('gridless')
-    logger.debug(f"P&L calc: cost_weth={cost_weth}, tokens={tokens}, buy_price={buy_price}, current_price={current_price}")
-    return ((current_price - buy_price) / buy_price) * 100
+    logger.debug(f"P&L calc: cost_wei={cost_wei}, balance={balance}, buy_price={buy_price_eth_per_token}, current_price={current_price}")
+    
+    return ((current_price - buy_price_eth_per_token) / buy_price_eth_per_token) * 100
 
 
 def get_buy_price(position: Dict[str, int]) -> float:
     """Calculate buy price in WETH per token."""
-    cost = position.get('cost', 0)
+    cost_wei = position.get('cost_wei', position.get('cost', 0) * 10**9)  # Migrate from nano-ETH
     balance = position.get('balance', 0)
-    if balance <= 0 or cost <= 0:
+    if balance <= 0 or cost_wei <= 0:
         return 0.0
-    return (cost / 1e9) / (balance / 1e18)
+    return (cost_wei / 1e18) / (balance / 1e18)
 
 
 def get_top_position(positions: Dict[str, Dict]) -> Optional[Tuple[str, Dict]]:
@@ -132,8 +145,10 @@ def find_sell_candidate(positions: Dict[str, Dict], current_price: float,
 
 
 def validate_position(position: Dict[str, int]) -> bool:
-    """Validate: cost >= 0 and balance >= 0."""
-    return position.get('cost', -1) >= 0 and position.get('balance', -1) >= 0
+    """Validate: cost_wei or cost >= 0 and balance >= 0."""
+    has_cost = position.get('cost_wei', -1) >= 0 or position.get('cost', -1) >= 0
+    has_balance = position.get('balance', -1) >= 0
+    return has_cost and has_balance
 
 
 def load_positions() -> Dict[str, Dict[str, int]]:
@@ -143,8 +158,21 @@ def load_positions() -> Dict[str, Dict[str, int]]:
     try:
         with open(POSITIONS_FILE, 'r') as f:
             data = json.load(f)
-        return {k: {'cost': int(v['cost']), 'balance': int(v['balance'])}
-                for k, v in data.items() if validate_position(v)}
+        positions = {}
+        for k, v in data.items():
+            if validate_position(v):
+                # Migrate from cost (nano-ETH) to cost_wei if needed
+                if 'cost' in v and 'cost_wei' not in v:
+                    positions[k] = {
+                        'cost_wei': int(v['cost']) * 10**9,
+                        'balance': int(v['balance'])
+                    }
+                else:
+                    positions[k] = {
+                        'cost_wei': int(v.get('cost_wei', 0)),
+                        'balance': int(v['balance'])
+                    }
+        return positions
     except (json.JSONDecodeError, IOError):
         return {}
 
@@ -158,8 +186,13 @@ def save_positions(positions: Dict[str, Dict[str, int]]) -> None:
     os.replace(temp_file, POSITIONS_FILE)
 
 
-def add_position(cost: int, balance: int) -> str:
-    """Add new position with lowest available ID (fills gaps)."""
+def add_position(cost_wei: int, balance: int) -> str:
+    """Add new position with lowest available ID (fills gaps).
+    
+    Args:
+        cost_wei: Cost in wei (not nano-ETH)
+        balance: Token balance in wei
+    """
     positions = load_positions()
     
     # Find the lowest unused ID
@@ -168,7 +201,7 @@ def add_position(cost: int, balance: int) -> str:
     while next_id in existing_ids:
         next_id += 1
     
-    positions[str(next_id)] = {'cost': cost, 'balance': balance}
+    positions[str(next_id)] = {'cost_wei': cost_wei, 'balance': balance}
     save_positions(positions)
     return str(next_id)
 
