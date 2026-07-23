@@ -334,29 +334,21 @@ class UniswapAPIClient:
             url = f"{self.BASE_URL}/swap"
             
             # Build payload according to Uniswap API spec
-            # Send FULL response but transform nested quote tradeType -> type
+            # Extract ONLY the nested quote object from the /quote response
+            # The nested quote contains: chainId, swapper, tradeType, route, input, output, etc.
             if isinstance(quote_data, dict) and 'quote' in quote_data:
-                # Make deep copy and transform nested quote
-                import copy
-                swap_quote = copy.deepcopy(quote_data)
-                nested = swap_quote.get('quote', {})
-                if 'tradeType' in nested:
-                    nested['type'] = nested.pop('tradeType')
-                    self.logger.debug(f"Transformed tradeType to type in nested quote")
+                nested_quote = quote_data.get('quote', {})
+                self.logger.debug(f"Extracted nested quote, keys: {list(nested_quote.keys()) if isinstance(nested_quote, dict) else 'not dict'}")
             else:
-                swap_quote = quote_data
+                nested_quote = quote_data
+                self.logger.debug(f"Using quote_data directly, keys: {list(nested_quote.keys()) if isinstance(nested_quote, dict) else 'not dict'}")
             
             payload = {
-                "quote": swap_quote,
+                "quote": nested_quote,
+                "refreshGasPrice": True,
+                "simulateTransaction": True,
+                "safetyMode": "SAFE",
             }
-            # Debug: log what we're sending
-            if isinstance(swap_quote, dict):
-                self.logger.debug(f"Sending full quote, outer keys: {list(swap_quote.keys())}")
-                nested = swap_quote.get('quote', {})
-                if isinstance(nested, dict):
-                    self.logger.debug(f"Nested quote keys: {list(nested.keys())}")
-                    if 'type' in nested:
-                        self.logger.debug(f"'type' field present: {nested.get('type')}")
             
             self.logger.debug(f"Fetching Uniswap swap transaction")
             self.logger.debug(f"Swap payload quote keys: {list(quote_data.keys()) if isinstance(quote_data, dict) else 'not dict'}")
