@@ -114,6 +114,9 @@ class BotConfig:
     gas_limit_multiplier: float  # Multiplier for gas limit (default: 1.05)
     gas_price_multiplier: float  # Multiplier for gas price (default: 1.05)
     
+    # Gridless Cooldown
+    gridless_buy_cooldown_seconds: int  # Seconds between gridless buys (default: 300)
+    
     # Derived properties
     @property
     def chain_name(self) -> str:
@@ -260,6 +263,9 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
         # Gas Settings
         gas_limit_multiplier=float(os.getenv("GAS_LIMIT_MULTIPLIER", "1.05")),
         gas_price_multiplier=float(os.getenv("GAS_PRICE_MULTIPLIER", "1.05")),
+        
+        # Gridless Cooldown
+        gridless_buy_cooldown_seconds=int(os.getenv("GRIDLESS_BUY_COOLDOWN_SECONDS", "300")),
     )
     
     # Validate the configuration
