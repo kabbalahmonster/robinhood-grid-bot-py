@@ -344,6 +344,10 @@ class UniswapAPIClient:
             
             self.logger.debug(f"Fetching Uniswap swap transaction")
             self.logger.debug(f"Swap payload quote keys: {list(quote_data.keys()) if isinstance(quote_data, dict) else 'not dict'}")
+            # Log the nested quote structure
+            if isinstance(quote_data, dict) and 'quote' in quote_data:
+                nested_quote = quote_data.get('quote', {})
+                self.logger.debug(f"Nested quote keys: {list(nested_quote.keys()) if isinstance(nested_quote, dict) else 'not dict'}")
             
             response = requests.post(
                 url,
