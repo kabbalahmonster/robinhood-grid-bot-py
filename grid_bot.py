@@ -374,9 +374,11 @@ class GridBot:
                         logger.error(f"Refreshed quote failed: {quote.error}")
                         return
         
-        # Execute swap
-        gas_limit = int(quote.gas * 1.2) if quote.gas else 350000
-        gas_price = int(self.wallet.w3.eth.gas_price * 1.2)
+        # Execute swap with configurable gas multipliers
+        gas_limit_mult = getattr(self.config, 'gas_limit_multiplier', 1.05)
+        gas_price_mult = getattr(self.config, 'gas_price_multiplier', 1.05)
+        gas_limit = int(quote.gas * gas_limit_mult) if quote.gas else 350000
+        gas_price = int(self.wallet.w3.eth.gas_price * gas_price_mult)
         
         from web3 import Web3
         tx_params = {
@@ -576,9 +578,11 @@ class GridBot:
                     logger.error(f"Refreshed quote failed: {quote.error}")
                     return
         
-        # Execute swap
-        gas_limit = int(quote.gas * 1.5) if quote.gas else 300000
-        gas_price = int(self.wallet.w3.eth.gas_price * 1.3)
+        # Execute swap with configurable gas multipliers
+        gas_limit_mult = getattr(self.config, 'gas_limit_multiplier', 1.05)
+        gas_price_mult = getattr(self.config, 'gas_price_multiplier', 1.05)
+        gas_limit = int(quote.gas * gas_limit_mult) if quote.gas else 300000
+        gas_price = int(self.wallet.w3.eth.gas_price * gas_price_mult)
         
         from web3 import Web3
         result = self.wallet._send_transaction({
@@ -703,10 +707,11 @@ class GridBot:
             logger.error(f"Quote failed: {quote.error}")
             return
         
-        # Execute swap with checksummed addresses
-        # Use 0x provided gas limit or default
-        gas_limit = int(quote.gas * 1.2) if quote.gas else 350000
-        gas_price = int(self.wallet.w3.eth.gas_price * 1.2)
+        # Execute swap with checksummed addresses and configurable gas multipliers
+        gas_limit_mult = getattr(self.config, 'gas_limit_multiplier', 1.05)
+        gas_price_mult = getattr(self.config, 'gas_price_multiplier', 1.05)
+        gas_limit = int(quote.gas * gas_limit_mult) if quote.gas else 350000
+        gas_price = int(self.wallet.w3.eth.gas_price * gas_price_mult)
         
         from web3 import Web3
         tx_params = {
@@ -861,9 +866,11 @@ class GridBot:
         
         logger.info(f"✅ Quote validated: {quote_return_eth:.6f} {self.trade_token_name} >= {min_return_eth:.6f} {self.trade_token_name} minimum")
         
-        # Execute swap with checksummed addresses
-        gas_limit = int(quote.gas * 1.5) if quote.gas else 300000
-        gas_price = int(self.wallet.w3.eth.gas_price * 1.3)
+        # Execute swap with checksummed addresses and configurable gas multipliers
+        gas_limit_mult = getattr(self.config, 'gas_limit_multiplier', 1.05)
+        gas_price_mult = getattr(self.config, 'gas_price_multiplier', 1.05)
+        gas_limit = int(quote.gas * gas_limit_mult) if quote.gas else 300000
+        gas_price = int(self.wallet.w3.eth.gas_price * gas_price_mult)
         
         result = self.wallet._send_transaction({
             "from": Web3.to_checksum_address(self.wallet.address),
@@ -960,9 +967,11 @@ class GridBot:
                     logger.error(f"WETH approval for banking failed: {result.error}")
                     return
         
-        # Execute banking swap
-        gas_limit = int(quote.gas * 1.5) if quote.gas else 300000
-        gas_price = int(self.wallet.w3.eth.gas_price * 1.3)
+        # Execute banking swap with configurable gas multipliers
+        gas_limit_mult = getattr(self.config, 'gas_limit_multiplier', 1.05)
+        gas_price_mult = getattr(self.config, 'gas_price_multiplier', 1.05)
+        gas_limit = int(quote.gas * gas_limit_mult) if quote.gas else 300000
+        gas_price = int(self.wallet.w3.eth.gas_price * gas_price_mult)
         
         result = self.wallet._send_transaction({
             "from": Web3.to_checksum_address(self.wallet.address),
