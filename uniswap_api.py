@@ -334,13 +334,15 @@ class UniswapAPIClient:
             url = f"{self.BASE_URL}/swap"
             
             # Build payload according to Uniswap API spec
-            # Try sending just the nested quote object (not the full response)
+            # Send FULL response but transform nested quote tradeType -> type
             if isinstance(quote_data, dict) and 'quote' in quote_data:
-                # Get nested quote and transform tradeType -> type
-                nested = quote_data.get('quote', {}).copy()
+                # Make deep copy and transform nested quote
+                import copy
+                swap_quote = copy.deepcopy(quote_data)
+                nested = swap_quote.get('quote', {})
                 if 'tradeType' in nested:
                     nested['type'] = nested.pop('tradeType')
-                swap_quote = nested
+                    self.logger.debug(f"Transformed tradeType to type in nested quote")
             else:
                 swap_quote = quote_data
             
@@ -349,7 +351,12 @@ class UniswapAPIClient:
             }
             # Debug: log what we're sending
             if isinstance(swap_quote, dict):
-                self.logger.debug(f"Sending nested quote only, keys: {list(swap_quote.keys())}")
+                self.logger.debug(f"Sending full quote, outer keys: {list(swap_quote.keys())}")
+                nested = swap_quote.get('quote', {})
+                if isinstance(nested, dict):
+                    self.logger.debug(f"Nested quote keys: {list(nested.keys())}")
+                    if 'type' in nested:
+                        self.logger.debug(f"'type' field present: {nested.get('type')}")
             
             self.logger.debug(f"Fetching Uniswap swap transaction")
             self.logger.debug(f"Swap payload quote keys: {list(quote_data.keys()) if isinstance(quote_data, dict) else 'not dict'}")
