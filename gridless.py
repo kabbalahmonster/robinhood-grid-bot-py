@@ -21,14 +21,18 @@ def calculate_pnl(position: Dict[str, int], current_price: float) -> float:
     Returns:
         P&L percentage
     """
+    # Migrate from old cost (nano-ETH) if needed
     cost_wei = position.get('cost_wei', 0)
+    if cost_wei <= 0 and 'cost' in position:
+        old_cost = position.get('cost', 0)
+        if old_cost > 0:
+            cost_wei = old_cost * 10**9
+    
     balance = position.get('balance', 0)
     if balance <= 0 or cost_wei <= 0:
         return 0.0
     
     # Calculate buy price in wei per wei-token for precise comparison
-    # buy_price_wei_per_token_wei = cost_wei / balance
-    # This gives us the ratio to compare against current market
     buy_price_eth_per_token = (cost_wei / 1e18) / (balance / 1e18)
     
     if buy_price_eth_per_token <= 0:
@@ -44,7 +48,13 @@ def calculate_pnl(position: Dict[str, int], current_price: float) -> float:
 
 def get_buy_price(position: Dict[str, int]) -> float:
     """Calculate buy price in WETH per token."""
-    cost_wei = position.get('cost_wei', position.get('cost', 0) * 10**9)  # Migrate from nano-ETH
+    # Migrate from old cost (nano-ETH) if needed
+    cost_wei = position.get('cost_wei', 0)
+    if cost_wei <= 0 and 'cost' in position:
+        old_cost = position.get('cost', 0)
+        if old_cost > 0:
+            cost_wei = old_cost * 10**9
+    
     balance = position.get('balance', 0)
     if balance <= 0 or cost_wei <= 0:
         return 0.0
@@ -118,8 +128,9 @@ def should_sell(position: Dict[str, int], current_price: float, config: Any,
     if pnl >= sell_threshold:
         if quote_profit_eth <= 0:
             return (False, f"Target met ({pnl:.1f}%) but no quote profit")
-        cost_weth = position.get('cost', 0) / 1e9
-        min_profit_eth = cost_weth * (min_profit / 100)
+        cost_wei = position.get('cost_wei', position.get('cost', 0) * 10**9)
+        cost_eth = cost_wei / 1e18
+        min_profit_eth = cost_eth * (min_profit / 100)
         if quote_profit_eth < min_profit_eth:
             return (False, f"Target met ({pnl:.1f}%) but quote < min")
         return (True, f"PROFIT: {pnl:.1f}%")
@@ -145,9 +156,11 @@ def find_sell_candidate(positions: Dict[str, Dict], current_price: float,
 
 
 def validate_position(position: Dict[str, int]) -> bool:
-    """Validate: cost_wei or cost >= 0 and balance >= 0."""
-    has_cost = position.get('cost_wei', -1) >= 0 or position.get('cost', -1) >= 0
-    has_balance = position.get('balance', -1) >= 0
+    """Validate: cost_wei or cost > 0 and balance > 0."""
+    cost_wei = position.get('cost_wei', 0)
+    cost = position.get('cost', 0)
+    has_cost = cost_wei > 0 or cost > 0
+    has_balance = position.get('balance', 0) > 0
     return has_cost and has_balance
 
 
