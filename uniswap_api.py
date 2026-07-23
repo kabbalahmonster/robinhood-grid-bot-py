@@ -306,3 +306,91 @@ class UniswapAPIClient:
             slippage_percentage=slippage_percentage,
             apply_jitter_to_price=False,
         )
+    
+    def get_swap_transaction(
+        self,
+        quote_data: dict,
+    ) -> QuoteResult:
+        """
+        Get swap transaction calldata from quote.
+        
+        Uniswap API requires a separate call to /swap to get the
+        actual transaction calldata from a quote.
+        
+        Args:
+            quote_data: The full quote object from get_quote response.
+            
+        Returns:
+            QuoteResult: Transaction data with calldata.
+        """
+        if not self.api_key:
+            return QuoteResult(
+                success=False,
+                error="Uniswap API key not configured",
+            )
+        
+        try:
+            url = f"{self.BASE_URL}/swap"
+            
+            # Build payload with quote and options
+            payload = {
+                "x-permit2-disabled": self.permit2_disabled,
+                "x-universal-router-version": "2.1.1",
+                "routing": quote_data.get("routing", "CLASSIC"),
+                "isTokenApprovalApplicable": quote_data.get("isTokenApprovalApplicable", True),
+                "quote": quote_data.get("quote", {}),
+            }
+            
+            self.logger.debug(f"Fetching Uniswap swap transaction")
+            
+            response = requests.post(
+                url,
+                headers=self._get_headers(),
+                json=payload,
+                timeout=30,
+            )
+            
+            self.logger.debug(f"Uniswap swap API response status: {response.status_code}")
+            
+            if response.status_code != 200:
+                error_text = response.text[:500]
+                self.logger.error(f"Uniswap swap API error: Status {response.status_code}")
+                self.logger.error(f"Response: {error_text}")
+                return QuoteResult(
+                    success=False,
+                    error=f"Uniswap swap API returned status {response.status_code}: {error_text}",
+                )
+            
+            data = response.json()
+            
+            # Extract transaction data
+            tx_data = data.get("tx", {})
+            
+            # Get quote data for amounts
+            quote = data.get("quote", {})
+            buy_amount = int(quote.get("output", {}).get("amount", 0)) if quote.get("output") else 0
+            sell_amount = int(quote.get("input", {}).get("amount", 0)) if quote.get("input") else 0
+            
+            return QuoteResult(
+                success=True,
+                price=buy_amount / sell_amount if sell_amount > 0 else 0,
+                buy_amount=buy_amount,
+                sell_amount=sell_amount,
+                allowance_target=tx_data.get("to"),
+                data=tx_data.get("data"),
+                to=tx_data.get("to"),
+                value=int(tx_data.get("value", 0)) if tx_data.get("value") else 0,
+                gas=int(tx_data.get("gasLimit", 300000)),
+                gas_price=int(tx_data.get("gasPrice")) if tx_data.get("gasPrice") else None,
+                raw_response=data,
+            )
+        
+        except requests.exceptions.RequestException as e:
+            error_msg = f"Swap request failed: {e}"
+            self.logger.error(error_msg)
+            return QuoteResult(success=False, error=error_msg)
+        
+        except Exception as e:
+            error_msg = f"Unexpected swap error: {e}"
+            self.logger.error(error_msg)
+            return QuoteResult(success=False, error=error_msg)

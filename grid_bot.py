@@ -386,6 +386,16 @@ class GridBot:
                         logger.error(f"Refreshed quote failed: {quote.error}")
                         return
         
+        # For Uniswap API, get swap transaction from quote
+        if getattr(self.config, 'use_uniswap_api', False):
+            from uniswap_api import UniswapAPIClient
+            if isinstance(self.api_client, UniswapAPIClient):
+                swap_result = self.api_client.get_swap_transaction(quote.raw_response)
+                if not swap_result.success:
+                    logger.error(f"Uniswap swap transaction failed: {swap_result.error}")
+                    return
+                quote = swap_result
+        
         # Execute swap with configurable gas multipliers
         # Use API's gas price estimate if available (more accurate than network average)
         gas_limit_mult = getattr(self.config, 'gas_limit_multiplier', 1.05)
@@ -594,6 +604,16 @@ class GridBot:
                     logger.error(f"Refreshed quote failed: {quote.error}")
                     return
         
+        # For Uniswap API, get swap transaction from quote
+        if getattr(self.config, 'use_uniswap_api', False):
+            from uniswap_api import UniswapAPIClient
+            if isinstance(self.api_client, UniswapAPIClient):
+                swap_result = self.api_client.get_swap_transaction(quote.raw_response)
+                if not swap_result.success:
+                    logger.error(f"Uniswap swap transaction failed: {swap_result.error}")
+                    return
+                quote = swap_result
+        
         # Execute swap with configurable gas multipliers
         # Use API's gas price estimate if available (more accurate than network average)
         gas_limit_mult = getattr(self.config, 'gas_limit_multiplier', 1.05)
@@ -726,6 +746,16 @@ class GridBot:
         if not quote.success:
             logger.error(f"Quote failed: {quote.error}")
             return
+        
+        # For Uniswap API, get swap transaction from quote
+        if getattr(self.config, 'use_uniswap_api', False):
+            from uniswap_api import UniswapAPIClient
+            if isinstance(self.api_client, UniswapAPIClient):
+                swap_result = self.api_client.get_swap_transaction(quote.raw_response)
+                if not swap_result.success:
+                    logger.error(f"Uniswap swap transaction failed: {swap_result.error}")
+                    return
+                quote = swap_result
         
         # Execute swap with checksummed addresses and configurable gas multipliers
         # Use API's gas price estimate if available (more accurate than network average)
@@ -890,6 +920,16 @@ class GridBot:
         
         logger.info(f"✅ Quote validated: {quote_return_eth:.6f} {self.trade_token_name} >= {min_return_eth:.6f} {self.trade_token_name} minimum")
         
+        # For Uniswap API, get swap transaction from quote
+        if getattr(self.config, 'use_uniswap_api', False):
+            from uniswap_api import UniswapAPIClient
+            if isinstance(self.api_client, UniswapAPIClient):
+                swap_result = self.api_client.get_swap_transaction(quote.raw_response)
+                if not swap_result.success:
+                    logger.error(f"Uniswap swap transaction failed: {swap_result.error}")
+                    return
+                quote = swap_result
+        
         # Execute swap with checksummed addresses and configurable gas multipliers
         # Use API's gas price estimate if available (more accurate than network average)
         gas_limit_mult = getattr(self.config, 'gas_limit_multiplier', 1.05)
@@ -994,6 +1034,16 @@ class GridBot:
                 if not result.success:
                     logger.error(f"WETH approval for banking failed: {result.error}")
                     return
+        
+        # For Uniswap API, get swap transaction from quote
+        if getattr(self.config, 'use_uniswap_api', False):
+            from uniswap_api import UniswapAPIClient
+            if isinstance(self.api_client, UniswapAPIClient):
+                swap_result = self.api_client.get_swap_transaction(quote.raw_response)
+                if not swap_result.success:
+                    logger.error(f"Uniswap swap transaction failed: {swap_result.error}")
+                    return
+                quote = swap_result
         
         # Execute banking swap with configurable gas multipliers
         # Use API's gas price estimate if available (more accurate than network average)
