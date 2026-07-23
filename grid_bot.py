@@ -16,6 +16,7 @@ from config import load_config
 from wallet import Wallet
 from zero_x import ZeroXClient
 from li_fi import LiFiClient
+from uniswap_api import UniswapAPIClient
 
 # Native ETH address for 0x API (used when trading with native ETH instead of WETH)
 ETH_ADDRESS = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
@@ -32,8 +33,12 @@ class GridBot:
         
         self.wallet = Wallet(self.config)
         
-        # Use LI.FI or 0x based on config
-        if getattr(self.config, 'use_li_fi', False):
+        # Select API provider based on config priority:
+        # 1. Uniswap API, 2. LI.FI, 3. 0x (default)
+        if getattr(self.config, 'use_uniswap_api', False):
+            self.api_client = UniswapAPIClient(self.config)
+            logger.info("Using Uniswap API for swaps")
+        elif getattr(self.config, 'use_li_fi', False):
             self.api_client = LiFiClient(self.config)
             print(f"DEBUG: use_li_fi={self.config.use_li_fi}, api_key={self.config.li_fi_api_key[:20]}...")
             logger.info("Using LI.FI API for swaps")

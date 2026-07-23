@@ -94,6 +94,10 @@ class BotConfig:
     li_fi_api_key: str
     li_fi_integrator: str  # Required integrator string for LI.FI API
     
+    use_uniswap_api: bool  # If True, use Uniswap API
+    uniswap_api_key: str
+    uniswap_permit2_disabled: bool  # Set to True to disable Permit2
+    
     # Gridless Trading Mode
     use_gridless: bool  # If True, use gridless position-based trading
     gridless_buy_threshold: float  # P&L % to trigger new buy (default: -10.0)
@@ -236,6 +240,10 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
         use_li_fi=os.getenv("USE_LI_FI", "false").lower() == "true",
         li_fi_api_key=os.getenv("LI_FI_API_KEY", ""),
         li_fi_integrator=os.getenv("LI_FI_INTEGRATOR", ""),
+        
+        use_uniswap_api=os.getenv("USE_UNISWAP_API", "false").lower() == "true",
+        uniswap_api_key=os.getenv("UNISWAP_API_KEY", ""),
+        uniswap_permit2_disabled=os.getenv("UNISWAP_PERMIT2_DISABLED", "true").lower() == "true",
         
         # Gridless Trading Mode
         use_gridless=os.getenv("USE_GRIDLESS", "false").lower() == "true",
