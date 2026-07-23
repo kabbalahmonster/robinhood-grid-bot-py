@@ -67,11 +67,8 @@ class GridBot:
         
         # Trading token setup (WETH or native ETH)
         if getattr(self.config, 'use_eth_trading', False):
-            # Uniswap API uses WETH address (it handles ETH wrapping internally)
-            if getattr(self.config, 'use_uniswap_api', False):
-                self.trade_token_address = self.config.weth_address
-            else:
-                self.trade_token_address = ETH_ADDRESS
+            # Use native ETH address (zero address for Uniswap API)
+            self.trade_token_address = UNISWAP_ETH_ADDRESS
             self.trade_token_name = "ETH"
             logger.info("Trading mode: Native ETH")
         else:
