@@ -15,6 +15,9 @@ from decimal import Decimal
 from web3 import Web3
 
 from config import BotConfig, load_config
+
+# Native ETH address for 0x API (used when trading with native ETH instead of WETH)
+ETH_ADDRESS = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
 from wallet import Wallet, TransactionResult
 from zero_x import ZeroXClient, QuoteResult
 from storage import Storage, Position, BotState
@@ -60,7 +63,6 @@ class GridBot:
         self.logger = setup_logging(config.log_level)
         
         self.logger.info(f"Initializing Grid Bot for {config.chain_name}")
-        self.logger.info(f"Trading {config.token_symbol} against WETH")
         
         # Initialize components
         self.wallet = Wallet(config)
@@ -75,6 +77,12 @@ class GridBot:
         self.token_address = Web3.to_checksum_address(config.token_address)
         self.weth_address = Web3.to_checksum_address(config.weth_address)
         self.usdg_address = Web3.to_checksum_address(config.usdg_address)
+        
+        # Trading token (WETH or native ETH)
+        if config.use_eth_trading:
+            self.trade_token_address = ETH_ADDRESS
+        else:
+            self.trade_token_address = self.weth_address
         
         # Bot state
         self.running = False
@@ -125,32 +133,39 @@ class GridBot:
             
             # Check wallet balances
             eth_balance = self.wallet.get_eth_balance()
-            weth_balance, _ = self.wallet.get_token_balance(self.weth_address)
             token_balance, _ = self.wallet.get_token_balance(self.token_address)
             
             self.logger.info(f"ETH Balance: {eth_balance:.6f}")
-            self.logger.info(f"WETH Balance: {weth_balance:.6f}")
             self.logger.info(f"Token Balance: {token_balance:.6f} {token_info.symbol}")
             
-            # Verify we have WETH for trading
-            if weth_balance < self.config.initial_buy_amount:
-                self.logger.warning(
-                    f"Low WETH balance ({weth_balance:.6f}). "
-                    f"Recommended: at least {self.config.initial_buy_amount:.6f} WETH"
-                )
+            # Check trading balance (ETH or WETH depending on mode)
+            if self.config.use_eth_trading:
+                trade_balance = eth_balance
+                trade_token_name = "ETH"
+                # Ensure we have enough ETH for trading after gas reserve
+                min_required = self.config.initial_buy_amount + self.config.eth_gas_reserve
+                if trade_balance < min_required:
+                    self.logger.warning(
+                        f"Low ETH balance ({trade_balance:.6f}). "
+                        f"Recommended: at least {min_required:.6f} ETH "
+                        f"({self.config.initial_buy_amount:.6f} for trading + "
+                        f"{self.config.eth_gas_reserve:.6f} gas reserve)"
+                    )
+            else:
+                weth_balance, _ = self.wallet.get_token_balance(self.weth_address)
+                trade_balance = weth_balance
+                trade_token_name = "WETH"
+                self.logger.info(f"WETH Balance: {weth_balance:.6f}")
+                if trade_balance < self.config.initial_buy_amount:
+                    self.logger.warning(
+                        f"Low WETH balance ({trade_balance:.6f}). "
+                        f"Recommended: at least {self.config.initial_buy_amount:.6f} WETH"
+                    )
             
             # Ensure approvals are set
             self.logger.info("Checking token approvals...")
             
-            # Approve WETH for Permit2
-            weth_approved = self.wallet.ensure_approval(
-                self.weth_address,
-                self.config.permit2_address,
-                eth_to_wei(1000),  # Approve 1000 WETH
-                use_permit2=False,  # Standard approval for Permit2 contract
-            )
-            
-            # Approve token for Permit2
+            # Approve token for Permit2 (always needed for selling tokens)
             token_approved = self.wallet.ensure_approval(
                 self.token_address,
                 self.config.permit2_address,
@@ -158,9 +173,21 @@ class GridBot:
                 use_permit2=False,
             )
             
-            if not weth_approved or not token_approved:
-                self.logger.error("Failed to set token approvals")
+            if not token_approved:
+                self.logger.error("Failed to set token approval")
                 return False
+            
+            # Approve WETH for Permit2 (only needed when trading WETH, not native ETH)
+            if not self.config.use_eth_trading:
+                weth_approved = self.wallet.ensure_approval(
+                    self.weth_address,
+                    self.config.permit2_address,
+                    eth_to_wei(1000),  # Approve 1000 WETH
+                    use_permit2=False,  # Standard approval for Permit2 contract
+                )
+                if not weth_approved:
+                    self.logger.error("Failed to set WETH approval")
+                    return False
             
             # Get current price and initialize grid
             self._update_price()
@@ -182,18 +209,18 @@ class GridBot:
             bool: True if price updated successfully.
         """
         try:
-            # Get price by quoting small WETH amount for token
-            quote_amount = eth_to_wei(0.001)  # 0.001 WETH
+            # Get price by quoting small ETH/WETH amount for token
+            quote_amount = eth_to_wei(0.001)  # 0.001 ETH/WETH
             
             quote = self.zero_x.get_quote(
-                sell_token=self.weth_address,
+                sell_token=self.trade_token_address,
                 buy_token=self.token_address,
                 sell_amount=quote_amount,
                 taker_address=self.wallet.address,
             )
             
             if quote.success and quote.price:
-                # Price is token per WETH, convert to ETH per token
+                # Price is token per ETH, convert to ETH per token
                 self.current_price = 1.0 / quote.price
                 self.storage.update_last_price(self.current_price)
                 return True
@@ -247,22 +274,30 @@ class GridBot:
     
     def _calculate_buy_amount(self) -> float:
         """
-        Calculate dynamic buy amount based on available WETH.
+        Calculate dynamic buy amount based on available ETH/WETH.
         
-        Distributes WETH balance evenly across empty grid positions.
+        Distributes balance evenly across empty grid positions,
+        reserving ETH for gas when trading with native ETH.
         
         Returns:
-            float: Buy amount in WETH.
+            float: Buy amount in ETH/WETH.
         """
-        weth_balance, _ = self.wallet.get_token_balance(self.weth_address)
         empty_levels = self._get_empty_grid_levels()
         
         if not empty_levels:
             return 0.0
         
-        # Reserve some WETH for gas (0.01 ETH worth)
-        reserved = 0.01
-        available = max(0, weth_balance - reserved)
+        # Get balance based on trading mode
+        if self.config.use_eth_trading:
+            # Use native ETH balance, reserve gas amount
+            balance = self.wallet.get_eth_balance()
+            reserved = self.config.eth_gas_reserve
+        else:
+            # Use WETH balance, reserve small amount for gas
+            balance, _ = self.wallet.get_token_balance(self.weth_address)
+            reserved = 0.01  # Keep some WETH for potential gas estimation
+        
+        available = max(0, balance - reserved)
         
         return calculate_dynamic_buy_amount(
             available,
@@ -336,9 +371,10 @@ class GridBot:
             self.logger.warning("Buy amount too small, skipping")
             return False
         
+        trade_token_name = "ETH" if self.config.use_eth_trading else "WETH"
         self.logger.info(
             f"Executing BUY at {level.price:.6f} ETH "
-            f"with {buy_amount_eth:.6f} WETH"
+            f"with {buy_amount_eth:.6f} {trade_token_name}"
         )
         
         try:
@@ -346,7 +382,7 @@ class GridBot:
             sell_amount_wei = eth_to_wei(buy_amount_eth)
             
             quote = self.zero_x.build_swap_transaction(
-                sell_token=self.weth_address,
+                sell_token=self.trade_token_address,
                 buy_token=self.token_address,
                 sell_amount=sell_amount_wei,
                 taker_address=self.wallet.address,
@@ -405,7 +441,7 @@ class GridBot:
                 
                 self.logger.info(
                     f"BUY successful: {format_token_amount(tokens_received, self.token_decimals)} "
-                    f"tokens for {buy_amount_eth:.6f} WETH "
+                    f"tokens for {buy_amount_eth:.6f} {trade_token_name} "
                     f"(tx: {format_address(result.tx_hash or '')})"
                 )
                 
@@ -440,7 +476,7 @@ class GridBot:
             # Get quote for swap
             quote = self.zero_x.build_swap_transaction(
                 sell_token=self.token_address,
-                buy_token=self.weth_address,
+                buy_token=self.trade_token_address,
                 sell_amount=token_amount_wei,
                 taker_address=self.wallet.address,
                 slippage_percentage=self.config.slippage_tolerance / 100,
@@ -455,9 +491,10 @@ class GridBot:
             profit_eth = eth_received - position.buy_amount_eth
             profit_percent = calculate_profit_margin(eth_received, position.buy_amount_eth)
             
+            trade_token_name = "ETH" if self.config.use_eth_trading else "WETH"
             self.logger.info(
-                f"Expected: {eth_received:.6f} WETH "
-                f"(profit: {profit_eth:.6f} WETH / {profit_percent:.2f}%)"
+                f"Expected: {eth_received:.6f} {trade_token_name} "
+                f"(profit: {profit_eth:.6f} {trade_token_name} / {profit_percent:.2f}%)"
             )
             
             # Double-check profit threshold
@@ -521,12 +558,12 @@ class GridBot:
                 
                 self.logger.info(
                     f"SELL successful: Position {position.id} closed "
-                    f"for {eth_received:.6f} WETH "
-                    f"(profit: {profit_eth:.6f} WETH, {profit_percent:.2f}%) "
-                    f"Bank: {bank_amount:.6f} WETH -> USDG"
+                    f"for {eth_received:.6f} {trade_token_name} "
+                    f"(profit: {profit_eth:.6f} {trade_token_name}, {profit_percent:.2f}%) "
+                    f"Bank: {bank_amount:.6f} {trade_token_name} -> USDG"
                 )
                 
-                # Bank profit to USDG
+                # Bank profit to USDG (only if using WETH mode, or wrap ETH first if needed)
                 if bank_amount > 0.001:
                     self._bank_profit(bank_amount)
                 
@@ -544,19 +581,21 @@ class GridBot:
         Bank profit to USDG.
         
         Args:
-            amount_eth: Amount of WETH to convert to USDG.
+            amount_eth: Amount of ETH/WETH to convert to USDG.
             
         Returns:
             bool: True if banking successful.
         """
-        self.logger.info(f"Banking {amount_eth:.6f} WETH to USDG")
+        trade_token_name = "ETH" if self.config.use_eth_trading else "WETH"
+        self.logger.info(f"Banking {amount_eth:.6f} {trade_token_name} to USDG")
         
         try:
-            # Get quote for WETH -> USDG swap
+            # Get quote for ETH/WETH -> USDG swap
             sell_amount_wei = eth_to_wei(amount_eth)
             
+            # Use trade_token_address (ETH or WETH) for banking
             quote = self.zero_x.build_swap_transaction(
-                sell_token=self.weth_address,
+                sell_token=self.trade_token_address,
                 buy_token=self.usdg_address,
                 sell_amount=sell_amount_wei,
                 taker_address=self.wallet.address,
@@ -594,7 +633,7 @@ class GridBot:
             
             if result.success:
                 self.logger.info(
-                    f"Banking successful: {amount_eth:.6f} WETH -> USDG "
+                    f"Banking successful: {amount_eth:.6f} {trade_token_name} -> USDG "
                     f"(tx: {format_address(result.tx_hash or '')})"
                 )
                 return True
@@ -628,12 +667,22 @@ class GridBot:
         """Log current bot status."""
         try:
             stats = self.storage.get_stats()
-            weth_balance, _ = self.wallet.get_token_balance(self.weth_address)
+            eth_balance = self.wallet.get_eth_balance()
             token_balance, _ = self.wallet.get_token_balance(self.token_address)
+            
+            # Show appropriate balance based on trading mode
+            if self.config.use_eth_trading:
+                trade_balance = eth_balance
+                trade_label = "ETH"
+            else:
+                weth_balance, _ = self.wallet.get_token_balance(self.weth_address)
+                trade_balance = weth_balance
+                trade_label = "WETH"
             
             self.logger.info(
                 f"Status | Price: {self.current_price:.6f} ETH | "
-                f"WETH: {weth_balance:.4f} | "
+                f"ETH: {eth_balance:.4f} | "
+                f"{trade_label}: {trade_balance:.4f} | "
                 f"{self.config.token_symbol}: {token_balance:.4f} | "
                 f"Positions: {stats['open_positions']}/{self.config.max_positions} | "
                 f"Profit: {stats['total_profit_eth']:.6f} ETH"

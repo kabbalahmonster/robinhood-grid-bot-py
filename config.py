@@ -102,6 +102,10 @@ class BotConfig:
     gridless_stoploss_enabled: bool  # Enable stoploss sells
     gridless_leading_edge: bool  # Enable leading edge buys (buy into strength)
     
+    # ETH Trading Mode
+    use_eth_trading: bool  # If True, trade native ETH instead of WETH
+    eth_gas_reserve: float  # ETH amount to reserve for gas (default: 0.001)
+    
     # Derived properties
     @property
     def chain_name(self) -> str:
@@ -236,6 +240,10 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
         gridless_stoploss_threshold=float(os.getenv("GRIDLESS_STOPLOSS_THRESHOLD", "-25.0")),
         gridless_stoploss_enabled=os.getenv("GRIDLESS_STOPLOSS_ENABLED", "false").lower() == "true",
         gridless_leading_edge=os.getenv("GRIDLESS_LEADING_EDGE", "false").lower() == "true",
+        
+        # ETH Trading Mode
+        use_eth_trading=os.getenv("USE_ETH_TRADING", "false").lower() == "true",
+        eth_gas_reserve=float(os.getenv("ETH_GAS_RESERVE", "0.001")),
     )
     
     # Validate the configuration
