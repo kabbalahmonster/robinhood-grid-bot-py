@@ -420,9 +420,10 @@ class GridBot:
         if result.success:
             # Record position in gridless format
             tokens_received = quote.buy_amount if quote.buy_amount else 0
-            # Use wei amount directly to avoid floating point precision loss
-            # cost is in nano-WETH (10^9), buy_amount_wei is in wei (10^18)
-            cost_nano = buy_amount_wei // 10**9
+            # Use the actual sell amount from the quote to avoid float precision issues
+            # quote.sell_amount is in wei, convert to nano-WETH (10^9)
+            sell_amount_wei = quote.sell_amount if quote.sell_amount else buy_amount_wei
+            cost_nano = sell_amount_wei // 10**9
             
             logger.debug(f"Recording position: cost_nano={cost_nano}, tokens_received={tokens_received}")
             logger.debug(f"Quote buy_amount: {quote.buy_amount}, sell_amount: {quote.sell_amount}")
@@ -791,8 +792,9 @@ class GridBot:
             tokens = tokens_received / 10**18
             self.positions[pos_id]['balance'] = tokens_received
             # Cost = actual WETH spent for profit calculation
-            # Use wei amount directly to avoid floating point precision loss
-            cost_nano = buy_amount_wei // 10**9
+            # Use the actual sell amount from the quote to avoid float precision issues
+            sell_amount_wei = quote.sell_amount if quote.sell_amount else buy_amount_wei
+            cost_nano = sell_amount_wei // 10**9
             self.positions[pos_id]['cost'] = cost_nano
             self.save_positions()
             
