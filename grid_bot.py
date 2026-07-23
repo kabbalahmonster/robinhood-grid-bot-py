@@ -421,6 +421,10 @@ class GridBot:
             # Record position in gridless format
             tokens_received = quote.buy_amount if quote.buy_amount else 0
             cost_nano = int(buy_amount_eth * 10**9)
+            
+            logger.debug(f"Recording position: cost_nano={cost_nano}, tokens_received={tokens_received}")
+            logger.debug(f"Quote buy_amount: {quote.buy_amount}, sell_amount: {quote.sell_amount}")
+            
             pos_id = add_position(cost_nano, tokens_received)
             
             tokens = tokens_received / 10**18

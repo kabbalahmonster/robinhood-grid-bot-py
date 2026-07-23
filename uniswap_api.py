@@ -380,10 +380,18 @@ class UniswapAPIClient:
             # Extract transaction data from "swap" field (not "tx")
             swap_data = data.get("swap", {})
             
-            # Get quote data for amounts
-            quote = data.get("quote", {})
-            buy_amount = int(quote.get("output", {}).get("amount", 0)) if quote.get("output") else 0
-            sell_amount = int(quote.get("input", {}).get("amount", 0)) if quote.get("input") else 0
+            # Get quote data for amounts from swap response
+            quote_info = data.get("quote", {})
+            self.logger.debug(f"Swap response quote keys: {list(quote_info.keys()) if isinstance(quote_info, dict) else 'not dict'}")
+            
+            output_info = quote_info.get("output", {}) if isinstance(quote_info, dict) else {}
+            input_info = quote_info.get("input", {}) if isinstance(quote_info, dict) else {}
+            
+            self.logger.debug(f"Output info: {output_info}")
+            self.logger.debug(f"Input info: {input_info}")
+            
+            buy_amount = int(output_info.get("amount", 0)) if output_info else 0
+            sell_amount = int(input_info.get("amount", 0)) if input_info else 0
             
             # Parse values that may be strings
             def parse_int(value):
