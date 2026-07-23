@@ -143,9 +143,9 @@ class GridBot:
     def get_token_price(self):
         """Get current token price in ETH/WETH using the lighter /price endpoint."""
         # Use /price endpoint for price discovery (doesn't count against quote-to-trade metrics)
-        # For LI.FI, we need to pass the wallet address
-        if getattr(self.config, 'use_li_fi', False):
-            # LI.FI requires fromAddress, so use get_quote instead
+        # For LI.FI and Uniswap API, we need to pass the wallet address
+        if getattr(self.config, 'use_li_fi', False) or getattr(self.config, 'use_uniswap_api', False):
+            # LI.FI and Uniswap API require taker address
             result = self.api_client.get_quote(
                 sell_token=self.trade_token_address,
                 buy_token=self.config.token_address,
@@ -154,10 +154,10 @@ class GridBot:
                 apply_jitter_to_price=False,
             )
             if result.success and result.price:
-                logger.debug(f"LI.FI price: {result.price}")
+                logger.debug(f"API price: {result.price}")
                 return result.price
             else:
-                logger.debug(f"LI.FI price failed: success={result.success}, price={result.price}, error={result.error}")
+                logger.debug(f"API price failed: success={result.success}, price={result.price}, error={result.error}")
             return None
         else:
             # 0x price endpoint doesn't require taker

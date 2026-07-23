@@ -59,16 +59,20 @@ class UniswapAPIClient:
         self.permit2_disabled = getattr(config, 'uniswap_permit2_disabled', True)
         self.chain_id = config.chain_id
         
-        # Headers for API requests
+        # Headers for API requests (matching Uniswap docs example)
         self.headers = {
             "x-api-key": self.api_key,
             "Content-Type": "application/json",
+            "x-universal-router-version": "2.0",
+            "x-erc20eth-enabled": "false",
         }
         
         # Disable Permit2 if configured
         if self.permit2_disabled:
             self.headers["x-permit2-disabled"] = "true"
             self.logger.info("Permit2 disabled via header")
+        else:
+            self.headers["x-permit2-disabled"] = "false"
         
         if not self.api_key:
             self.logger.warning("Uniswap API key not set")
@@ -103,7 +107,7 @@ class UniswapAPIClient:
             buy_token: Address of token to buy.
             sell_amount: Amount to sell (in base units).
             buy_amount: Amount to buy (in base units).
-            taker_address: Address of the taker.
+            taker_address: Address of the taker (required).
             slippage_percentage: Slippage tolerance (e.g., 0.01 for 1%).
             apply_jitter_to_price: Whether to apply anti-MEV jitter.
             
@@ -116,20 +120,28 @@ class UniswapAPIClient:
                 error="Uniswap API key not configured",
             )
         
-        # Build query parameters
-        params = {
-            "chainId": self.chain_id,
+        if not taker_address:
+            return QuoteResult(
+                success=False,
+                error="swapper (taker_address) is required",
+            )
+        
+        # Build JSON payload (POST request)
+        payload = {
+            "tokenInChainId": self.chain_id,
+            "tokenOutChainId": self.chain_id,
             "tokenIn": sell_token,
             "tokenOut": buy_token,
+            "swapper": taker_address,
         }
         
         # Must specify either sellAmount or buyAmount
         if sell_amount:
-            params["amount"] = str(sell_amount)
-            params["type"] = "exactIn"
+            payload["amount"] = str(sell_amount)
+            payload["type"] = "EXACT_INPUT"
         elif buy_amount:
-            params["amount"] = str(buy_amount)
-            params["type"] = "exactOut"
+            payload["amount"] = str(buy_amount)
+            payload["type"] = "EXACT_OUTPUT"
         else:
             return QuoteResult(
                 success=False,
@@ -137,21 +149,18 @@ class UniswapAPIClient:
             )
         
         # Optional parameters
-        if taker_address:
-            params["recipient"] = taker_address
-        
         if slippage_percentage:
-            params["slippageTolerance"] = str(int(slippage_percentage * 10000))  # Basis points
+            payload["slippageTolerance"] = slippage_percentage * 100  # Percent (e.g., 0.5 = 0.5%)
         
         try:
             url = f"{self.BASE_URL}/quote"
             
-            self.logger.debug(f"Fetching Uniswap quote: {params}")
+            self.logger.debug(f"Fetching Uniswap quote: {payload}")
             
-            response = requests.get(
+            response = requests.post(
                 url,
                 headers=self._get_headers(),
-                params=params,
+                json=payload,
                 timeout=30,
             )
             
@@ -169,8 +178,10 @@ class UniswapAPIClient:
             data = response.json()
             
             # Extract amounts and calculate price
-            buy_amount = int(data.get("outputAmount", 0)) if data.get("outputAmount") else 0
-            sell_amount = int(data.get("inputAmount", 0)) if data.get("inputAmount") else 0
+            # Uniswap API returns quote field with input/output amounts
+            quote = data.get("quote", {})
+            buy_amount = int(quote.get("output", {}).get("amount", 0)) if quote.get("output") else 0
+            sell_amount = int(quote.get("input", {}).get("amount", 0)) if quote.get("input") else 0
             price = buy_amount / sell_amount if sell_amount > 0 else 0
             
             # Apply jitter if requested
@@ -178,21 +189,20 @@ class UniswapAPIClient:
                 price = apply_jitter(price, jitter_percent=0.05)
             
             # Extract transaction data if available
-            route = data.get("route", [])
-            method_parameters = data.get("methodParameters", {})
+            tx_data = data.get("tx", {})
             
             gas = data.get("gasUseEstimate")
-            gas_price = data.get("gasPriceWei")
+            gas_price = tx_data.get("gasPrice")
             
             return QuoteResult(
                 success=True,
                 price=price,
                 buy_amount=buy_amount,
                 sell_amount=sell_amount,
-                allowance_target=method_parameters.get("to"),  # Router address
-                data=method_parameters.get("calldata"),
-                to=method_parameters.get("to"),
-                value=int(method_parameters.get("value", 0)) if method_parameters.get("value") else 0,
+                allowance_target=tx_data.get("to"),  # Router address
+                data=tx_data.get("data"),
+                to=tx_data.get("to"),
+                value=int(tx_data.get("value", 0)) if tx_data.get("value") else 0,
                 gas=int(gas) if gas else 300000,
                 gas_price=int(gas_price) if gas_price else None,
                 raw_response=data,
