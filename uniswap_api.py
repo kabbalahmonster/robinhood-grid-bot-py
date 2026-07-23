@@ -43,7 +43,7 @@ class UniswapAPIClient:
     with optional Permit2 bypass support.
     """
     
-    BASE_URL = "https://api.uniswap.org/v1"
+    BASE_URL = "https://trade-api.gateway.uniswap.org/v1"
     
     def __init__(self, config: BotConfig):
         """
