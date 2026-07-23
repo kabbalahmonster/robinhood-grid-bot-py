@@ -333,7 +333,8 @@ class UniswapAPIClient:
             url = f"{self.BASE_URL}/swap"
             
             # Build payload according to Uniswap API spec
-            # Send the complete quote object unchanged
+            # quote_data is the full /quote response which contains routing, isTokenApprovalApplicable, quote, etc.
+            # The /swap endpoint expects this exact structure as the "quote" value
             payload = {
                 "quote": quote_data,
                 "refreshGasPrice": True,
@@ -342,6 +343,7 @@ class UniswapAPIClient:
             }
             
             self.logger.debug(f"Fetching Uniswap swap transaction")
+            self.logger.debug(f"Swap payload quote keys: {list(quote_data.keys()) if isinstance(quote_data, dict) else 'not dict'}")
             
             response = requests.post(
                 url,
