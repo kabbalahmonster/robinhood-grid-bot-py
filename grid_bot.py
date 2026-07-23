@@ -499,11 +499,17 @@ class GridBot:
             return
         
         # Check min profit requirement against individual position quote
-        cost_weth = pos.get('cost', 0) / 1e9
+        # Support both cost_wei (new) and cost (legacy nano-ETH)
+        cost_wei = pos.get('cost_wei', 0)
+        if cost_wei <= 0 and 'cost' in pos:
+            old_cost = pos.get('cost', 0)
+            if old_cost > 0:
+                cost_wei = old_cost * 10**9
+        cost_eth = cost_wei / 1e18
         min_profit = getattr(self.config, 'min_profit_percent', 1.5)
-        min_profit_eth = cost_weth * (min_profit / 100)
+        min_profit_eth = cost_eth * (min_profit / 100)
         quote_return_eth = quote.buy_amount / 10**18 if quote.buy_amount else 0
-        quote_profit_eth = quote_return_eth - cost_weth
+        quote_profit_eth = quote_return_eth - cost_eth
         
         if quote_profit_eth < min_profit_eth:
             buy_price = get_buy_price(pos)
@@ -519,15 +525,20 @@ class GridBot:
         from gridless import remove_position, calculate_pnl
         
         balance = pos.get('balance', 0)
-        cost = pos.get('cost', 0)
+        # Support both cost_wei (new) and cost (legacy nano-ETH)
+        cost_wei = pos.get('cost_wei', 0)
+        if cost_wei <= 0 and 'cost' in pos:
+            old_cost = pos.get('cost', 0)
+            if old_cost > 0:
+                cost_wei = old_cost * 10**9
         
-        if balance <= 0 or cost <= 0:
-            logger.warning(f"Invalid position #{pos_id}: balance={balance}, cost={cost}")
+        if balance <= 0 or cost_wei <= 0:
+            logger.warning(f"Invalid position #{pos_id}: balance={balance}, cost_wei={cost_wei}")
             return
         
         tokens = balance / 10**18
-        cost_weth = cost / 1e9
-        buy_price = cost_weth / tokens if tokens > 0 else 0
+        cost_eth = cost_wei / 1e18
+        buy_price = cost_eth / tokens if tokens > 0 else 0
         pnl = calculate_pnl(pos, price)
         
         # Moonbag logic
@@ -1144,10 +1155,15 @@ class GridBot:
                 )
                 for pos_id, pos in active_positions[:3]:
                     tokens = pos.get('balance', 0) / 10**18
-                    cost = pos.get('cost', 0)
-                    cost_weth = cost / 10**9
-                    if tokens > 0 and cost_weth > 0:
-                        buy_price = cost_weth / tokens
+                    # Support both cost_wei (new) and cost (legacy nano-ETH)
+                    cost_wei = pos.get('cost_wei', 0)
+                    if cost_wei <= 0 and 'cost' in pos:
+                        old_cost = pos.get('cost', 0)
+                        if old_cost > 0:
+                            cost_wei = old_cost * 10**9
+                    cost_eth = cost_wei / 10**18
+                    if tokens > 0 and cost_eth > 0:
+                        buy_price = cost_eth / tokens
                         pnl = ((price - buy_price) / buy_price * 100)
                         logger.info(f"#{pos_id:>3}: {tokens:>6.1f} | P&L: {pnl:>+5.1f}%")
                     else:
@@ -1193,12 +1209,17 @@ class GridBot:
                     )
                     for pos_id, pos in sorted_positions:
                         balance_raw = pos.get('balance', 0)
-                        cost_raw = pos.get('cost', 0)
+                        # Support both cost_wei (new) and cost (legacy nano-ETH)
+                        cost_wei = pos.get('cost_wei', 0)
+                        if cost_wei <= 0 and 'cost' in pos:
+                            old_cost = pos.get('cost', 0)
+                            if old_cost > 0:
+                                cost_wei = old_cost * 10**9
                         tokens = balance_raw / 10**18
-                        cost_weth = cost_raw / 10**9
+                        cost_eth = cost_wei / 10**18
                         # Calculate buy_price from cost/balance
-                        if tokens > 0 and cost_weth > 0:
-                            buy_price = cost_weth / tokens
+                        if tokens > 0 and cost_eth > 0:
+                            buy_price = cost_eth / tokens
                             sell_target = buy_price * (1 + sell_threshold / 100)
                             pnl = ((price - buy_price) / buy_price * 100)
                             price_diff = sell_target - price
