@@ -265,3 +265,34 @@ class UniswapAPIClient:
         if result.success and result.price:
             return result.price
         return None
+    
+    def refresh_quote(
+        self,
+        sell_token: str,
+        buy_token: str,
+        sell_amount: int,
+        taker_address: str,
+        slippage_percentage: float = 0.01,
+    ) -> QuoteResult:
+        """
+        Refresh a quote (called after token approval).
+        Same as build_swap_transaction - gets fresh quote.
+        
+        Args:
+            sell_token: Address of token to sell.
+            buy_token: Address of token to buy.
+            sell_amount: Amount to sell (in base units).
+            taker_address: Address of the taker.
+            slippage_percentage: Slippage tolerance.
+            
+        Returns:
+            QuoteResult: Fresh transaction data.
+        """
+        return self.get_quote(
+            sell_token=sell_token,
+            buy_token=buy_token,
+            sell_amount=sell_amount,
+            taker_address=taker_address,
+            slippage_percentage=slippage_percentage,
+            apply_jitter_to_price=False,
+        )
