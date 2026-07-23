@@ -148,9 +148,10 @@ class UniswapAPIClient:
                 error="Must specify either sell_amount or buy_amount",
             )
         
-        # Optional parameters
-        if slippage_percentage:
-            payload["slippageTolerance"] = slippage_percentage * 100  # Percent (e.g., 0.5 = 0.5%)
+        # Optional parameters - slippageTolerance in percent (e.g., 0.5 = 0.5%)
+        # Convert from fraction (0.02 = 2%) to percent value (2.0 = 2%)
+        if slippage_percentage is not None:
+            payload["slippageTolerance"] = float(slippage_percentage * 100)  # e.g., 0.02 -> 2.0 (2%)
         
         try:
             url = f"{self.BASE_URL}/quote"
