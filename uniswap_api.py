@@ -183,7 +183,9 @@ class UniswapAPIClient:
             quote = data.get("quote", {})
             buy_amount = int(quote.get("output", {}).get("amount", 0)) if quote.get("output") else 0
             sell_amount = int(quote.get("input", {}).get("amount", 0)) if quote.get("input") else 0
-            price = buy_amount / sell_amount if sell_amount > 0 else 0
+            # Price in ETH per token (sell_amount is wei, buy_amount is wei-tokens)
+            # ETH/token = (wei / 10^18) / (wei-tokens / 10^18) = wei / wei-tokens
+            price = sell_amount / buy_amount if buy_amount > 0 else 0
             
             # Apply jitter if requested
             if apply_jitter_to_price and self.config.anti_mev_jitter:
