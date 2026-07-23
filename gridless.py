@@ -22,6 +22,10 @@ def calculate_pnl(position: Dict[str, int], current_price: float) -> float:
     buy_price = cost_weth / tokens
     if buy_price <= 0:
         return 0.0
+    # Debug
+    import logging
+    logger = logging.getLogger('gridless')
+    logger.debug(f"P&L calc: cost_weth={cost_weth}, tokens={tokens}, buy_price={buy_price}, current_price={current_price}")
     return ((current_price - buy_price) / buy_price) * 100
 
 
