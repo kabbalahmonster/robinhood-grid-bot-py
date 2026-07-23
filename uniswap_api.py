@@ -59,12 +59,12 @@ class UniswapAPIClient:
         self.permit2_disabled = getattr(config, 'uniswap_permit2_disabled', True)
         self.chain_id = config.chain_id
         
-        # Headers for API requests (matching Uniswap docs example)
+        # Headers for API requests (matching working curl)
         self.headers = {
             "x-api-key": self.api_key,
             "Content-Type": "application/json",
-            "x-universal-router-version": "2.0",
-            "x-erc20eth-enabled": "false",
+            "x-universal-router-version": "2.1.1",
+            "x-erc20eth-enabled": "true",
         }
         
         # Disable Permit2 if configured
