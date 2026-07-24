@@ -596,58 +596,88 @@ class GridBot:
             logger.warning(f"❌ Sell aborted: Quote ({quote_return_eth:.6f}) < min ({min_return_eth:.6f})")
             return
         
-        # Determine spender for approval
-        # For Uniswap API, use Universal Router from config (swap API needs approval first)
-        if getattr(self.config, 'use_uniswap_api', False):
-            spender = self.config.uniswap_router
-        else:
-            spender = quote.allowance_target or self.config.zero_x_proxy
-        
-        # Check/approve token before getting swap transaction (Uniswap API requires this)
-        token_allowance = self.wallet.check_allowance(self.config.token_address, spender, use_permit2=False)
-        approval_sent = False
-        if token_allowance < sell_amount:
-            logger.info(f"Approving {self.config.token_symbol} to {spender[:20]}...")
-            result = self.wallet.approve_token(self.config.token_address, spender, 2**256 - 1)
-            if not result.success:
-                logger.error(f"Approval failed: {result.error}")
-                return
-            approval_sent = True
-            # Wait for approval to be confirmed (up to 30 seconds)
-            logger.info("Waiting for approval confirmation...")
-            import time
-            for i in range(30):
-                time.sleep(1)
-                token_allowance = self.wallet.check_allowance(self.config.token_address, spender, use_permit2=False)
-                if token_allowance >= sell_amount:
-                    logger.info(f"Approval confirmed after {i+1}s")
-                    break
-            else:
-                logger.error("Approval not confirmed after 30s")
-                return
-        
-        # For Uniswap API, get swap transaction after approval is confirmed
+        # For Uniswap API, use check_approval flow to get correct approval transaction
         if getattr(self.config, 'use_uniswap_api', False):
             from uniswap_api import UniswapAPIClient
             if isinstance(self.api_client, UniswapAPIClient):
+                # Step 1: Check approval via Uniswap API
+                approval_result = self.api_client.check_approval(
+                    token=self.config.token_address,
+                    amount=sell_amount,
+                    wallet=self.wallet.address,
+                )
+                
+                if "error" in approval_result:
+                    logger.error(f"Approval check failed: {approval_result.get('error')}")
+                    return
+                
+                # Step 2: Execute approval transactions if needed
+                approval_txs = approval_result.get("transactions", [])
+                if approval_txs:
+                    logger.info(f"Uniswap approval required: {len(approval_txs)} transaction(s)")
+                    for i, tx in enumerate(approval_txs):
+                        logger.info(f"Sending approval tx {i+1}/{len(approval_txs)} to {tx.get('to', 'unknown')[:20]}...")
+                        result = self.wallet._send_transaction({
+                            "to": tx.get("to"),
+                            "data": tx.get("data"),
+                            "value": int(tx.get("value", 0)),
+                            "gas": int(tx.get("gas", 100000)),
+                            "gasPrice": int(tx.get("gasPrice", self.wallet.w3.eth.gas_price)),
+                            "nonce": self.wallet.w3.eth.get_transaction_count(self.wallet.address),
+                            "chainId": self.config.chain_id,
+                        })
+                        if not result.success:
+                            logger.error(f"Approval tx {i+1} failed: {result.error}")
+                            return
+                        logger.info(f"Approval tx {i+1} confirmed: {result.tx_hash}")
+                    
+                    # Step 3: Wait a moment for state to update
+                    import time
+                    time.sleep(2)
+                else:
+                    logger.info("No approval required (sufficient allowance)")
+                
+                # Step 4: Get fresh quote after approval
+                quote = self.api_client.get_quote(
+                    sell_token=self.config.token_address,
+                    buy_token=self.trade_token_address,
+                    sell_amount=sell_amount,
+                    taker_address=self.wallet.address,
+                    slippage_percentage=0.02,
+                )
+                if not quote.success:
+                    logger.error(f"Fresh quote after approval failed: {quote.error}")
+                    return
+                
+                # Step 5: Get swap transaction
                 swap_result = self.api_client.get_swap_transaction(quote.raw_response)
                 if not swap_result.success:
                     logger.error(f"Uniswap swap transaction failed: {swap_result.error}")
                     return
                 quote = swap_result
-        
-        # For LI.FI, refresh quote after approval
-        if getattr(self.config, 'use_li_fi', False) and token_allowance < sell_amount:
-            quote = self.api_client.refresh_quote(
-                sell_token=self.config.token_address,
-                buy_token=self.trade_token_address,
-                sell_amount=sell_amount,
-                taker_address=self.wallet.address,
-                slippage_percentage=0.02,
-            )
-            if not quote.success:
-                logger.error(f"Refreshed quote failed: {quote.error}")
-                return
+        else:
+            # Non-Uniswap: use standard approval flow
+            spender = quote.allowance_target or self.config.zero_x_proxy
+            token_allowance = self.wallet.check_allowance(self.config.token_address, spender, use_permit2=False)
+            if token_allowance < sell_amount:
+                logger.info(f"Approving {self.config.token_symbol} to {spender[:20]}...")
+                result = self.wallet.approve_token(self.config.token_address, spender, 2**256 - 1)
+                if not result.success:
+                    logger.error(f"Approval failed: {result.error}")
+                    return
+            
+                # For LI.FI, refresh quote after approval
+                if getattr(self.config, 'use_li_fi', False):
+                    quote = self.api_client.refresh_quote(
+                        sell_token=self.config.token_address,
+                        buy_token=self.trade_token_address,
+                        sell_amount=sell_amount,
+                        taker_address=self.wallet.address,
+                        slippage_percentage=0.02,
+                    )
+                    if not quote.success:
+                        logger.error(f"Refreshed quote failed: {quote.error}")
+                        return
         
         # Execute swap with configurable gas multipliers
         # Use API's gas price estimate if available (more accurate than network average)

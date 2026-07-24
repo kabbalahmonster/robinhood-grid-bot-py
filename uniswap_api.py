@@ -310,6 +310,66 @@ class UniswapAPIClient:
             apply_jitter_to_price=False,
         )
     
+    def check_approval(
+        self,
+        token: str,
+        amount: int,
+        wallet: str,
+    ) -> dict:
+        """
+        Check and get approval transaction from Uniswap API.
+        
+        Args:
+            token: Token address to approve.
+            amount: Amount to approve (in base units).
+            wallet: Wallet address.
+            
+        Returns:
+            dict: Approval response with transaction data if needed.
+        """
+        if not self.api_key:
+            return {"error": "Uniswap API key not configured"}
+        
+        try:
+            url = f"{self.BASE_URL}/check_approval"
+            
+            payload = {
+                "walletAddress": wallet,
+                "token": token,
+                "amount": str(amount),
+                "chainId": self.chain_id,
+            }
+            
+            self.logger.debug(f"Checking Uniswap approval: token={token}, amount={amount}, wallet={wallet}")
+            
+            response = requests.post(
+                url,
+                headers=self._get_headers(),
+                json=payload,
+                timeout=30,
+            )
+            
+            self.logger.debug(f"Uniswap check_approval response status: {response.status_code}")
+            
+            if response.status_code != 200:
+                error_text = response.text[:500]
+                self.logger.error(f"Uniswap check_approval error: Status {response.status_code}")
+                self.logger.error(f"Response: {error_text}")
+                return {"error": f"check_approval failed: {response.status_code}", "detail": error_text}
+            
+            data = response.json()
+            self.logger.debug(f"Uniswap check_approval response: {data}")
+            return data
+            
+        except requests.exceptions.RequestException as e:
+            error_msg = f"check_approval request failed: {e}"
+            self.logger.error(error_msg)
+            return {"error": error_msg}
+        except Exception as e:
+            error_msg = f"check_approval unexpected error: {e}"
+            self.logger.error(error_msg)
+            return {"error": error_msg}
+    
     def get_swap_transaction(
         self,
         quote_data: dict,
