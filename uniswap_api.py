@@ -495,3 +495,122 @@ class UniswapAPIClient:
             error_msg = f"Unexpected swap error: {e}"
             self.logger.error(error_msg)
             return QuoteResult(success=False, error=error_msg)
+    
+    def execute_sell_with_approval(
+        self,
+        sell_token: str,
+        buy_token: str,
+        sell_amount: int,
+        taker_address: str,
+        wallet,
+        slippage_percentage: float = 0.02,
+    ) -> QuoteResult:
+        """
+        Execute a sell with full approval handling.
+        
+        This is the high-level method that handles:
+        1. Getting quote
+        2. Checking/executing approval via Uniswap API
+        3. Getting swap transaction
+        
+        Args:
+            sell_token: Token to sell
+            buy_token: Token to buy
+            sell_amount: Amount to sell
+            taker_address: Taker address
+            wallet: Wallet instance for sending transactions
+            slippage_percentage: Slippage tolerance
+            
+        Returns:
+            QuoteResult with transaction data ready to execute
+        """
+        # Step 1: Get initial quote
+        quote = self.get_quote(
+            sell_token=sell_token,
+            buy_token=buy_token,
+            sell_amount=sell_amount,
+            taker_address=taker_address,
+            slippage_percentage=slippage_percentage,
+        )
+        if not quote.success:
+            return quote
+        
+        # Step 2: Check approval via Uniswap API
+        approval_result = self.check_approval(
+            token=sell_token,
+            amount=sell_amount,
+            wallet=taker_address,
+        )
+        
+        if "error" in approval_result:
+            return QuoteResult(success=False, error=f"Approval check failed: {approval_result.get('error')}")
+        
+        # Step 3: Execute approval transactions if needed
+        cancel_tx = approval_result.get("cancel")
+        approval_tx = approval_result.get("approval")
+        
+        if cancel_tx is not None:
+            self.logger.info("Approval cancel transaction required")
+            result = self._send_api_transaction(cancel_tx, wallet)
+            if not result.success:
+                return QuoteResult(success=False, error=f"Cancel failed: {result.error}")
+            self.logger.info(f"Cancel confirmed: {result.tx_hash}")
+            import time
+            time.sleep(3)
+        
+        if approval_tx is not None:
+            self.logger.info("ERC20 approval transaction required")
+            result = self._send_api_transaction(approval_tx, wallet)
+            if not result.success:
+                return QuoteResult(success=False, error=f"Approval failed: {result.error}")
+            self.logger.info(f"Approval confirmed: {result.tx_hash}")
+            import time
+            time.sleep(3)
+        
+        # Step 4: Get swap transaction
+        swap_result = self.get_swap_transaction(quote.raw_response)
+        if not swap_result.success:
+            return swap_result
+        
+        return swap_result
+    
+    def _send_api_transaction(self, api_tx: dict, wallet) -> Any:
+        """Send a transaction from Uniswap API response with fresh EIP-1559 fees."""
+        from web3 import Web3
+        
+        # Get fresh block data
+        latest_block = wallet.w3.eth.get_block("latest")
+        base_fee = int(latest_block.get("baseFeePerGas", 0))
+        
+        # Get priority fee
+        try:
+            priority_fee = int(wallet.w3.eth.max_priority_fee)
+        except Exception:
+            priority_fee = 1_000_000
+        priority_fee = max(priority_fee, 1_000_000)
+        
+        # Calculate max fee with headroom
+        max_fee = base_fee * 2 + priority_fee
+        
+        tx = {
+            "from": Web3.to_checksum_address(api_tx.get("from", wallet.address)),
+            "to": Web3.to_checksum_address(api_tx.get("to")),
+            "data": api_tx.get("data"),
+            "value": int(api_tx.get("value", "0x0"), 16) if isinstance(api_tx.get("value"), str) else int(api_tx.get("value", 0)),
+            "chainId": int(api_tx.get("chainId", self.chain_id)),
+            "nonce": wallet.w3.eth.get_transaction_count(wallet.address, "pending"),
+            "maxPriorityFeePerGas": priority_fee,
+            "maxFeePerGas": max_fee,
+            "type": 2,
+        }
+        
+        # Estimate gas
+        try:
+            estimated = wallet.w3.eth.estimate_gas(tx)
+            tx["gas"] = int(estimated * 1.2)
+        except Exception as e:
+            self.logger.warning(f"Gas estimation failed: {e}")
+            tx["gas"] = int(api_tx.get("gas", 100000))
+        
+        self.logger.info(f"Tx fees: base={base_fee} priority={priority_fee} max={max_fee} gas={tx['gas']}")
+        return wallet._send_transaction(tx)
