@@ -17,6 +17,7 @@ CHAIN_CONFIG = {
         "weth": "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73",
         "permit2": "0x000000000022d473030f116ddee9f6b43ac78ba3",
         "zero_x_proxy": "0x0000000000001ff3684f28c67538d4d072c22734",  # 0x AllowanceHolder
+        "uniswap_router": "0xEf1c6E67703c7BD7107eed8303Fbe6EC2554BF6B",  # Universal Router v2
         "default_max_positions": 20,
     },
     8453: {  # Base
@@ -24,6 +25,7 @@ CHAIN_CONFIG = {
         "weth": "0x4200000000000000000000000000000000000006",
         "permit2": "0x000000000022d473030f116ddee9f6b43ac78ba3",
         "zero_x_proxy": "0xDef1C0ded9bec7F1a1670819833240f027b25EfF",
+        "uniswap_router": "0xEf1c6E67703c7BD7107eed8303Fbe6EC2554BF6B",  # Universal Router v2
         "default_max_positions": 10,
     },
     1: {  # Ethereum Mainnet
@@ -31,6 +33,7 @@ CHAIN_CONFIG = {
         "weth": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
         "permit2": "0x000000000022d473030f116ddee9f6b43ac78ba3",
         "zero_x_proxy": "0xDef1C0ded9bec7F1a1670819833240f027b25EfF",
+        "uniswap_router": "0xEf1c6E67703c7BD7107eed8303Fbe6EC2554BF6B",  # Universal Router v2
         "default_max_positions": 10,
     },
 }
@@ -97,6 +100,7 @@ class BotConfig:
     use_uniswap_api: bool  # If True, use Uniswap API
     uniswap_api_key: str
     uniswap_permit2_disabled: bool  # Set to True to disable Permit2
+    uniswap_router: str  # Universal Router address for token approvals
     
     # Gridless Trading Mode
     use_gridless: bool  # If True, use gridless position-based trading
@@ -214,6 +218,7 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
         usdg_address=os.getenv("USDG_ADDRESS", ""),
         permit2_address=chain_defaults.get("permit2", ""),
         zero_x_proxy=chain_defaults.get("zero_x_proxy", ""),
+        uniswap_router=chain_defaults.get("uniswap_router", ""),
         
         # Trading Parameters
         grid_spacing_percent=float(os.getenv("GRID_SPACING_PERCENT", "5.0")),
