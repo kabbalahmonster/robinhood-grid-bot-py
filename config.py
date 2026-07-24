@@ -17,7 +17,7 @@ CHAIN_CONFIG = {
         "weth": "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73",
         "permit2": "0x000000000022d473030f116ddee9f6b43ac78ba3",
         "zero_x_proxy": "0x0000000000001ff3684f28c67538d4d072c22734",  # 0x AllowanceHolder
-        "uniswap_router": "0xEf1c6E67703c7BD7107eed8303Fbe6EC2554BF6B",  # Universal Router v2
+        "uniswap_router": "0x8876789976decbfcbbbe364623c63652db8c0904",  # Universal Router v2.1.1
         "default_max_positions": 20,
     },
     8453: {  # Base
