@@ -596,7 +596,17 @@ class GridBot:
             logger.warning(f"❌ Sell aborted: Quote ({quote_return_eth:.6f}) < min ({min_return_eth:.6f})")
             return
         
-        # Check/approve token
+        # For Uniswap API, get swap transaction first (need correct router address for approval)
+        if getattr(self.config, 'use_uniswap_api', False):
+            from uniswap_api import UniswapAPIClient
+            if isinstance(self.api_client, UniswapAPIClient):
+                swap_result = self.api_client.get_swap_transaction(quote.raw_response)
+                if not swap_result.success:
+                    logger.error(f"Uniswap swap transaction failed: {swap_result.error}")
+                    return
+                quote = swap_result
+        
+        # Check/approve token (now using correct router from swap transaction)
         spender = quote.allowance_target or self.config.zero_x_proxy
         token_allowance = self.wallet.check_allowance(self.config.token_address, spender, use_permit2=False)
         if token_allowance < sell_amount:
@@ -616,16 +626,6 @@ class GridBot:
                 if not quote.success:
                     logger.error(f"Refreshed quote failed: {quote.error}")
                     return
-        
-        # For Uniswap API, get swap transaction from quote
-        if getattr(self.config, 'use_uniswap_api', False):
-            from uniswap_api import UniswapAPIClient
-            if isinstance(self.api_client, UniswapAPIClient):
-                swap_result = self.api_client.get_swap_transaction(quote.raw_response)
-                if not swap_result.success:
-                    logger.error(f"Uniswap swap transaction failed: {swap_result.error}")
-                    return
-                quote = swap_result
         
         # Execute swap with configurable gas multipliers
         # Use API's gas price estimate if available (more accurate than network average)
