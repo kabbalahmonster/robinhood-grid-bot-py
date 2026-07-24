@@ -348,8 +348,8 @@ class UniswapAPIClient:
             payload = {
                 "quote": nested_quote,
                 "refreshGasPrice": True,
-                "simulateTransaction": False,  # Skip simulation - approval may not be confirmed yet
-                "safetyMode": "DANGEROUS",  # Allow without simulation
+                "simulateTransaction": True,
+                "safetyMode": "SAFE",
             }
             
             self.logger.debug(f"Fetching Uniswap swap transaction")

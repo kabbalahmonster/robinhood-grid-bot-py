@@ -605,14 +605,28 @@ class GridBot:
         
         # Check/approve token before getting swap transaction (Uniswap API requires this)
         token_allowance = self.wallet.check_allowance(self.config.token_address, spender, use_permit2=False)
+        approval_sent = False
         if token_allowance < sell_amount:
             logger.info(f"Approving {self.config.token_symbol} to {spender[:20]}...")
             result = self.wallet.approve_token(self.config.token_address, spender, 2**256 - 1)
             if not result.success:
                 logger.error(f"Approval failed: {result.error}")
                 return
+            approval_sent = True
+            # Wait for approval to be confirmed (up to 30 seconds)
+            logger.info("Waiting for approval confirmation...")
+            import time
+            for i in range(30):
+                time.sleep(1)
+                token_allowance = self.wallet.check_allowance(self.config.token_address, spender, use_permit2=False)
+                if token_allowance >= sell_amount:
+                    logger.info(f"Approval confirmed after {i+1}s")
+                    break
+            else:
+                logger.error("Approval not confirmed after 30s")
+                return
         
-        # For Uniswap API, get swap transaction after approval
+        # For Uniswap API, get swap transaction after approval is confirmed
         if getattr(self.config, 'use_uniswap_api', False):
             from uniswap_api import UniswapAPIClient
             if isinstance(self.api_client, UniswapAPIClient):
