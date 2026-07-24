@@ -612,30 +612,87 @@ class GridBot:
                     return
                 
                 # Step 2: Execute approval transactions if needed
-                approval_txs = approval_result.get("transactions", [])
-                if approval_txs:
-                    logger.info(f"Uniswap approval required: {len(approval_txs)} transaction(s)")
-                    for i, tx in enumerate(approval_txs):
-                        logger.info(f"Sending approval tx {i+1}/{len(approval_txs)} to {tx.get('to', 'unknown')[:20]}...")
-                        result = self.wallet._send_transaction({
-                            "to": tx.get("to"),
-                            "data": tx.get("data"),
-                            "value": int(tx.get("value", 0)),
-                            "gas": int(tx.get("gas", 100000)),
-                            "gasPrice": int(tx.get("gasPrice", self.wallet.w3.eth.gas_price)),
-                            "nonce": self.wallet.w3.eth.get_transaction_count(self.wallet.address),
-                            "chainId": self.config.chain_id,
-                        })
-                        if not result.success:
-                            logger.error(f"Approval tx {i+1} failed: {result.error}")
-                            return
-                        logger.info(f"Approval tx {i+1} confirmed: {result.tx_hash}")
-                    
-                    # Step 3: Wait a moment for state to update
+                # Uniswap check_approval returns {"approval": tx} when approval is needed, null otherwise
+                cancel_tx = approval_result.get("cancel")
+                approval_tx = approval_result.get("approval")
+                
+                # Handle cancel transaction first (if present)
+                if cancel_tx is not None:
+                    logger.info("Approval cancel/reset transaction required")
+                    result = self.wallet._send_transaction({
+                        "to": cancel_tx.get("to"),
+                        "data": cancel_tx.get("data"),
+                        "value": int(cancel_tx.get("value", "0x0"), 16) if isinstance(cancel_tx.get("value"), str) else int(cancel_tx.get("value", 0)),
+                        "gas": int(cancel_tx.get("gas", 100000)),
+                        "gasPrice": int(cancel_tx.get("gasPrice", self.wallet.w3.eth.gas_price)),
+                        "nonce": self.wallet.w3.eth.get_transaction_count(self.wallet.address),
+                        "chainId": self.config.chain_id,
+                    })
+                    if not result.success:
+                        logger.error(f"Cancel transaction failed: {result.error}")
+                        return
+                    logger.info(f"Cancel transaction confirmed: {result.tx_hash}")
+                    # Wait for confirmation
                     import time
-                    time.sleep(2)
+                    time.sleep(3)
+                
+                # Handle approval transaction
+                if approval_tx is not None:
+                    logger.info("ERC20 approval transaction required")
+                    result = self.wallet._send_transaction({
+                        "to": approval_tx.get("to"),
+                        "data": approval_tx.get("data"),
+                        "value": int(approval_tx.get("value", "0x0"), 16) if isinstance(approval_tx.get("value"), str) else int(approval_tx.get("value", 0)),
+                        "gas": int(approval_tx.get("gas", 100000)),
+                        "gasPrice": int(approval_tx.get("gasPrice", self.wallet.w3.eth.gas_price)),
+                        "nonce": self.wallet.w3.eth.get_transaction_count(self.wallet.address),
+                        "chainId": self.config.chain_id,
+                    })
+                    if not result.success:
+                        logger.error(f"Approval transaction failed: {result.error}")
+                        return
+                    logger.info(f"Approval transaction confirmed: {result.tx_hash}")
+                    # Wait for confirmation
+                    import time
+                    time.sleep(3)
                 else:
-                    logger.info("No approval required (sufficient allowance)")
+                    logger.info("No approval transaction required")
+                
+                # Step 3b: Verify allowance if approval was sent
+                if approval_tx is not None:
+                    # Decode spender from approval calldata (0x095ea7b3 = approve(address,uint256))
+                    import binascii
+                    data = approval_tx.get("data", "")
+                    if data.startswith("0x095ea7b3") or data.startswith("095ea7b3"):
+                        # spender is the first 32-byte word after selector
+                        clean_data = data[10:] if data.startswith("0x") else data[8:]
+                        spender_word = clean_data[:64]
+                        spender_addr = "0x" + spender_word[-40:]
+                        logger.info(f"Decoded spender from approval: {spender_addr}")
+                        
+                        # Check allowance on-chain
+                        from web3 import Web3
+                        token_contract = self.wallet.w3.eth.contract(
+                            address=Web3.to_checksum_address(self.config.token_address),
+                            abi=[{
+                                "name": "allowance",
+                                "type": "function",
+                                "stateMutability": "view",
+                                "inputs": [
+                                    {"name": "owner", "type": "address"},
+                                    {"name": "spender", "type": "address"},
+                                ],
+                                "outputs": [{"name": "", "type": "uint256"}],
+                            }]
+                        )
+                        confirmed_allowance = token_contract.functions.allowance(
+                            self.wallet.address,
+                            Web3.to_checksum_address(spender_addr),
+                        ).call()
+                        logger.info(f"Confirmed allowance: {confirmed_allowance} >= required {sell_amount}")
+                        if confirmed_allowance < sell_amount:
+                            logger.error("Approval succeeded but allowance is insufficient!")
+                            return
                 
                 # Step 4: Get fresh quote after approval
                 quote = self.api_client.get_quote(
