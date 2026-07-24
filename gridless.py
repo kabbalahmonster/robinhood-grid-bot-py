@@ -124,8 +124,8 @@ def should_sell(position: Dict[str, int], current_price: float, config: Any,
         if quote_profit_eth < 0:
             return (False, f"STOPLOSS ({pnl:.1f}%) but quote loss")
         return (True, f"STOPLOSS: {pnl:.1f}%")
-    # Profit target check
-    if pnl >= sell_threshold:
+    # Profit target check (with small tolerance for floating point precision)
+    if pnl >= sell_threshold - 0.01:  # >= with 0.01% tolerance
         if quote_profit_eth <= 0:
             return (False, f"Target met ({pnl:.1f}%) but no quote profit")
         cost_wei = position.get('cost_wei', position.get('cost', 0) * 10**9)
