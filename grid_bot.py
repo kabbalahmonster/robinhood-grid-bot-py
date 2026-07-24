@@ -616,18 +616,52 @@ class GridBot:
                 cancel_tx = approval_result.get("cancel")
                 approval_tx = approval_result.get("approval")
                 
+                # Helper function to build EIP-1559 transaction with fresh fees
+                def build_eip1559_tx(api_tx):
+                    from web3 import Web3
+                    # Get fresh block data
+                    latest_block = self.wallet.w3.eth.get_block("latest")
+                    base_fee = int(latest_block.get("baseFeePerGas", 0))
+                    
+                    # Get priority fee (with fallback)
+                    try:
+                        priority_fee = int(self.wallet.w3.eth.max_priority_fee)
+                    except Exception:
+                        priority_fee = 1_000_000  # 0.001 gwei fallback
+                    priority_fee = max(priority_fee, 1_000_000)
+                    
+                    # Calculate max fee with 2x headroom
+                    max_fee = base_fee * 2 + priority_fee
+                    
+                    # Build transaction
+                    tx = {
+                        "from": Web3.to_checksum_address(api_tx.get("from", self.wallet.address)),
+                        "to": Web3.to_checksum_address(api_tx.get("to")),
+                        "data": api_tx.get("data"),
+                        "value": int(api_tx.get("value", "0x0"), 16) if isinstance(api_tx.get("value"), str) else int(api_tx.get("value", 0)),
+                        "chainId": int(api_tx.get("chainId", self.config.chain_id)),
+                        "nonce": self.wallet.w3.eth.get_transaction_count(self.wallet.address, "pending"),
+                        "maxPriorityFeePerGas": priority_fee,
+                        "maxFeePerGas": max_fee,
+                        "type": 2,  # EIP-1559
+                    }
+                    
+                    # Estimate gas with headroom
+                    try:
+                        estimated_gas = self.wallet.w3.eth.estimate_gas(tx)
+                        tx["gas"] = int(estimated_gas * 1.2)  # 20% headroom
+                    except Exception as e:
+                        logger.warning(f"Gas estimation failed: {e}, using default")
+                        tx["gas"] = int(api_tx.get("gas", 100000))
+                    
+                    logger.info(f"Approval fees: base={base_fee} priority={priority_fee} max={max_fee} nonce={tx['nonce']} gas={tx['gas']}")
+                    return tx
+                
                 # Handle cancel transaction first (if present)
                 if cancel_tx is not None:
                     logger.info("Approval cancel/reset transaction required")
-                    result = self.wallet._send_transaction({
-                        "to": cancel_tx.get("to"),
-                        "data": cancel_tx.get("data"),
-                        "value": int(cancel_tx.get("value", "0x0"), 16) if isinstance(cancel_tx.get("value"), str) else int(cancel_tx.get("value", 0)),
-                        "gas": int(cancel_tx.get("gas", 100000)),
-                        "gasPrice": int(cancel_tx.get("gasPrice", self.wallet.w3.eth.gas_price)),
-                        "nonce": self.wallet.w3.eth.get_transaction_count(self.wallet.address),
-                        "chainId": self.config.chain_id,
-                    })
+                    tx = build_eip1559_tx(cancel_tx)
+                    result = self.wallet._send_transaction(tx)
                     if not result.success:
                         logger.error(f"Cancel transaction failed: {result.error}")
                         return
@@ -639,15 +673,8 @@ class GridBot:
                 # Handle approval transaction
                 if approval_tx is not None:
                     logger.info("ERC20 approval transaction required")
-                    result = self.wallet._send_transaction({
-                        "to": approval_tx.get("to"),
-                        "data": approval_tx.get("data"),
-                        "value": int(approval_tx.get("value", "0x0"), 16) if isinstance(approval_tx.get("value"), str) else int(approval_tx.get("value", 0)),
-                        "gas": int(approval_tx.get("gas", 100000)),
-                        "gasPrice": int(approval_tx.get("gasPrice", self.wallet.w3.eth.gas_price)),
-                        "nonce": self.wallet.w3.eth.get_transaction_count(self.wallet.address),
-                        "chainId": self.config.chain_id,
-                    })
+                    tx = build_eip1559_tx(approval_tx)
+                    result = self.wallet._send_transaction(tx)
                     if not result.success:
                         logger.error(f"Approval transaction failed: {result.error}")
                         return
