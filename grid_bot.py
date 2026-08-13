@@ -81,9 +81,9 @@ class GridBot:
         
         # Dashboard reporter (None when DASHBOARD_URL is not configured)
         self._reporter: Optional[DashboardReporter] = create_reporter_from_config(self.config)
-        self.logger.info(f"DEBUG: dashboard_url={self.config.dashboard_url!r}, reporter={self._reporter}")
+        logger.info(f"DEBUG: dashboard_url={self.config.dashboard_url!r}, reporter={self._reporter}")
         if self._reporter:
-            self.logger.info(f"Dashboard reporting enabled (bot_id={self._reporter.bot_id})")
+            logger.info(f"Dashboard reporting enabled (bot_id={self._reporter.bot_id})")
         logger.info(f"Wallet: {self.wallet.address}")
         logger.info(f"Trading: {self.config.token_symbol}")
         logger.info(f"Max active positions: {self.config.max_active_positions}")
