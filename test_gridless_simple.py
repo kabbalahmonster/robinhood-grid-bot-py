@@ -266,7 +266,7 @@ class TestPositionManagement(unittest.TestCase):
         
         positions = gridless.load_positions()
         self.assertIn('0', positions)
-        self.assertEqual(positions['0']['cost'], 1_000_000_000)
+        self.assertEqual(positions['0']['cost_wei'], 1_000_000_000)
         self.assertEqual(positions['0']['balance'], 10_000_000_000_000_000_000)
     
     def test_add_multiple_positions(self):

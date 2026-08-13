@@ -5,6 +5,7 @@ Sell: pnl >= sell_threshold (check quote) OR stoploss triggered
 """
 
 import json
+import math
 import os
 from typing import Dict, Optional, Tuple, Any
 
@@ -105,7 +106,9 @@ def should_buy(positions: Dict[str, Dict], current_price: float, config: Any) ->
     # Trigger at 50% of sell threshold (e.g., if sell=5%, buy at +2.5%)
     if leading_edge_enabled and len(positions) == 1:
         leading_edge_trigger = sell_threshold * 0.5
-        if top_pnl >= leading_edge_trigger:
+        if top_pnl > leading_edge_trigger or math.isclose(
+            top_pnl, leading_edge_trigger, rel_tol=1e-12, abs_tol=1e-9
+        ):
             return (True, f"Leading edge: P&L {top_pnl:.2f}% >= 50% of sell ({leading_edge_trigger}%)")
     
     return (False, f"Top position P&L {top_pnl:.2f}% > threshold {buy_threshold}%")
