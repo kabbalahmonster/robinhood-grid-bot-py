@@ -17,6 +17,7 @@ from wallet import Wallet
 from zero_x import ZeroXClient
 from li_fi import LiFiClient
 from uniswap_api import UniswapAPIClient
+from dashboard_reporter import DashboardReporter, create_reporter_from_config
 
 # Native ETH address for 0x API (used when trading with native ETH instead of WETH)
 # Native ETH address for 0x API
@@ -77,6 +78,12 @@ class GridBot:
             logger.info("Trading mode: WETH")
         
         logger.info(f"Grid Bot initialized")
+        
+        # Dashboard reporter (None when DASHBOARD_URL is not configured)
+        self._reporter: Optional[DashboardReporter] = create_reporter_from_config(self.config)
+        self.logger.info(f"DEBUG: dashboard_url={self.config.dashboard_url!r}, reporter={self._reporter}")
+        if self._reporter:
+            self.logger.info(f"Dashboard reporting enabled (bot_id={self._reporter.bot_id})")
         logger.info(f"Wallet: {self.wallet.address}")
         logger.info(f"Trading: {self.config.token_symbol}")
         logger.info(f"Max active positions: {self.config.max_active_positions}")
@@ -1418,6 +1425,44 @@ class GridBot:
                         logger.info(f"🛒 Next Buy: Position #{lowest_buy['pos_id']} at {lowest_buy['buy_max']:.10f} (need +{rise_pct:.1f}% rise to enter range)")
             
             logger.info("-" * 70)
+            
+            # Report to dashboard if configured
+            if self._reporter:
+                try:
+                    positions_data = []
+                    for pos_id, pos in self.positions.items():
+                        if pos['balance'] > 0:
+                            balance_raw = pos['balance']
+                            cost_raw = pos.get('cost_wei', pos.get('cost', 0))
+                            if cost_raw > 0 and 'cost' in pos and 'cost_wei' not in pos:
+                                cost_raw = cost_raw * 10**9
+                            tokens = balance_raw / 10**18
+                            cost_eth = cost_raw / 10**18
+                            if tokens > 0 and cost_eth > 0:
+                                buy_price = cost_eth / tokens
+                                pnl = ((price - buy_price) / buy_price * 100)
+                                positions_data.append({
+                                    'id': pos_id,
+                                    'buy_price': buy_price,
+                                    'buy_amount_token': tokens,
+                                    'buy_amount_eth': cost_eth,
+                                    'cost_basis': cost_eth,
+                                    'pnl': pnl,
+                                    'timestamp': pos.get('timestamp', 0),
+                                })
+                    
+                    self._reporter.report(
+                        price=price,
+                        eth_balance=eth_balance,
+                        weth_balance=weth_balance,
+                        token_balance=token_balance,
+                        positions=positions_data,
+                        profit=session_profit,
+                        trades=self.session_buys + self.session_sells,
+                        rpc_status="ok",
+                    )
+                except Exception:
+                    pass  # Never let dashboard reporting crash the bot
         
         # Check sells first (take profits)
         self.check_sells(price)
