@@ -1480,6 +1480,8 @@ class GridBot:
                     profit_percent=round(profit_percent, 2),
                     buys=self.session_buys,
                     sells=self.session_sells,
+                    filled_positions=active,
+                    max_positions=self.config.max_active_positions,
                     rpc_status="ok",
                 )
             except Exception as e:

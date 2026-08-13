@@ -97,6 +97,8 @@ class DashboardReporter:
         profit: Optional[float] = None,
         buys: int = 0,
         sells: int = 0,
+        filled_positions: int = 0,
+        max_positions: int = 0,
         trades: Optional[int] = None,
         rpc_status: str = "unknown",
     ) -> None:
@@ -117,6 +119,8 @@ class DashboardReporter:
             "profit_percent": profit_percent,
             "buys": buys,
             "sells": sells,
+            "filled_positions": filled_positions,
+            "max_positions": max_positions,
             "rpc_status": rpc_status,
         }
 
@@ -139,6 +143,8 @@ class DashboardReporter:
         profit_percent: float = 0.0,
         buys: int = 0,
         sells: int = 0,
+        filled_positions: int = 0,
+        max_positions: int = 0,
         rpc_status: str = "unknown",
     ) -> None:
         """
@@ -153,6 +159,8 @@ class DashboardReporter:
             profit_percent=profit_percent,
             buys=buys,
             sells=sells,
+            filled_positions=filled_positions,
+            max_positions=max_positions,
             rpc_status=rpc_status,
         )
 
