@@ -302,7 +302,7 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
         # Dashboard Reporting
         dashboard_url=os.getenv("DASHBOARD_URL", ""),
         dashboard_api_key=os.getenv("DASHBOARD_API_KEY", ""),
-        bot_id=os.getenv("BOT_ID", f"grid-bot-{chain_id}"),
+        bot_id=os.getenv("BOT_ID", os.getenv("TOKEN_SYMBOL", f"grid-bot-{chain_id}")),
     )
     
     # Validate the configuration
