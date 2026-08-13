@@ -88,6 +88,7 @@ python grid_bot.py
 | `CHAIN_ID` | Yes | 4663 | Chain ID (4663=Robinhood, 8453=Base, 1=Mainnet) |
 | `ZEROX_API_KEY` | Yes* | - | 0x API key from 0x.org (if using 0x) |
 | `LI_FI_API_KEY` | Yes* | - | LI.FI API key from li.fi (if using LI.FI) |
+| `SWAP_PROVIDER` | No | 0x | Swap provider: `0x`, `lifi`, or `uniswap` |
 | `USE_LI_FI` | No | false | Use LI.FI instead of 0x for swaps |
 | **Token Configuration** ||||
 | `TOKEN_ADDRESS` | Yes | - | Token address to trade |
@@ -531,6 +532,18 @@ robinhood-grid-bot-py/
 **zero_x.py**: Integrates with 0x API for price quotes and swap transactions
 
 **li_fi.py / uniswap_api.py**: Alternative swap-provider integrations selected through `.env`
+
+**swap_provider.py**: Provider registry, factory, and capability adapter. It centralizes provider selection and differences such as taker-required pricing, quote refresh after approval, API-managed approvals, and separate swap-calldata preparation. `grid_bot.py` consumes these capabilities instead of checking provider classes directly.
+
+### Swap provider selection
+
+Prefer the explicit provider setting:
+
+```dotenv
+SWAP_PROVIDER=uniswap  # 0x, lifi, or uniswap
+```
+
+The older `USE_UNISWAP_API` and `USE_LI_FI` flags remain backward compatible when `SWAP_PROVIDER` is empty. Explicit `SWAP_PROVIDER` takes precedence. Each provider keeps its existing quote, approval, slippage, and transaction behavior; this abstraction is intended to make future providers additive rather than adding more conditionals to the trading engine.
 
 **grid_bot.py**: Main trading logic - grid management, buy/sell decisions, profit tracking
 

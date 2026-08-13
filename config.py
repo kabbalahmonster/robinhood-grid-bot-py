@@ -108,6 +108,7 @@ class BotConfig:
     minimal_logs: bool
     
     # API Provider Selection
+    swap_provider: str  # Explicit provider: 0x, lifi, or uniswap
     use_li_fi: bool  # If True, use LI.FI instead of 0x
     li_fi_api_key: str
     li_fi_integrator: str  # Required integrator string for LI.FI API
@@ -174,13 +175,23 @@ class BotConfig:
             if not self.rpc_url or self.rpc_url == "https://...":
                 raise ValueError("RPC_URL is required (or set RPC_URLS for rotation)")
         
-        # Check API keys - need either 0x or LI.FI
-        if self.use_li_fi:
+        # Validate the resolved provider and its credentials. Explicit
+        # SWAP_PROVIDER takes precedence; legacy flags remain compatible.
+        provider = (self.swap_provider or "").strip().lower()
+        provider = {"li.fi": "lifi", "li_fi": "lifi", "zero_x": "0x", "zerox": "0x"}.get(provider, provider)
+        if not provider:
+            provider = "uniswap" if self.use_uniswap_api else ("lifi" if self.use_li_fi else "0x")
+        if provider not in {"0x", "lifi", "uniswap"}:
+            raise ValueError(f"Unsupported SWAP_PROVIDER: {provider}")
+        if provider == "lifi":
             if not self.li_fi_api_key:
-                raise ValueError("LI_FI_API_KEY is required when USE_LI_FI=true")
-        else:
+                raise ValueError("LI_FI_API_KEY is required for the lifi provider")
+        elif provider == "uniswap":
+            if not self.uniswap_api_key:
+                raise ValueError("UNISWAP_API_KEY is required for the uniswap provider")
+        elif provider == "0x":
             if not self.zero_x_api_key or self.zero_x_api_key == "...":
-                raise ValueError("ZEROX_API_KEY is required when USE_LI_FI=false (default)")
+                raise ValueError("ZEROX_API_KEY is required for the 0x provider")
         
         if not self.token_address or self.token_address == "0x...":
             raise ValueError("TOKEN_ADDRESS is required and must be set")
@@ -274,6 +285,7 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
         minimal_logs=os.getenv("MINIMAL_LOGS", "false").lower() == "true",
         
         # API Provider Selection
+        swap_provider=os.getenv("SWAP_PROVIDER", ""),
         use_li_fi=os.getenv("USE_LI_FI", "false").lower() == "true",
         li_fi_api_key=os.getenv("LI_FI_API_KEY", ""),
         li_fi_integrator=os.getenv("LI_FI_INTEGRATOR", ""),

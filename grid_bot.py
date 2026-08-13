@@ -14,9 +14,7 @@ from web3 import Web3
 
 from config import load_config
 from wallet import Wallet
-from zero_x import ZeroXClient
-from li_fi import LiFiClient
-from uniswap_api import UniswapAPIClient
+from swap_provider import create_swap_provider
 from dashboard_reporter import DashboardReporter, create_reporter_from_config
 
 # Native ETH address for 0x API (used when trading with native ETH instead of WETH)
@@ -37,21 +35,9 @@ class GridBot:
         
         self.wallet = Wallet(self.config)
         
-        # Select API provider based on config priority:
-        # 1. Uniswap API, 2. LI.FI, 3. 0x (default)
-        if getattr(self.config, 'use_uniswap_api', False):
-            self.api_client = UniswapAPIClient(self.config)
-            logger.info("Using Uniswap API for swaps")
-        elif getattr(self.config, 'use_li_fi', False):
-            self.api_client = LiFiClient(self.config)
-            print(f"DEBUG: use_li_fi={self.config.use_li_fi}, api_key={self.config.li_fi_api_key[:20]}...")
-            logger.info("Using LI.FI API for swaps")
-        else:
-            self.api_client = ZeroXClient(self.config)
-            logger.info("Using 0x API for swaps")
-        
-        # Keep zero_x reference for backward compatibility
-        self.zero_x = self.api_client
+        self.provider = create_swap_provider(self.config)
+        self.api_client = self.provider  # compatibility alias during refactor
+        logger.info(f"Using {self.provider.name} provider for swaps")
         
         self.positions_file = "data/positions.json"
         self.positions = {}
@@ -185,9 +171,7 @@ class GridBot:
     def get_token_price(self):
         """Get current token price in ETH/WETH using the lighter /price endpoint."""
         # Use /price endpoint for price discovery (doesn't count against quote-to-trade metrics)
-        # For LI.FI and Uniswap API, we need to pass the wallet address
-        if getattr(self.config, 'use_li_fi', False) or getattr(self.config, 'use_uniswap_api', False):
-            # LI.FI and Uniswap API require taker address
+        if self.provider.capabilities.price_requires_taker:
             result = self.api_client.get_quote(
                 sell_token=self.trade_token_address,
                 buy_token=self.config.token_address,
@@ -202,8 +186,7 @@ class GridBot:
                 logger.debug(f"API price failed: success={result.success}, price={result.price}, error={result.error}")
             return None
         else:
-            # 0x price endpoint doesn't require taker
-            price = self.zero_x.get_price(
+            price = self.provider.get_price(
                 sell_token=self.trade_token_address,
                 buy_token=self.config.token_address,
                 sell_amount=10**15,  # 0.001 ETH/WETH
@@ -409,7 +392,7 @@ class GridBot:
                     logger.error(f"Approval failed: {result.error}")
                     return
                 # Refresh quote after approval for LI.FI
-                if getattr(self.config, 'use_li_fi', False):
+                if self.provider.capabilities.refresh_after_approval:
                     quote = self.api_client.refresh_quote(
                         sell_token=self.config.weth_address,
                         buy_token=self.config.token_address,
@@ -421,15 +404,13 @@ class GridBot:
                         logger.error(f"Refreshed quote failed: {quote.error}")
                         return
         
-        # For Uniswap API, get swap transaction from quote
-        if getattr(self.config, 'use_uniswap_api', False):
-            from uniswap_api import UniswapAPIClient
-            if isinstance(self.api_client, UniswapAPIClient):
-                swap_result = self.api_client.get_swap_transaction(quote.raw_response)
-                if not swap_result.success:
-                    logger.error(f"Uniswap swap transaction failed: {swap_result.error}")
-                    return
-                quote = swap_result
+        # Some providers return pricing first and executable calldata separately.
+        if self.provider.capabilities.quote_requires_preparation:
+            swap_result = self.provider.prepare_swap(quote)
+            if not swap_result.success:
+                logger.error(f"{self.provider.name} swap preparation failed: {swap_result.error}")
+                return
+            quote = swap_result
         
         # Execute swap with configurable gas multipliers
         # Use API's gas price estimate if available (more accurate than network average)
@@ -635,10 +616,8 @@ class GridBot:
             logger.warning(f"❌ Sell aborted: Quote ({quote_return_eth:.6f}) < min ({min_return_eth:.6f})")
             return
         
-        # For Uniswap API, use check_approval flow to get correct approval transaction
-        if getattr(self.config, 'use_uniswap_api', False):
-            from uniswap_api import UniswapAPIClient
-            if isinstance(self.api_client, UniswapAPIClient):
+        # Providers with API-managed approvals return the required approval txs.
+        if self.provider.capabilities.api_managed_approval:
                 # Step 1: Check approval via Uniswap API
                 approval_result = self.api_client.check_approval(
                     token=self.config.token_address,
@@ -773,13 +752,13 @@ class GridBot:
                     return
                 
                 # Step 5: Get swap transaction
-                swap_result = self.api_client.get_swap_transaction(quote.raw_response)
+                swap_result = self.provider.prepare_swap(quote)
                 if not swap_result.success:
-                    logger.error(f"Uniswap swap transaction failed: {swap_result.error}")
+                    logger.error(f"{self.provider.name} swap preparation failed: {swap_result.error}")
                     return
                 quote = swap_result
         else:
-            # Non-Uniswap: use standard approval flow
+            # Providers without API-managed approvals use standard ERC-20 approval.
             spender = quote.allowance_target or self.config.zero_x_proxy
             token_allowance = self.wallet.check_allowance(self.config.token_address, spender, use_permit2=False)
             if token_allowance < sell_amount:
@@ -789,8 +768,8 @@ class GridBot:
                     logger.error(f"Approval failed: {result.error}")
                     return
             
-                # For LI.FI, refresh quote after approval
-                if getattr(self.config, 'use_li_fi', False):
+                # Refresh provider routes after approval when required.
+                if self.provider.capabilities.refresh_after_approval:
                     quote = self.api_client.refresh_quote(
                         sell_token=self.config.token_address,
                         buy_token=self.trade_token_address,
@@ -918,9 +897,9 @@ class GridBot:
                     logger.error(f"Approval failed: {result.error}")
                     return
                 
-                # IMPORTANT: For LI.FI, refresh quote after approval
-                if getattr(self.config, 'use_li_fi', False):
-                    logger.info("Refreshing LI.FI quote after approval...")
+                # Refresh provider routes after approval when required.
+                if self.provider.capabilities.refresh_after_approval:
+                    logger.info(f"Refreshing {self.provider.name} quote after approval...")
                     quote = self.api_client.refresh_quote(
                         sell_token=self.config.weth_address,
                         buy_token=self.config.token_address,
@@ -936,15 +915,13 @@ class GridBot:
             logger.error(f"Quote failed: {quote.error}")
             return
         
-        # For Uniswap API, get swap transaction from quote
-        if getattr(self.config, 'use_uniswap_api', False):
-            from uniswap_api import UniswapAPIClient
-            if isinstance(self.api_client, UniswapAPIClient):
-                swap_result = self.api_client.get_swap_transaction(quote.raw_response)
-                if not swap_result.success:
-                    logger.error(f"Uniswap swap transaction failed: {swap_result.error}")
-                    return
-                quote = swap_result
+        # Prepare executable calldata when the provider separates quote and swap.
+        if self.provider.capabilities.quote_requires_preparation:
+            swap_result = self.provider.prepare_swap(quote)
+            if not swap_result.success:
+                logger.error(f"{self.provider.name} swap preparation failed: {swap_result.error}")
+                return
+            quote = swap_result
         
         # Execute swap with checksummed addresses and configurable gas multipliers
         # Use API's gas price estimate if available (more accurate than network average)
@@ -1049,7 +1026,7 @@ class GridBot:
         logger.info(f"   Profit: {profit_eth:.6f} {self.trade_token_name} ({profit_percent:+.2f}%)")
         
         # Get quote
-        quote = self.zero_x.build_swap_transaction(
+        quote = self.provider.build_swap_transaction(
             sell_token=self.config.token_address,
             buy_token=self.trade_token_address,
             sell_amount=sell_amount,
@@ -1082,10 +1059,10 @@ class GridBot:
                 logger.error(f"Token approval failed: {result.error}")
                 return
             
-            # IMPORTANT: For LI.FI, refresh quote after approval
+            # Refresh provider routes after approval when required.
             # Gas prices, calldata, and routes may have changed
-            if getattr(self.config, 'use_li_fi', False):
-                logger.info("Refreshing LI.FI quote after approval...")
+            if self.provider.capabilities.refresh_after_approval:
+                logger.info(f"Refreshing {self.provider.name} quote after approval...")
                 quote = self.api_client.refresh_quote(
                     sell_token=self.config.token_address,
                     buy_token=self.trade_token_address,
@@ -1113,15 +1090,13 @@ class GridBot:
         
         logger.info(f"✅ Quote validated: {quote_return_eth:.6f} {self.trade_token_name} >= {min_return_eth:.6f} {self.trade_token_name} minimum")
         
-        # For Uniswap API, get swap transaction from quote
-        if getattr(self.config, 'use_uniswap_api', False):
-            from uniswap_api import UniswapAPIClient
-            if isinstance(self.api_client, UniswapAPIClient):
-                swap_result = self.api_client.get_swap_transaction(quote.raw_response)
-                if not swap_result.success:
-                    logger.error(f"Uniswap swap transaction failed: {swap_result.error}")
-                    return
-                quote = swap_result
+        # Prepare executable calldata when the provider separates quote and swap.
+        if self.provider.capabilities.quote_requires_preparation:
+            swap_result = self.provider.prepare_swap(quote)
+            if not swap_result.success:
+                logger.error(f"{self.provider.name} swap preparation failed: {swap_result.error}")
+                return
+            quote = swap_result
         
         # Execute swap with checksummed addresses and configurable gas multipliers
         # Use API's gas price estimate if available (more accurate than network average)
@@ -1189,7 +1164,7 @@ class GridBot:
         logger.info(f"🏦 Getting quote for banking {eth_amount:.6f} {self.trade_token_name} → USDG...")
         
         # Get quote for ETH/WETH -> USDG
-        quote = self.zero_x.build_swap_transaction(
+        quote = self.provider.build_swap_transaction(
             sell_token=self.trade_token_address,
             buy_token=self.config.usdg_address,
             sell_amount=eth_wei,
@@ -1229,15 +1204,13 @@ class GridBot:
                     logger.error(f"WETH approval for banking failed: {result.error}")
                     return
         
-        # For Uniswap API, get swap transaction from quote
-        if getattr(self.config, 'use_uniswap_api', False):
-            from uniswap_api import UniswapAPIClient
-            if isinstance(self.api_client, UniswapAPIClient):
-                swap_result = self.api_client.get_swap_transaction(quote.raw_response)
-                if not swap_result.success:
-                    logger.error(f"Uniswap swap transaction failed: {swap_result.error}")
-                    return
-                quote = swap_result
+        # Prepare executable calldata when the provider separates quote and swap.
+        if self.provider.capabilities.quote_requires_preparation:
+            swap_result = self.provider.prepare_swap(quote)
+            if not swap_result.success:
+                logger.error(f"{self.provider.name} swap preparation failed: {swap_result.error}")
+                return
+            quote = swap_result
         
         # Execute banking swap with configurable gas multipliers
         # Use API's gas price estimate if available (more accurate than network average)
