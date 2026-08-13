@@ -100,6 +100,9 @@ class DashboardReporter:
         sells: int = 0,
         filled_positions: int = 0,
         max_positions: int = 0,
+        chain_id: Optional[int] = None,
+        token_address: str = "",
+        wallet_address: str = "",
         trades: Optional[int] = None,
         rpc_status: str = "unknown",
     ) -> None:
@@ -123,6 +126,9 @@ class DashboardReporter:
             "sells": sells,
             "filled_positions": filled_positions,
             "max_positions": max_positions,
+            "chain_id": chain_id,
+            "token_address": token_address,
+            "wallet_address": wallet_address,
             "rpc_status": rpc_status,
         }
 
@@ -148,6 +154,9 @@ class DashboardReporter:
         sells: int = 0,
         filled_positions: int = 0,
         max_positions: int = 0,
+        chain_id: Optional[int] = None,
+        token_address: str = "",
+        wallet_address: str = "",
         rpc_status: str = "unknown",
     ) -> None:
         """
@@ -165,6 +174,9 @@ class DashboardReporter:
             sells=sells,
             filled_positions=filled_positions,
             max_positions=max_positions,
+            chain_id=chain_id,
+            token_address=token_address,
+            wallet_address=wallet_address,
             rpc_status=rpc_status,
         )
 

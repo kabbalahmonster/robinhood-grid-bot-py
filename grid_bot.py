@@ -1483,6 +1483,9 @@ class GridBot:
                     sells=self.session_sells,
                     filled_positions=active,
                     max_positions=self.config.max_active_positions,
+                    chain_id=self.config.chain_id,
+                    token_address=self.config.token_address,
+                    wallet_address=self.wallet.address,
                     rpc_status="ok",
                 )
             except Exception as e:
