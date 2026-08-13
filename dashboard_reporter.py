@@ -103,6 +103,9 @@ class DashboardReporter:
         chain_id: Optional[int] = None,
         token_address: str = "",
         wallet_address: str = "",
+        display_name: str = "",
+        group: str = "",
+        trades_history: Optional[list] = None,
         trades: Optional[int] = None,
         rpc_status: str = "unknown",
     ) -> None:
@@ -130,6 +133,9 @@ class DashboardReporter:
             "chain_id": chain_id,
             "token_address": token_address,
             "wallet_address": wallet_address,
+            "display_name": display_name,
+            "group": group,
+            "trades_history": trades_history if trades_history is not None else [],
             "rpc_status": rpc_status,
         }
 

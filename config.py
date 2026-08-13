@@ -143,6 +143,8 @@ class BotConfig:
     dashboard_url: str = ""       # e.g. http://localhost:3000
     dashboard_api_key: str = ""   # Bearer token for dashboard API
     bot_id: str = "grid-bot-1"    # Unique identifier shown on dashboard
+    dashboard_name: str = ""      # Optional display name
+    dashboard_group: str = ""     # Optional dashboard grouping label
     
     # Derived properties
     @property
@@ -303,6 +305,8 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
         dashboard_url=os.getenv("DASHBOARD_URL", ""),
         dashboard_api_key=os.getenv("DASHBOARD_API_KEY", ""),
         bot_id=os.getenv("BOT_ID", os.getenv("TOKEN_SYMBOL", f"grid-bot-{chain_id}")),
+        dashboard_name=os.getenv("DASHBOARD_NAME", ""),
+        dashboard_group=os.getenv("DASHBOARD_GROUP", ""),
     )
     
     # Validate the configuration

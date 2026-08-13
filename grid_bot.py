@@ -61,6 +61,8 @@ class GridBot:
         self.session_buys = 0
         self.session_sells = 0
         self.session_profit_weth = 0.0
+        self.dashboard_trades_file = "data/dashboard_trades.json"
+        self.dashboard_trades = self._load_dashboard_trades()
         
         # Cooldown tracking for gridless buys
         self.last_buy_time = 0
@@ -84,6 +86,35 @@ class GridBot:
         logger.info(f"DEBUG: dashboard_url={self.config.dashboard_url!r}, reporter={self._reporter}")
         if self._reporter:
             logger.info(f"Dashboard reporting enabled (bot_id={self._reporter.bot_id})")
+
+    def _load_dashboard_trades(self):
+        try:
+            with open(self.dashboard_trades_file, "r") as handle:
+                data = json.load(handle)
+            return data[-50:] if isinstance(data, list) else []
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return []
+
+    def _record_dashboard_trade(self, side, eth_amount, token_amount, price, tx_hash, profit_eth=None):
+        trade = {
+            "timestamp": datetime.now().astimezone().isoformat(),
+            "side": side,
+            "eth_amount": float(eth_amount),
+            "token_amount": float(token_amount),
+            "price": float(price),
+            "tx_hash": str(tx_hash),
+        }
+        if profit_eth is not None:
+            trade["profit_eth"] = float(profit_eth)
+        self.dashboard_trades = (self.dashboard_trades + [trade])[-50:]
+        try:
+            os.makedirs(os.path.dirname(self.dashboard_trades_file), exist_ok=True)
+            temp_file = self.dashboard_trades_file + ".tmp"
+            with open(temp_file, "w") as handle:
+                json.dump(self.dashboard_trades, handle, indent=2)
+            os.replace(temp_file, self.dashboard_trades_file)
+        except OSError as exc:
+            logger.warning(f"Could not persist dashboard trade history: {exc}")
         logger.info(f"Wallet: {self.wallet.address}")
         logger.info(f"Trading: {self.config.token_symbol}")
         logger.info(f"Max active positions: {self.config.max_active_positions}")
@@ -439,6 +470,7 @@ class GridBot:
             buy_price = buy_amount_eth / tokens if tokens > 0 else 0
             self.session_buys += 1
             self.last_buy_time = time.time()  # Update cooldown timer
+            self._record_dashboard_trade("buy", buy_amount_eth, tokens, buy_price, result.tx_hash)
             
             logger.info(f"✅ Gridless buy successful! Position #{pos_id}")
             logger.info(f"   Tokens: {tokens:.6f} {self.config.token_symbol}")
@@ -806,6 +838,7 @@ class GridBot:
                 logger.info(f"   Moonbag: {moonbag_tokens/1e18:.4f} tokens to wallet")
             
             profit_pct = (actual_profit / sold_cost_eth * 100) if sold_cost_eth > 0 else 0
+            self._record_dashboard_trade("sell", eth_received, sell_tokens, price, result.tx_hash, actual_profit)
             logger.info(f"✅ Gridless sell successful! Profit: {actual_profit:.6f} {self.trade_token_name} ({profit_pct:+.2f}%)")
             
             # Reset buy cooldown so we can buy again immediately after selling
@@ -955,6 +988,7 @@ class GridBot:
             
             # Track session stats
             self.session_buys += 1
+            self._record_dashboard_trade("buy", buy_amount_eth, tokens, buy_price, result.tx_hash)
             
             logger.info(f"✅ Buy successful!")
             logger.info(f"   Position: #{pos_id}")
@@ -1118,6 +1152,7 @@ class GridBot:
             # Track session stats
             self.session_sells += 1
             self.session_profit_weth += actual_profit_eth
+            self._record_dashboard_trade("sell", eth_received, sell_tokens, price, result.tx_hash, actual_profit_eth)
             
             # Position is always cleared to 0 after sell
             # Moonbag tokens go to wallet balance (not tracked in position)
@@ -1486,6 +1521,9 @@ class GridBot:
                     chain_id=self.config.chain_id,
                     token_address=self.config.token_address,
                     wallet_address=self.wallet.address,
+                    display_name=self.config.dashboard_name,
+                    group=self.config.dashboard_group,
+                    trades_history=self.dashboard_trades,
                     rpc_status="ok",
                 )
             except Exception as e:
