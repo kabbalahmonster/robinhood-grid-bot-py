@@ -215,14 +215,14 @@ class DashboardReporter:
         if self._api_key:
             headers["X-API-Key"] = self._api_key
 
-        logger.info(f"Dashboard POST to {self._url} with bot_id={self._bot_id}")
+        logger.debug(f"Dashboard POST to {self._url} with bot_id={self._bot_id}")
         response = requests.post(
             self._url,
             data=json.dumps(payload),
             headers=headers,
             timeout=_REQUEST_TIMEOUT,
         )
-        logger.info(f"Dashboard response: {response.status_code}")
+        logger.debug(f"Dashboard response: {response.status_code}")
         # Log non-2xx at debug level only — we don't want log spam
         if response.status_code >= 400:
             logger.warning(
