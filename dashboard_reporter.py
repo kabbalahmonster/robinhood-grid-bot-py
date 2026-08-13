@@ -90,11 +90,14 @@ class DashboardReporter:
         *,
         price: Optional[float] = None,
         eth_balance: float = 0.0,
-        weth_balance: float = 0.0,
+        weth_balance: Optional[float] = None,
         token_balance: float = 0.0,
         positions: Optional[list] = None,
-        profit: float = 0.0,
-        trades: int = 0,
+        profit_percent: float = 0.0,
+        profit: Optional[float] = None,
+        buys: int = 0,
+        sells: int = 0,
+        trades: Optional[int] = None,
         rpc_status: str = "unknown",
     ) -> None:
         """
@@ -109,11 +112,11 @@ class DashboardReporter:
             "uptime_seconds": round(self.uptime_seconds, 1),
             "price": price,
             "eth_balance": eth_balance,
-            "weth_balance": weth_balance,
             "token_balance": token_balance,
             "positions": positions if positions is not None else [],
-            "profit": profit,
-            "trades": trades,
+            "profit_percent": profit_percent,
+            "buys": buys,
+            "sells": sells,
             "rpc_status": rpc_status,
         }
 
@@ -131,11 +134,11 @@ class DashboardReporter:
         *,
         price: Optional[float] = None,
         eth_balance: float = 0.0,
-        weth_balance: float = 0.0,
         token_balance: float = 0.0,
         positions: Optional[list] = None,
-        profit: float = 0.0,
-        trades: int = 0,
+        profit_percent: float = 0.0,
+        buys: int = 0,
+        sells: int = 0,
         rpc_status: str = "unknown",
     ) -> None:
         """
@@ -145,11 +148,11 @@ class DashboardReporter:
         self.report(
             price=price,
             eth_balance=eth_balance,
-            weth_balance=weth_balance,
             token_balance=token_balance,
             positions=positions,
-            profit=profit,
-            trades=trades,
+            profit_percent=profit_percent,
+            buys=buys,
+            sells=sells,
             rpc_status=rpc_status,
         )
 

@@ -1444,11 +1444,10 @@ class GridBot:
                                 pnl = ((price - buy_price) / buy_price * 100)
                                 positions_data.append({
                                     'id': pos_id,
-                                    'buy_price': buy_price,
                                     'buy_amount_token': tokens,
-                                    'buy_amount_eth': cost_eth,
                                     'cost_basis': cost_eth,
                                     'pnl': round(pnl, 2),
+                                    'timestamp': pos.get('timestamp'),
                                 })
                 else:
                     for pos_id, pos in self.positions.items():
@@ -1460,21 +1459,27 @@ class GridBot:
                                 pnl = ((price - buy_price) / buy_price * 100)
                                 positions_data.append({
                                     'id': pos_id,
-                                    'buy_price': buy_price,
                                     'buy_amount_token': tokens,
-                                    'buy_amount_eth': cost_eth,
                                     'cost_basis': cost_eth,
                                     'pnl': round(pnl, 2),
+                                    'timestamp': pos.get('timestamp'),
                                 })
+
+                total_cost = sum(p['cost_basis'] for p in positions_data)
+                total_value = sum(p['buy_amount_token'] * price for p in positions_data)
+                profit_percent = (
+                    ((total_value - total_cost) / total_cost) * 100
+                    if total_cost > 0 else 0.0
+                )
                 
                 self._reporter.report(
                     price=price,
                     eth_balance=eth_bal,
-                    weth_balance=weth_bal,
                     token_balance=token_bal,
                     positions=positions_data,
-                    profit=self.session_profit_weth,
-                    trades=self.session_buys + self.session_sells,
+                    profit_percent=round(profit_percent, 2),
+                    buys=self.session_buys,
+                    sells=self.session_sells,
                     rpc_status="ok",
                 )
             except Exception as e:
