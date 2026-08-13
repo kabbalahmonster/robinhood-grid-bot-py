@@ -139,6 +139,11 @@ class BotConfig:
     # RPC Rotation (optional, defaults to None = single RPC_URL mode)
     rpc_urls: Optional[list] = None  # List of RPC URLs for rotation/failover
     
+    # Dashboard Reporting (optional — bot works fine without these)
+    dashboard_url: str = ""       # e.g. http://localhost:3000
+    dashboard_api_key: str = ""   # Bearer token for dashboard API
+    bot_id: str = "grid-bot-1"    # Unique identifier shown on dashboard
+    
     # Derived properties
     @property
     def chain_name(self) -> str:
@@ -293,6 +298,11 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
         
         # Gridless Cooldown
         gridless_buy_cooldown_seconds=int(os.getenv("GRIDLESS_BUY_COOLDOWN_SECONDS", "300")),
+        
+        # Dashboard Reporting
+        dashboard_url=os.getenv("DASHBOARD_URL", ""),
+        dashboard_api_key=os.getenv("DASHBOARD_API_KEY", ""),
+        bot_id=os.getenv("BOT_ID", f"grid-bot-{chain_id}"),
     )
     
     # Validate the configuration

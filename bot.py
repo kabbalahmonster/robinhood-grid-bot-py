@@ -15,6 +15,7 @@ from decimal import Decimal
 from web3 import Web3
 
 from config import BotConfig, load_config
+from dashboard_reporter import DashboardReporter
 
 # Native ETH address for 0x API (used when trading with native ETH instead of WETH)
 ETH_ADDRESS = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
@@ -88,6 +89,13 @@ class GridBot:
         self.running = False
         self.current_price: Optional[float] = None
         self.token_decimals: int = 18
+        
+        # Dashboard reporter (fire-and-forget, never blocks)
+        self._reporter = DashboardReporter(
+            dashboard_url=config.dashboard_url,
+            api_key=config.dashboard_api_key,
+            bot_id=config.bot_id,
+        )
         
         # Setup signal handlers
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -664,7 +672,7 @@ class GridBot:
                 time.sleep(2)
     
     def _log_status(self) -> None:
-        """Log current bot status."""
+        """Log current bot status and report to dashboard."""
         try:
             stats = self.storage.get_stats()
             eth_balance = self.wallet.get_eth_balance()
@@ -674,6 +682,7 @@ class GridBot:
             if self.config.use_eth_trading:
                 trade_balance = eth_balance
                 trade_label = "ETH"
+                weth_balance = 0.0
             else:
                 weth_balance, _ = self.wallet.get_token_balance(self.weth_address)
                 trade_balance = weth_balance
@@ -687,8 +696,61 @@ class GridBot:
                 f"Positions: {stats['open_positions']}/{self.config.max_positions} | "
                 f"Profit: {stats['total_profit_eth']:.6f} ETH"
             )
+            
+            # Fire-and-forget report to dashboard
+            self._report_to_dashboard(
+                eth_balance=eth_balance,
+                weth_balance=weth_balance,
+                token_balance=token_balance,
+                stats=stats,
+            )
         except Exception as e:
             self.logger.error(f"Error logging status: {e}")
+    
+    def _report_to_dashboard(
+        self,
+        *,
+        eth_balance: float,
+        weth_balance: float,
+        token_balance: float,
+        stats: dict,
+    ) -> None:
+        """
+        Send a status snapshot to the dashboard (non-blocking).
+        
+        This method is wrapped in its own try/except so a dashboard
+        failure can never affect the trading loop.
+        """
+        if not self._reporter.enabled:
+            return
+        
+        try:
+            open_positions = self.storage.get_open_positions()
+            positions_data = [
+                {
+                    "id": p.id,
+                    "buy_price": p.buy_price,
+                    "buy_amount_token": p.buy_amount_token,
+                    "buy_amount_eth": p.buy_amount_eth,
+                    "cost_basis": p.cost_basis,
+                    "timestamp": p.timestamp,
+                }
+                for p in open_positions
+            ]
+            
+            self._reporter.report_status(
+                price=self.current_price,
+                eth_balance=eth_balance,
+                weth_balance=weth_balance,
+                token_balance=token_balance,
+                positions=positions_data,
+                profit=stats.get("total_profit_eth", 0.0),
+                trades=stats.get("total_trades", 0),
+                rpc_status="ok" if self.current_price else "error",
+            )
+        except Exception:
+            # Absolutely never let reporting crash the bot
+            pass
     
     def run(self) -> None:
         """Main bot loop."""

@@ -1,0 +1,237 @@
+"""
+Dashboard Reporter module for the Grid Trading Bot.
+
+Sends bot status updates to a remote dashboard via HTTP POST.
+Fire-and-forget design: threaded, non-blocking, silent failure.
+The bot must never crash because of dashboard connectivity issues.
+"""
+
+import json
+import logging
+import threading
+import time
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
+
+import requests
+
+logger = logging.getLogger("grid_bot.dashboard")
+
+# How long (seconds) to wait for the dashboard HTTP round-trip before giving up
+_REQUEST_TIMEOUT = 5
+
+# Maximum number of queued payloads waiting to be sent.
+# If the queue is full the oldest payload is dropped (fire-and-forget).
+_MAX_QUEUE_SIZE = 10
+
+
+class DashboardReporter:
+    """
+    Fire-and-forget HTTP reporter for bot status updates.
+
+    Uses a single background daemon thread with a bounded queue so the
+    bot's main loop is never blocked and memory stays bounded even if
+    the dashboard is unreachable for extended periods.
+
+    Usage:
+        reporter = DashboardReporter(
+            dashboard_url="https://dash.example.com/api/status",
+            api_key="secret",
+            bot_id="grid-bot-1",
+        )
+        reporter.report(price=1.0, eth_balance=0.5, ...)
+        reporter.shutdown()
+    """
+
+    def __init__(
+        self,
+        dashboard_url: str,
+        api_key: str = "",
+        bot_id: str = "grid-bot-1",
+    ):
+        self._url = dashboard_url.rstrip("/")
+        self._api_key = api_key
+        self._bot_id = bot_id
+        self._start_time = time.monotonic()
+
+        # Internal queue + worker thread
+        self._queue: List[Dict[str, Any]] = []
+        self._lock = threading.Lock()
+        self._event = threading.Event()
+        self._shutdown = False
+
+        self._thread = threading.Thread(
+            target=self._worker,
+            name="dashboard-reporter",
+            daemon=True,          # die with the main process
+        )
+        self._thread.start()
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    @property
+    def bot_id(self) -> str:
+        return self._bot_id
+
+    @property
+    def enabled(self) -> bool:
+        """True when a dashboard URL is configured and reporting is active."""
+        return bool(self._url)
+
+    @property
+    def uptime_seconds(self) -> float:
+        """Seconds since this reporter was created (≈ bot uptime)."""
+        return time.monotonic() - self._start_time
+
+    def report(
+        self,
+        *,
+        price: Optional[float] = None,
+        eth_balance: float = 0.0,
+        weth_balance: float = 0.0,
+        token_balance: float = 0.0,
+        positions: Optional[list] = None,
+        profit: float = 0.0,
+        trades: int = 0,
+        rpc_status: str = "unknown",
+    ) -> None:
+        """
+        Enqueue a status payload for delivery.  Returns immediately.
+
+        All parameters are optional so callers can send partial updates
+        without breaking the schema.
+        """
+        payload: Dict[str, Any] = {
+            "bot_id": self._bot_id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "uptime_seconds": round(self.uptime_seconds, 1),
+            "price": price,
+            "eth_balance": eth_balance,
+            "weth_balance": weth_balance,
+            "token_balance": token_balance,
+            "positions": positions if positions is not None else [],
+            "profit": profit,
+            "trades": trades,
+            "rpc_status": rpc_status,
+        }
+
+        with self._lock:
+            if len(self._queue) >= _MAX_QUEUE_SIZE:
+                # Drop oldest to make room — fire-and-forget semantics
+                self._queue.pop(0)
+            self._queue.append(payload)
+
+        # Wake the worker thread
+        self._event.set()
+
+    def report_status(
+        self,
+        *,
+        price: Optional[float] = None,
+        eth_balance: float = 0.0,
+        weth_balance: float = 0.0,
+        token_balance: float = 0.0,
+        positions: Optional[list] = None,
+        profit: float = 0.0,
+        trades: int = 0,
+        rpc_status: str = "unknown",
+    ) -> None:
+        """
+        Alias for report() — provided for semantic clarity in bot.py.
+        Enqueue a status payload for delivery.  Returns immediately.
+        """
+        self.report(
+            price=price,
+            eth_balance=eth_balance,
+            weth_balance=weth_balance,
+            token_balance=token_balance,
+            positions=positions,
+            profit=profit,
+            trades=trades,
+            rpc_status=rpc_status,
+        )
+
+    def shutdown(self, timeout: float = 3.0) -> None:
+        """
+        Signal the worker to drain remaining items and exit.
+
+        Args:
+            timeout: Max seconds to wait for the thread to finish.
+        """
+        self._shutdown = True
+        self._event.set()
+        self._thread.join(timeout=timeout)
+
+    # ------------------------------------------------------------------
+    # Internal
+    # ------------------------------------------------------------------
+
+    def _worker(self) -> None:
+        """Background loop: wait for payloads, POST them, repeat."""
+        while not self._shutdown:
+            # Block until there's work (or shutdown is signalled)
+            self._event.wait(timeout=1.0)
+            self._event.clear()
+
+            while True:
+                with self._lock:
+                    if not self._queue:
+                        break
+                    payload = self._queue.pop(0)
+
+                try:
+                    self._post(payload)
+                except Exception:
+                    # Silent fail — never let dashboard issues propagate
+                    pass
+
+    def _post(self, payload: Dict[str, Any]) -> None:
+        """
+        Send a single payload to the dashboard.
+
+        Raises on failure so the worker's except clause can swallow it.
+        """
+        headers = {
+            "Content-Type": "application/json",
+            "User-Agent": f"grid-bot/{self._bot_id}",
+        }
+        if self._api_key:
+            headers["Authorization"] = f"Bearer {self._api_key}"
+
+        response = requests.post(
+            self._url,
+            data=json.dumps(payload),
+            headers=headers,
+            timeout=_REQUEST_TIMEOUT,
+        )
+        # Log non-2xx at debug level only — we don't want log spam
+        if response.status_code >= 400:
+            logger.debug(
+                "Dashboard returned %s for bot %s",
+                response.status_code,
+                self._bot_id,
+            )
+
+
+# ------------------------------------------------------------------
+# Convenience factory
+# ------------------------------------------------------------------
+
+def create_reporter_from_config(config) -> Optional[DashboardReporter]:
+    """
+    Build a DashboardReporter from a BotConfig instance.
+
+    Returns None when DASHBOARD_URL is not configured so the bot
+    can simply skip reporting without extra checks everywhere.
+    """
+    url = getattr(config, "dashboard_url", "") or ""
+    if not url:
+        return None
+
+    return DashboardReporter(
+        dashboard_url=url,
+        api_key=getattr(config, "dashboard_api_key", "") or "",
+        bot_id=getattr(config, "bot_id", "grid-bot-1") or "grid-bot-1",
+    )
