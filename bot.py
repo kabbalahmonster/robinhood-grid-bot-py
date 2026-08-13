@@ -92,6 +92,7 @@ class GridBot:
         
         # Dashboard reporter (None when DASHBOARD_URL is not configured)
         self._reporter: Optional[DashboardReporter] = create_reporter_from_config(config)
+        self.logger.info(f"DEBUG: dashboard_url={config.dashboard_url!r}, reporter={self._reporter}")
         if self._reporter:
             self.logger.info(f"Dashboard reporting enabled (bot_id={self._reporter.bot_id})")
         
