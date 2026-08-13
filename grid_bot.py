@@ -1492,6 +1492,7 @@ class GridBot:
                     filled_positions=active,
                     max_positions=self.config.max_active_positions,
                     chain_id=self.config.chain_id,
+                    swap_provider=self.provider.name,
                     token_address=self.config.token_address,
                     wallet_address=self.wallet.address,
                     display_name=self.config.dashboard_name,
