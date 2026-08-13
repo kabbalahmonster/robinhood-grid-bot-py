@@ -15,7 +15,7 @@ from decimal import Decimal
 from web3 import Web3
 
 from config import BotConfig, load_config
-from dashboard_reporter import DashboardReporter
+from dashboard_reporter import DashboardReporter, create_reporter_from_config
 
 # Native ETH address for 0x API (used when trading with native ETH instead of WETH)
 ETH_ADDRESS = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
@@ -90,12 +90,10 @@ class GridBot:
         self.current_price: Optional[float] = None
         self.token_decimals: int = 18
         
-        # Dashboard reporter (fire-and-forget, never blocks)
-        self._reporter = DashboardReporter(
-            dashboard_url=config.dashboard_url,
-            api_key=config.dashboard_api_key,
-            bot_id=config.bot_id,
-        )
+        # Dashboard reporter (None when DASHBOARD_URL is not configured)
+        self._reporter: Optional[DashboardReporter] = create_reporter_from_config(config)
+        if self._reporter:
+            self.logger.info(f"Dashboard reporting enabled (bot_id={self._reporter.bot_id})")
         
         # Setup signal handlers
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -721,7 +719,7 @@ class GridBot:
         This method is wrapped in its own try/except so a dashboard
         failure can never affect the trading loop.
         """
-        if not self._reporter.enabled:
+        if not self._reporter:
             return
         
         try:
@@ -738,7 +736,7 @@ class GridBot:
                 for p in open_positions
             ]
             
-            self._reporter.report_status(
+            self._reporter.report(
                 price=self.current_price,
                 eth_balance=eth_balance,
                 weth_balance=weth_balance,
@@ -785,6 +783,10 @@ class GridBot:
                 time.sleep(self.config.poll_interval_seconds)
         
         self.logger.info("Grid Bot stopped")
+        
+        # Gracefully drain any pending dashboard reports
+        if self._reporter:
+            self._reporter.shutdown()
     
     def run_once(self) -> None:
         """Run a single iteration (for testing)."""
