@@ -1,6 +1,6 @@
 # Robinhood Chain Grid Trading Bot (Python)
 
-A production-grade grid trading bot for Robinhood Chain and other EVM networks, implemented in Python using web3.py. Supports both 0x Protocol and LI.FI API for optimal DEX aggregation with features like dynamic position sizing, moonbag retention, profit banking to stablecoins, and session tracking.
+A production-grade grid trading bot for Robinhood Chain and other EVM networks, implemented in Python using web3.py. Supports Uniswap API, LI.FI, and 0x swap providers with features like dynamic position sizing, moonbag retention, profit banking to stablecoins, session tracking, and optional fleet-dashboard reporting.
 
 ## Features
 
@@ -12,11 +12,13 @@ A production-grade grid trading bot for Robinhood Chain and other EVM networks, 
 - **Moonbag Support**: Retain a percentage of tokens after each sell
 - **Profit Banking**: Automatically banks profits to USDG/USDC stablecoin
 - **Session Statistics**: Track total buys, sells, and accumulated profit
-- **Multi-DEX Aggregation**: 0x Protocol OR LI.FI API for best price execution
+- **Multiple Swap Providers**: Uniswap API, LI.FI, or 0x selected through environment configuration
 - **Anti-MEV Protection**: Jitter on timing to protect against front-running
 - **Multi-Position Support**: Multiple active positions with individual tracking
 - **Persistent State**: Survives restarts with position recovery
 - **Multi-Chain Support**: Robinhood Chain (4663), Base (8453), Ethereum Mainnet (1)
+- **Optional Live Dashboard**: Non-blocking authenticated status reporting, fleet metrics, Dexscreener charts, and explorer links
+- **Persistent Trade History**: Latest 50 successful buys/sells saved locally and reported without additional RPC/API calls
 
 ## Quick Start
 
@@ -93,23 +95,29 @@ python grid_bot.py
 | `WETH_ADDRESS` | Auto | Chain | WETH address (auto-set per chain) |
 | `USDG_ADDRESS` | Yes | - | Stablecoin address for profit banking |
 | **Grid Parameters** ||||
-| `GRID_SPACING_PERCENT` | No | 6.0 | Grid spacing percentage between levels |
-| `MAX_POSITIONS` | No | 24 | Total number of grid positions to create |
-| `MAX_ACTIVE_POSITIONS` | No | 6 | Maximum positions that can be active at once |
+| `GRID_SPACING_PERCENT` | No | 5.0 | Grid spacing percentage between levels |
+| `MAX_POSITIONS` | No | Chain default | Total number of grid positions to create |
+| `MAX_ACTIVE_POSITIONS` | No | `MAX_POSITIONS` | Maximum positions that can be active at once |
 | **Trading Settings** ||||
-| `MIN_PROFIT_PERCENT` | No | 5.0 | Minimum profit % before selling (includes 1.5% slippage buffer) |
-| `INITIAL_BUY_AMOUNT` | No | 0.001 | Initial WETH amount for first buys |
-| `SLIPPAGE_TOLERANCE` | No | 2.0 | Slippage tolerance % for swaps |
+| `MIN_PROFIT_PERCENT` | No | 1.5 | Minimum profit % before selling |
+| `INITIAL_BUY_AMOUNT` | No | 0.01 | Initial ETH/WETH amount for first buys |
+| `SLIPPAGE_TOLERANCE` | No | 1.0 | Slippage tolerance % for swaps |
 | **Profit Distribution** ||||
 | `BANK_PERCENTAGE` | No | 0.0 | % of profit to swap to stablecoin (0 to disable) |
 | `MOONBAG_PERCENTAGE` | No | 0.0 | % of tokens to keep after sell (0 to disable) |
 | **Bot Behavior** ||||
-| `POLL_INTERVAL_SECONDS` | No | 1 | Price check interval in seconds |
+| `POLL_INTERVAL_SECONDS` | No | 30 | Price check interval in seconds |
 | `ANTI_MEV_JITTER` | No | true | Enable anti-MEV timing jitter |
 | `LOG_LEVEL` | No | INFO | Logging level (DEBUG/INFO/WARNING/ERROR) |
 | `STATE_FILE` | No | ./data/positions.json | Position state file path |
 | `COMPACT_MODE` | No | false | Compact single-line output for tmux |
 | `MINIMAL_LOGS` | No | false | Remove timestamps from console output |
+| **Dashboard Reporting** ||||
+| `DASHBOARD_URL` | No | empty | Full status endpoint URL; empty disables reporting |
+| `DASHBOARD_API_KEY` | No* | empty | Shared dashboard key; required when reporting is enabled |
+| `BOT_ID` | No | `TOKEN_SYMBOL` | Stable unique bot ID used by the dashboard |
+| `DASHBOARD_NAME` | No | empty | Optional human-friendly display name |
+| `DASHBOARD_GROUP` | No | empty | Optional fleet/group label used for filtering |
 | **Gridless Mode** ||||
 | `USE_GRIDLESS` | No | false | Enable gridless trading mode |
 | `GRIDLESS_BUY_THRESHOLD` | No | -10.0 | Buy when top position P&L ≤ this % |
@@ -498,8 +506,11 @@ robinhood-grid-bot-py/
 ├── .env.mainnet               # Ethereum Mainnet config template
 ├── config.py                  # Configuration management
 ├── grid_bot.py                # Main bot logic
+├── dashboard_reporter.py      # Non-blocking authenticated dashboard client
 ├── wallet.py                  # Wallet & transaction handling
 ├── zero_x.py                  # 0x API integration
+├── li_fi.py                   # LI.FI API integration
+├── uniswap_api.py             # Uniswap Trading API integration
 ├── generate_grid_dynamic.py   # Grid position generator (dynamic from price)
 ├── generate_grid.py           # Grid position generator (legacy format)
 ├── generate_positions.py      # Grid position generator (simple)
@@ -507,6 +518,7 @@ robinhood-grid-bot-py/
 ├── generate_wallet.py         # Generate new trading wallet
 ├── data/                      # Data directory
 │   └── positions.json         # Position state file
+│   └── dashboard_trades.json  # Latest 50 successful trades for dashboard display
 └── logs/                      # Log files (created at runtime)
 ```
 
@@ -518,7 +530,11 @@ robinhood-grid-bot-py/
 
 **zero_x.py**: Integrates with 0x API for price quotes and swap transactions
 
+**li_fi.py / uniswap_api.py**: Alternative swap-provider integrations selected through `.env`
+
 **grid_bot.py**: Main trading logic - grid management, buy/sell decisions, profit tracking
+
+**dashboard_reporter.py**: Bounded background queue for dashboard POSTs. Dashboard failures never propagate into the trading loop.
 
 **generate_grid_dynamic.py**: Creates grid positions based on current market price
 
@@ -652,6 +668,31 @@ python test_gridless_simple.py
 7. **Session Tracking**: Monitors cumulative performance
 
 ## Troubleshooting
+
+### Dashboard reporting
+
+Enable reporting with the dashboard server's full ingestion endpoint and shared key:
+
+```dotenv
+DASHBOARD_URL=http://DASHBOARD_HOST:5000/api/status
+DASHBOARD_API_KEY=the-dashboard-server-API_KEY
+BOT_ID=MERD
+# Optional:
+DASHBOARD_NAME=MERD Main
+DASHBOARD_GROUP=Robinhood Farm
+```
+
+Restart the bot after changing `.env`. Reporting runs in a daemon thread with a bounded queue and a five-second HTTP timeout, so dashboard downtime does not block trading. Successful requests are logged only at `DEBUG`; failures remain warnings.
+
+Each status payload includes schema version, chain/token/public-wallet metadata, balances, positions, AVG P&L, session profit, buy/sell counts, capacity, and up to 50 trades. Only the public wallet address is sent—never the private key.
+
+Successful trades are appended atomically to `data/dashboard_trades.json`, reloaded after restart, and capped at 50. This uses transaction results the bot already has and makes no extra RPC or third-party API calls. Existing on-chain history predating this feature is not reconstructed.
+
+Common failures:
+
+- `401`: `DASHBOARD_API_KEY` does not match the server `API_KEY`.
+- `429`: the dashboard's per-IP fleet rate limit is too low for the number/report interval of bots.
+- Bot absent: confirm `DASHBOARD_URL` ends with `/api/status`, restart the bot, and test connectivity from the bot host.
 
 ### "Failed to connect to RPC"
 - Verify RPC URL in .env file

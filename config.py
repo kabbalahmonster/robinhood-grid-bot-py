@@ -141,7 +141,7 @@ class BotConfig:
     
     # Dashboard Reporting (optional — bot works fine without these)
     dashboard_url: str = ""       # e.g. http://localhost:3000
-    dashboard_api_key: str = ""   # Bearer token for dashboard API
+    dashboard_api_key: str = ""   # Shared X-API-Key for dashboard ingestion
     bot_id: str = "grid-bot-1"    # Unique identifier shown on dashboard
     dashboard_name: str = ""      # Optional display name
     dashboard_group: str = ""     # Optional dashboard grouping label
