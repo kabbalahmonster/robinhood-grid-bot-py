@@ -18,6 +18,7 @@ from hexbytes import HexBytes
 
 from config import BotConfig
 from utils import wei_to_eth, eth_to_wei
+from rpc_rotator import create_web3
 
 # Standard ERC20 ABI (minimal for balance and approve)
 ERC20_ABI = [
@@ -153,8 +154,8 @@ class Wallet:
         self.config = config
         self.logger = logging.getLogger("grid_bot.wallet")
         
-        # Initialize Web3 connection
-        self.w3 = Web3(Web3.HTTPProvider(config.rpc_url))
+        # Initialize Web3 connection (with optional RPC rotation/failover)
+        self.w3 = create_web3(config)
         
         if not self.w3.is_connected():
             raise ConnectionError(f"Failed to connect to RPC: {config.rpc_url}")

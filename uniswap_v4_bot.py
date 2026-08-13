@@ -10,6 +10,7 @@ import logging
 from web3 import Web3
 from config import load_config
 from wallet import Wallet
+from rpc_rotator import create_web3
 
 logging.basicConfig(
     level=logging.INFO,
@@ -45,8 +46,8 @@ class UniswapV4Bot:
         self.positions = {}
         self.running = True
         
-        # Connect to RPC
-        self.w3 = Web3(Web3.HTTPProvider(self.config.rpc_url))
+        # Connect to RPC (with optional rotation/failover)
+        self.w3 = create_web3(self.config)
         
         logger.info(f"Uniswap V4 Bot initialized")
         logger.info(f"Wallet: {self.wallet.address}")

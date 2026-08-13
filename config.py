@@ -46,6 +46,21 @@ ZEROX_API_URLS = {
 }
 
 
+def _parse_rpc_urls(env_value: str) -> Optional[list]:
+    """
+    Parse RPC_URLS environment variable into a list of URLs.
+    
+    Supports comma-separated format:
+        RPC_URLS=https://rpc1.example.com,https://rpc2.example.com
+    
+    Returns None if empty or not set (falls back to single RPC_URL mode).
+    """
+    if not env_value or not env_value.strip():
+        return None
+    urls = [url.strip() for url in env_value.split(",") if url.strip()]
+    return urls if urls else None
+
+
 @dataclass
 class BotConfig:
     """
@@ -121,6 +136,9 @@ class BotConfig:
     # Gridless Cooldown
     gridless_buy_cooldown_seconds: int  # Seconds between gridless buys (default: 300)
     
+    # RPC Rotation (optional, defaults to None = single RPC_URL mode)
+    rpc_urls: Optional[list] = None  # List of RPC URLs for rotation/failover
+    
     # Derived properties
     @property
     def chain_name(self) -> str:
@@ -143,8 +161,11 @@ class BotConfig:
         if not self.private_key or self.private_key == "0x...":
             raise ValueError("PRIVATE_KEY is required and must be set")
         
-        if not self.rpc_url or self.rpc_url == "https://...":
-            raise ValueError("RPC_URL is required and must be set")
+        # RPC_URL is required only if RPC_URLS is not set
+        rpc_urls = getattr(self, 'rpc_urls', None)
+        if not rpc_urls:
+            if not self.rpc_url or self.rpc_url == "https://...":
+                raise ValueError("RPC_URL is required (or set RPC_URLS for rotation)")
         
         # Check API keys - need either 0x or LI.FI
         if self.use_li_fi:
@@ -204,6 +225,7 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
         private_key=os.getenv("PRIVATE_KEY", ""),
         rpc_url=os.getenv("RPC_URL", ""),
         chain_id=chain_id,
+        rpc_urls=_parse_rpc_urls(os.getenv("RPC_URLS", "")),
         
         # API Keys
         zero_x_api_key=os.getenv("ZEROX_API_KEY", ""),
