@@ -113,6 +113,7 @@ class DashboardReporter:
         without breaking the schema.
         """
         payload: Dict[str, Any] = {
+            "dashboard_schema_version": 1,
             "bot_id": self._bot_id,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "uptime_seconds": round(self.uptime_seconds, 1),
