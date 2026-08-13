@@ -1478,6 +1478,7 @@ class GridBot:
                     token_balance=token_bal,
                     positions=positions_data,
                     profit_percent=round(profit_percent, 2),
+                    session_profit_eth=self.session_profit_weth,
                     buys=self.session_buys,
                     sells=self.session_sells,
                     filled_positions=active,
