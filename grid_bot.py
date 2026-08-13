@@ -1430,39 +1430,55 @@ class GridBot:
             if self._reporter:
                 try:
                     positions_data = []
-                    for pos_id, pos in self.positions.items():
-                        if pos['balance'] > 0:
-                            balance_raw = pos['balance']
-                            cost_raw = pos.get('cost_wei', pos.get('cost', 0))
-                            if cost_raw > 0 and 'cost' in pos and 'cost_wei' not in pos:
-                                cost_raw = cost_raw * 10**9
-                            tokens = balance_raw / 10**18
-                            cost_eth = cost_raw / 10**18
-                            if tokens > 0 and cost_eth > 0:
-                                buy_price = cost_eth / tokens
-                                pnl = ((price - buy_price) / buy_price * 100)
-                                positions_data.append({
-                                    'id': pos_id,
-                                    'buy_price': buy_price,
-                                    'buy_amount_token': tokens,
-                                    'buy_amount_eth': cost_eth,
-                                    'cost_basis': cost_eth,
-                                    'pnl': pnl,
-                                    'timestamp': pos.get('timestamp', 0),
-                                })
+                    if use_gridless:
+                        from gridless import load_positions, get_buy_price
+                        gpos = load_positions()
+                        for pos_id, pos in gpos.items():
+                            bal = pos.get('balance', 0)
+                            if bal > 0:
+                                tokens = bal / 10**18
+                                cost_wei = pos.get('cost_wei', pos.get('cost', 0) * 10**9)
+                                cost_eth = cost_wei / 10**18
+                                if tokens > 0 and cost_eth > 0:
+                                    buy_price = cost_eth / tokens
+                                    pnl = ((price - buy_price) / buy_price * 100)
+                                    positions_data.append({
+                                        'id': pos_id,
+                                        'buy_price': buy_price,
+                                        'buy_amount_token': tokens,
+                                        'buy_amount_eth': cost_eth,
+                                        'cost_basis': cost_eth,
+                                        'pnl': round(pnl, 2),
+                                    })
+                    else:
+                        for pos_id, pos in self.positions.items():
+                            if pos['balance'] > 0:
+                                tokens = pos['balance'] / 10**18
+                                cost_eth = pos.get('cost', 0) / 10**9
+                                if tokens > 0 and cost_eth > 0:
+                                    buy_price = cost_eth / tokens
+                                    pnl = ((price - buy_price) / buy_price * 100)
+                                    positions_data.append({
+                                        'id': pos_id,
+                                        'buy_price': buy_price,
+                                        'buy_amount_token': tokens,
+                                        'buy_amount_eth': cost_eth,
+                                        'cost_basis': cost_eth,
+                                        'pnl': round(pnl, 2),
+                                    })
                     
                     self._reporter.report(
                         price=price,
-                        eth_balance=eth_balance,
-                        weth_balance=weth_balance,
-                        token_balance=token_balance,
+                        eth_balance=eth_bal,
+                        weth_balance=weth_bal,
+                        token_balance=token_bal,
                         positions=positions_data,
-                        profit=session_profit,
+                        profit=self.session_profit_weth,
                         trades=self.session_buys + self.session_sells,
                         rpc_status="ok",
                     )
-                except Exception:
-                    pass  # Never let dashboard reporting crash the bot
+                except Exception as e:
+                    logger.warning(f"Dashboard report failed: {e}")
         
         # Check sells first (take profits)
         self.check_sells(price)
