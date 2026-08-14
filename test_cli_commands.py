@@ -33,6 +33,7 @@ class TestCliCommands(unittest.TestCase):
         load_config.return_value = SimpleNamespace(
             token_symbol="TEST",
             token_address="0x0000000000000000000000000000000000000001",
+            usdg_address="0x0000000000000000000000000000000000000003",
             chain_name="Robinhood",
             chain_id=4663,
             swap_provider="uniswap",
@@ -46,7 +47,10 @@ class TestCliCommands(unittest.TestCase):
         wallet.address = "0x0000000000000000000000000000000000000002"
         wallet.get_eth_balance.return_value = 1.25
         wallet._load_token_info.return_value = SimpleNamespace(symbol="TEST")
-        wallet.get_token_balance.return_value = (42.0, 42 * 10**18)
+        wallet.get_token_balance.side_effect = [
+            (42.0, 42 * 10**18),
+            (12.5, 12_500_000),
+        ]
         get.return_value = Mock(status_code=200)
         get.return_value.raise_for_status.return_value = None
 
@@ -56,6 +60,7 @@ class TestCliCommands(unittest.TestCase):
 
         self.assertEqual(result, 0)
         self.assertIn("no quote requested and no transaction broadcast", output.getvalue())
+        self.assertIn("PASS USDG: 12.500000", output.getvalue())
         get.assert_called_once_with("https://doomdash.ca/", timeout=5)
 
 

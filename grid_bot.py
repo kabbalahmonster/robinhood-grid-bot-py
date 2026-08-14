@@ -83,6 +83,11 @@ def check_config():
         token_info = wallet._load_token_info(config.token_address)
         token_balance, _ = wallet.get_token_balance(config.token_address)
         print(f"PASS token: {token_info.symbol} at {config.token_address} ({token_balance:.8f})")
+        if config.usdg_address and config.usdg_address != "0x...":
+            usdg_balance, _ = wallet.get_token_balance(config.usdg_address)
+            print(f"PASS USDG: {usdg_balance:.6f}")
+        else:
+            print("SKIP USDG: USDG_ADDRESS is not configured")
     except Exception as exc:
         print(f"FAIL chain/wallet/token: {exc}")
         return 1
@@ -1414,6 +1419,14 @@ class GridBot:
         else:
             weth_bal, weth_raw = self.wallet.get_token_balance(self.config.weth_address)
         token_bal, token_raw = self.wallet.get_token_balance(self.config.token_address)
+        usdg_bal = None
+        if self.config.usdg_address and self.config.usdg_address != "0x...":
+            try:
+                usdg_bal, _ = self.wallet.get_token_balance(self.config.usdg_address)
+            except Exception as exc:
+                # Dashboard enrichment must never interrupt trading or create a
+                # recurring warning event when a public RPC is briefly limited.
+                logger.debug(f"USDG balance read failed: {exc}")
         
         # Check if gridless mode is enabled
         use_gridless = getattr(self.config, 'use_gridless', False)
@@ -1648,6 +1661,7 @@ class GridBot:
                 self._reporter.report(
                     price=price,
                     eth_balance=eth_bal,
+                    usdg_balance=usdg_bal,
                     token_balance=token_bal,
                     positions=positions_data,
                     profit_percent=round(profit_percent, 2),
