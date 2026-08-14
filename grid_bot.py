@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import threading
+import sys
 from datetime import datetime
 from decimal import Decimal
 from web3 import Web3
@@ -18,6 +19,7 @@ from config import load_config
 from wallet import Wallet
 from swap_provider import create_swap_provider
 from dashboard_reporter import DashboardReporter, create_reporter_from_config
+from profit_tracker import ProfitTracker
 
 # Native ETH address for 0x API (used when trading with native ETH instead of WETH)
 # Native ETH address for 0x API
@@ -81,6 +83,7 @@ class GridBot:
         self.session_buys = 0
         self.session_sells = 0
         self.session_profit_weth = 0.0
+        self.profit_tracker = ProfitTracker()
         self.dashboard_trades_file = "data/dashboard_trades.json"
         self.dashboard_trades = self._load_dashboard_trades()
         
@@ -895,6 +898,11 @@ class GridBot:
             
             self.session_sells += 1
             self.session_profit_weth += actual_profit
+            try:
+                profit_wei = int(quote.buy_amount or 0) - int(round(sold_cost_eth * 10**18))
+                self.profit_tracker.record_sale(profit_wei, result.tx_hash)
+            except (OSError, ValueError) as exc:
+                logger.error(f"Could not persist realized profit: {exc}")
             
             # Remove position
             remove_position(pos_id)
@@ -1213,6 +1221,11 @@ class GridBot:
             # Track session stats
             self.session_sells += 1
             self.session_profit_weth += actual_profit_eth
+            try:
+                profit_wei = int(quote.buy_amount or 0) - int(round(sold_cost_eth * 10**18))
+                self.profit_tracker.record_sale(profit_wei, result.tx_hash)
+            except (OSError, ValueError) as exc:
+                logger.error(f"Could not persist realized profit: {exc}")
             self._record_dashboard_trade("sell", eth_received, sell_tokens, price, result.tx_hash, actual_profit_eth)
             
             # Position is always cleared to 0 after sell
@@ -1575,6 +1588,9 @@ class GridBot:
                     positions=positions_data,
                     profit_percent=round(profit_percent, 2),
                     session_profit_eth=self.session_profit_weth,
+                    realized_profit_eth=self.profit_tracker.realized_profit_eth,
+                    realized_sales=self.profit_tracker.realized_sales,
+                    profit_tracking_started_at=self.profit_tracker.tracking_started_at,
                     buys=self.session_buys,
                     sells=self.session_sells,
                     filled_positions=active,
@@ -1617,5 +1633,13 @@ class GridBot:
                 time.sleep(10)
 
 if __name__ == "__main__":
+    if len(sys.argv) == 2 and sys.argv[1] == "--reset-profit-baseline":
+        tracker = ProfitTracker()
+        tracker.reset_baseline()
+        print(f"Profit baseline reset at {tracker.tracking_started_at}")
+        raise SystemExit(0)
+    if len(sys.argv) > 1:
+        print("Usage: python grid_bot.py [--reset-profit-baseline]")
+        raise SystemExit(2)
     bot = GridBot()
     bot.run()

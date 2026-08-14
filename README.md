@@ -697,11 +697,13 @@ DASHBOARD_GROUP=Robinhood Farm
 
 Restart the bot after changing `.env`. Reporting runs in a daemon thread with a bounded queue and a five-second HTTP timeout, so dashboard downtime does not block trading. Successful requests are logged only at `DEBUG`; failures remain warnings.
 
-Each status payload includes schema version, chain/token/public-wallet metadata, balances, positions, AVG P&L, session profit, buy/sell counts, capacity, and up to 50 trades. Only the public wallet address is sent—never the private key.
+Each status payload includes schema version, chain/token/public-wallet metadata, balances, positions, AVG P&L, session and persistent realized profit, buy/sell counts, capacity, and up to 50 trades. Only the public wallet address is sent—never the private key.
 
 Successful trades are appended atomically to `data/dashboard_trades.json`, reloaded after restart, and capped at 50. This uses transaction results the bot already has and makes no extra RPC or third-party API calls. Existing on-chain history predating this feature is not reconstructed.
 
 Warnings and errors are also retained locally in `data/dashboard_events.json` and included in the existing dashboard status payload. The history is capped at 50 entries, consecutive identical events are count-badged instead of duplicated, and messages are truncated and redacted before reporting. Meaningful blocked actions such as a sell trigger whose quote is below the configured minimum profit are recorded as structured warnings; routine polling decisions are omitted.
+
+Confirmed sells update `data/profit_totals.json` atomically. Profit is stored as integer wei, includes both realized gains and realized stop-losses, and is deduplicated by transaction hash. It intentionally excludes unrealized P&L, gas, and trades completed before tracking began. Session profit still resets on restart; realized profit survives restarts. To begin a new displayed accounting period without deleting the all-time ledger, stop the bot and run `python grid_bot.py --reset-profit-baseline` once.
 
 Common failures:
 
