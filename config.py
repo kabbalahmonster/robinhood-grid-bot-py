@@ -136,6 +136,7 @@ class BotConfig:
     
     # Gridless Cooldown
     gridless_buy_cooldown_seconds: int  # Seconds between gridless buys (default: 300)
+    gridless_buy_execution_margin: float  # Allowed recovery toward buy threshold before execution
     
     # RPC Rotation (optional, defaults to None = single RPC_URL mode)
     rpc_urls: Optional[list] = None  # List of RPC URLs for rotation/failover
@@ -212,6 +213,9 @@ class BotConfig:
         
         if self.poll_interval_seconds < 1:
             raise ValueError("POLL_INTERVAL_SECONDS must be at least 1 second")
+
+        if not 0 <= self.gridless_buy_execution_margin <= 100:
+            raise ValueError("GRIDLESS_BUY_EXECUTION_MARGIN must be between 0 and 100")
 
 
 def load_config(env_file: Optional[str] = None) -> BotConfig:
@@ -312,6 +316,7 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
         
         # Gridless Cooldown
         gridless_buy_cooldown_seconds=int(os.getenv("GRIDLESS_BUY_COOLDOWN_SECONDS", "300")),
+        gridless_buy_execution_margin=float(os.getenv("GRIDLESS_BUY_EXECUTION_MARGIN", "50")),
         
         # Dashboard Reporting
         dashboard_url=os.getenv("DASHBOARD_URL", ""),
