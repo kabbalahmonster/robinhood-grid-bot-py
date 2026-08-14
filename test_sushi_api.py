@@ -26,6 +26,16 @@ SUCCESS_QUOTE = {
 
 
 class TestSushiAPI(unittest.TestCase):
+    def test_native_eth_zero_address_uses_sushi_sentinel(self):
+        client = SushiAPIClient(config())
+        params = client._params(
+            "0x0000000000000000000000000000000000000000",
+            "0xout",
+            10**15,
+            0.01,
+        )
+        self.assertEqual(params["tokenIn"], client.NATIVE_TOKEN_ADDRESS)
+
     @patch("sushi_api.requests.get")
     def test_quote_maps_exact_input_amounts(self, get):
         get.return_value = response(200, SUCCESS_QUOTE)

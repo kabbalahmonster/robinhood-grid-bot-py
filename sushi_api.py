@@ -38,6 +38,7 @@ class SushiAPIClient:
     """Quote and prepare exact-input swaps through Sushi's v7 API."""
 
     BASE_URL = "https://api.sushi.com"
+    NATIVE_TOKEN_ADDRESS = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
 
     def __init__(self, config: BotConfig):
         self.config = config
@@ -55,6 +56,10 @@ class SushiAPIClient:
         return int(value)
 
     def _params(self, sell_token, buy_token, sell_amount, slippage_percentage):
+        # The trading engine uses the zero address for native ETH because that
+        # is Uniswap's convention. Sushi's API uses the Eeee... sentinel.
+        sell_token = self._sushi_token_address(sell_token)
+        buy_token = self._sushi_token_address(buy_token)
         params = {
             "tokenIn": sell_token,
             "tokenOut": buy_token,
@@ -64,6 +69,12 @@ class SushiAPIClient:
         if self.api_key:
             params["apiKey"] = self.api_key
         return params
+
+    @classmethod
+    def _sushi_token_address(cls, token_address):
+        if str(token_address).lower() == "0x0000000000000000000000000000000000000000":
+            return cls.NATIVE_TOKEN_ADDRESS
+        return token_address
 
     def _request(self, endpoint, params):
         try:
