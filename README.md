@@ -12,6 +12,7 @@ A production-grade grid trading bot for Robinhood Chain and other EVM networks, 
 - **Moonbag Support**: Retain a percentage of tokens after each sell
 - **Profit Banking**: Automatically banks profits to USDG/USDC stablecoin
 - **Session Statistics**: Track total buys, sells, and accumulated profit
+- **Persistent Realized Profit**: Confirmed sell profit/loss survives restarts with transaction-hash deduplication and non-destructive baseline resets
 - **Multiple Swap Providers**: Uniswap API, LI.FI, or 0x selected through environment configuration
 - **Anti-MEV Protection**: Jitter on timing to protect against front-running
 - **Multi-Position Support**: Multiple active positions with individual tracking
@@ -19,6 +20,9 @@ A production-grade grid trading bot for Robinhood Chain and other EVM networks, 
 - **Multi-Chain Support**: Robinhood Chain (4663), Base (8453), Ethereum Mainnet (1)
 - **Optional Live Dashboard**: Non-blocking authenticated status reporting, fleet metrics, Dexscreener charts, and explorer links
 - **Persistent Trade History**: Latest 50 successful buys/sells saved locally and reported without additional RPC/API calls
+- **Structured Events**: Latest 50 redacted warnings/errors persist locally with repeat counts
+- **Safe Maintenance CLI**: Read-only config checks plus independent profit, Event, and Trade History resets
+- **USDG Monitoring**: Optional read-only stablecoin balance included in dashboard status
 
 ## Quick Start
 
@@ -27,9 +31,7 @@ A production-grade grid trading bot for Robinhood Chain and other EVM networks, 
 - Python 3.9+
 - pip
 - A wallet with ETH/WETH for trading
-- DEX Aggregator API key:
-  - **0x** (free at [0x.org](https://0x.org/)) - default
-  - **LI.FI** (free at [li.fi](https://li.fi/)) - alternative
+- An API key for the selected swap provider: Uniswap API, LI.FI, or 0x
 - Alchemy or other RPC provider API key
 
 ### Installation
@@ -85,11 +87,14 @@ python grid_bot.py
 | **Wallet & Connection** ||||
 | `PRIVATE_KEY` | Yes | - | Wallet private key (with 0x prefix) |
 | `RPC_URL` | Yes | - | RPC endpoint URL (Alchemy recommended) |
+| `RPC_URLS` | No | empty | Comma-separated RPC rotation/failover list; overrides `RPC_URL` when set |
 | `CHAIN_ID` | Yes | 4663 | Chain ID (4663=Robinhood, 8453=Base, 1=Mainnet) |
 | `ZEROX_API_KEY` | Yes* | - | 0x API key from 0x.org (if using 0x) |
 | `LI_FI_API_KEY` | Yes* | - | LI.FI API key from li.fi (if using LI.FI) |
+| `UNISWAP_API_KEY` | Yes* | - | Uniswap API key (if using Uniswap) |
 | `SWAP_PROVIDER` | No | empty | Explicit provider: `0x`, `lifi`, or `uniswap`; empty uses legacy flags |
 | `USE_LI_FI` | No | false | Use LI.FI instead of 0x for swaps |
+| `USE_UNISWAP_API` | No | true | Legacy Uniswap selection used when `SWAP_PROVIDER` is empty |
 | **Token Configuration** ||||
 | `TOKEN_ADDRESS` | Yes | - | Token address to trade |
 | `TOKEN_SYMBOL` | No | TOKEN | Token symbol for logging |
@@ -106,6 +111,9 @@ python grid_bot.py
 | **Profit Distribution** ||||
 | `BANK_PERCENTAGE` | No | 20 | % of profit to swap to stablecoin (0 to disable) |
 | `MOONBAG_PERCENTAGE` | No | 1 | % of tokens to keep after sell (0 to disable) |
+| `BANK_MIN_AMOUNT` | No | 0.2 | Minimum stablecoin output required before banking |
+| `FAST_PROFIT` | No | true | Sell above minimum profit without waiting for the classic sell range |
+| `TRADEABLE_BALANCE_PERCENT` | No | 100 | Percentage of ETH/WETH balance available for trading |
 | **Bot Behavior** ||||
 | `POLL_INTERVAL_SECONDS` | No | 6 | Price check interval in seconds |
 | `ANTI_MEV_JITTER` | No | true | Enable anti-MEV timing jitter |
@@ -129,29 +137,15 @@ python grid_bot.py
 | `GRIDLESS_BUY_COOLDOWN_SECONDS` | No | 0 | Cooldown between gridless buys (0 disables cooldown) |
 | `GRIDLESS_BUY_EXECUTION_MARGIN` | No | 50 | Execution margin % - blocks buy if quote P&L recovered past threshold + (abs(threshold) * margin%) (e.g., -10% trigger + 50% = block above -5%) |
 
-### DEX Aggregation (0x vs LI.FI)
+### Swap providers
 
-The bot supports two DEX aggregators. Choose based on your needs:
+Prefer explicit provider selection:
 
-#### 0x Protocol (Default)
-- **Best for**: General use, widest liquidity
-- **Setup**: Get API key at [0x.org](https://0x.org/)
-- **Config**:
-```bash
-USE_LI_FI=false
-ZEROX_API_KEY=your_0x_key_here
+```dotenv
+SWAP_PROVIDER=uniswap  # uniswap, lifi, or 0x
 ```
 
-#### LI.FI API (Alternative)
-- **Best for**: Multi-chain routing, when 0x is rate-limited
-- **Setup**: Get API key at [li.fi](https://li.fi/)
-- **Config**:
-```bash
-USE_LI_FI=true
-LI_FI_API_KEY=your_li_fi_key_here
-```
-
-**Switching**: Just change `USE_LI_FI` in your `.env`. Same bot, same config, different aggregator.
+Explicit `SWAP_PROVIDER` takes precedence. When it is empty, backward-compatible selection checks `USE_UNISWAP_API=true`, then `USE_LI_FI=true`, otherwise 0x. The normalized templates currently select Uniswap through the legacy flag. Each provider requires its matching API key.
 
 ### Chain-Specific Configuration
 
@@ -192,8 +186,8 @@ INITIAL_BUY_AMOUNT=0.01      # Higher amounts due to gas costs
 
 ### Safe maintenance commands
 
-Stop the bot before resetting persisted dashboard history. These commands do
-not modify positions or profit accounting:
+Stop the bot before resetting persisted history. None of these commands starts
+the trading loop, and none modifies positions:
 
 ```bash
 # Validate provider/key selection, RPC chain, wallet/token reads, and dashboard
@@ -209,6 +203,8 @@ python grid_bot.py --reset-trade-history
 # Start a new displayed realized-profit accounting period.
 python grid_bot.py --reset-profit-baseline
 ```
+
+Each maintenance command exits without constructing or running `GridBot`: it does not initialize a provider, request a quote, broadcast a transaction, start dashboard reporting, or enter the trading loop. Event and Trade History resets atomically replace their files with empty lists. The profit reset starts a new displayed period at zero while preserving cumulative totals and recent transaction hashes for duplicate protection.
 
 ### Generate Grid Positions
 
@@ -528,6 +524,7 @@ robinhood-grid-bot-py/
 ├── config.py                  # Configuration management
 ├── grid_bot.py                # Main bot logic
 ├── dashboard_reporter.py      # Non-blocking authenticated dashboard client
+├── profit_tracker.py          # Persistent realized-profit accounting
 ├── wallet.py                  # Wallet & transaction handling
 ├── zero_x.py                  # 0x API integration
 ├── li_fi.py                   # LI.FI API integration
@@ -538,8 +535,10 @@ robinhood-grid-bot-py/
 ├── migrate_grid.py            # Migrate holdings to new grid
 ├── generate_wallet.py         # Generate new trading wallet
 ├── data/                      # Data directory
-│   └── positions.json         # Position state file
-│   └── dashboard_trades.json  # Latest 50 successful trades for dashboard display
+│   ├── positions.json         # Position state file
+│   ├── dashboard_trades.json  # Latest 50 successful trades for dashboard display
+│   ├── dashboard_events.json  # Latest 50 structured warnings/errors
+│   └── profit_totals.json     # Realized totals, baseline, and transaction hashes
 └── logs/                      # Log files (created at runtime)
 ```
 
@@ -568,6 +567,8 @@ The older `USE_UNISWAP_API` and `USE_LI_FI` flags remain backward compatible whe
 **grid_bot.py**: Main trading logic - grid management, buy/sell decisions, profit tracking
 
 **dashboard_reporter.py**: Bounded background queue for dashboard POSTs. Dashboard failures never propagate into the trading loop.
+
+**profit_tracker.py**: Atomic integer-wei realized-profit accounting for confirmed sells. It includes gains and realized losses, deduplicates by transaction hash, and supports non-destructive displayed baselines.
 
 **generate_grid_dynamic.py**: Creates grid positions based on current market price
 
@@ -707,7 +708,7 @@ python test_gridless_simple.py
 Enable reporting with the dashboard server's full ingestion endpoint and shared key:
 
 ```dotenv
-DASHBOARD_URL=http://DASHBOARD_HOST:5000/api/status
+DASHBOARD_URL=https://doomdash.ca/api/status
 DASHBOARD_API_KEY=the-dashboard-server-API_KEY
 BOT_ID=MERD
 # Optional:
@@ -767,14 +768,11 @@ Common failures:
 ### Running Tests
 
 ```bash
-# Test imports
-python -c "from grid_bot import GridBot; print('OK')"
+# Full unit suite
+python -m unittest -v
 
-# Test configuration
-python -c "from config import load_config; c = load_config('.env'); print(f'Chain: {c.chain_name}')"
-
-# Test wallet connection
-python -c "from config import load_config; from wallet import Wallet; c = load_config('.env'); w = Wallet(c); print(f'Balance: {w.get_eth_balance()}')"
+# Read-only live configuration/RPC/wallet/token/dashboard check
+python grid_bot.py --check-config
 ```
 
 ### Adding New Chains
@@ -892,7 +890,16 @@ quote = client.build_swap_transaction(
 
 ## Changelog
 
-### v1.2.0 - Latest
+### v1.3.0 - Latest
+- Explicit Uniswap/LI.FI/0x provider abstraction with legacy compatibility
+- Structured persistent dashboard Events and static position-capacity warnings
+- Persistent confirmed-sell realized profit with transaction deduplication and baseline resets
+- Persistent Trade History plus independent Event/Trade reset commands
+- Read-only `--check-config` diagnostics
+- Per-cycle read-only USDG balance reporting
+- Normalized 50-variable environment templates and shared operational defaults
+
+### v1.2.0
 - **Gridless Trading Mode**: Dynamic position-based trading without fixed grid levels
 - **Grid Mode Migration**: `migrate_grid_mode.py` to switch between classic/gridless
 - **Individual Position Quotes**: Gridless sells use per-position quotes (not aggregate)
