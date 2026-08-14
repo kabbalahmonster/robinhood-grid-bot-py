@@ -20,7 +20,7 @@ A production-grade grid trading bot for Robinhood Chain and other EVM networks, 
 - **Multi-Chain Support**: Robinhood Chain (4663), Base (8453), Ethereum Mainnet (1)
 - **Optional Live Dashboard**: Non-blocking authenticated status reporting, fleet metrics, Dexscreener charts, and explorer links
 - **Persistent Trade History**: Latest 50 successful buys/sells saved locally and reported without additional RPC/API calls
-- **Structured Events**: Latest 50 redacted warnings/errors persist locally with repeat counts
+- **Structured Events**: Latest 50 redacted successes/warnings/errors persist locally with repeat counts
 - **Safe Maintenance CLI**: Read-only config checks plus independent profit, Event, and Trade History resets
 - **USDG Monitoring**: Optional read-only stablecoin balance included in dashboard status
 
@@ -537,7 +537,7 @@ robinhood-grid-bot-py/
 ├── data/                      # Data directory
 │   ├── positions.json         # Position state file
 │   ├── dashboard_trades.json  # Latest 50 successful trades for dashboard display
-│   ├── dashboard_events.json  # Latest 50 structured warnings/errors
+│   ├── dashboard_events.json  # Latest 50 structured operational events
 │   └── profit_totals.json     # Realized totals, baseline, and transaction hashes
 └── logs/                      # Log files (created at runtime)
 ```
@@ -722,7 +722,7 @@ Each status payload includes schema version, chain/token/public-wallet metadata,
 
 Successful trades are appended atomically to `data/dashboard_trades.json`, reloaded after restart, and capped at 50. This uses transaction results the bot already has and makes no extra RPC or third-party API calls. Existing on-chain history predating this feature is not reconstructed.
 
-Warnings and errors are also retained locally in `data/dashboard_events.json` and included in the existing dashboard status payload. The history is capped at 50 entries, consecutive identical events are count-badged instead of duplicated, and messages are truncated and redacted before reporting. Meaningful blocked actions such as a sell trigger whose quote is below the configured minimum profit are recorded as structured warnings; routine polling decisions are omitted.
+Operational Events are retained locally in `data/dashboard_events.json` and included in the existing dashboard status payload. The history is capped at 50 entries, consecutive identical events are count-badged instead of duplicated, and messages are truncated and redacted before reporting. Meaningful blocked actions such as a sell trigger whose quote is below the configured minimum profit are recorded as warnings; routine polling decisions are omitted. A successfully confirmed USDG banking swap records a green `usdg_banked` success Event with the source amount, USDG amount, and public transaction hash. Events carrying different transaction hashes are never collapsed together.
 
 Confirmed sells update `data/profit_totals.json` atomically. Profit is stored as integer wei, includes both realized gains and realized stop-losses, and is deduplicated by transaction hash. It intentionally excludes unrealized P&L, gas, and trades completed before tracking began. Session profit still resets on restart; realized profit survives restarts. To begin a new displayed accounting period without deleting the all-time ledger, stop the bot and run `python grid_bot.py --reset-profit-baseline` once.
 

@@ -223,7 +223,7 @@ class GridBot:
         now = datetime.now().astimezone().isoformat()
         event = {
             "timestamp": now,
-            "level": level if level in {"warning", "error"} else "warning",
+            "level": level if level in {"success", "warning", "error"} else "warning",
             "code": str(code)[:80],
             "message": _safe_event_message(message),
         }
@@ -234,7 +234,9 @@ class GridBot:
         with self._dashboard_event_lock:
             if self.dashboard_events:
                 previous = self.dashboard_events[-1]
-                if previous.get("code") == event["code"] and previous.get("message") == event["message"]:
+                same_message = previous.get("code") == event["code"] and previous.get("message") == event["message"]
+                same_transaction = not event.get("tx_hash") or previous.get("tx_hash") == event.get("tx_hash")
+                if same_message and same_transaction:
                     previous["timestamp"] = now
                     previous["count"] = int(previous.get("count", 1)) + 1
                 else:
@@ -1428,6 +1430,15 @@ class GridBot:
         if result.success:
             usdg_received = quote.buy_amount / 10**6 if quote.buy_amount else 0  # USDG is 6 decimals
             logger.info(f"✅ Banked! Received {usdg_received:.2f} USDG")
+            self._record_dashboard_event(
+                "success",
+                "usdg_banked",
+                f"Banked {eth_amount:.6f} {self.trade_token_name} into {usdg_received:.2f} USDG",
+                tx_hash=str(result.tx_hash),
+                source_amount=eth_amount,
+                source_asset=self.trade_token_name,
+                usdg_amount=usdg_received,
+            )
         else:
             logger.error(f"❌ Banking failed: {result.error}")
     

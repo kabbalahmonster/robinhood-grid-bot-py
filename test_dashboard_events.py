@@ -32,6 +32,20 @@ class TestDashboardEvents(unittest.TestCase):
         self.assertEqual(len(self.bot.dashboard_events), 1)
         self.assertEqual(self.bot.dashboard_events[0]["count"], 2)
 
+    def test_success_event_preserves_level_and_transaction(self):
+        self.bot._record_dashboard_event(
+            "success", "usdg_banked", "Banked 0.001 ETH into 4.00 USDG", tx_hash="0xabc"
+        )
+        event = self.bot.dashboard_events[0]
+        self.assertEqual(event["level"], "success")
+        self.assertEqual(event["tx_hash"], "0xabc")
+
+    def test_distinct_transactions_are_not_deduplicated(self):
+        message = "Banked 0.001 ETH into 4.00 USDG"
+        self.bot._record_dashboard_event("success", "usdg_banked", message, tx_hash="0xabc")
+        self.bot._record_dashboard_event("success", "usdg_banked", message, tx_hash="0xdef")
+        self.assertEqual(len(self.bot.dashboard_events), 2)
+
     def test_event_history_is_bounded(self):
         for index in range(55):
             self.bot._record_dashboard_event("warning", f"warning_{index}", f"Warning {index}")
