@@ -70,12 +70,14 @@ logger = logging.getLogger('grid_bot')
 
 _PRIVATE_KEY_RE = re.compile(r'(?<![0-9a-fA-F])(?:0x)?[0-9a-fA-F]{64}(?![0-9a-fA-F])')
 _SECRET_PARAM_RE = re.compile(r'(?i)(api[_-]?key|token|secret|authorization)([=:]\s*)([^\s&,]+)')
+_REQUEST_ID_RE = re.compile(r'(?i)(["\']?request[_-]?id["\']?\s*[:=]\s*)["\']?[^"\',}\s]+["\']?')
 
 
 def _safe_event_message(message):
     """Bound and redact log text before it leaves the bot."""
     text = _PRIVATE_KEY_RE.sub('[REDACTED]', str(message))
     text = _SECRET_PARAM_RE.sub(r'\1\2[REDACTED]', text)
+    text = _REQUEST_ID_RE.sub(r'\1[REDACTED]', text)
     return text[:500]
 
 

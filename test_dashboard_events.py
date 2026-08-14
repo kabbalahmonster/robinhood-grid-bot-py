@@ -58,6 +58,14 @@ class TestDashboardEvents(unittest.TestCase):
         self.assertNotIn(key, message)
         self.assertIn("[REDACTED]", message)
 
+    def test_redacts_provider_request_id(self):
+        request_id = "a45b05e6a365eb11232b52fe72bfbd44"
+        message = _safe_event_message(
+            f'Response: {{"detail":"No quotes available","requestId":"{request_id}"}}'
+        )
+        self.assertNotIn(request_id, message)
+        self.assertIn('"requestId":[REDACTED]', message)
+
     def test_logging_handler_maps_errors(self):
         self.bot.dashboard_events = []
         handler = DashboardEventHandler(self.bot._record_dashboard_event)
