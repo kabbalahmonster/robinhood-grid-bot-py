@@ -15,6 +15,42 @@ from datetime import datetime
 from decimal import Decimal
 from urllib.parse import urlsplit
 
+from profit_tracker import ProfitTracker
+
+
+def _reset_json_history(path, label):
+    """Atomically replace a bot-owned history file with an empty list."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    temp_file = path + ".tmp"
+    with open(temp_file, "w") as handle:
+        json.dump([], handle, indent=2)
+        handle.write("\n")
+    os.replace(temp_file, path)
+    print(f"{label} reset: {path}")
+
+
+def _run_lightweight_maintenance():
+    """Handle reset commands before importing Web3/provider dependencies."""
+    if len(sys.argv) != 2:
+        return
+    command = sys.argv[1]
+    if command == "--reset-profit-baseline":
+        tracker = ProfitTracker()
+        tracker.reset_baseline()
+        print(f"Profit baseline reset at {tracker.tracking_started_at}")
+        raise SystemExit(0)
+    if command == "--reset-event-data":
+        _reset_json_history("data/dashboard_events.json", "Dashboard event data")
+        raise SystemExit(0)
+    if command == "--reset-trade-history":
+        _reset_json_history("data/dashboard_trades.json", "Dashboard trade history")
+        raise SystemExit(0)
+
+
+if __name__ == "__main__":
+    _run_lightweight_maintenance()
+
+
 import requests
 from web3 import Web3
 
@@ -22,7 +58,6 @@ from config import load_config
 from wallet import Wallet
 from swap_provider import create_swap_provider, resolve_provider_name
 from dashboard_reporter import DashboardReporter, create_reporter_from_config
-from profit_tracker import ProfitTracker
 
 # Native ETH address for 0x API (used when trading with native ETH instead of WETH)
 # Native ETH address for 0x API
@@ -42,17 +77,6 @@ def _safe_event_message(message):
     text = _PRIVATE_KEY_RE.sub('[REDACTED]', str(message))
     text = _SECRET_PARAM_RE.sub(r'\1\2[REDACTED]', text)
     return text[:500]
-
-
-def _reset_json_history(path, label):
-    """Atomically replace a bot-owned history file with an empty list."""
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    temp_file = path + ".tmp"
-    with open(temp_file, "w") as handle:
-        json.dump([], handle, indent=2)
-        handle.write("\n")
-    os.replace(temp_file, path)
-    print(f"{label} reset: {path}")
 
 
 def _dashboard_root_url(status_url):
@@ -1715,17 +1739,6 @@ if __name__ == "__main__":
         command = sys.argv[1]
         if command == "--check-config":
             raise SystemExit(check_config())
-        if command == "--reset-profit-baseline":
-            tracker = ProfitTracker()
-            tracker.reset_baseline()
-            print(f"Profit baseline reset at {tracker.tracking_started_at}")
-            raise SystemExit(0)
-        if command == "--reset-event-data":
-            _reset_json_history("data/dashboard_events.json", "Dashboard event data")
-            raise SystemExit(0)
-        if command == "--reset-trade-history":
-            _reset_json_history("data/dashboard_trades.json", "Dashboard trade history")
-            raise SystemExit(0)
     if len(sys.argv) > 1:
         print(
             "Usage: python grid_bot.py "

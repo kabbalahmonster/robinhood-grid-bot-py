@@ -204,7 +204,7 @@ python grid_bot.py --reset-trade-history
 python grid_bot.py --reset-profit-baseline
 ```
 
-Each maintenance command exits without constructing or running `GridBot`: it does not initialize a provider, request a quote, broadcast a transaction, start dashboard reporting, or enter the trading loop. Event and Trade History resets atomically replace their files with empty lists. The profit reset starts a new displayed period at zero while preserving cumulative totals and recent transaction hashes for duplicate protection.
+Each reset command is dispatched before Web3/provider imports, so it works with plain `python3` even when the bot's virtual environment is elsewhere. It exits without constructing or running `GridBot`: no provider initialization, quote, transaction, dashboard reporter, or trading loop. Event and Trade History resets atomically replace their files with empty lists. The profit reset starts a new displayed period at zero while preserving cumulative totals and recent transaction hashes for duplicate protection. `--check-config` still requires the normal bot environment because it deliberately checks live dependencies.
 
 ### Generate Grid Positions
 
