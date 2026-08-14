@@ -190,6 +190,26 @@ INITIAL_BUY_AMOUNT=0.01      # Higher amounts due to gas costs
 
 ## Usage
 
+### Safe maintenance commands
+
+Stop the bot before resetting persisted dashboard history. These commands do
+not modify positions or profit accounting:
+
+```bash
+# Validate provider/key selection, RPC chain, wallet/token reads, and dashboard
+# connectivity without requesting a quote or broadcasting a transaction.
+python grid_bot.py --check-config
+
+# Clear the dashboard Events history for this bot.
+python grid_bot.py --reset-event-data
+
+# Clear the dashboard Trade history for this bot.
+python grid_bot.py --reset-trade-history
+
+# Start a new displayed realized-profit accounting period.
+python grid_bot.py --reset-profit-baseline
+```
+
 ### Generate Grid Positions
 
 **Prerequisite:** You must configure your `.env` file first (see Installation step 3). The grid generator needs `TOKEN_ADDRESS` to fetch the current price from 0x API.

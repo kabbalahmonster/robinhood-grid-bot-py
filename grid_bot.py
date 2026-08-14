@@ -13,11 +13,14 @@ import threading
 import sys
 from datetime import datetime
 from decimal import Decimal
+from urllib.parse import urlsplit
+
+import requests
 from web3 import Web3
 
 from config import load_config
 from wallet import Wallet
-from swap_provider import create_swap_provider
+from swap_provider import create_swap_provider, resolve_provider_name
 from dashboard_reporter import DashboardReporter, create_reporter_from_config
 from profit_tracker import ProfitTracker
 
@@ -39,6 +42,67 @@ def _safe_event_message(message):
     text = _PRIVATE_KEY_RE.sub('[REDACTED]', str(message))
     text = _SECRET_PARAM_RE.sub(r'\1\2[REDACTED]', text)
     return text[:500]
+
+
+def _reset_json_history(path, label):
+    """Atomically replace a bot-owned history file with an empty list."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    temp_file = path + ".tmp"
+    with open(temp_file, "w") as handle:
+        json.dump([], handle, indent=2)
+        handle.write("\n")
+    os.replace(temp_file, path)
+    print(f"{label} reset: {path}")
+
+
+def _dashboard_root_url(status_url):
+    parsed = urlsplit(status_url)
+    return f"{parsed.scheme}://{parsed.netloc}/" if parsed.scheme and parsed.netloc else status_url
+
+
+def check_config():
+    """Validate configuration and read-only dependencies without trading."""
+    try:
+        config = load_config()
+    except Exception as exc:
+        print(f"FAIL configuration: {exc}")
+        return 1
+
+    provider = resolve_provider_name(config)
+    selection = "explicit SWAP_PROVIDER" if config.swap_provider else "legacy provider flags/default"
+    print(f"PASS configuration: {config.token_symbol} on {config.chain_name} ({config.chain_id})")
+    print(f"PASS provider: {provider} ({selection})")
+
+    try:
+        wallet = Wallet(config)
+        chain_id = wallet.w3.eth.chain_id
+        if chain_id != config.chain_id:
+            raise ValueError(f"RPC chain ID {chain_id} does not match configured {config.chain_id}")
+        print(f"PASS RPC: connected to chain {chain_id}")
+        print(f"PASS wallet: {wallet.address} ({wallet.get_eth_balance():.8f} ETH)")
+        token_info = wallet._load_token_info(config.token_address)
+        token_balance, _ = wallet.get_token_balance(config.token_address)
+        print(f"PASS token: {token_info.symbol} at {config.token_address} ({token_balance:.8f})")
+    except Exception as exc:
+        print(f"FAIL chain/wallet/token: {exc}")
+        return 1
+
+    if not config.dashboard_url:
+        print("SKIP dashboard: DASHBOARD_URL is not configured")
+    else:
+        if not config.dashboard_api_key:
+            print("FAIL dashboard: DASHBOARD_API_KEY is not configured")
+            return 1
+        try:
+            response = requests.get(_dashboard_root_url(config.dashboard_url), timeout=5)
+            response.raise_for_status()
+            print(f"PASS dashboard: reachable at {_dashboard_root_url(config.dashboard_url)}")
+        except requests.RequestException as exc:
+            print(f"FAIL dashboard: {exc}")
+            return 1
+
+    print("PASS check complete: no quote requested and no transaction broadcast")
+    return 0
 
 
 class DashboardEventHandler(logging.Handler):
@@ -1633,13 +1697,26 @@ class GridBot:
                 time.sleep(10)
 
 if __name__ == "__main__":
-    if len(sys.argv) == 2 and sys.argv[1] == "--reset-profit-baseline":
-        tracker = ProfitTracker()
-        tracker.reset_baseline()
-        print(f"Profit baseline reset at {tracker.tracking_started_at}")
-        raise SystemExit(0)
+    if len(sys.argv) == 2:
+        command = sys.argv[1]
+        if command == "--check-config":
+            raise SystemExit(check_config())
+        if command == "--reset-profit-baseline":
+            tracker = ProfitTracker()
+            tracker.reset_baseline()
+            print(f"Profit baseline reset at {tracker.tracking_started_at}")
+            raise SystemExit(0)
+        if command == "--reset-event-data":
+            _reset_json_history("data/dashboard_events.json", "Dashboard event data")
+            raise SystemExit(0)
+        if command == "--reset-trade-history":
+            _reset_json_history("data/dashboard_trades.json", "Dashboard trade history")
+            raise SystemExit(0)
     if len(sys.argv) > 1:
-        print("Usage: python grid_bot.py [--reset-profit-baseline]")
+        print(
+            "Usage: python grid_bot.py "
+            "[--check-config|--reset-profit-baseline|--reset-event-data|--reset-trade-history]"
+        )
         raise SystemExit(2)
     bot = GridBot()
     bot.run()
