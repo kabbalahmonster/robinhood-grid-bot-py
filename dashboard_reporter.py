@@ -108,6 +108,7 @@ class DashboardReporter:
         display_name: str = "",
         group: str = "",
         trades_history: Optional[list] = None,
+        events: Optional[list] = None,
         trades: Optional[int] = None,
         rpc_status: str = "unknown",
     ) -> None:
@@ -140,6 +141,7 @@ class DashboardReporter:
             "display_name": display_name,
             "group": group,
             "trades_history": trades_history if trades_history is not None else [],
+            "events": events if events is not None else [],
             "rpc_status": rpc_status,
         }
 

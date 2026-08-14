@@ -701,6 +701,8 @@ Each status payload includes schema version, chain/token/public-wallet metadata,
 
 Successful trades are appended atomically to `data/dashboard_trades.json`, reloaded after restart, and capped at 50. This uses transaction results the bot already has and makes no extra RPC or third-party API calls. Existing on-chain history predating this feature is not reconstructed.
 
+Warnings and errors are also retained locally in `data/dashboard_events.json` and included in the existing dashboard status payload. The history is capped at 50 entries, consecutive identical events are count-badged instead of duplicated, and messages are truncated and redacted before reporting. Meaningful blocked actions such as a sell trigger whose quote is below the configured minimum profit are recorded as structured warnings; routine polling decisions are omitted.
+
 Common failures:
 
 - `401`: `DASHBOARD_API_KEY` does not match the server `API_KEY`.

@@ -8,6 +8,8 @@ import json
 import time
 import logging
 import os
+import re
+import threading
 from datetime import datetime
 from decimal import Decimal
 from web3 import Web3
@@ -26,9 +28,41 @@ UNISWAP_ETH_ADDRESS = "0x0000000000000000000000000000000000000000"
 # Global logger - will be configured by GridBot
 logger = logging.getLogger('grid_bot')
 
+_PRIVATE_KEY_RE = re.compile(r'(?<![0-9a-fA-F])(?:0x)?[0-9a-fA-F]{64}(?![0-9a-fA-F])')
+_SECRET_PARAM_RE = re.compile(r'(?i)(api[_-]?key|token|secret|authorization)([=:]\s*)([^\s&,]+)')
+
+
+def _safe_event_message(message):
+    """Bound and redact log text before it leaves the bot."""
+    text = _PRIVATE_KEY_RE.sub('[REDACTED]', str(message))
+    text = _SECRET_PARAM_RE.sub(r'\1\2[REDACTED]', text)
+    return text[:500]
+
+
+class DashboardEventHandler(logging.Handler):
+    """Convert warning/error log records into structured dashboard events."""
+
+    def __init__(self, callback):
+        super().__init__(level=logging.WARNING)
+        self.callback = callback
+
+    def emit(self, record):
+        try:
+            self.callback(
+                record.levelname.lower(),
+                'log_error' if record.levelno >= logging.ERROR else 'log_warning',
+                record.getMessage(),
+                source=record.name,
+            )
+        except Exception:
+            pass
+
 class GridBot:
     def __init__(self):
         self.config = load_config()
+        self.dashboard_events_file = "data/dashboard_events.json"
+        self._dashboard_event_lock = threading.Lock()
+        self.dashboard_events = self._load_dashboard_events()
         
         # Setup logging FIRST so we capture all initialization logs
         self._setup_logging()
@@ -80,6 +114,46 @@ class GridBot:
             return data[-50:] if isinstance(data, list) else []
         except (FileNotFoundError, json.JSONDecodeError, OSError):
             return []
+
+    def _load_dashboard_events(self):
+        try:
+            with open(self.dashboard_events_file, "r") as handle:
+                data = json.load(handle)
+            return data[-50:] if isinstance(data, list) else []
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return []
+
+    def _record_dashboard_event(self, level, code, message, **context):
+        now = datetime.now().astimezone().isoformat()
+        event = {
+            "timestamp": now,
+            "level": level if level in {"warning", "error"} else "warning",
+            "code": str(code)[:80],
+            "message": _safe_event_message(message),
+        }
+        for key, value in context.items():
+            if isinstance(value, (str, int, float, bool)) or value is None:
+                event[str(key)[:80]] = _safe_event_message(value) if isinstance(value, str) else value
+
+        with self._dashboard_event_lock:
+            if self.dashboard_events:
+                previous = self.dashboard_events[-1]
+                if previous.get("code") == event["code"] and previous.get("message") == event["message"]:
+                    previous["timestamp"] = now
+                    previous["count"] = int(previous.get("count", 1)) + 1
+                else:
+                    self.dashboard_events.append(event)
+            else:
+                self.dashboard_events.append(event)
+            self.dashboard_events = self.dashboard_events[-50:]
+            try:
+                os.makedirs(os.path.dirname(self.dashboard_events_file), exist_ok=True)
+                temp_file = self.dashboard_events_file + ".tmp"
+                with open(temp_file, "w") as handle:
+                    json.dump(self.dashboard_events, handle, indent=2)
+                os.replace(temp_file, self.dashboard_events_file)
+            except OSError:
+                pass
 
     def _record_dashboard_trade(self, side, eth_amount, token_amount, price, tx_hash, profit_eth=None):
         trade = {
@@ -142,6 +216,9 @@ class GridBot:
                 datefmt='%Y-%m-%d %H:%M:%S'
             ))
         logger.addHandler(console_handler)
+
+        event_handler = DashboardEventHandler(self._record_dashboard_event)
+        logger.addHandler(event_handler)
         
         logger.info(f"Logging to: {self.log_filename}")
     
@@ -535,6 +612,15 @@ class GridBot:
             buy_price = get_buy_price(pos)
             pnl_at_check = calculate_pnl(pos, price)
             logger.info(f"⏸️  Position #{pos_id} at {pnl_at_check:.1f}% P&L but quote profit ({quote_profit_eth:.6f}) < min ({min_profit_eth:.6f}) - skipping")
+            self._record_dashboard_event(
+                "warning",
+                "sell_quote_below_minimum",
+                "Sell target met, but quoted profit was below minimum",
+                position_id=str(pos_id),
+                pnl_percent=round(pnl_at_check, 2),
+                quoted_profit_eth=round(quote_profit_eth, 8),
+                minimum_profit_eth=round(min_profit_eth, 8),
+            )
             return
         
         logger.info(f"🎯 Gridless sell trigger: Position #{pos_id} - {reason}")
@@ -1501,6 +1587,7 @@ class GridBot:
                     display_name=self.config.dashboard_name,
                     group=self.config.dashboard_group,
                     trades_history=self.dashboard_trades,
+                    events=self.dashboard_events,
                     rpc_status="ok",
                 )
             except Exception as e:
