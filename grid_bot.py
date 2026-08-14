@@ -1438,9 +1438,11 @@ class GridBot:
         if self._reporter:
             try:
                 positions_data = []
+                capacity_warning = None
                 if use_gridless:
-                    from gridless import load_positions, get_buy_price
+                    from gridless import load_positions, get_capacity_warning
                     gpos = load_positions()
+                    capacity_warning = get_capacity_warning(gpos, price, self.config)
                     for pos_id, pos in gpos.items():
                         bal = pos.get('balance', 0)
                         if bal > 0:
@@ -1491,6 +1493,7 @@ class GridBot:
                     sells=self.session_sells,
                     filled_positions=active,
                     max_positions=self.config.max_active_positions,
+                    capacity_warning=capacity_warning,
                     chain_id=self.config.chain_id,
                     swap_provider=self.provider.name,
                     token_address=self.config.token_address,

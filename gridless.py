@@ -114,6 +114,31 @@ def should_buy(positions: Dict[str, Dict], current_price: float, config: Any) ->
     return (False, f"Top position P&L {top_pnl:.2f}% > threshold {buy_threshold}%")
 
 
+def get_capacity_warning(positions: Dict[str, Dict], current_price: float, config: Any) -> Optional[Dict]:
+    """Describe a dip buy blocked only because all gridless slots are filled."""
+    max_active = getattr(config, 'max_active_positions', 10)
+    buy_threshold = getattr(config, 'gridless_buy_threshold', -10.0)
+    if max_active <= 0 or len(positions) < max_active:
+        return None
+
+    top = get_top_position(positions)
+    if top is None:
+        return None
+
+    top_pnl = calculate_pnl(top[1], current_price)
+    if top_pnl > buy_threshold:
+        return None
+
+    return {
+        'code': 'buy_blocked_at_capacity',
+        'message': 'Buy point reached, but all position slots are filled',
+        'highest_position_pnl': round(top_pnl, 2),
+        'buy_threshold': round(buy_threshold, 2),
+        'filled_positions': len(positions),
+        'max_positions': max_active,
+    }
+
+
 def should_sell(position: Dict[str, int], current_price: float, config: Any,
                 quote_profit_eth: float = 0.0) -> Tuple[bool, str]:
     """Check sell rules: profit target OR stoploss."""

@@ -148,6 +148,33 @@ class TestShouldBuy(unittest.TestCase):
         self.assertFalse(should_buy)
 
 
+class TestCapacityWarning(unittest.TestCase):
+    """Test dashboard warnings for buys blocked by position capacity."""
+
+    def setUp(self):
+        self.config = MagicMock()
+        self.config.max_active_positions = 2
+        self.config.gridless_buy_threshold = -10.0
+        self.positions = {
+            '0': {'cost': 1_000_000_000, 'balance': 10_000_000_000_000_000_000},
+            '1': {'cost': 2_000_000_000, 'balance': 20_000_000_000_000_000_000},
+        }
+
+    def test_warns_when_buy_threshold_met_at_capacity(self):
+        warning = gridless.get_capacity_warning(self.positions, 0.09, self.config)
+        self.assertEqual(warning['code'], 'buy_blocked_at_capacity')
+        self.assertEqual(warning['highest_position_pnl'], -10.0)
+        self.assertEqual(warning['buy_threshold'], -10.0)
+        self.assertEqual(warning['filled_positions'], 2)
+
+    def test_does_not_warn_above_buy_threshold(self):
+        self.assertIsNone(gridless.get_capacity_warning(self.positions, 0.095, self.config))
+
+    def test_does_not_warn_when_slot_is_available(self):
+        self.positions.pop('1')
+        self.assertIsNone(gridless.get_capacity_warning(self.positions, 0.09, self.config))
+
+
 class TestShouldSell(unittest.TestCase):
     """Test sell trigger logic."""
     
