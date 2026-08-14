@@ -168,12 +168,10 @@ class UniswapAPIClient:
             self.logger.debug(f"Uniswap API response status: {response.status_code}")
             
             if response.status_code != 200:
-                error_text = response.text[:500]
                 self.logger.error(f"Uniswap API error: Status {response.status_code}")
-                self.logger.error(f"Response: {error_text}")
                 return QuoteResult(
                     success=False,
-                    error=f"Uniswap API returned status {response.status_code}: {error_text}",
+                    error=f"Uniswap API returned status {response.status_code}",
                 )
             
             data = response.json()
@@ -429,12 +427,10 @@ class UniswapAPIClient:
             self.logger.debug(f"Uniswap swap API response status: {response.status_code}")
             
             if response.status_code != 200:
-                error_text = response.text[:500]
                 self.logger.error(f"Uniswap swap API error: Status {response.status_code}")
-                self.logger.error(f"Response: {error_text}")
                 return QuoteResult(
                     success=False,
-                    error=f"Uniswap swap API returned status {response.status_code}: {error_text}",
+                    error=f"Uniswap swap API returned status {response.status_code}",
                 )
             
             data = response.json()
@@ -447,7 +443,7 @@ class UniswapAPIClient:
             self.logger.info(f"Swap response has quote: {bool(quote_info)}, has swap: {bool(swap_data)}")
             
             if not quote_info:
-                self.logger.warning(f"No quote in swap response! Keys: {list(data.keys())}")
+                self.logger.warning("Uniswap swap response contained no quote")
                 # Fallback: try to use amounts from original quote
                 quote_info = payload.get("quote", {})
             
