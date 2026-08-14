@@ -271,17 +271,17 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
             str(chain_defaults.get("default_max_positions", 20))
         )),
         max_active_positions=int(os.getenv("MAX_ACTIVE_POSITIONS", os.getenv("MAX_POSITIONS", "10"))),
-        min_profit_percent=float(os.getenv("MIN_PROFIT_PERCENT", "1.5")),
+        min_profit_percent=float(os.getenv("MIN_PROFIT_PERCENT", "5.0")),
         initial_buy_amount=float(os.getenv("INITIAL_BUY_AMOUNT", "0.01")),
-        slippage_tolerance=float(os.getenv("SLIPPAGE_TOLERANCE", "1.0")),
-        bank_percentage=float(os.getenv("BANK_PERCENTAGE", "0.0")),
-        moonbag_percentage=float(os.getenv("MOONBAG_PERCENTAGE", "0.0")),
-        bank_min_amount=float(os.getenv("BANK_MIN_AMOUNT", "0.5")),
-        fast_profit=os.getenv("FAST_PROFIT", "false").lower() == "true",
-        tradeable_balance_percent=float(os.getenv("TRADEABLE_BALANCE_PERCENT", "90.0")),
+        slippage_tolerance=float(os.getenv("SLIPPAGE_TOLERANCE", "2.0")),
+        bank_percentage=float(os.getenv("BANK_PERCENTAGE", "20")),
+        moonbag_percentage=float(os.getenv("MOONBAG_PERCENTAGE", "1")),
+        bank_min_amount=float(os.getenv("BANK_MIN_AMOUNT", "0.2")),
+        fast_profit=os.getenv("FAST_PROFIT", "true").lower() == "true",
+        tradeable_balance_percent=float(os.getenv("TRADEABLE_BALANCE_PERCENT", "100")),
         
         # Bot Behavior
-        poll_interval_seconds=int(os.getenv("POLL_INTERVAL_SECONDS", "30")),
+        poll_interval_seconds=int(os.getenv("POLL_INTERVAL_SECONDS", "6")),
         anti_mev_jitter=os.getenv("ANTI_MEV_JITTER", "true").lower() == "true",
         log_level=os.getenv("LOG_LEVEL", "INFO"),
         state_file=os.getenv("STATE_FILE", "./data/positions.json"),
@@ -294,17 +294,17 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
         li_fi_api_key=os.getenv("LI_FI_API_KEY", ""),
         li_fi_integrator=os.getenv("LI_FI_INTEGRATOR", ""),
         
-        use_uniswap_api=os.getenv("USE_UNISWAP_API", "false").lower() == "true",
+        use_uniswap_api=os.getenv("USE_UNISWAP_API", "true").lower() == "true",
         uniswap_api_key=os.getenv("UNISWAP_API_KEY", ""),
         uniswap_permit2_disabled=os.getenv("UNISWAP_PERMIT2_DISABLED", "true").lower() == "true",
         
         # Gridless Trading Mode
-        use_gridless=os.getenv("USE_GRIDLESS", "false").lower() == "true",
+        use_gridless=os.getenv("USE_GRIDLESS", "true").lower() == "true",
         gridless_buy_threshold=float(os.getenv("GRIDLESS_BUY_THRESHOLD", "-10.0")),
         gridless_sell_threshold=float(os.getenv("GRIDLESS_SELL_THRESHOLD", "5.0")),
         gridless_stoploss_threshold=float(os.getenv("GRIDLESS_STOPLOSS_THRESHOLD", "-25.0")),
         gridless_stoploss_enabled=os.getenv("GRIDLESS_STOPLOSS_ENABLED", "false").lower() == "true",
-        gridless_leading_edge=os.getenv("GRIDLESS_LEADING_EDGE", "false").lower() == "true",
+        gridless_leading_edge=os.getenv("GRIDLESS_LEADING_EDGE", "true").lower() == "true",
         
         # ETH Trading Mode
         use_eth_trading=os.getenv("USE_ETH_TRADING", "false").lower() == "true",
@@ -315,7 +315,7 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
         gas_price_multiplier=float(os.getenv("GAS_PRICE_MULTIPLIER", "1.05")),
         
         # Gridless Cooldown
-        gridless_buy_cooldown_seconds=int(os.getenv("GRIDLESS_BUY_COOLDOWN_SECONDS", "300")),
+        gridless_buy_cooldown_seconds=int(os.getenv("GRIDLESS_BUY_COOLDOWN_SECONDS", "0")),
         gridless_buy_execution_margin=float(os.getenv("GRIDLESS_BUY_EXECUTION_MARGIN", "50")),
         
         # Dashboard Reporting

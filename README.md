@@ -88,7 +88,7 @@ python grid_bot.py
 | `CHAIN_ID` | Yes | 4663 | Chain ID (4663=Robinhood, 8453=Base, 1=Mainnet) |
 | `ZEROX_API_KEY` | Yes* | - | 0x API key from 0x.org (if using 0x) |
 | `LI_FI_API_KEY` | Yes* | - | LI.FI API key from li.fi (if using LI.FI) |
-| `SWAP_PROVIDER` | No | 0x | Swap provider: `0x`, `lifi`, or `uniswap` |
+| `SWAP_PROVIDER` | No | empty | Explicit provider: `0x`, `lifi`, or `uniswap`; empty uses legacy flags |
 | `USE_LI_FI` | No | false | Use LI.FI instead of 0x for swaps |
 | **Token Configuration** ||||
 | `TOKEN_ADDRESS` | Yes | - | Token address to trade |
@@ -100,14 +100,14 @@ python grid_bot.py
 | `MAX_POSITIONS` | No | Chain default | Total number of grid positions to create |
 | `MAX_ACTIVE_POSITIONS` | No | `MAX_POSITIONS` | Maximum positions that can be active at once |
 | **Trading Settings** ||||
-| `MIN_PROFIT_PERCENT` | No | 1.5 | Minimum profit % before selling |
+| `MIN_PROFIT_PERCENT` | No | 5.0 | Minimum profit % before selling |
 | `INITIAL_BUY_AMOUNT` | No | 0.01 | Initial ETH/WETH amount for first buys |
-| `SLIPPAGE_TOLERANCE` | No | 1.0 | Slippage tolerance % for swaps |
+| `SLIPPAGE_TOLERANCE` | No | 2.0 | Slippage tolerance % for swaps |
 | **Profit Distribution** ||||
-| `BANK_PERCENTAGE` | No | 0.0 | % of profit to swap to stablecoin (0 to disable) |
-| `MOONBAG_PERCENTAGE` | No | 0.0 | % of tokens to keep after sell (0 to disable) |
+| `BANK_PERCENTAGE` | No | 20 | % of profit to swap to stablecoin (0 to disable) |
+| `MOONBAG_PERCENTAGE` | No | 1 | % of tokens to keep after sell (0 to disable) |
 | **Bot Behavior** ||||
-| `POLL_INTERVAL_SECONDS` | No | 30 | Price check interval in seconds |
+| `POLL_INTERVAL_SECONDS` | No | 6 | Price check interval in seconds |
 | `ANTI_MEV_JITTER` | No | true | Enable anti-MEV timing jitter |
 | `LOG_LEVEL` | No | INFO | Logging level (DEBUG/INFO/WARNING/ERROR) |
 | `STATE_FILE` | No | ./data/positions.json | Position state file path |
@@ -120,13 +120,13 @@ python grid_bot.py
 | `DASHBOARD_NAME` | No | empty | Optional human-friendly display name |
 | `DASHBOARD_GROUP` | No | empty | Optional fleet/group label used for filtering |
 | **Gridless Mode** ||||
-| `USE_GRIDLESS` | No | false | Enable gridless trading mode |
+| `USE_GRIDLESS` | No | true | Enable gridless trading mode |
 | `GRIDLESS_BUY_THRESHOLD` | No | -10.0 | Buy when top position P&L ≤ this % |
 | `GRIDLESS_SELL_THRESHOLD` | No | 5.0 | Sell when position P&L ≥ this % |
-| `GRIDLESS_LEADING_EDGE` | No | false | Buy into strength (single position climbing) |
+| `GRIDLESS_LEADING_EDGE` | No | true | Buy into strength (single position climbing) |
 | `GRIDLESS_STOPLOSS_ENABLED` | No | false | Enable stoploss in gridless mode |
 | `GRIDLESS_STOPLOSS_THRESHOLD` | No | -25.0 | Stoploss trigger % |
-| `GRIDLESS_BUY_COOLDOWN_SECONDS` | No | 300 | Cooldown between gridless buys (default 5 min) |
+| `GRIDLESS_BUY_COOLDOWN_SECONDS` | No | 0 | Cooldown between gridless buys (0 disables cooldown) |
 | `GRIDLESS_BUY_EXECUTION_MARGIN` | No | 50 | Execution margin % - blocks buy if quote P&L recovered past threshold + (abs(threshold) * margin%) (e.g., -10% trigger + 50% = block above -5%) |
 
 ### DEX Aggregation (0x vs LI.FI)
@@ -163,7 +163,7 @@ CHAIN_ID=4663
 RPC_URL=https://robinhood-mainnet.g.alchemy.com/v2/YOUR_KEY
 WETH_ADDRESS=0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73
 USDG_ADDRESS=0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168
-POLL_INTERVAL_SECONDS=1      # Fast chain, can poll every 1s
+POLL_INTERVAL_SECONDS=6
 MAX_POSITIONS=24             # More positions for volatile tokens
 ```
 
@@ -173,7 +173,7 @@ CHAIN_ID=8453
 RPC_URL=https://base-mainnet.g.alchemy.com/v2/YOUR_KEY
 WETH_ADDRESS=0x4200000000000000000000000000000000000006
 USDG_ADDRESS=0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913
-POLL_INTERVAL_SECONDS=10     # Base block time ~2s
+POLL_INTERVAL_SECONDS=6
 MAX_POSITIONS=10
 ```
 
@@ -183,7 +183,7 @@ CHAIN_ID=1
 RPC_URL=https://eth-mainnet.g.alchemy.com/v2/YOUR_KEY
 WETH_ADDRESS=0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2
 USDG_ADDRESS=0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48
-POLL_INTERVAL_SECONDS=15     # Mainnet block time ~12s
+POLL_INTERVAL_SECONDS=6
 MAX_POSITIONS=10
 INITIAL_BUY_AMOUNT=0.01      # Higher amounts due to gas costs
 ```
