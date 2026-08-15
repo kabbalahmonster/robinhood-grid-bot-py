@@ -24,6 +24,7 @@ def test_legacy_provider_priority_is_preserved():
 def test_provider_aliases():
     assert resolve_provider_name(config(swap_provider="LI.FI")) == "lifi"
     assert resolve_provider_name(config(swap_provider="zero_x")) == "0x"
+    assert resolve_provider_name(config(swap_provider="sushi")) == "sushiswap"
 
 
 def test_capabilities_are_provider_owned():
@@ -31,3 +32,5 @@ def test_capabilities_are_provider_owned():
     assert PROVIDERS["lifi"].capabilities.refresh_after_approval is True
     assert PROVIDERS["uniswap"].capabilities.api_managed_approval is True
     assert PROVIDERS["uniswap"].capabilities.quote_requires_preparation is True
+    assert PROVIDERS["sushiswap"].capabilities.refresh_after_approval is True
+    assert PROVIDERS["sushiswap"].capabilities.api_managed_approval is False

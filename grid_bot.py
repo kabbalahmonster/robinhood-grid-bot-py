@@ -1384,21 +1384,33 @@ class GridBot:
         
         # Check/approve WETH for swapping (skip for native ETH)
         if not getattr(self.config, 'use_eth_trading', False):
+            spender = quote.allowance_target or self.config.zero_x_proxy
             weth_allowance = self.wallet.check_allowance(
                 self.config.weth_address,
-                self.config.zero_x_proxy,
+                spender,
                 use_permit2=False
             )
             if weth_allowance < eth_wei:
-                logger.info(f"Approving WETH to AllowanceHolder for banking...")
+                logger.info(f"Approving WETH to {spender[:20]} for banking...")
                 result = self.wallet.approve_token(
                     self.config.weth_address,
-                    self.config.zero_x_proxy,
+                    spender,
                     2**256 - 1
                 )
                 if not result.success:
                     logger.error(f"WETH approval for banking failed: {result.error}")
                     return
+                if self.provider.capabilities.refresh_after_approval:
+                    quote = self.provider.refresh_quote(
+                        sell_token=self.trade_token_address,
+                        buy_token=self.config.usdg_address,
+                        sell_amount=eth_wei,
+                        taker_address=self.wallet.address,
+                        slippage_percentage=0.01,
+                    )
+                    if not quote.success:
+                        logger.error(f"Refreshed banking quote failed: {quote.error}")
+                        return
         
         # Prepare executable calldata when the provider separates quote and swap.
         if self.provider.capabilities.quote_requires_preparation:

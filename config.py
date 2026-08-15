@@ -108,7 +108,8 @@ class BotConfig:
     minimal_logs: bool
     
     # API Provider Selection
-    swap_provider: str  # Explicit provider: 0x, lifi, or uniswap
+    swap_provider: str  # Explicit provider: 0x, lifi, uniswap, or sushiswap
+    sushi_api_key: str  # Optional Sushi API key for higher service limits
     use_li_fi: bool  # If True, use LI.FI instead of 0x
     li_fi_api_key: str
     li_fi_integrator: str  # Required integrator string for LI.FI API
@@ -179,10 +180,10 @@ class BotConfig:
         # Validate the resolved provider and its credentials. Explicit
         # SWAP_PROVIDER takes precedence; legacy flags remain compatible.
         provider = (self.swap_provider or "").strip().lower()
-        provider = {"li.fi": "lifi", "li_fi": "lifi", "zero_x": "0x", "zerox": "0x"}.get(provider, provider)
+        provider = {"li.fi": "lifi", "li_fi": "lifi", "zero_x": "0x", "zerox": "0x", "sushi": "sushiswap"}.get(provider, provider)
         if not provider:
             provider = "uniswap" if self.use_uniswap_api else ("lifi" if self.use_li_fi else "0x")
-        if provider not in {"0x", "lifi", "uniswap"}:
+        if provider not in {"0x", "lifi", "uniswap", "sushiswap"}:
             raise ValueError(f"Unsupported SWAP_PROVIDER: {provider}")
         if provider == "lifi":
             if not self.li_fi_api_key:
@@ -290,6 +291,7 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
         
         # API Provider Selection
         swap_provider=os.getenv("SWAP_PROVIDER", ""),
+        sushi_api_key=os.getenv("SUSHI_API_KEY", ""),
         use_li_fi=os.getenv("USE_LI_FI", "false").lower() == "true",
         li_fi_api_key=os.getenv("LI_FI_API_KEY", ""),
         li_fi_integrator=os.getenv("LI_FI_INTEGRATOR", ""),

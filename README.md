@@ -92,7 +92,8 @@ python grid_bot.py
 | `ZEROX_API_KEY` | Yes* | - | 0x API key from 0x.org (if using 0x) |
 | `LI_FI_API_KEY` | Yes* | - | LI.FI API key from li.fi (if using LI.FI) |
 | `UNISWAP_API_KEY` | Yes* | - | Uniswap API key (if using Uniswap) |
-| `SWAP_PROVIDER` | No | empty | Explicit provider: `0x`, `lifi`, or `uniswap`; empty uses legacy flags |
+| `SUSHI_API_KEY` | No | empty | Optional Sushi portal API key; the public v7 API works without one |
+| `SWAP_PROVIDER` | No | empty | Explicit provider: `0x`, `lifi`, `uniswap`, or `sushiswap`; empty uses legacy flags |
 | `USE_LI_FI` | No | false | Use LI.FI instead of 0x for swaps |
 | `USE_UNISWAP_API` | No | true | Legacy Uniswap selection used when `SWAP_PROVIDER` is empty |
 | **Token Configuration** ||||
@@ -142,10 +143,10 @@ python grid_bot.py
 Prefer explicit provider selection:
 
 ```dotenv
-SWAP_PROVIDER=uniswap  # uniswap, lifi, or 0x
+SWAP_PROVIDER=sushiswap  # sushiswap, uniswap, lifi, or 0x
 ```
 
-Explicit `SWAP_PROVIDER` takes precedence. When it is empty, backward-compatible selection checks `USE_UNISWAP_API=true`, then `USE_LI_FI=true`, otherwise 0x. The normalized templates currently select Uniswap through the legacy flag. Each provider requires its matching API key.
+Explicit `SWAP_PROVIDER` takes precedence. `sushi` is accepted as an alias for `sushiswap`. When the setting is empty, backward-compatible selection checks `USE_UNISWAP_API=true`, then `USE_LI_FI=true`, otherwise 0x. The normalized templates currently select Uniswap through the legacy flag. Sushi uses its v7 quote/swap API and supports an optional `SUSHI_API_KEY`; the other providers require their matching credentials.
 
 ### Chain-Specific Configuration
 
@@ -550,7 +551,7 @@ robinhood-grid-bot-py/
 
 **zero_x.py**: Integrates with 0x API for price quotes and swap transactions
 
-**li_fi.py / uniswap_api.py**: Alternative swap-provider integrations selected through `.env`
+**li_fi.py / uniswap_api.py / sushi_api.py**: Alternative swap-provider integrations selected through `.env`. Sushi v7 uses exact-input routing and handles its insufficient-allowance response as a normal approve-and-refresh handshake.
 
 **swap_provider.py**: Provider registry, factory, and capability adapter. It centralizes provider selection and differences such as taker-required pricing, quote refresh after approval, API-managed approvals, and separate swap-calldata preparation. `grid_bot.py` consumes these capabilities instead of checking provider classes directly.
 
@@ -559,10 +560,10 @@ robinhood-grid-bot-py/
 Prefer the explicit provider setting:
 
 ```dotenv
-SWAP_PROVIDER=uniswap  # 0x, lifi, or uniswap
+SWAP_PROVIDER=sushiswap  # 0x, lifi, uniswap, or sushiswap
 ```
 
-The older `USE_UNISWAP_API` and `USE_LI_FI` flags remain backward compatible when `SWAP_PROVIDER` is empty. Explicit `SWAP_PROVIDER` takes precedence. Each provider keeps its existing quote, approval, slippage, and transaction behavior; this abstraction is intended to make future providers additive rather than adding more conditionals to the trading engine.
+The older `USE_UNISWAP_API` and `USE_LI_FI` flags remain backward compatible when `SWAP_PROVIDER` is empty. Explicit `SWAP_PROVIDER` takes precedence. Sushi currently supports exact-input swaps, which is the only execution mode used by this bot. Each provider keeps its own quote, approval, slippage, and transaction behavior behind the common capability layer.
 
 **grid_bot.py**: Main trading logic - grid management, buy/sell decisions, profit tracking
 
@@ -891,6 +892,7 @@ quote = client.build_swap_transaction(
 ## Changelog
 
 ### v1.3.0 - Latest
+- Sushi v7 quote/swap compatibility with RouteProcessor approval refresh
 - Explicit Uniswap/LI.FI/0x provider abstraction with legacy compatibility
 - Structured persistent dashboard Events and static position-capacity warnings
 - Persistent confirmed-sell realized profit with transaction deduplication and baseline resets

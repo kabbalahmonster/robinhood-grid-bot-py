@@ -57,13 +57,16 @@ PROVIDERS = {
         api_managed_approval=True,
         quote_requires_preparation=True,
     )),
+    "sushiswap": ProviderDefinition("sushi_api", "SushiAPIClient", ProviderCapabilities(
+        refresh_after_approval=True,
+    )),
 }
 
 
 def resolve_provider_name(config):
     """Resolve explicit provider name, preserving legacy flag precedence."""
     explicit = (getattr(config, "swap_provider", "") or "").strip().lower()
-    aliases = {"li.fi": "lifi", "li_fi": "lifi", "zero_x": "0x", "zerox": "0x"}
+    aliases = {"li.fi": "lifi", "li_fi": "lifi", "zero_x": "0x", "zerox": "0x", "sushi": "sushiswap"}
     explicit = aliases.get(explicit, explicit)
     if explicit:
         return explicit
