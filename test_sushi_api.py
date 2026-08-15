@@ -11,8 +11,8 @@ def config():
     return SimpleNamespace(chain_id=4663, sushi_api_key="", anti_mev_jitter=False)
 
 
-def response(status_code, payload):
-    item = Mock(status_code=status_code)
+def response(status_code, payload, headers=None):
+    item = Mock(status_code=status_code, headers=headers or {})
     item.json.return_value = payload
     return item
 
@@ -71,6 +71,44 @@ class TestSushiAPI(unittest.TestCase):
         result = SushiAPIClient(config()).get_quote("0xin", "0xout", buy_amount=100)
         self.assertFalse(result.success)
         self.assertIn("exact-input", result.error)
+
+    @patch("sushi_api.time.time", return_value=1000)
+    @patch("sushi_api.requests.get")
+    def test_rate_limit_respects_retry_after_and_skips_requests(self, get, now):
+        get.return_value = response(429, {"detail": "slow down"}, {"Retry-After": "120"})
+        client = SushiAPIClient(config())
+
+        first = client.get_quote("0xin", "0xout", sell_amount=10**15)
+        second = client.get_quote("0xin", "0xout", sell_amount=10**15)
+
+        self.assertFalse(first.success)
+        self.assertIn("retry in 120s", first.error)
+        self.assertFalse(second.success)
+        self.assertIn("cooldown active", second.error)
+        self.assertEqual(get.call_count, 1)
+
+    @patch("sushi_api.random.uniform", return_value=1.0)
+    @patch("sushi_api.time.time", return_value=1000)
+    @patch("sushi_api.requests.get")
+    def test_rate_limit_uses_exponential_fallback(self, get, now, uniform):
+        get.return_value = response(429, {"detail": "slow down"})
+        client = SushiAPIClient(config())
+        client.get_quote("0xin", "0xout", sell_amount=10**15)
+        self.assertEqual(client._rate_limit_until, 1030)
+
+    @patch("sushi_api.time.time", side_effect=[1000, 1031])
+    @patch("sushi_api.requests.get")
+    def test_success_after_cooldown_resets_backoff(self, get, now):
+        get.side_effect = [
+            response(429, {"detail": "slow down"}, {"Retry-After": "30"}),
+            response(200, SUCCESS_QUOTE),
+        ]
+        client = SushiAPIClient(config())
+        client.get_quote("0xin", "0xout", sell_amount=10**15)
+        recovered = client.get_quote("0xin", "0xout", sell_amount=10**15)
+        self.assertTrue(recovered.success)
+        self.assertEqual(client._rate_limit_strikes, 0)
+        self.assertEqual(client._rate_limit_until, 0)
 
 
 if __name__ == "__main__":

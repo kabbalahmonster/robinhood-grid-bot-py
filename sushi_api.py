@@ -9,7 +9,10 @@ Docs: https://docs.sushi.com/api/examples/quote
 """
 
 from dataclasses import dataclass
+from email.utils import parsedate_to_datetime
 import logging
+import random
+import time
 from typing import Optional
 
 import requests
@@ -39,12 +42,16 @@ class SushiAPIClient:
 
     BASE_URL = "https://api.sushi.com"
     NATIVE_TOKEN_ADDRESS = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
+    RATE_LIMIT_BASE_SECONDS = 30
+    RATE_LIMIT_MAX_SECONDS = 15 * 60
 
     def __init__(self, config: BotConfig):
         self.config = config
         self.chain_id = config.chain_id
         self.api_key = getattr(config, "sushi_api_key", "")
         self.logger = logging.getLogger("grid_bot.sushi_api")
+        self._rate_limit_until = 0.0
+        self._rate_limit_strikes = 0
         self.logger.info(f"Sushi API Client initialized for chain {self.chain_id}")
 
     @staticmethod
@@ -77,6 +84,11 @@ class SushiAPIClient:
         return token_address
 
     def _request(self, endpoint, params):
+        now = time.time()
+        if now < self._rate_limit_until:
+            remaining = max(1, int(self._rate_limit_until - now + 0.999))
+            return 429, {"detail": f"Sushi rate-limit cooldown active; retry in {remaining}s"}
+
         try:
             response = requests.get(
                 f"{self.BASE_URL}/{endpoint}/v7/{self.chain_id}",
@@ -87,9 +99,39 @@ class SushiAPIClient:
                 data = response.json()
             except ValueError:
                 data = {"detail": response.text[:500]}
+
+            if response.status_code == 429:
+                self._rate_limit_strikes += 1
+                delay = self._retry_after_seconds(response.headers, now)
+                if delay is None:
+                    exponential = min(
+                        self.RATE_LIMIT_BASE_SECONDS * (2 ** (self._rate_limit_strikes - 1)),
+                        self.RATE_LIMIT_MAX_SECONDS,
+                    )
+                    delay = exponential * random.uniform(0.9, 1.1)
+                self._rate_limit_until = max(self._rate_limit_until, now + max(1, delay))
+                wait_seconds = max(1, int(self._rate_limit_until - now + 0.999))
+                self.logger.warning(f"Sushi rate limited; pausing API requests for {wait_seconds}s")
+                data = {"detail": f"Sushi rate limited; retry in {wait_seconds}s"}
+            elif 200 <= response.status_code < 300:
+                self._rate_limit_strikes = 0
+                self._rate_limit_until = 0.0
             return response.status_code, data
         except requests.RequestException as exc:
             return None, {"detail": f"Request failed: {exc}"}
+
+    @staticmethod
+    def _retry_after_seconds(headers, now):
+        raw = (headers or {}).get("Retry-After")
+        if not raw:
+            return None
+        try:
+            return max(0, float(raw))
+        except (TypeError, ValueError):
+            try:
+                return max(0, parsedate_to_datetime(raw).timestamp() - now)
+            except (TypeError, ValueError, OverflowError):
+                return None
 
     def _quote_result(self, data, apply_jitter_to_price):
         status = data.get("status")

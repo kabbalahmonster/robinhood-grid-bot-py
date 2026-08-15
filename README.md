@@ -146,7 +146,7 @@ Prefer explicit provider selection:
 SWAP_PROVIDER=sushiswap  # sushiswap, uniswap, lifi, or 0x
 ```
 
-Explicit `SWAP_PROVIDER` takes precedence. `sushi` is accepted as an alias for `sushiswap`. When the setting is empty, backward-compatible selection checks `USE_UNISWAP_API=true`, then `USE_LI_FI=true`, otherwise 0x. The normalized templates currently select Uniswap through the legacy flag. Sushi uses its v7 quote/swap API and supports an optional `SUSHI_API_KEY`; the other providers require their matching credentials.
+Explicit `SWAP_PROVIDER` takes precedence. `sushi` is accepted as an alias for `sushiswap`. When the setting is empty, backward-compatible selection checks `USE_UNISWAP_API=true`, then `USE_LI_FI=true`, otherwise 0x. The normalized templates currently select Uniswap through the legacy flag. Sushi uses its v7 quote/swap API and supports an optional `SUSHI_API_KEY`; the other providers require their matching credentials. When Sushi returns HTTP 429, that bot honors `Retry-After` when supplied and otherwise enters a jittered exponential cooldown (30 seconds up to 15 minutes). Requests are skipped locally during the cooldown and a successful response resets the backoff.
 
 ### Chain-Specific Configuration
 
