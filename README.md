@@ -551,7 +551,7 @@ robinhood-grid-bot-py/
 
 **zero_x.py**: Integrates with 0x API for price quotes and swap transactions
 
-**li_fi.py / uniswap_api.py / sushi_api.py**: Alternative swap-provider integrations selected through `.env`. Sushi v7 uses exact-input routing and handles its insufficient-allowance response as a normal approve-and-refresh handshake.
+**li_fi.py / uniswap_api.py / sushi_api.py**: Alternative swap-provider integrations selected through `.env`. Sushi v7 uses exact-input routing, handles its insufficient-allowance response as a normal approve-and-refresh handshake, and applies per-bot rate-limit cooldowns without blocking the main loop.
 
 **swap_provider.py**: Provider registry, factory, and capability adapter. It centralizes provider selection and differences such as taker-required pricing, quote refresh after approval, API-managed approvals, and separate swap-calldata preparation. `grid_bot.py` consumes these capabilities instead of checking provider classes directly.
 
@@ -564,6 +564,20 @@ SWAP_PROVIDER=sushiswap  # 0x, lifi, uniswap, or sushiswap
 ```
 
 The older `USE_UNISWAP_API` and `USE_LI_FI` flags remain backward compatible when `SWAP_PROVIDER` is empty. Explicit `SWAP_PROVIDER` takes precedence. Sushi currently supports exact-input swaps, which is the only execution mode used by this bot. Each provider keeps its own quote, approval, slippage, and transaction behavior behind the common capability layer.
+
+For a Sushi bot, set:
+
+```dotenv
+SWAP_PROVIDER=sushiswap
+SUSHI_API_KEY=your_key_here  # Optional, but recommended for a multi-bot rollout
+```
+
+Restart after changing `.env`. Roll out one or two bots first and confirm price
+updates plus a small buy/sell before moving more of the fleet. Each process keeps
+its own rate-limit state. On HTTP 429 it honors Sushi's `Retry-After` header or
+uses a jittered exponential cooldown from 30 seconds to 15 minutes; calls are
+skipped locally until the cooldown expires, and the first successful response
+resets it. This prevents bots sharing one public IP from synchronizing retries.
 
 **grid_bot.py**: Main trading logic - grid management, buy/sell decisions, profit tracking
 
@@ -682,14 +696,16 @@ Run unit tests for gridless trading logic:
 
 ```bash
 # Run all tests
-python test_gridless_simple.py
+python -m unittest discover -v
 
-# Tests cover:
+# Tests cover, among other behavior:
 # - P&L calculations
 # - Buy/sell decision logic
 # - Stoploss triggers
 # - Leading edge buys
 # - Position validation
+# - Provider selection and Sushi response mapping
+# - Sushi rate-limit cooldown, skipped calls, and recovery
 ```
 
 ## Safety Features
@@ -730,7 +746,8 @@ Confirmed sells update `data/profit_totals.json` atomically. Profit is stored as
 Common failures:
 
 - `401`: `DASHBOARD_API_KEY` does not match the server `API_KEY`.
-- `429`: the dashboard's per-IP fleet rate limit is too low for the number/report interval of bots.
+- Dashboard POST `429`: the dashboard's per-IP fleet rate limit is too low for the number/report interval of bots.
+- `Sushi rate limited`: the provider returned HTTP 429. The bot automatically pauses Sushi calls, reports the warning as an Event, and resumes after `Retry-After` or its exponential cooldown. Do not restart repeatedly; that discards the in-memory cooldown.
 - Bot absent: confirm `DASHBOARD_URL` ends with `/api/status`, restart the bot, and test connectivity from the bot host.
 
 ### "Failed to connect to RPC"
@@ -744,7 +761,8 @@ Common failures:
 - Verify token contract addresses are correct
 
 ### "Quote failed"
-- Check 0x API key is valid and not rate-limited
+- Confirm `SWAP_PROVIDER` resolved to the intended provider in startup logs or run `python grid_bot.py --check-config`
+- Check the selected provider's API key when it requires or recommends one
 - Verify token has liquidity on the chain
 - Increase `SLIPPAGE_TOLERANCE` if token is volatile
 
@@ -893,6 +911,7 @@ quote = client.build_swap_transaction(
 
 ### v1.3.0 - Latest
 - Sushi v7 quote/swap compatibility with RouteProcessor approval refresh
+- Fleet-safe Sushi HTTP 429 handling with `Retry-After`, jittered exponential cooldown, and automatic recovery
 - Explicit Uniswap/LI.FI/0x provider abstraction with legacy compatibility
 - Structured persistent dashboard Events and static position-capacity warnings
 - Persistent confirmed-sell realized profit with transaction deduplication and baseline resets
