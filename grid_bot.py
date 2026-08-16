@@ -712,15 +712,13 @@ class GridBot:
             buy_price = get_buy_price(pos)
             pnl_at_check = calculate_pnl(pos, price)
             logger.info(f"⏸️  Position #{pos_id} at {pnl_at_check:.1f}% P&L but quote profit ({quote_profit_eth:.6f}) < min ({min_profit_eth:.6f}) - skipping")
-            self._record_dashboard_event(
-                "warning",
-                "sell_quote_below_minimum",
-                "Sell target met, but quoted profit was below minimum",
-                position_id=str(pos_id),
-                pnl_percent=round(pnl_at_check, 2),
-                quoted_profit_eth=round(quote_profit_eth, 8),
-                minimum_profit_eth=round(min_profit_eth, 8),
-            )
+            self._sell_attempt = {
+                "status": "quote_below_minimum",
+                "position_id": str(pos_id),
+                "pnl_percent": round(pnl_at_check, 2),
+                "quoted_profit_eth": round(quote_profit_eth, 8),
+                "minimum_profit_eth": round(min_profit_eth, 8),
+            }
             return
         
         logger.info(f"🎯 Gridless sell trigger: Position #{pos_id} - {reason}")
@@ -1459,6 +1457,9 @@ class GridBot:
     def run_cycle(self):
         """Run one trading cycle."""
         self.round_count += 1
+        # Ephemeral by design: a sell attempt must be re-established by this
+        # round's quote check or it disappears from the next dashboard report.
+        self._sell_attempt = None
         elapsed = time.time() - self.start_time
         
         # Get balances
@@ -1659,6 +1660,10 @@ class GridBot:
             
             logger.info("-" * 70)
         
+        # Check sells before reporting so this round's transient attempt state
+        # appears immediately rather than one poll late.
+        self.check_sells(price)
+
         # Report to dashboard if configured (runs regardless of compact mode)
         if self._reporter:
             try:
@@ -1723,6 +1728,7 @@ class GridBot:
                     filled_positions=active,
                     max_positions=self.config.max_active_positions,
                     capacity_warning=capacity_warning,
+                    sell_attempt=self._sell_attempt,
                     chain_id=self.config.chain_id,
                     swap_provider=self.provider.name,
                     token_address=self.config.token_address,
@@ -1735,9 +1741,6 @@ class GridBot:
                 )
             except Exception as e:
                 logger.warning(f"Dashboard report failed: {e}")
-        
-        # Check sells first (take profits)
-        self.check_sells(price)
         
         # Then check buys
         self.check_buys(price)

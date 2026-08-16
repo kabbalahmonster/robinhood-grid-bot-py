@@ -13,6 +13,20 @@ class TestDashboardReporter(unittest.TestCase):
         self.assertEqual(len(reporter._queue), 1)
         self.assertEqual(reporter._queue[0]["usdg_balance"], 123.456)
 
+    @patch("dashboard_reporter.threading.Thread.start")
+    def test_sell_attempt_is_round_scoped_payload_field(self, _start):
+        reporter = DashboardReporter("https://doomdash.ca/api/status")
+        attempt = {
+            "status": "quote_below_minimum",
+            "quoted_profit_eth": 0.001,
+            "minimum_profit_eth": 0.002,
+        }
+        reporter.report(sell_attempt=attempt)
+        reporter.report()
+
+        self.assertEqual(reporter._queue[0]["sell_attempt"], attempt)
+        self.assertIsNone(reporter._queue[1]["sell_attempt"])
+
 
 if __name__ == "__main__":
     unittest.main()
