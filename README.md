@@ -1,6 +1,6 @@
 # Robinhood Chain Grid Trading Bot (Python)
 
-A production-grade grid trading bot for Robinhood Chain and other EVM networks, implemented in Python using web3.py. Supports Uniswap API, LI.FI, and 0x swap providers with features like dynamic position sizing, moonbag retention, profit banking to stablecoins, session tracking, and optional fleet-dashboard reporting.
+A production-grade grid trading bot for Robinhood Chain and other EVM networks, implemented in Python using web3.py. Supports SushiSwap, Uniswap API, LI.FI, and 0x swap providers with features like dynamic position sizing, moonbag retention, profit banking to stablecoins, session tracking, and optional fleet-dashboard reporting.
 
 ## Features
 
@@ -13,7 +13,7 @@ A production-grade grid trading bot for Robinhood Chain and other EVM networks, 
 - **Profit Banking**: Automatically banks profits to USDG/USDC stablecoin
 - **Session Statistics**: Track total buys, sells, and accumulated profit
 - **Persistent Realized Profit**: Confirmed sell profit/loss survives restarts with transaction-hash deduplication and non-destructive baseline resets
-- **Multiple Swap Providers**: Uniswap API, LI.FI, or 0x selected through environment configuration
+- **Multiple Swap Providers**: SushiSwap, Uniswap API, LI.FI, or 0x selected through environment configuration
 - **Anti-MEV Protection**: Jitter on timing to protect against front-running
 - **Multi-Position Support**: Multiple active positions with individual tracking
 - **Persistent State**: Survives restarts with position recovery
@@ -21,6 +21,7 @@ A production-grade grid trading bot for Robinhood Chain and other EVM networks, 
 - **Optional Live Dashboard**: Non-blocking authenticated status reporting, fleet metrics, Dexscreener charts, and explorer links
 - **Persistent Trade History**: Latest 50 successful buys/sells saved locally and reported without additional RPC/API calls
 - **Structured Events**: Latest 50 redacted successes/warnings/errors persist locally with repeat counts
+- **Transient Sell Checks**: Reports when a sell target is being checked but quoted profit is below the configured minimum
 - **Safe Maintenance CLI**: Read-only config checks plus independent profit, Event, and Trade History resets
 - **USDG Monitoring**: Optional read-only stablecoin balance included in dashboard status
 
@@ -31,7 +32,7 @@ A production-grade grid trading bot for Robinhood Chain and other EVM networks, 
 - Python 3.9+
 - pip
 - A wallet with ETH/WETH for trading
-- An API key for the selected swap provider: Uniswap API, LI.FI, or 0x
+- Credentials for the selected swap provider when required; Sushi's public v7 API works without a key
 - Alchemy or other RPC provider API key
 
 ### Installation
@@ -735,11 +736,13 @@ DASHBOARD_GROUP=Robinhood Farm
 
 Restart the bot after changing `.env`. Reporting runs in a daemon thread with a bounded queue and a five-second HTTP timeout, so dashboard downtime does not block trading. Successful requests are logged only at `DEBUG`; failures remain warnings.
 
-Each status payload includes schema version, chain/token/public-wallet metadata, ETH, USDG, and trading-token balances, positions, AVG P&L, session and persistent realized profit, buy/sell counts, capacity, and up to 50 trades. The USDG balance is a read-only ERC-20 call made once per cycle when `USDG_ADDRESS` is configured; a failed read is omitted and never interrupts trading. Only the public wallet address is sent—never the private key.
+Each status payload includes schema version, chain/token/public-wallet metadata, ETH, USDG, and trading-token balances, positions, AVG P&L, session and persistent realized profit, buy/sell counts, capacity, the current round's optional `sell_attempt`, and up to 50 trades. Sell checks run before the status report so a blocked attempt is visible in the same round rather than one report late. The USDG balance is a read-only ERC-20 call made once per cycle when `USDG_ADDRESS` is configured; a failed read is omitted and never interrupts trading. Only the public wallet address is sent—never the private key.
 
 Successful trades are appended atomically to `data/dashboard_trades.json`, reloaded after restart, and capped at 50. This uses transaction results the bot already has and makes no extra RPC or third-party API calls. Existing on-chain history predating this feature is not reconstructed.
 
-Operational Events are retained locally in `data/dashboard_events.json` and included in the existing dashboard status payload. The history is capped at 50 entries, consecutive identical events are count-badged instead of duplicated, and messages are truncated and redacted before reporting. Meaningful blocked actions such as a sell trigger whose quote is below the configured minimum profit are recorded as warnings; routine polling decisions are omitted. A successfully confirmed USDG banking swap records a green `usdg_banked` success Event with the source amount, USDG amount, and public transaction hash. Events carrying different transaction hashes are never collapsed together.
+Operational Events are retained locally in `data/dashboard_events.json` and included in the existing dashboard status payload. The history is capped at 50 entries, consecutive identical events are count-badged instead of duplicated, and messages are truncated and redacted before reporting. Durable operational outcomes belong here; routine polling decisions are omitted. A successfully confirmed USDG banking swap records a green `usdg_banked` success Event with the source amount, USDG amount, and public transaction hash. Events carrying different transaction hashes are never collapsed together.
+
+A sell target whose quoted profit is below the ETH minimum derived from the position cost and `MIN_PROFIT_PERCENT` is deliberately **not** stored as an Event. During that round, the bot reports `sell_attempt.status: "quote_below_minimum"` with the position ID, P&L, quoted profit, and minimum profit. `_sell_attempt` is cleared at the beginning of every cycle and must be re-established by that cycle's sell check, so the dashboard indication disappears on the next report where the condition no longer occurs. This is live attempt state, not historical warning state.
 
 Confirmed sells update `data/profit_totals.json` atomically. Profit is stored as integer wei, includes both realized gains and realized stop-losses, and is deduplicated by transaction hash. It intentionally excludes unrealized P&L, gas, and trades completed before tracking began. Session profit still resets on restart; realized profit survives restarts. To begin a new displayed accounting period without deleting the all-time ledger, stop the bot and run `python grid_bot.py --reset-profit-baseline` once.
 
@@ -914,6 +917,7 @@ quote = client.build_swap_transaction(
 - Fleet-safe Sushi HTTP 429 handling with `Retry-After`, jittered exponential cooldown, and automatic recovery
 - Explicit Uniswap/LI.FI/0x provider abstraction with legacy compatibility
 - Structured persistent dashboard Events and static position-capacity warnings
+- Round-scoped dashboard indication for sell quotes below the minimum profit
 - Persistent confirmed-sell realized profit with transaction deduplication and baseline resets
 - Persistent Trade History plus independent Event/Trade reset commands
 - Read-only `--check-config` diagnostics
