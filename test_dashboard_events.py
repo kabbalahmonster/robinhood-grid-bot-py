@@ -33,11 +33,21 @@ class TestDashboardEvents(unittest.TestCase):
         self.assertEqual(self.bot.dashboard_events[0]["count"], 2)
 
     def test_success_event_preserves_level_and_transaction(self):
+        tx_hash = "0x" + "a" * 64
         self.bot._record_dashboard_event(
-            "success", "usdg_banked", "Banked 0.001 ETH into 4.00 USDG", tx_hash="0xabc"
+            "success", "usdg_banked", "Banked 0.001 ETH into 4.00 USDG", tx_hash=tx_hash
         )
         event = self.bot.dashboard_events[0]
         self.assertEqual(event["level"], "success")
+        self.assertEqual(event["tx_hash"], tx_hash)
+
+    def test_tx_hash_exemption_requires_exact_key_and_valid_hash(self):
+        hash_shaped_secret = "0x" + "b" * 64
+        self.bot._record_dashboard_event(
+            "warning", "test", "Safe message", transaction=hash_shaped_secret, tx_hash="0xabc"
+        )
+        event = self.bot.dashboard_events[0]
+        self.assertEqual(event["transaction"], "[REDACTED]")
         self.assertEqual(event["tx_hash"], "0xabc")
 
     def test_distinct_transactions_are_not_deduplicated(self):

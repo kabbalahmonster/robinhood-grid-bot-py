@@ -71,6 +71,7 @@ logger = logging.getLogger('grid_bot')
 _PRIVATE_KEY_RE = re.compile(r'(?<![0-9a-fA-F])(?:0x)?[0-9a-fA-F]{64}(?![0-9a-fA-F])')
 _SECRET_PARAM_RE = re.compile(r'(?i)(api[_-]?key|token|secret|authorization)([=:]\s*)([^\s&,]+)')
 _REQUEST_ID_RE = re.compile(r'(?i)(["\']?request[_-]?id["\']?\s*[:=]\s*)["\']?[^"\',}\s]+["\']?')
+_TX_HASH_RE = re.compile(r'^0x[0-9a-fA-F]{64}$')
 
 
 def _safe_event_message(message):
@@ -231,7 +232,15 @@ class GridBot:
         }
         for key, value in context.items():
             if isinstance(value, (str, int, float, bool)) or value is None:
-                event[str(key)[:80]] = _safe_event_message(value) if isinstance(value, str) else value
+                safe_key = str(key)[:80]
+                # A confirmed transaction hash is public and intentionally
+                # rendered as an explorer link by the dashboard. It has the
+                # same 0x + 64-hex shape as a private key, so exempt only this
+                # explicitly named field after strict validation.
+                if safe_key == "tx_hash" and isinstance(value, str) and _TX_HASH_RE.fullmatch(value):
+                    event[safe_key] = value
+                else:
+                    event[safe_key] = _safe_event_message(value) if isinstance(value, str) else value
 
         with self._dashboard_event_lock:
             if self.dashboard_events:
