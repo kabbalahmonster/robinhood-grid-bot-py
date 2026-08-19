@@ -1520,18 +1520,8 @@ class GridBot:
             from datetime import datetime
             time_str = datetime.now().strftime('%H:%M')
             
-            # Line 1: Time, round, token
-            logger.info(f"{time_str} R#{self.round_count} | {self.config.token_symbol}")
-            
-            # Line 2 & 3: W/T/Pos and B/S/P stats
-            balance_letter = "E" if getattr(self.config, 'use_eth_trading', False) else "W"
-            logger.info(f"{balance_letter}:{weth_bal:.3f} T:{token_bal:.0f} {active}/{self.config.max_active_positions}/{active+empty}")
-            logger.info(f"B:{self.session_buys} S:{self.session_sells} P:{self.session_profit_weth:.6f}")
-            
-            # Separator matches 26 char width
-            logger.info("-" * 26)
-            
-            # Each position on its own line (max 3), no price shown
+            # Positions are shown first so the bot identity and balances remain
+            # visible at the bottom of narrow tmux panes.
             if use_gridless:
                 # Sort by buy price ascending for consistent display
                 from gridless import get_buy_price
@@ -1567,6 +1557,15 @@ class GridBot:
                         logger.info(f"#{pos_id:>3}: {tokens:>6.1f} | moonbag")
             if len(active_positions) > 3:
                 logger.info(f"... and {len(active_positions) - 3} more")
+
+            # Separator matches 26 char width
+            logger.info("-" * 26)
+
+            # Bot identity and balance/session summary
+            logger.info(f"{time_str} R#{self.round_count} | {self.config.token_symbol}")
+            balance_letter = "E" if getattr(self.config, 'use_eth_trading', False) else "W"
+            logger.info(f"{balance_letter}:{weth_bal:.3f} T:{token_bal:.0f} {active}/{self.config.max_active_positions}/{active+empty}")
+            logger.info(f"B:{self.session_buys} S:{self.session_sells} P:{self.session_profit_weth:.6f}")
             
             # Final separator
             logger.info("-" * 26)
