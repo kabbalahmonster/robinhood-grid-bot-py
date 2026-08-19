@@ -11,6 +11,7 @@ import os
 import re
 import threading
 import sys
+import argparse
 from datetime import datetime
 from decimal import Decimal
 from urllib.parse import urlsplit
@@ -45,6 +46,114 @@ def _run_lightweight_maintenance():
     if command == "--reset-trade-history":
         _reset_json_history("data/dashboard_trades.json", "Dashboard trade history")
         raise SystemExit(0)
+
+
+def _append_treasury_receipt(record):
+    """Atomically retain a bounded, local audit trail of sweep attempts."""
+    path = "data/treasury_transfers.json"
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    try:
+        with open(path, "r") as handle:
+            history = json.load(handle)
+        if not isinstance(history, list):
+            history = []
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        history = []
+    history.append(record)
+    history = history[-200:]
+    temp_file = path + ".tmp"
+    with open(temp_file, "w") as handle:
+        json.dump(history, handle, indent=2)
+        handle.write("\n")
+    os.replace(temp_file, path)
+
+
+def _resolve_transfer_token(config, token):
+    if token.upper() == "USDG":
+        if not config.usdg_address or config.usdg_address == "0x...":
+            raise ValueError("USDG_ADDRESS is not configured")
+        return config.usdg_address
+    if not Web3.is_address(token):
+        raise ValueError("--transfer-token must be USDG or an ERC-20 contract address")
+    return Web3.to_checksum_address(token)
+
+
+def run_treasury_transfer(args):
+    """Plan or execute one deliberately guarded ERC-20 treasury transfer."""
+    try:
+        config = load_config()
+        if not Web3.is_address(args.recipient):
+            raise ValueError("Recipient is not a valid EVM address")
+        recipient = Web3.to_checksum_address(args.recipient)
+        token_address = _resolve_transfer_token(config, args.transfer_token)
+        wallet = Wallet(config)
+        if recipient.lower() == wallet.address.lower():
+            raise ValueError("Recipient cannot be the bot wallet")
+
+        allowed = {address.lower() for address in config.treasury_allowed_recipients}
+        recipient_is_allowed = recipient.lower() in allowed
+        if not recipient_is_allowed:
+            confirmation = (args.confirm_recipient or "").lower()
+            if confirmation != recipient.lower():
+                raise ValueError(
+                    "Recipient is not allowlisted. Repeat it exactly with "
+                    "--confirm-recipient <recipient> to authorize this one transfer."
+                )
+
+        token_info = wallet.get_token_info(token_address)
+        balance, balance_raw = wallet.get_token_balance(token_address)
+        if args.amount == "all":
+            amount_raw = balance_raw
+        else:
+            requested = Decimal(args.amount)
+            if not requested.is_finite() or requested <= 0:
+                raise ValueError("--amount must be a positive decimal amount or 'all'")
+            amount_raw = int(requested * (Decimal(10) ** token_info.decimals))
+            if amount_raw <= 0:
+                raise ValueError("--amount is below one smallest token unit")
+        if amount_raw > balance_raw:
+            raise ValueError("Requested amount exceeds the current token balance")
+        if amount_raw <= 0:
+            raise ValueError("There is no token balance available to transfer")
+
+        amount = Decimal(amount_raw) / (Decimal(10) ** token_info.decimals)
+        print("TREASURY TRANSFER PLAN")
+        print(f"Wallet:    {wallet.address}")
+        print(f"Token:     {token_info.symbol} ({token_address})")
+        print(f"Balance:   {balance}")
+        print(f"Send:      {amount}")
+        print(f"Recipient: {recipient} ({'allowlisted' if recipient_is_allowed else 'one-time confirmed'})")
+
+        if not args.execute:
+            print("DRY RUN: no transaction broadcast. Add --execute after reviewing this plan.")
+            return 0
+        if not args.confirm_bot_stopped:
+            raise ValueError(
+                "Refusing to broadcast while a trading bot may share this wallet. "
+                "Stop it first, then pass --confirm-bot-stopped."
+            )
+
+        result = wallet.transfer_erc20(token_address, recipient, amount_raw, wait_for_receipt=True)
+        record = {
+            "timestamp": datetime.now().astimezone().isoformat(),
+            "wallet": wallet.address,
+            "token": token_info.symbol,
+            "token_address": token_address,
+            "amount": str(amount),
+            "recipient": recipient,
+            "success": result.success,
+            "tx_hash": result.tx_hash,
+            "error": result.error,
+        }
+        _append_treasury_receipt(record)
+        if not result.success:
+            print(f"TRANSFER FAILED: {result.error}")
+            return 1
+        print(f"TRANSFER CONFIRMED: {result.tx_hash}")
+        return 0
+    except Exception as exc:
+        print(f"TREASURY TRANSFER REFUSED: {exc}")
+        return 2
 
 
 if __name__ == "__main__":
@@ -1771,15 +1880,30 @@ class GridBot:
                 time.sleep(10)
 
 if __name__ == "__main__":
-    if len(sys.argv) == 2:
-        command = sys.argv[1]
-        if command == "--check-config":
-            raise SystemExit(check_config())
-    if len(sys.argv) > 1:
-        print(
-            "Usage: python grid_bot.py "
-            "[--check-config|--reset-profit-baseline|--reset-event-data|--reset-trade-history]"
-        )
-        raise SystemExit(2)
+    parser = argparse.ArgumentParser(description="Robinhood Chain Grid Trading Bot")
+    parser.add_argument("--check-config", action="store_true", help="Validate config without trading")
+    parser.add_argument("--sweep-usdg", metavar="RECIPIENT", help="Transfer USDG; shorthand for --transfer-token USDG")
+    parser.add_argument("--transfer-token", metavar="USDG_OR_ADDRESS", help="ERC-20 token to transfer")
+    parser.add_argument("--recipient", help="Recipient for --transfer-token")
+    parser.add_argument("--amount", default="all", help="Token amount or 'all' (default: all)")
+    parser.add_argument("--confirm-recipient", help="Required exact recipient for a non-allowlisted address")
+    parser.add_argument("--confirm-bot-stopped", action="store_true", help="Acknowledge the bot sharing this wallet is stopped")
+    parser.add_argument("--execute", action="store_true", help="Broadcast the planned transfer")
+    args = parser.parse_args()
+    if args.check_config:
+        if any([args.sweep_usdg, args.transfer_token, args.recipient, args.execute]):
+            parser.error("--check-config cannot be combined with a transfer command")
+        raise SystemExit(check_config())
+    if args.sweep_usdg:
+        if args.transfer_token or args.recipient:
+            parser.error("--sweep-usdg cannot be combined with --transfer-token or --recipient")
+        args.transfer_token = "USDG"
+        args.recipient = args.sweep_usdg
+    if args.transfer_token or args.recipient:
+        if not args.transfer_token or not args.recipient:
+            parser.error("--transfer-token and --recipient must be supplied together")
+        raise SystemExit(run_treasury_transfer(args))
+    if any([args.amount != "all", args.confirm_recipient, args.confirm_bot_stopped, args.execute]):
+        parser.error("transfer options require --sweep-usdg or --transfer-token with --recipient")
     bot = GridBot()
     bot.run()

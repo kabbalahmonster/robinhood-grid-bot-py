@@ -83,6 +83,7 @@ class BotConfig:
     token_symbol: str
     weth_address: str
     usdg_address: str
+    treasury_allowed_recipients: list[str]
     permit2_address: str
     zero_x_proxy: str
     
@@ -261,6 +262,11 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
             chain_defaults.get("weth", "")
         ),
         usdg_address=os.getenv("USDG_ADDRESS", ""),
+        treasury_allowed_recipients=[
+            address.strip()
+            for address in os.getenv("TREASURY_ALLOWED_RECIPIENTS", "").split(",")
+            if address.strip()
+        ],
         permit2_address=chain_defaults.get("permit2", ""),
         zero_x_proxy=chain_defaults.get("zero_x_proxy", ""),
         uniswap_router=chain_defaults.get("uniswap_router", ""),

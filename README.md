@@ -835,6 +835,39 @@ CHAIN_CONFIG = {
 - Keep your 0x API key private
 - Use hardware wallets when possible for production
 
+### Treasury sweeps
+
+The bot can transfer its banked USDG (or another ERC-20) without exporting its
+private key to a separate sweep script. Stop the bot that owns the wallet
+first: a concurrent trading transaction can collide on the account nonce.
+
+Every command prints a plan first. It is a dry run unless `--execute` is
+present, and every broadcast also requires `--confirm-bot-stopped`.
+
+```bash
+# USDG sweep to the central wallet (dry run)
+python grid_bot.py --sweep-usdg 0xCentralWallet
+
+# Broadcast the reviewed sweep
+python grid_bot.py --sweep-usdg 0xCentralWallet --execute --confirm-bot-stopped
+```
+
+Set `TREASURY_ALLOWED_RECIPIENTS` to a comma-separated list of central wallet
+addresses. A recipient outside that list is allowed only when it is repeated
+verbatim with `--confirm-recipient`; this prevents a typo or stale batch target
+from silently becoming a transfer destination.
+
+```bash
+TREASURY_ALLOWED_RECIPIENTS=0xCentralWallet,0xBackupTreasury
+python grid_bot.py --transfer-token USDG --recipient 0xOneOffWallet \
+  --amount 25.50 --confirm-recipient 0xOneOffWallet \
+  --execute --confirm-bot-stopped
+```
+
+Successful and failed broadcast attempts are recorded locally in
+`data/treasury_transfers.json` with the public transaction hash. The command
+never transfers native ETH, so the wallet's gas balance remains untouched.
+
 ## API Reference
 
 ### BotConfig

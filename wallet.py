@@ -46,6 +46,16 @@ ERC20_ABI = [
     {
         "constant": False,
         "inputs": [
+            {"name": "_to", "type": "address"},
+            {"name": "_value", "type": "uint256"},
+        ],
+        "name": "transfer",
+        "outputs": [{"name": "", "type": "bool"}],
+        "type": "function",
+    },
+    {
+        "constant": False,
+        "inputs": [
             {"name": "_spender", "type": "address"},
             {"name": "_value", "type": "uint256"},
         ],
@@ -249,6 +259,42 @@ class Wallet:
         if token_address not in self._token_info_cache:
             return self._load_token_info(token_address)
         return self._token_info_cache[token_address]
+
+    def transfer_erc20(
+        self,
+        token_address: str,
+        recipient: str,
+        amount: int,
+        wait_for_receipt: bool = True,
+    ) -> TransactionResult:
+        """Transfer an ERC-20 token from this wallet.
+
+        Callers are responsible for policy checks (recipient allowlists,
+        reserves, and explicit operator confirmation).  This low-level method
+        intentionally only signs the exact token transfer requested.
+        """
+        if amount <= 0:
+            return TransactionResult(success=False, error="Transfer amount must be positive")
+        if not Web3.is_address(recipient):
+            return TransactionResult(success=False, error="Invalid recipient address")
+
+        token = self.w3.eth.contract(
+            address=Web3.to_checksum_address(token_address),
+            abi=ERC20_ABI,
+        )
+        gas_price = int(self.w3.eth.gas_price * 1.2)
+        tx = token.functions.transfer(
+            Web3.to_checksum_address(recipient),
+            amount,
+        ).build_transaction({
+            "from": self.address,
+            "nonce": self.w3.eth.get_transaction_count(self.address),
+            # ERC-20 transfers generally consume far less; this leaves room
+            # for non-standard but compatible token implementations.
+            "gas": 100000,
+            "gasPrice": gas_price,
+        })
+        return self._send_transaction(tx, wait_for_receipt)
     
     def approve_token(
         self,

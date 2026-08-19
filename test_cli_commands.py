@@ -7,7 +7,7 @@ from io import StringIO
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from grid_bot import _dashboard_root_url, _reset_json_history, check_config
+from grid_bot import _dashboard_root_url, _reset_json_history, check_config, run_treasury_transfer
 
 
 class TestCliCommands(unittest.TestCase):
@@ -62,6 +62,51 @@ class TestCliCommands(unittest.TestCase):
         self.assertIn("no quote requested and no transaction broadcast", output.getvalue())
         self.assertIn("PASS USDG: 12.500000", output.getvalue())
         get.assert_called_once_with("https://doomdash.ca/", timeout=5)
+
+    @patch("grid_bot._append_treasury_receipt")
+    @patch("grid_bot.Wallet")
+    @patch("grid_bot.load_config")
+    def test_treasury_dry_run_never_broadcasts(self, load_config, wallet_class, append_receipt):
+        load_config.return_value = SimpleNamespace(
+            usdg_address="0x0000000000000000000000000000000000000003",
+            treasury_allowed_recipients=["0x0000000000000000000000000000000000000004"],
+        )
+        wallet = wallet_class.return_value
+        wallet.address = "0x0000000000000000000000000000000000000002"
+        wallet.get_token_info.return_value = SimpleNamespace(symbol="USDG", decimals=6)
+        wallet.get_token_balance.return_value = (12.5, 12_500_000)
+        args = SimpleNamespace(
+            recipient="0x0000000000000000000000000000000000000004",
+            transfer_token="USDG",
+            amount="all",
+            confirm_recipient=None,
+            execute=False,
+            confirm_bot_stopped=False,
+        )
+
+        self.assertEqual(run_treasury_transfer(args), 0)
+        wallet.transfer_erc20.assert_not_called()
+        append_receipt.assert_not_called()
+
+    @patch("grid_bot.Wallet")
+    @patch("grid_bot.load_config")
+    def test_treasury_non_allowlisted_recipient_requires_exact_confirmation(self, load_config, wallet_class):
+        load_config.return_value = SimpleNamespace(
+            usdg_address="0x0000000000000000000000000000000000000003",
+            treasury_allowed_recipients=[],
+        )
+        wallet_class.return_value.address = "0x0000000000000000000000000000000000000002"
+        args = SimpleNamespace(
+            recipient="0x0000000000000000000000000000000000000004",
+            transfer_token="USDG",
+            amount="all",
+            confirm_recipient=None,
+            execute=False,
+            confirm_bot_stopped=False,
+        )
+
+        self.assertEqual(run_treasury_transfer(args), 2)
+        wallet_class.return_value.get_token_balance.assert_not_called()
 
 
 if __name__ == "__main__":
