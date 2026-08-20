@@ -68,6 +68,40 @@ def _append_treasury_receipt(record):
     os.replace(temp_file, path)
 
 
+def _total_successful_treasury_sent_usdg(usdg_address, path="data/treasury_transfers.json"):
+    """Return the all-time USDG amount confirmed by the local sweep audit log.
+
+    Treasury receipts are the durable source of truth for this display metric:
+    dry runs and refused commands never create a receipt, and failed broadcasts
+    are explicitly excluded.  The dashboard uses a float only for rendering;
+    transfer amounts remain strings in the audit log so their exact decimal
+    representation is preserved there.
+    """
+    if not usdg_address:
+        return 0.0
+    try:
+        with open(path, "r") as handle:
+            history = json.load(handle)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return 0.0
+    if not isinstance(history, list):
+        return 0.0
+
+    total = Decimal(0)
+    for record in history:
+        if not isinstance(record, dict) or not record.get("success"):
+            continue
+        if str(record.get("token_address", "")).lower() != usdg_address.lower():
+            continue
+        try:
+            amount = Decimal(str(record.get("amount", "")))
+        except Exception:
+            continue
+        if amount.is_finite() and amount > 0:
+            total += amount
+    return float(total)
+
+
 def _resolve_transfer_token(config, token):
     if token.upper() == "USDG":
         if not config.usdg_address or config.usdg_address == "0x...":
@@ -1833,6 +1867,7 @@ class GridBot:
                     price=price,
                     eth_balance=eth_bal,
                     usdg_balance=usdg_bal,
+                    treasury_sent_usdg=_total_successful_treasury_sent_usdg(self.config.usdg_address),
                     token_balance=token_bal,
                     positions=positions_data,
                     profit_percent=round(profit_percent, 2),

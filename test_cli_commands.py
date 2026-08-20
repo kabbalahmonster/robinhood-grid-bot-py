@@ -7,10 +7,29 @@ from io import StringIO
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from grid_bot import _dashboard_root_url, _reset_json_history, check_config, run_treasury_transfer
+from grid_bot import (
+    _dashboard_root_url,
+    _reset_json_history,
+    _total_successful_treasury_sent_usdg,
+    check_config,
+    run_treasury_transfer,
+)
 
 
 class TestCliCommands(unittest.TestCase):
+    def test_treasury_total_counts_only_confirmed_usdg_receipts(self):
+        usdg = "0x0000000000000000000000000000000000000003"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = os.path.join(temp_dir, "treasury_transfers.json")
+            with open(path, "w") as handle:
+                json.dump([
+                    {"success": True, "token_address": usdg, "amount": "12.50"},
+                    {"success": False, "token_address": usdg, "amount": "5.00"},
+                    {"success": True, "token_address": "0x0000000000000000000000000000000000000004", "amount": "9.00"},
+                    {"success": True, "token_address": usdg, "amount": "not-a-number"},
+                ], handle)
+            self.assertEqual(_total_successful_treasury_sent_usdg(usdg, path), 12.5)
+
     def test_reset_json_history_is_idempotent(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = os.path.join(temp_dir, "data", "history.json")
