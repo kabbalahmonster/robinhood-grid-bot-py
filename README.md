@@ -102,6 +102,7 @@ python grid_bot.py
 | `TOKEN_SYMBOL` | No | TOKEN | Token symbol for logging |
 | `WETH_ADDRESS` | Auto | Chain | WETH address (auto-set per chain) |
 | `USDG_ADDRESS` | Yes | - | Stablecoin address for profit banking |
+| `TREASURY_ALLOWED_RECIPIENTS` | No | empty | Comma-separated EVM recipient allowlist for the guarded treasury-transfer CLI |
 | **Grid Parameters** ||||
 | `GRID_SPACING_PERCENT` | No | 5.0 | Grid spacing percentage between levels |
 | `MAX_POSITIONS` | No | Chain default | Total number of grid positions to create |
@@ -837,19 +838,37 @@ CHAIN_CONFIG = {
 
 ### Treasury sweeps
 
-The bot can transfer its banked USDG (or another ERC-20) without exporting its
-private key to a separate sweep script. Stop the bot that owns the wallet
-first: a concurrent trading transaction can collide on the account nonce.
+The guarded treasury CLI transfers banked USDG, or a specified ERC-20, from a
+bot wallet without exporting its private key to a separate sweep script. It is
+intended for moving funds from an individual bot to a known central treasury;
+it is not part of the normal trading loop and never transfers native ETH.
 
-Every command prints a plan first. It is a dry run unless `--execute` is
-present, and every broadcast also requires `--confirm-bot-stopped`.
+#### Before broadcasting
+
+1. Stop the bot that owns the wallet and confirm its process is no longer
+   running. A trading transaction and a sweep from the same wallet can race for
+   the same account nonce.
+2. Verify the destination address out of band. Do not paste an address from an
+   untrusted chat message or browser prompt.
+3. Keep enough native ETH in the bot wallet for gas; ERC-20 sweeps deliberately
+   leave its native balance untouched.
+4. Run the dry run, review its wallet, token contract, balance, amount, and
+   recipient, then run the identical command with the two execution guards.
+
+Every invocation prints a transfer plan. It stays a dry run unless `--execute`
+is present; a broadcast additionally requires `--confirm-bot-stopped`.
+
+Use a shell variable containing the *actual checksummed central-wallet address*
+so the same reviewed value is used in both commands:
 
 ```bash
-# USDG sweep to the central wallet (dry run)
-python grid_bot.py --sweep-usdg 0xCentralWallet
+TREASURY=0xYourActualCentralWalletAddress
 
-# Broadcast the reviewed sweep
-python grid_bot.py --sweep-usdg 0xCentralWallet --execute --confirm-bot-stopped
+# Sweep all USDG: dry run first
+python grid_bot.py --sweep-usdg "$TREASURY"
+
+# Broadcast only after the plan is correct and the bot is stopped
+python grid_bot.py --sweep-usdg "$TREASURY" --execute --confirm-bot-stopped
 ```
 
 Set `TREASURY_ALLOWED_RECIPIENTS` to a comma-separated list of central wallet
@@ -858,15 +877,30 @@ verbatim with `--confirm-recipient`; this prevents a typo or stale batch target
 from silently becoming a transfer destination.
 
 ```bash
-TREASURY_ALLOWED_RECIPIENTS=0xCentralWallet,0xBackupTreasury
-python grid_bot.py --transfer-token USDG --recipient 0xOneOffWallet \
-  --amount 25.50 --confirm-recipient 0xOneOffWallet \
+# .env: use real addresses, with no quotes required
+TREASURY_ALLOWED_RECIPIENTS=0xCentralWalletAddress,0xBackupTreasuryAddress
+
+# A one-off recipient needs an exact second acknowledgement.
+RECIPIENT=0xOneOffRecipientAddress
+python grid_bot.py --transfer-token USDG --recipient "$RECIPIENT" \
+  --amount 25.50 --confirm-recipient "$RECIPIENT" \
   --execute --confirm-bot-stopped
 ```
 
-Successful and failed broadcast attempts are recorded locally in
-`data/treasury_transfers.json` with the public transaction hash. The command
-never transfers native ETH, so the wallet's gas balance remains untouched.
+`--sweep-usdg RECIPIENT` is shorthand for `--transfer-token USDG --recipient
+RECIPIENT`. For another ERC-20, pass its contract address to `--transfer-token`.
+`--amount all` (the default) sends the entire token balance; a positive decimal
+sends that token amount, subject to its on-chain decimals and available balance.
+The command refuses a self-transfer, malformed recipient, unsupported token
+identifier, nonpositive amount, amount above balance, empty balance, or a
+non-allowlisted recipient that was not repeated exactly.
+
+The command waits for the transfer result. Successful and failed broadcast
+results are appended, relative to the command's working directory, to
+`data/treasury_transfers.json`, including the timestamp, wallet, token,
+recipient, amount, status, and public transaction hash/error. Preserve that
+file with the bot's operational records. A refused preflight and a dry run do
+not write a receipt because no transaction was submitted.
 
 ## API Reference
 
