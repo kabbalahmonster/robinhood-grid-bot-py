@@ -2,7 +2,7 @@
 
 from types import SimpleNamespace
 
-from swap_provider import PROVIDERS, resolve_provider_name
+from swap_provider import FallbackSwapProvider, PROVIDERS, SwapProvider, create_swap_provider, resolve_provider_name
 
 
 def config(**values):
@@ -34,3 +34,41 @@ def test_capabilities_are_provider_owned():
     assert PROVIDERS["uniswap"].capabilities.quote_requires_preparation is True
     assert PROVIDERS["sushiswap"].capabilities.refresh_after_approval is True
     assert PROVIDERS["sushiswap"].capabilities.api_managed_approval is False
+
+
+class Result:
+    def __init__(self, success, error=None):
+        self.success = success
+        self.error = error
+
+
+class Client:
+    def __init__(self, results):
+        self.results = list(results)
+
+    def build_swap_transaction(self, **kwargs):
+        return self.results.pop(0)
+
+
+def test_retryable_primary_failure_activates_fallback_for_next_attempt():
+    primary = SwapProvider("uniswap", Client([Result(False, "Uniswap API returned status 404")]), PROVIDERS["uniswap"].capabilities)
+    fallback = SwapProvider("sushiswap", Client([Result(True)]), PROVIDERS["sushiswap"].capabilities)
+    provider = FallbackSwapProvider(primary, fallback)
+
+    first = provider.build_swap_transaction()
+    assert first.success is False
+    assert provider.name == "sushiswap"
+    assert provider.capabilities.refresh_after_approval is True
+
+    second = provider.build_swap_transaction()
+    assert second.success is True
+
+
+def test_nonretryable_primary_failure_does_not_activate_fallback():
+    primary = SwapProvider("uniswap", Client([Result(False, "Uniswap API returned status 400")]), PROVIDERS["uniswap"].capabilities)
+    fallback = SwapProvider("sushiswap", Client([Result(True)]), PROVIDERS["sushiswap"].capabilities)
+    provider = FallbackSwapProvider(primary, fallback)
+
+    result = provider.build_swap_transaction()
+    assert result.success is False
+    assert provider.name == "uniswap"

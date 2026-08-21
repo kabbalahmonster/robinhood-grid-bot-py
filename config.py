@@ -110,6 +110,7 @@ class BotConfig:
     
     # API Provider Selection
     swap_provider: str  # Explicit provider: 0x, lifi, uniswap, or sushiswap
+    swap_fallback_provider: str  # Optional fallback after retryable provider failures
     sushi_api_key: str  # Optional Sushi API key for higher service limits
     use_li_fi: bool  # If True, use LI.FI instead of 0x
     li_fi_api_key: str
@@ -195,6 +196,19 @@ class BotConfig:
         elif provider == "0x":
             if not self.zero_x_api_key or self.zero_x_api_key == "...":
                 raise ValueError("ZEROX_API_KEY is required for the 0x provider")
+
+        fallback_provider = (self.swap_fallback_provider or "").strip().lower()
+        fallback_provider = {"li.fi": "lifi", "li_fi": "lifi", "zero_x": "0x", "zerox": "0x", "sushi": "sushiswap"}.get(
+            fallback_provider, fallback_provider
+        )
+        if fallback_provider not in {"", "0x", "lifi", "uniswap", "sushiswap"}:
+            raise ValueError(f"Unsupported SWAP_FALLBACK_PROVIDER: {fallback_provider}")
+        if fallback_provider == "lifi" and not self.li_fi_api_key:
+            raise ValueError("LI_FI_API_KEY is required for the lifi fallback provider")
+        if fallback_provider == "uniswap" and not self.uniswap_api_key:
+            raise ValueError("UNISWAP_API_KEY is required for the uniswap fallback provider")
+        if fallback_provider == "0x" and (not self.zero_x_api_key or self.zero_x_api_key == "..."):
+            raise ValueError("ZEROX_API_KEY is required for the 0x fallback provider")
         
         if not self.token_address or self.token_address == "0x...":
             raise ValueError("TOKEN_ADDRESS is required and must be set")
@@ -297,6 +311,7 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
         
         # API Provider Selection
         swap_provider=os.getenv("SWAP_PROVIDER", ""),
+        swap_fallback_provider=os.getenv("SWAP_FALLBACK_PROVIDER", "sushiswap"),
         sushi_api_key=os.getenv("SUSHI_API_KEY", ""),
         use_li_fi=os.getenv("USE_LI_FI", "false").lower() == "true",
         li_fi_api_key=os.getenv("LI_FI_API_KEY", ""),

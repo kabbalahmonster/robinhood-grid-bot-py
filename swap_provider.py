@@ -8,6 +8,8 @@ capabilities to the trading engine.
 
 from dataclasses import dataclass
 from importlib import import_module
+import logging
+import re
 
 
 @dataclass(frozen=True)
@@ -34,6 +36,106 @@ class SwapProvider:
         if not self.capabilities.quote_requires_preparation:
             return quote
         return self.client.get_swap_transaction(quote.raw_response)
+
+
+class FallbackSwapProvider:
+    """Fail over to a secondary provider after retryable primary failures.
+
+    Failover deliberately takes effect on the *next* trading attempt. This
+    prevents a single transaction flow from mixing one provider's approval or
+    quote with another provider's calldata. Once activated, the fallback stays
+    selected until process restart; startup always gives the configured primary
+    provider the first opportunity again.
+    """
+
+    RETRYABLE_STATUS_CODES = {404, 408, 425, 429, 500, 502, 503, 504}
+    RETRYABLE_ERROR_MARKERS = (
+        "connection error",
+        "connection reset",
+        "connection aborted",
+        "request failed",
+        "timed out",
+        "timeout",
+        "temporarily unavailable",
+    )
+
+    def __init__(self, primary, fallback):
+        self.primary = primary
+        self.fallback = fallback
+        self.active = primary
+        self.logger = logging.getLogger("grid_bot.swap_provider")
+
+    @property
+    def name(self):
+        return self.active.name
+
+    @property
+    def capabilities(self):
+        return self.active.capabilities
+
+    @property
+    def client(self):
+        return self.active.client
+
+    @property
+    def fallback_active(self):
+        return self.active is self.fallback
+
+    def __getattr__(self, method_name):
+        method = getattr(self.active, method_name)
+        if not callable(method):
+            return method
+
+        def guarded_call(*args, **kwargs):
+            result = method(*args, **kwargs)
+            self._activate_after_retryable_failure(method_name, result)
+            return result
+
+        return guarded_call
+
+    def prepare_swap(self, quote):
+        result = self.active.prepare_swap(quote)
+        self._activate_after_retryable_failure("prepare_swap", result)
+        return result
+
+    def _activate_after_retryable_failure(self, method_name, result):
+        if self.active is not self.primary or not self._is_retryable_failure(result):
+            return
+        original_error = self._error_text(result)
+        self.active = self.fallback
+        message = (
+            f"{self.primary.name} {method_name} failed with a retryable error; "
+            f"switching to {self.fallback.name} until restart. "
+            f"Current attempt will stop safely and retry on the next poll."
+        )
+        self.logger.warning(f"{message} Error: {original_error}")
+        if hasattr(result, "error"):
+            result.error = f"{original_error}; {message}"
+        elif isinstance(result, dict):
+            result["error"] = f"{original_error}; {message}"
+            result["fallback_activated"] = True
+
+    @classmethod
+    def _is_retryable_failure(cls, result):
+        if result is None:
+            return True
+        if hasattr(result, "success") and result.success:
+            return False
+        if isinstance(result, dict) and "error" not in result:
+            return False
+        error = cls._error_text(result).lower()
+        status_codes = {int(code) for code in re.findall(r"\b(\d{3})\b", error)}
+        if status_codes & cls.RETRYABLE_STATUS_CODES or any(500 <= code <= 599 for code in status_codes):
+            return True
+        return any(marker in error for marker in cls.RETRYABLE_ERROR_MARKERS)
+
+    @staticmethod
+    def _error_text(result):
+        if result is None:
+            return "provider returned no result"
+        if isinstance(result, dict):
+            return str(result.get("error") or result.get("detail") or result)
+        return str(getattr(result, "error", result))
 
 
 @dataclass(frozen=True)
@@ -84,4 +186,25 @@ def create_swap_provider(config):
         raise ValueError(f"Unsupported SWAP_PROVIDER '{name}'. Supported: {supported}")
     definition = PROVIDERS[name]
     client_class = definition.load_client_class()
-    return SwapProvider(name, client_class(config), definition.capabilities)
+    primary = SwapProvider(name, client_class(config), definition.capabilities)
+
+    fallback_name = (getattr(config, "swap_fallback_provider", "") or "").strip().lower()
+    aliases = {"li.fi": "lifi", "li_fi": "lifi", "zero_x": "0x", "zerox": "0x", "sushi": "sushiswap"}
+    fallback_name = aliases.get(fallback_name, fallback_name)
+    if not fallback_name or fallback_name == name:
+        return primary
+    if fallback_name not in PROVIDERS:
+        supported = ", ".join(sorted(PROVIDERS))
+        raise ValueError(f"Unsupported SWAP_FALLBACK_PROVIDER '{fallback_name}'. Supported: {supported}")
+
+    fallback_definition = PROVIDERS[fallback_name]
+    fallback_class = fallback_definition.load_client_class()
+    fallback = SwapProvider(
+        fallback_name,
+        fallback_class(config),
+        fallback_definition.capabilities,
+    )
+    logging.getLogger("grid_bot.swap_provider").info(
+        f"Swap fallback enabled: {name} -> {fallback_name}"
+    )
+    return FallbackSwapProvider(primary, fallback)

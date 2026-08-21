@@ -260,8 +260,11 @@ def check_config():
 
     provider = resolve_provider_name(config)
     selection = "explicit SWAP_PROVIDER" if config.swap_provider else "legacy provider flags/default"
+    fallback = (getattr(config, "swap_fallback_provider", "") or "").strip().lower()
     print(f"PASS configuration: {config.token_symbol} on {config.chain_name} ({config.chain_id})")
     print(f"PASS provider: {provider} ({selection})")
+    if fallback and fallback != provider:
+        print(f"PASS fallback provider: {fallback}")
 
     try:
         wallet = Wallet(config)

@@ -168,10 +168,12 @@ class UniswapAPIClient:
             self.logger.debug(f"Uniswap API response status: {response.status_code}")
             
             if response.status_code != 200:
+                error_text = response.text[:500]
                 self.logger.error(f"Uniswap API error: Status {response.status_code}")
+                self.logger.error(f"Response: {error_text}")
                 return QuoteResult(
                     success=False,
-                    error=f"Uniswap API returned status {response.status_code}",
+                    error=f"Uniswap API returned status {response.status_code}: {error_text}",
                 )
             
             data = response.json()
@@ -427,10 +429,12 @@ class UniswapAPIClient:
             self.logger.debug(f"Uniswap swap API response status: {response.status_code}")
             
             if response.status_code != 200:
+                error_text = response.text[:500]
                 self.logger.error(f"Uniswap swap API error: Status {response.status_code}")
+                self.logger.error(f"Response: {error_text}")
                 return QuoteResult(
                     success=False,
-                    error=f"Uniswap swap API returned status {response.status_code}",
+                    error=f"Uniswap swap API returned status {response.status_code}: {error_text}",
                 )
             
             data = response.json()
