@@ -895,6 +895,37 @@ The command refuses a self-transfer, malformed recipient, unsupported token
 identifier, nonpositive amount, amount above balance, empty balance, or a
 non-allowlisted recipient that was not repeated exactly.
 
+#### Fleet batch sweep
+
+`scripts/sweep_fleet_usdg.sh` runs the USDG sweep command in every checkout
+under a fleet root (each checkout is identified by a `grid_bot.py` file). It
+uses each bot's `.venv/bin/python` when present, otherwise `python3`, and runs
+from the bot directory so its own `.env` and receipt log are used. It never
+stops bot processes itself.
+
+Run the dry run first:
+
+```bash
+cd /path/to/robinhood-grid-bot-py
+scripts/sweep_fleet_usdg.sh \
+  --fleet-root "$HOME/bots" \
+  --recipient 0xYourActualCentralWalletAddress
+```
+
+After reviewing every plan and stopping every bot, broadcast with the explicit
+acknowledgement. The recipient must be allowed by each bot's
+`TREASURY_ALLOWED_RECIPIENTS` setting (or that bot will refuse it):
+
+```bash
+scripts/sweep_fleet_usdg.sh \
+  --fleet-root "$HOME/bots" \
+  --recipient 0xYourActualCentralWalletAddress \
+  --execute --confirm-fleet-stopped
+```
+
+The script continues through the fleet and exits nonzero if any bot command
+fails, so its final summary identifies whether the batch needs attention.
+
 The command waits for the transfer result. Successful and failed broadcast
 results are appended, relative to the command's working directory, to
 `data/treasury_transfers.json`, including the timestamp, wallet, token,
