@@ -1907,6 +1907,7 @@ class GridBot:
                     wallet_address=self.wallet.address,
                     display_name=self.config.dashboard_name,
                     group=self.config.dashboard_group,
+                    poll_interval_seconds=self.config.poll_interval_seconds,
                     trades_history=self.dashboard_trades,
                     events=self.dashboard_events,
                     rpc_status="ok",
