@@ -10,6 +10,7 @@ from unittest.mock import Mock, patch
 from grid_bot import (
     _dashboard_root_url,
     _reset_json_history,
+    _terminal_transaction_link,
     _total_successful_treasury_sent_usdg,
     check_config,
     run_treasury_transfer,
@@ -17,6 +18,19 @@ from grid_bot import (
 
 
 class TestCliCommands(unittest.TestCase):
+    def test_terminal_transaction_link_uses_chain_explorer_with_hash_only_label(self):
+        tx_hash = "0x" + "a" * 64
+        self.assertEqual(
+            _terminal_transaction_link(4663, tx_hash),
+            f"\033]8;;https://robinhoodchain.blockscout.com/tx/{tx_hash}\033\\{tx_hash}\033]8;;\033\\",
+        )
+        self.assertIn("basescan.org/tx/", _terminal_transaction_link(8453, tx_hash))
+        self.assertIn("etherscan.io/tx/", _terminal_transaction_link(1, tx_hash))
+
+    def test_terminal_transaction_link_falls_back_to_plain_hash_for_unknown_chain(self):
+        tx_hash = "0x" + "a" * 64
+        self.assertEqual(_terminal_transaction_link(999, tx_hash), tx_hash)
+
     def test_treasury_total_counts_only_confirmed_usdg_receipts(self):
         usdg = "0x0000000000000000000000000000000000000003"
         with tempfile.TemporaryDirectory() as temp_dir:

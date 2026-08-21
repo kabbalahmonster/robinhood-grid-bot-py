@@ -933,6 +933,11 @@ recipient, amount, status, and public transaction hash/error. Preserve that
 file with the bot's operational records. A refused preflight and a dry run do
 not write a receipt because no transaction was submitted.
 
+On a successful sweep, the displayed transaction hash is a terminal hyperlink
+to the configured chain's explorer (Robinhood Chain/Blockscout, BaseScan, or
+Etherscan). The URL stays hidden so fleet output displays only the hash;
+terminals without hyperlink support simply show the same readable hash.
+
 ## API Reference
 
 ### BotConfig

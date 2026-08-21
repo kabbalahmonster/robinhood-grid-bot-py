@@ -183,7 +183,7 @@ def run_treasury_transfer(args):
         if not result.success:
             print(f"TRANSFER FAILED: {result.error}")
             return 1
-        print(f"TRANSFER CONFIRMED: {result.tx_hash}")
+        print(f"TRANSFER CONFIRMED: {_terminal_transaction_link(config.chain_id, result.tx_hash)}")
         return 0
     except Exception as exc:
         print(f"TREASURY TRANSFER REFUSED: {exc}")
@@ -215,6 +215,26 @@ _PRIVATE_KEY_RE = re.compile(r'(?<![0-9a-fA-F])(?:0x)?[0-9a-fA-F]{64}(?![0-9a-fA
 _SECRET_PARAM_RE = re.compile(r'(?i)(api[_-]?key|token|secret|authorization)([=:]\s*)([^\s&,]+)')
 _REQUEST_ID_RE = re.compile(r'(?i)(["\']?request[_-]?id["\']?\s*[:=]\s*)["\']?[^"\',}\s]+["\']?')
 _TX_HASH_RE = re.compile(r'^0x[0-9a-fA-F]{64}$')
+_TRANSACTION_EXPLORER_BASES = {
+    1: "https://etherscan.io/tx/",
+    4663: "https://robinhoodchain.blockscout.com/tx/",
+    8453: "https://basescan.org/tx/",
+}
+
+
+def _terminal_transaction_link(chain_id, tx_hash):
+    """Return a terminal hyperlink with the transaction hash as its label.
+
+    OSC 8 links are supported by current terminal emulators and remain a plain,
+    readable hash in terminals that do not support hyperlinks. The URL is never
+    printed visibly, so fleet output stays compact.
+    """
+    tx_hash = str(tx_hash)
+    base_url = _TRANSACTION_EXPLORER_BASES.get(chain_id)
+    if not base_url or not _TX_HASH_RE.fullmatch(tx_hash):
+        return tx_hash
+    url = f"{base_url}{tx_hash}"
+    return f"\033]8;;{url}\033\\{tx_hash}\033]8;;\033\\"
 
 
 def _safe_event_message(message):
