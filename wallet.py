@@ -197,6 +197,12 @@ class Wallet:
     def get_eth_balance_wei(self) -> int:
         """Get the wallet's native ETH balance without losing wei precision."""
         return int(self.w3.eth.get_balance(self.address))
+
+    def address_has_code(self, address: str) -> bool:
+        """Return whether an address currently contains EVM bytecode."""
+        if not Web3.is_address(address):
+            raise ValueError("Invalid address")
+        return bool(self.w3.eth.get_code(Web3.to_checksum_address(address)))
     
     def get_token_balance(self, token_address: str) -> tuple[float, int]:
         """

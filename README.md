@@ -920,8 +920,7 @@ The command refuses a self-transfer, malformed recipient, unsupported token
 identifier, nonpositive amount, amount above balance, empty balance, or a
 non-allowlisted recipient that was not repeated exactly.
 
-For an exact native ETH transfer, use `--transfer-eth`. There is intentionally
-no native `all` mode:
+For an exact native ETH transfer, use `--transfer-eth`:
 
 ```bash
 python grid_bot.py \
@@ -944,6 +943,35 @@ and gas price multipliers. They are refused unless the wallet can send the
 exact amount, cover the estimated maximum transaction fee, and still retain
 `ETH_GAS_RESERVE`. Successful and failed broadcasts use the same local
 `data/treasury_transfers.json` audit trail as ERC-20 transfers.
+
+Native `--amount all` is an explicit liquidation mode. It requires
+`--confirm-liquidate` even for planning, bypasses `ETH_GAS_RESERVE`, and sends
+the current balance minus the buffered maximum fee calculated for the
+transaction. It refuses contract recipients because their receive logic can
+change the required gas:
+
+```bash
+# Dry-run liquidation plan
+python grid_bot.py \
+  --transfer-eth \
+  --recipient "$TREASURY" \
+  --amount all \
+  --confirm-liquidate
+
+# Broadcast after review and after stopping the bot
+python grid_bot.py \
+  --transfer-eth \
+  --recipient "$TREASURY" \
+  --amount all \
+  --confirm-liquidate \
+  --execute \
+  --confirm-bot-stopped
+```
+
+Liquidation can leave the wallet with no usable ETH. A failed transaction may
+still consume gas, and changing gas conditions can make a precomputed
+whole-balance transaction fail. Review the freshly printed execution plan and
+receipt; never retry a fleet liquidation blindly.
 
 #### Fleet batch sweep
 

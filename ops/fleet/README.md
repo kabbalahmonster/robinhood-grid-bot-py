@@ -187,8 +187,9 @@ safety assertion.
 ## Native ETH and other fleet treasury transfers
 
 `treasury-transfer` is the general guarded batch command. Its `--asset` may be
-`ETH`, `USDG`, or an ERC-20 contract address. Native ETH always requires an
-exact amount; deliberately, there is no `all` mode for ETH.
+`ETH`, `USDG`, or an ERC-20 contract address. Exact native transfers preserve
+the gas reserve. Native `all` is a separate, explicitly confirmed liquidation
+mode.
 
 To plan sending exactly `0.0005 ETH` from every configured wallet:
 
@@ -224,6 +225,35 @@ For another ERC-20, use its contract address and either an exact token amount
 or `all`. USDG is accepted as a named asset. All recipient allowlist,
 one-time-confirmation, stopped-process, receipt, partial-failure, and non-atomic
 warnings from `usdg-sweep` apply equally here.
+
+To liquidate the native ETH balance of every configured wallet, leaving only
+the buffered maximum fee needed by each transfer:
+
+```bash
+# Plan only; --confirm-liquidate is required even to produce this plan.
+ops/fleet/treasury-transfer \
+  --asset ETH \
+  --amount all \
+  --recipient "$TREASURY" \
+  --confirm-liquidate
+
+# Broadcast only after reviewing every calculated amount.
+ops/fleet/stop-fleet
+ops/fleet/treasury-transfer \
+  --asset ETH \
+  --amount all \
+  --recipient "$TREASURY" \
+  --confirm-liquidate \
+  --execute \
+  --confirm-fleet-stopped
+```
+
+Liquidation intentionally sets the retained reserve to zero and sends
+`balance - buffered maximum fee`. It is allowed only to an externally owned
+account (an address without deployed bytecode), because a contract's receive
+logic may consume different gas and invalidate the subtraction. Gas prices can
+still move between construction and mining; a failed transaction may consume
+gas without completing the transfer. Inspect every receipt before retrying.
 
 ## Updating one variable across the fleet
 
@@ -282,7 +312,8 @@ common secret-like names, but the shell cannot).
   `fleet.conf`.
 - `treasury-transfer` applies the same batch guards to native ETH, USDG, and
   arbitrary ERC-20 contracts. Native transfers also enforce the configured gas
-  reserve after the amount and estimated maximum fee.
+  reserve after an exact amount and estimated maximum fee. Native liquidation
+  bypasses the reserve only with `--amount all --confirm-liquidate`.
 - `update-variable` is preview-only without `--apply`; backups are intentionally
   retained for operator recovery and gitignored.
 
