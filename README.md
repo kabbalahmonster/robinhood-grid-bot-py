@@ -188,6 +188,24 @@ INITIAL_BUY_AMOUNT=0.01      # Higher amounts due to gas costs
 
 ## Usage
 
+### Operating multiple bots with tmux
+
+The repository includes aligned `start-fleet`, `stop-fleet`, `restart-fleet`,
+and `update-fleet` templates under [`ops/fleet`](ops/fleet/README.md). They run
+independently configured clones in tiled tmux panes while preserving an
+interactive Bash shell, command history, and normal job control beneath every
+bot. The fleet guide covers fresh-clone setup, local configuration, virtual
+environments, command installation, updates, tmux navigation, and the exact
+`Ctrl+C`/`Ctrl+Z` behavior.
+
+Start with:
+
+```bash
+cp ops/fleet/fleet.conf.example ops/fleet/fleet.conf
+nano ops/fleet/fleet.conf
+ops/fleet/start-fleet
+```
+
 ### Safe maintenance commands
 
 Stop the bot before resetting persisted history. None of these commands starts

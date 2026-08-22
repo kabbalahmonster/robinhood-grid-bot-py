@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+SCRIPT_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)"
+
+usage() {
+  cat <<'EOF'
+Usage: restart-fleet [--detach] [--config PATH]
+
+Stop the configured fleet if it is running, then start it from current files.
+EOF
+}
+
+config_path=""
+detach=0
+while (($#)); do
+  case "$1" in
+    --config)
+      (($# >= 2)) || { echo "Error: --config requires a path" >&2; exit 1; }
+      config_path="$2"
+      shift 2
+      ;;
+    --detach) detach=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Error: Unknown option: $1" >&2; exit 1 ;;
+  esac
+done
+
+common_args=()
+[[ -z "$config_path" ]] || common_args+=(--config "$config_path")
+"$SCRIPT_DIR/stop-fleet" --if-running "${common_args[@]}"
+start_args=("${common_args[@]}")
+((detach == 0)) || start_args+=(--detach)
+exec "$SCRIPT_DIR/start-fleet" "${start_args[@]}"

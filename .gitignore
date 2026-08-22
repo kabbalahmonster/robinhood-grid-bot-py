@@ -30,6 +30,9 @@ ENV/
 .env.local
 .env.*.local
 
+# Local fleet topology (copy from ops/fleet/fleet.conf.example)
+ops/fleet/fleet.conf
+
 # Data files
 data/
 *.json

@@ -1,0 +1,15 @@
+# Local fleet topology. Copy this file to fleet.conf and edit it.
+# fleet.conf is gitignored because each machine's paths and fleet are different.
+
+FLEET_SESSION="bot_farm"
+FLEET_WINDOW="fleet"
+FLEET_ENTRYPOINT="grid_bot.py"
+FLEET_RESTART_DELAY=5
+FLEET_START_STAGGER=1
+
+# Each directory must be a complete, independently configured checkout with its
+# own .env and data directory. Paths may use $HOME because this is Bash config.
+FLEET_BOT_DIRS=(
+  "$HOME/bot-farm/rh-bots/example-one/robinhood-grid-bot-py"
+  "$HOME/bot-farm/rh-bots/example-two/robinhood-grid-bot-py"
+)
