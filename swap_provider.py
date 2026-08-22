@@ -39,13 +39,12 @@ class SwapProvider:
 
 
 class FallbackSwapProvider:
-    """Fail over to a secondary provider after retryable primary failures.
+    """Retry complete provider operations with a secondary provider.
 
-    Failover deliberately takes effect on the *next* trading attempt. This
-    prevents a single transaction flow from mixing one provider's approval or
-    quote with another provider's calldata. Once activated, the fallback stays
-    selected until process restart; startup always gives the configured primary
-    provider the first opportunity again.
+    Provider methods only mark a retryable failure. ``run_with_fallback`` then
+    lets the current operation unwind completely before rerunning it from the
+    beginning with the fallback. This keeps quotes, approvals, and calldata
+    provider-consistent while avoiding a one-poll delay.
     """
 
     RETRYABLE_STATUS_CODES = {404, 408, 425, 429, 500, 502, 503, 504}
@@ -63,6 +62,7 @@ class FallbackSwapProvider:
         self.primary = primary
         self.fallback = fallback
         self.active = primary
+        self._operation_retries = []
         self.logger = logging.getLogger("grid_bot.swap_provider")
 
     @property
@@ -81,6 +81,33 @@ class FallbackSwapProvider:
     def fallback_active(self):
         return self.active is self.fallback
 
+    def run_with_fallback(self, operation, operation_name="swap operation"):
+        """Run one complete operation with primary, then fallback if marked."""
+        previous_active = self.active
+        try:
+            self.active = self.primary
+            result, retry = self._run_operation_attempt(operation)
+            if not retry:
+                return result
+
+            self.logger.warning(
+                f"Retrying {operation_name} from the beginning with "
+                f"{self.fallback.name}; no swap transaction was broadcast."
+            )
+            self.active = self.fallback
+            result, _ = self._run_operation_attempt(operation)
+            return result
+        finally:
+            self.active = previous_active if self._operation_retries else self.primary
+
+    def _run_operation_attempt(self, operation):
+        self._operation_retries.append(None)
+        try:
+            result = operation()
+            return result, self._operation_retries[-1]
+        finally:
+            self._operation_retries.pop()
+
     def __getattr__(self, method_name):
         method = getattr(self.active, method_name)
         if not callable(method):
@@ -88,32 +115,33 @@ class FallbackSwapProvider:
 
         def guarded_call(*args, **kwargs):
             result = method(*args, **kwargs)
-            self._activate_after_retryable_failure(method_name, result)
+            self._request_retry_after_failure(method_name, result)
             return result
 
         return guarded_call
 
     def prepare_swap(self, quote):
         result = self.active.prepare_swap(quote)
-        self._activate_after_retryable_failure("prepare_swap", result)
+        self._request_retry_after_failure("prepare_swap", result)
         return result
 
-    def _activate_after_retryable_failure(self, method_name, result):
+    def _request_retry_after_failure(self, method_name, result):
         if self.active is not self.primary or not self._is_retryable_failure(result):
             return
         original_error = self._error_text(result)
-        self.active = self.fallback
         message = (
             f"{self.primary.name} {method_name} failed with a retryable error; "
-            f"switching to {self.fallback.name} until restart. "
-            f"Current attempt will stop safely and retry on the next poll."
+            f"the current operation will stop safely and retry immediately "
+            f"with {self.fallback.name}."
         )
         self.logger.warning(f"{message} Error: {original_error}")
+        if self._operation_retries:
+            self._operation_retries[-1] = (method_name, original_error)
         if hasattr(result, "error"):
             result.error = f"{original_error}; {message}"
         elif isinstance(result, dict):
             result["error"] = f"{original_error}; {message}"
-            result["fallback_activated"] = True
+            result["fallback_requested"] = True
 
     @classmethod
     def _is_retryable_failure(cls, result):
@@ -191,6 +219,11 @@ def create_swap_provider(config):
     fallback_name = (getattr(config, "swap_fallback_provider", "") or "").strip().lower()
     aliases = {"li.fi": "lifi", "li_fi": "lifi", "zero_x": "0x", "zerox": "0x", "sushi": "sushiswap"}
     fallback_name = aliases.get(fallback_name, fallback_name)
+    # The default fallback value is sushiswap. When Sushi itself is primary,
+    # make the pair symmetric if Uniswap credentials are available. An empty
+    # SWAP_FALLBACK_PROVIDER still disables fallback explicitly.
+    if fallback_name == name == "sushiswap" and getattr(config, "uniswap_api_key", ""):
+        fallback_name = "uniswap"
     if not fallback_name or fallback_name == name:
         return primary
     if fallback_name not in PROVIDERS:

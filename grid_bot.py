@@ -12,11 +12,26 @@ import re
 import threading
 import sys
 import argparse
+from functools import wraps
 from datetime import datetime
 from decimal import Decimal
 from urllib.parse import urlsplit
 
 from profit_tracker import ProfitTracker
+
+
+def _with_swap_provider_fallback(method):
+    """Retry a complete pre-broadcast operation with its fallback provider."""
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        runner = getattr(self.provider, "run_with_fallback", None)
+        if runner is None:
+            return method(self, *args, **kwargs)
+        return runner(
+            lambda: method(self, *args, **kwargs),
+            operation_name=method.__name__,
+        )
+    return wrapped
 
 
 def _reset_json_history(path, label):
@@ -520,6 +535,7 @@ class GridBot:
         with open(self.positions_file, 'w') as f:
             json.dump(self.positions, f, indent=2)
     
+    @_with_swap_provider_fallback
     def get_token_price(self):
         """Get current token price in ETH/WETH using the lighter /price endpoint."""
         # Use /price endpoint for price discovery (doesn't count against quote-to-trade metrics)
@@ -673,6 +689,7 @@ class GridBot:
         is_leading_edge_buy = "Leading edge" in reason
         self._execute_buy_gridless(buy_amount_eth, buy_amount_wei, price, is_leading_edge_buy)
     
+    @_with_swap_provider_fallback
     def _execute_buy_gridless(self, buy_amount_eth, buy_amount_wei, price, is_leading_edge_buy=False):
         """Execute a gridless buy order."""
         from gridless import add_position
@@ -813,6 +830,7 @@ class GridBot:
         else:
             logger.error(f"❌ Gridless buy failed: {result.error}")
     
+    @_with_swap_provider_fallback
     def _check_sells_gridless(self, price):
         """Gridless sell logic - sell when P&L >= threshold or stoploss triggered."""
         from gridless import load_positions, find_sell_candidate, calculate_pnl, remove_position, get_buy_price
@@ -1199,6 +1217,7 @@ class GridBot:
         else:
             logger.error(f"❌ Gridless sell failed: {result.error}")
     
+    @_with_swap_provider_fallback
     def execute_buy(self, pos_id, price):
         """Execute a buy order."""
         pos = self.positions[pos_id]
@@ -1340,6 +1359,7 @@ class GridBot:
         else:
             logger.error(f"❌ Buy failed: {result.error}")
     
+    @_with_swap_provider_fallback
     def execute_sell(self, pos_id, price):
         """Execute a sell order with moonbag and banking."""
         pos = self.positions[pos_id]
@@ -1522,6 +1542,7 @@ class GridBot:
         else:
             logger.error(f"❌ Sell failed: {result.error}")
     
+    @_with_swap_provider_fallback
     def bank_profit(self, eth_amount):
         """Swap ETH/WETH profit to USDG for banking."""
         if eth_amount <= 0:

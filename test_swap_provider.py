@@ -1,8 +1,9 @@
 """Tests for provider selection and capability isolation."""
 
 from types import SimpleNamespace
+from unittest.mock import patch
 
-from swap_provider import FallbackSwapProvider, PROVIDERS, SwapProvider, create_swap_provider, resolve_provider_name
+from swap_provider import FallbackSwapProvider, PROVIDERS, ProviderDefinition, SwapProvider, create_swap_provider, resolve_provider_name
 
 
 def config(**values):
@@ -50,18 +51,20 @@ class Client:
         return self.results.pop(0)
 
 
-def test_retryable_primary_failure_activates_fallback_for_next_attempt():
+def test_retryable_primary_failure_retries_complete_operation_immediately():
     primary = SwapProvider("uniswap", Client([Result(False, "Uniswap API returned status 404")]), PROVIDERS["uniswap"].capabilities)
     fallback = SwapProvider("sushiswap", Client([Result(True)]), PROVIDERS["sushiswap"].capabilities)
     provider = FallbackSwapProvider(primary, fallback)
 
-    first = provider.build_swap_transaction()
-    assert first.success is False
-    assert provider.name == "sushiswap"
-    assert provider.capabilities.refresh_after_approval is True
+    attempts = []
+    def operation():
+        attempts.append(provider.name)
+        return provider.build_swap_transaction()
 
-    second = provider.build_swap_transaction()
-    assert second.success is True
+    result = provider.run_with_fallback(operation, "sell")
+    assert result.success is True
+    assert attempts == ["uniswap", "sushiswap"]
+    assert provider.name == "uniswap"
 
 
 def test_nonretryable_primary_failure_does_not_activate_fallback():
@@ -72,3 +75,78 @@ def test_nonretryable_primary_failure_does_not_activate_fallback():
     result = provider.build_swap_transaction()
     assert result.success is False
     assert provider.name == "uniswap"
+
+
+def test_retryable_refreshed_quote_restarts_without_mixing_providers():
+    class RefreshClient:
+        def __init__(self, quote, refresh):
+            self.quote = quote
+            self.refresh = refresh
+
+        def build_swap_transaction(self, **kwargs):
+            return self.quote
+
+        def refresh_quote(self, **kwargs):
+            return self.refresh
+
+    primary = SwapProvider(
+        "uniswap",
+        RefreshClient(Result(True), Result(False, "Uniswap API returned status 404")),
+        PROVIDERS["uniswap"].capabilities,
+    )
+    fallback = SwapProvider(
+        "sushiswap",
+        RefreshClient(Result(True), Result(True)),
+        PROVIDERS["sushiswap"].capabilities,
+    )
+    provider = FallbackSwapProvider(primary, fallback)
+    attempts = []
+
+    def sell_operation():
+        attempts.append(provider.name)
+        first = provider.build_swap_transaction()
+        if not first.success:
+            return first
+        return provider.refresh_quote()
+
+    result = provider.run_with_fallback(sell_operation, "sell")
+    assert result.success is True
+    assert attempts == ["uniswap", "sushiswap"]
+    assert provider.name == "uniswap"
+
+
+def test_nested_operations_keep_retry_requests_isolated():
+    primary = SwapProvider("uniswap", Client([Result(False, "status 404")]), PROVIDERS["uniswap"].capabilities)
+    fallback = SwapProvider("sushiswap", Client([Result(True)]), PROVIDERS["sushiswap"].capabilities)
+    provider = FallbackSwapProvider(primary, fallback)
+    outer_attempts = []
+
+    def nested_operation():
+        return provider.build_swap_transaction()
+
+    def outer_operation():
+        outer_attempts.append(provider.name)
+        return provider.run_with_fallback(nested_operation, "banking")
+
+    result = provider.run_with_fallback(outer_operation, "sell")
+    assert result.success is True
+    assert outer_attempts == ["uniswap"]
+    assert provider.name == "uniswap"
+
+
+def test_sushi_primary_uses_uniswap_as_reverse_default_fallback():
+    class DummyClient:
+        def __init__(self, config):
+            pass
+
+    settings = config(
+        swap_provider="sushiswap",
+        swap_fallback_provider="sushiswap",
+        uniswap_api_key="configured",
+    )
+    with patch.object(ProviderDefinition, "load_client_class", return_value=DummyClient):
+        provider = create_swap_provider(settings)
+
+    assert isinstance(provider, FallbackSwapProvider)
+    assert provider.primary.name == "sushiswap"
+    assert provider.fallback.name == "uniswap"

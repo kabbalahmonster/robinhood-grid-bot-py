@@ -95,7 +95,7 @@ python grid_bot.py
 | `UNISWAP_API_KEY` | Yes* | - | Uniswap API key (if using Uniswap) |
 | `SUSHI_API_KEY` | No | empty | Optional Sushi portal API key; the public v7 API works without one |
 | `SWAP_PROVIDER` | No | empty | Explicit provider: `0x`, `lifi`, `uniswap`, or `sushiswap`; empty uses legacy flags |
-| `SWAP_FALLBACK_PROVIDER` | No | sushiswap | Provider activated after retryable primary failures; empty disables fallback |
+| `SWAP_FALLBACK_PROVIDER` | No | sushiswap | Immediate per-operation fallback after retryable pre-broadcast failures; empty disables fallback |
 | `USE_LI_FI` | No | false | Use LI.FI instead of 0x for swaps |
 | `USE_UNISWAP_API` | No | true | Legacy Uniswap selection used when `SWAP_PROVIDER` is empty |
 | **Token Configuration** ||||
@@ -149,7 +149,7 @@ Prefer explicit provider selection:
 SWAP_PROVIDER=sushiswap  # sushiswap, uniswap, lifi, or 0x
 ```
 
-Explicit `SWAP_PROVIDER` takes precedence. `sushi` is accepted as an alias for `sushiswap`. When the setting is empty, backward-compatible selection checks `USE_UNISWAP_API=true`, then `USE_LI_FI=true`, otherwise 0x. The normalized templates currently select Uniswap through the legacy flag and configure Sushi as the fallback. On a retryable primary failure (HTTP 404/408/425/429/5xx, timeout, or connection failure), the current attempt stops before broadcast and the bot switches to the fallback for subsequent attempts until restart. This avoids mixing approvals and calldata from different routers inside one transaction flow. Sushi uses its v7 quote/swap API and supports an optional `SUSHI_API_KEY`; the other providers require their matching credentials. When Sushi returns HTTP 429, that bot honors `Retry-After` when supplied and otherwise enters a jittered exponential cooldown (30 seconds up to 15 minutes). Requests are skipped locally during the cooldown and a successful response resets the backoff.
+Explicit `SWAP_PROVIDER` takes precedence. `sushi` is accepted as an alias for `sushiswap`. When the setting is empty, backward-compatible selection checks `USE_UNISWAP_API=true`, then `USE_LI_FI=true`, otherwise 0x. The normalized templates currently select Uniswap through the legacy flag and configure Sushi as the fallback. On a retryable primary failure (HTTP 404/408/425/429/5xx, timeout, or connection failure), the current pre-broadcast operation stops and immediately restarts from the beginning with the fallback. The next operation gives the configured primary the first opportunity again. This avoids mixing approvals and calldata from different routers inside one transaction flow. When Sushi is primary and the default Sushi fallback value is unchanged, the bot automatically uses Uniswap as the reverse fallback if `UNISWAP_API_KEY` is configured; set `SWAP_FALLBACK_PROVIDER` empty to disable fallback. Sushi uses its v7 quote/swap API and supports an optional `SUSHI_API_KEY`; the other providers require their matching credentials. When Sushi returns HTTP 429, that bot honors `Retry-After` when supplied and otherwise enters a jittered exponential cooldown (30 seconds up to 15 minutes). Requests are skipped locally during the cooldown and a successful response resets the backoff.
 
 ### Chain-Specific Configuration
 
