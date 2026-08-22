@@ -15,6 +15,8 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
+from sigil import create_sigil
+
 logger = logging.getLogger("grid_bot.dashboard")
 
 # How long (seconds) to wait for the dashboard HTTP round-trip before giving up
@@ -53,6 +55,7 @@ class DashboardReporter:
         self._api_key = api_key
         self._bot_id = bot_id
         self._start_time = time.monotonic()
+        self._sigil = create_sigil(bot_id)
 
         # Internal queue + worker thread
         self._queue: List[Dict[str, Any]] = []
@@ -159,6 +162,7 @@ class DashboardReporter:
             "trades_history": trades_history if trades_history is not None else [],
             "events": events if events is not None else [],
             "rpc_status": rpc_status,
+            "sigil": self._sigil,
         }
 
         with self._lock:

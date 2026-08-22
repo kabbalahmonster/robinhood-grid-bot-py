@@ -14,6 +14,7 @@ class TestDashboardReporter(unittest.TestCase):
         self.assertEqual(reporter._queue[0]["usdg_balance"], 123.456)
         self.assertEqual(reporter._queue[0]["poll_interval_seconds"], 30)
         self.assertEqual(reporter._queue[0]["token_symbol"], "TENDIES")
+        self.assertEqual(reporter._queue[0]["sigil"], reporter._sigil)
 
     @patch("dashboard_reporter.threading.Thread.start")
     def test_sell_attempt_is_round_scoped_payload_field(self, _start):
