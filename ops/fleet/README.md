@@ -2,7 +2,8 @@
 
 These scripts operate many independently configured bot checkouts as one tmux
 fleet. Each bot gets its own pane, working directory, `.env`, virtual
-environment, and persistent `data/` directory.
+environment, and persistent `data/` directory. The same local fleet
+configuration also drives guarded whole-fleet USDG sweeps.
 
 The start command deliberately creates an **interactive shell first** and uses
 `tmux send-keys` to enter the restart loop. This preserves the established
@@ -66,7 +67,7 @@ sudo apt install tmux git python3 python3-venv
    cp ops/fleet/fleet.conf.example ops/fleet/fleet.conf
    nano ops/fleet/fleet.conf
    chmod +x ops/fleet/start-fleet ops/fleet/stop-fleet \
-     ops/fleet/restart-fleet ops/fleet/update-fleet
+     ops/fleet/restart-fleet ops/fleet/update-fleet ops/fleet/usdg-sweep
    ```
 
    Replace the example directories in `FLEET_BOT_DIRS` with every real bot
@@ -80,6 +81,7 @@ sudo apt install tmux git python3 python3-venv
    ln -sf "$PWD/ops/fleet/stop-fleet" "$HOME/bin/stop-fleet"
    ln -sf "$PWD/ops/fleet/restart-fleet" "$HOME/bin/restart-fleet"
    ln -sf "$PWD/ops/fleet/update-fleet" "$HOME/bin/update-fleet"
+   ln -sf "$PWD/ops/fleet/usdg-sweep" "$HOME/bin/usdg-sweep"
    ```
 
    Ensure `~/bin` is in `PATH`, or invoke the scripts by their repository paths.
@@ -138,6 +140,47 @@ ops/fleet/update-fleet --restart
 Add `--detach` to either restart form to leave the new session in the
 background. Every command accepts `--config PATH`.
 
+## Whole-fleet USDG sweep
+
+`usdg-sweep` invokes each bot's guarded `--sweep-usdg` maintenance command
+sequentially using the same explicit `FLEET_BOT_DIRS` list and per-checkout
+Python selection as the lifecycle commands. It never discovers extra
+directories and never stops bots automatically.
+
+First set a shell variable to the actual reviewed treasury address and run a
+dry run while the fleet is still available:
+
+```bash
+TREASURY=0xYourActualCentralWalletAddress
+ops/fleet/usdg-sweep --recipient "$TREASURY"
+```
+
+Review the wallet, token, balance, amount, and recipient printed for **every**
+bot. Then stop the fleet and execute using the same shell variable:
+
+```bash
+ops/fleet/stop-fleet
+ops/fleet/usdg-sweep \
+  --recipient "$TREASURY" \
+  --execute \
+  --confirm-fleet-stopped
+```
+
+Broadcast mode requires both `--execute` and `--confirm-fleet-stopped`, and it
+also refuses to run if the configured tmux session still exists. Each bot must
+allow the destination through its own `TREASURY_ALLOWED_RECIPIENTS`. For an
+intentional one-off destination, repeat the exact address with
+`--confirm-recipient "$TREASURY"`; the individual bot CLI still performs its
+normal validation.
+
+The sweep is not atomic across wallets. A later bot can fail after earlier
+transfers confirm, so the script continues through the configured fleet,
+reports per-bot failures, and exits nonzero if any failed. Each bot retains its
+own audit trail in `data/treasury_transfers.json`. Never retry blindly: inspect
+the output and receipts first. The tmux-session check cannot detect bots
+started elsewhere, so the explicit stopped-fleet confirmation remains a human
+safety assertion.
+
 ## Safety and update behavior
 
 - `start-fleet` validates every directory, entrypoint, interpreter, and
@@ -157,6 +200,9 @@ background. Every command accepts `--config PATH`.
   `update-fleet --restart` when the new code should become active immediately.
 - The config is sourced as Bash and must be treated as trusted local code. It
   should contain paths/topology only—never private keys or API credentials.
+- `usdg-sweep` is dry-run by default, validates the recipient format, and uses
+  each checkout's existing `.env`; treasury addresses and keys never belong in
+  `fleet.conf`.
 
 ## Tmux navigation and troubleshooting
 

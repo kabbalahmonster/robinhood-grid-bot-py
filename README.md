@@ -191,11 +191,12 @@ INITIAL_BUY_AMOUNT=0.01      # Higher amounts due to gas costs
 ### Operating multiple bots with tmux
 
 The repository includes aligned `start-fleet`, `stop-fleet`, `restart-fleet`,
-and `update-fleet` templates under [`ops/fleet`](ops/fleet/README.md). They run
-independently configured clones in tiled tmux panes while preserving an
-interactive Bash shell, command history, and normal job control beneath every
-bot. The fleet guide covers fresh-clone setup, local configuration, virtual
-environments, command installation, updates, tmux navigation, and the exact
+`update-fleet`, and guarded `usdg-sweep` templates under
+[`ops/fleet`](ops/fleet/README.md). They run independently configured clones in
+tiled tmux panes while preserving an interactive Bash shell, command history,
+and normal job control beneath every bot. The fleet guide covers fresh-clone
+setup, local configuration, virtual environments, command installation,
+updates, treasury sweep safety, tmux navigation, and the exact
 `Ctrl+C`/`Ctrl+Z` behavior.
 
 Start with:
@@ -917,6 +918,12 @@ identifier, nonpositive amount, amount above balance, empty balance, or a
 non-allowlisted recipient that was not repeated exactly.
 
 #### Fleet batch sweep
+
+For fleets configured through `ops/fleet/fleet.conf`, prefer the aligned
+`ops/fleet/usdg-sweep` command documented in the
+[tmux fleet operations guide](ops/fleet/README.md). It uses the same explicit
+bot list as start/stop/restart/update, refuses broadcast while the configured
+tmux session is running, and remains dry-run by default.
 
 `scripts/sweep_fleet_usdg.sh` runs the USDG sweep command in every checkout
 under a fleet root (each checkout is identified by a `grid_bot.py` file). It

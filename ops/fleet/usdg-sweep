@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+SCRIPT_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)"
+# shellcheck source=fleet-common.sh
+source "$SCRIPT_DIR/fleet-common.sh"
+
+usage() {
+  cat <<'EOF'
+Usage: usdg-sweep --recipient ADDRESS [options]
+
+Plan or execute a USDG sweep in every checkout from the shared fleet config.
+Dry run is the default.
+
+Options:
+  --recipient ADDRESS          Treasury receiving every bot's USDG (required)
+  --confirm-recipient ADDRESS  Exact repeat for a recipient not allowlisted by a bot
+  --execute                    Broadcast transfers after all safety checks
+  --confirm-fleet-stopped      Required with --execute
+  --config PATH                Use an alternate fleet configuration
+  -h, --help                   Show this help
+
+Execution is refused while the configured tmux fleet session exists. The
+script never stops bots itself. Run and review the full dry run first, stop the
+fleet, then repeat with --execute --confirm-fleet-stopped.
+EOF
+}
+
+config_path=""
+recipient=""
+confirmed_recipient=""
+execute=0
+fleet_stopped=0
+
+while (($#)); do
+  case "$1" in
+    --config)
+      (($# >= 2)) || fleet_die "--config requires a path"
+      config_path="$2"
+      shift 2
+      ;;
+    --recipient)
+      (($# >= 2)) || fleet_die "--recipient requires an address"
+      recipient="$2"
+      shift 2
+      ;;
+    --confirm-recipient)
+      (($# >= 2)) || fleet_die "--confirm-recipient requires an address"
+      confirmed_recipient="$2"
+      shift 2
+      ;;
+    --execute) execute=1; shift ;;
+    --confirm-fleet-stopped) fleet_stopped=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) fleet_die "Unknown option: $1" ;;
+  esac
+done
+
+[[ "$recipient" =~ ^0x[0-9a-fA-F]{40}$ ]] || fleet_die "--recipient must be a 20-byte 0x-prefixed EVM address"
+if [[ -n "$confirmed_recipient" && "$confirmed_recipient" != "$recipient" ]]; then
+  fleet_die "--confirm-recipient must exactly match --recipient"
+fi
+if ((execute && !fleet_stopped)); then
+  fleet_die "--execute requires --confirm-fleet-stopped"
+fi
+
+fleet_load_config "$config_path"
+fleet_validate_bots
+
+if ((execute)); then
+  fleet_require_tmux
+  if fleet_session_exists; then
+    fleet_die "Refusing to broadcast while tmux session '$FLEET_SESSION' is running.
+Stop it with: $SCRIPT_DIR/stop-fleet --config '$FLEET_CONFIG_PATH'"
+  fi
+fi
+
+mode="DRY RUN"
+((execute == 0)) || mode="EXECUTE"
+printf 'Fleet USDG sweep: %s\nRecipient: %s\nBots configured: %d\n\n' \
+  "$mode" "$recipient" "${#FLEET_BOT_DIRS[@]}"
+
+successes=0
+failures=0
+for bot_dir in "${FLEET_BOT_DIRS[@]}"; do
+  python_bin="$(fleet_python_for "$bot_dir")"
+  printf '%s\n%s\n' '------------------------------------------------------------' "$bot_dir"
+
+  command_args=("$python_bin" "$FLEET_ENTRYPOINT" --sweep-usdg "$recipient")
+  if [[ -n "$confirmed_recipient" ]]; then
+    command_args+=(--confirm-recipient "$confirmed_recipient")
+  fi
+  if ((execute)); then
+    command_args+=(--execute --confirm-bot-stopped)
+  fi
+
+  if (cd "$bot_dir" && "${command_args[@]}"); then
+    successes=$((successes + 1))
+  else
+    printf 'FAILED: %s\n' "$bot_dir" >&2
+    failures=$((failures + 1))
+  fi
+done
+
+printf '\nFleet USDG sweep complete: %d succeeded, %d failed (%s).\n' \
+  "$successes" "$failures" "$mode"
+((failures == 0))
