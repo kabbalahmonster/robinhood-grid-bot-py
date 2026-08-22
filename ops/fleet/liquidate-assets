@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+SCRIPT_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)"
+# shellcheck source=fleet-common.sh
+source "$SCRIPT_DIR/fleet-common.sh"
+
+usage() {
+  cat <<'EOF'
+Usage: liquidate-assets [options]
+
+Plan or execute conversion of every bot-managed token balance to native ETH.
+Dry run is the default. Unknown/airdrop tokens are intentionally ignored.
+
+  --execute                    Broadcast after reviewing the complete dry run
+  --confirm-liquidate-assets   Required acknowledgement (dry run and execute)
+  --confirm-fleet-stopped      Required with --execute
+  --config PATH                Use an alternate fleet configuration
+  -h, --help                   Show this help
+EOF
+}
+
+config_path=""
+execute=0
+confirmed=0
+fleet_stopped=0
+while (($#)); do
+  case "$1" in
+    --config) (($# >= 2)) || fleet_die "--config requires a path"; config_path="$2"; shift 2 ;;
+    --execute) execute=1; shift ;;
+    --confirm-liquidate-assets) confirmed=1; shift ;;
+    --confirm-fleet-stopped) fleet_stopped=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) fleet_die "Unknown option: $1" ;;
+  esac
+done
+
+((confirmed == 1)) || fleet_die "--confirm-liquidate-assets is required"
+if ((execute && !fleet_stopped)); then
+  fleet_die "--execute requires --confirm-fleet-stopped"
+fi
+
+fleet_load_config "$config_path"
+fleet_validate_bots
+if ((execute)); then
+  fleet_require_tmux
+  if fleet_session_exists; then
+    fleet_die "Refusing to liquidate while tmux session '$FLEET_SESSION' is running. Stop the fleet first."
+  fi
+fi
+
+printf 'Fleet managed-asset liquidation: %s\nBots configured: %d\n\n' \
+  "$([[ $execute == 1 ]] && printf EXECUTE || printf 'DRY RUN')" "${#FLEET_BOT_DIRS[@]}"
+
+successes=0
+failures=0
+for bot_dir in "${FLEET_BOT_DIRS[@]}"; do
+  python_bin="$(fleet_python_for "$bot_dir")"
+  printf '%s\n%s\n' '------------------------------------------------------------' "$bot_dir"
+  command_args=("$python_bin" "$FLEET_ENTRYPOINT" --liquidate-assets --confirm-liquidate-assets)
+  ((execute == 0)) || command_args+=(--execute --confirm-bot-stopped)
+  if (cd "$bot_dir" && "${command_args[@]}"); then
+    successes=$((successes + 1))
+  else
+    printf 'FAILED: %s\n' "$bot_dir" >&2
+    failures=$((failures + 1))
+  fi
+done
+
+printf '\nFleet asset liquidation complete: %d succeeded, %d failed.\n' "$successes" "$failures"
+((failures == 0))

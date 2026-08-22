@@ -68,7 +68,8 @@ sudo apt install tmux git python3 python3-venv
    nano ops/fleet/fleet.conf
    chmod +x ops/fleet/start-fleet ops/fleet/stop-fleet \
      ops/fleet/restart-fleet ops/fleet/update-fleet ops/fleet/usdg-sweep \
-     ops/fleet/treasury-transfer ops/fleet/update-variable
+     ops/fleet/treasury-transfer ops/fleet/update-variable \
+     ops/fleet/liquidate-assets
    ```
 
    Replace the example directories in `FLEET_BOT_DIRS` with every real bot
@@ -85,6 +86,7 @@ sudo apt install tmux git python3 python3-venv
    ln -sf "$PWD/ops/fleet/usdg-sweep" "$HOME/bin/usdg-sweep"
    ln -sf "$PWD/ops/fleet/treasury-transfer" "$HOME/bin/treasury-transfer"
    ln -sf "$PWD/ops/fleet/update-variable" "$HOME/bin/update-variable"
+   ln -sf "$PWD/ops/fleet/liquidate-assets" "$HOME/bin/liquidate-assets"
    ```
 
    Ensure `~/bin` is in `PATH`, or invoke the scripts by their repository paths.
@@ -254,6 +256,52 @@ account (an address without deployed bytecode), because a contract's receive
 logic may consume different gas and invalidate the subtraction. Gas prices can
 still move between construction and mining; a failed transaction may consume
 gas without completing the transfer. Inspect every receipt before retrying.
+
+## Liquidating bot-managed assets to native ETH
+
+`liquidate-assets` converts all configured bot-managed ERC-20 balances in each
+wallet into native ETH: the full `TOKEN_ADDRESS` balance (including untracked
+moonbags), the full `USDG_ADDRESS` balance, and the full `WETH_ADDRESS` balance.
+WETH is unwrapped directly. Duplicate addresses are processed once, existing
+native ETH stays in the wallet, and unknown airdrops or unrelated tokens are
+deliberately ignored. EVM wallets do not natively enumerate tokens; external
+discovery would let spam or malicious assets enter a destructive workflow.
+
+Create and review the complete read-only plan first:
+
+```bash
+ops/fleet/liquidate-assets --confirm-liquidate-assets
+```
+
+The confirmation is required even for planning. A dry run reads balances and
+quotes but sends no approval, swap, or unwrap transaction and changes no files.
+To execute after reviewing every wallet:
+
+```bash
+ops/fleet/stop-fleet
+ops/fleet/liquidate-assets \
+  --confirm-liquidate-assets \
+  --execute \
+  --confirm-fleet-stopped
+```
+
+Execution refuses to start while the configured tmux session exists. It uses
+the configured primary/fallback providers and deliberately ignores profit
+thresholds, moonbag retention, and profit banking.
+
+Position clearing is the final commit step. After all transaction receipts
+confirm, the command re-reads every managed-token balance and requires it to be
+exactly zero. Only then does it create timestamped
+`*.pre-liquidation.*.bak` files and atomically replace both
+`data/positions.json` and `data/gridless_positions.json` with empty objects.
+Any quote, approval, transaction, residual balance, or file-write failure leaves
+position data uncleared. Each checkout records execution results in
+`data/asset_liquidations.json`.
+
+Fleet execution is not atomic: earlier wallets may complete before a later one
+fails. Inspect receipts, residual balances, audit files, and backups before any
+retry. The tmux check cannot detect a bot launched outside the configured
+session, so `--confirm-fleet-stopped` remains a human safety assertion.
 
 ## Updating one variable across the fleet
 

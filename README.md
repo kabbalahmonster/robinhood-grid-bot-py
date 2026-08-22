@@ -192,13 +192,14 @@ INITIAL_BUY_AMOUNT=0.01      # Higher amounts due to gas costs
 ### Operating multiple bots with tmux
 
 The repository includes aligned `start-fleet`, `stop-fleet`, `restart-fleet`,
-`update-fleet`, guarded treasury-transfer tools, and a reusable fleet variable
-updater under
+`update-fleet`, guarded treasury-transfer and managed-asset liquidation tools,
+and a reusable fleet variable updater under
 [`ops/fleet`](ops/fleet/README.md). They run independently configured clones in
 tiled tmux panes while preserving an interactive Bash shell, command history,
 and normal job control beneath every bot. The fleet guide covers fresh-clone
 setup, local configuration, virtual environments, command installation,
-updates, native/ERC-20 treasury safety, fleet `.env` updates, tmux navigation, and the exact
+updates, native/ERC-20 treasury safety, verified position-clearing liquidation,
+fleet `.env` updates, tmux navigation, and the exact
 `Ctrl+C`/`Ctrl+Z` behavior.
 
 Start with:
@@ -973,6 +974,30 @@ still consume gas, and changing gas conditions can make a precomputed
 whole-balance transaction fail. Review the freshly printed execution plan and
 receipt; never retry a fleet liquidation blindly.
 
+To convert this bot's configured trading-token, USDG, and WETH balances into
+native ETH in the same wallet, use the separate managed-asset command. It does
+not discover or touch unrelated tokens:
+
+```bash
+# Read-only balances and quote plan
+python grid_bot.py --liquidate-assets --confirm-liquidate-assets
+
+# Broadcast only after review and after stopping this bot
+python grid_bot.py \
+  --liquidate-assets \
+  --confirm-liquidate-assets \
+  --execute \
+  --confirm-bot-stopped
+```
+
+The full trading-token and USDG balances are swapped without profit, banking,
+or moonbag rules; WETH is unwrapped directly. All managed-token balances must
+verify at exactly zero after confirmed receipts. Only then are timestamped
+backups created and both `data/positions.json` and
+`data/gridless_positions.json` atomically cleared. Any partial failure leaves
+position data intact. Execution events are durable in
+`data/asset_liquidations.json`. See the fleet guide for the guarded batch form.
+
 #### Fleet batch sweep
 
 For fleets configured through `ops/fleet/fleet.conf`, prefer the aligned
@@ -982,7 +1007,8 @@ bot list as start/stop/restart/update, refuses broadcast while the configured
 tmux session is running, and remains dry-run by default.
 
 Use `ops/fleet/treasury-transfer` for native ETH or another ERC-20 across the
-same explicit fleet. The fleet guide also documents `ops/fleet/update-variable`
+same explicit fleet, and `ops/fleet/liquidate-assets` for verified managed-asset
+conversion plus position cleanup. The fleet guide also documents `ops/fleet/update-variable`
 for previewed, backed-up, atomic `.env` changes such as
 `ETH_GAS_RESERVE=0.0005`.
 
