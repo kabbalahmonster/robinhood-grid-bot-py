@@ -30,13 +30,14 @@ class LiquidationResult:
     quoted_output_wei: int = 0
 
 
-def _managed_assets(config: Any) -> list[tuple[str, str]]:
+def _managed_assets(config: Any, keep_usdg: bool = False) -> list[tuple[str, str]]:
     """Return configured assets once each; WETH is always handled as WETH."""
     candidates = [
         (getattr(config, "token_symbol", "TOKEN"), config.token_address),
-        ("USDG", config.usdg_address),
         ("WETH", config.weth_address),
     ]
+    if not keep_usdg:
+        candidates.insert(1, ("USDG", config.usdg_address))
     weth_key = config.weth_address.lower()
     unique: dict[str, tuple[str, str]] = {}
     for label, address in candidates:
@@ -180,7 +181,8 @@ def run_asset_liquidation(args: Any) -> int:
         config = load_config()
         wallet = Wallet(config)
         provider = create_swap_provider(config)
-        assets = _managed_assets(config)
+        keep_usdg = bool(getattr(args, "keep_usdg", False))
+        assets = _managed_assets(config, keep_usdg=keep_usdg)
         balances: list[tuple[str, str, int, int]] = []
         for label, address in assets:
             info = wallet.get_token_info(address)
@@ -191,6 +193,7 @@ def run_asset_liquidation(args: Any) -> int:
         print(f"Wallet: {wallet.address}")
         print("Destination: native ETH in the same wallet")
         print("Unknown/airdrop tokens: ignored")
+        print(f"USDG: {'kept unchanged' if keep_usdg else 'included in liquidation'}")
 
         plans: list[dict[str, Any]] = []
         for label, address, decimals, raw in balances:

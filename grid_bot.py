@@ -2074,12 +2074,14 @@ if __name__ == "__main__":
     parser.add_argument("--confirm-liquidate", action="store_true", help="Required to send all native ETH minus its maximum fee")
     parser.add_argument("--liquidate-assets", action="store_true", help="Convert all configured bot-managed tokens to native ETH")
     parser.add_argument("--confirm-liquidate-assets", action="store_true", help="Required acknowledgement for --liquidate-assets")
+    parser.add_argument("--keep-usdg", action="store_true", help="Exclude configured USDG from --liquidate-assets")
     parser.add_argument("--confirm-bot-stopped", action="store_true", help="Acknowledge the bot sharing this wallet is stopped")
     parser.add_argument("--execute", action="store_true", help="Broadcast the planned transfer")
     args = parser.parse_args()
     if args.check_config:
         if any([args.sweep_usdg, args.transfer_token, args.transfer_eth, args.recipient, args.confirm_liquidate,
-                args.liquidate_assets, args.confirm_liquidate_assets, args.confirm_bot_stopped, args.execute]):
+                args.liquidate_assets, args.confirm_liquidate_assets, args.keep_usdg,
+                args.confirm_bot_stopped, args.execute]):
             parser.error("--check-config cannot be combined with a maintenance command")
         raise SystemExit(check_config())
     if args.liquidate_assets:
@@ -2088,6 +2090,8 @@ if __name__ == "__main__":
             parser.error("--liquidate-assets cannot be combined with treasury transfer commands")
         from asset_liquidator import run_asset_liquidation
         raise SystemExit(run_asset_liquidation(args))
+    if args.keep_usdg:
+        parser.error("--keep-usdg requires --liquidate-assets")
     if args.sweep_usdg:
         if args.transfer_token or args.transfer_eth or args.recipient:
             parser.error("--sweep-usdg cannot be combined with --transfer-token, --transfer-eth, or --recipient")
@@ -2101,7 +2105,8 @@ if __name__ == "__main__":
         if not args.transfer_token or not args.recipient:
             parser.error("--transfer-token and --recipient must be supplied together")
         raise SystemExit(run_treasury_transfer(args))
-    if any([args.amount != "all", args.confirm_recipient, args.confirm_liquidate, args.confirm_liquidate_assets, args.confirm_bot_stopped, args.execute]):
+    if any([args.amount != "all", args.confirm_recipient, args.confirm_liquidate, args.confirm_liquidate_assets,
+            args.keep_usdg, args.confirm_bot_stopped, args.execute]):
         parser.error("transfer options require --sweep-usdg, --transfer-token, or --transfer-eth with --recipient")
     bot = GridBot()
     bot.run()

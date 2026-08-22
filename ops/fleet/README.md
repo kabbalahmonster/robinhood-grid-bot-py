@@ -273,6 +273,17 @@ Create and review the complete read-only plan first:
 ops/fleet/liquidate-assets --confirm-liquidate-assets
 ```
 
+To preserve every wallet's configured USDG balance, add `--keep-usdg` to both
+the plan and the later execution command:
+
+```bash
+ops/fleet/liquidate-assets --confirm-liquidate-assets --keep-usdg
+```
+
+In this mode USDG is not read as a liquidation target, quoted, approved,
+swapped, or required to reach zero. Trading-token and WETH handling—and every
+position-clearing guard—remain unchanged.
+
 The confirmation is required even for planning. A dry run reads balances and
 quotes but sends no approval, swap, or unwrap transaction and changes no files.
 To execute after reviewing every wallet:
@@ -284,6 +295,9 @@ ops/fleet/liquidate-assets \
   --execute \
   --confirm-fleet-stopped
 ```
+
+If the reviewed plan used `--keep-usdg`, add the same flag to this execution
+command. Do not change inclusion/exclusion choices between plan and execution.
 
 Execution refuses to start while the configured tmux session exists. It uses
 the configured primary/fallback providers and deliberately ignores profit

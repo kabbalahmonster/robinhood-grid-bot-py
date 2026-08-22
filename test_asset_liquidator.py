@@ -29,11 +29,12 @@ def config():
     )
 
 
-def args(execute=False, confirmed=True, stopped=False):
+def args(execute=False, confirmed=True, stopped=False, keep_usdg=False):
     return SimpleNamespace(
         execute=execute,
         confirm_liquidate_assets=confirmed,
         confirm_bot_stopped=stopped,
+        keep_usdg=keep_usdg,
     )
 
 
@@ -42,6 +43,28 @@ class TestAssetLiquidator(unittest.TestCase):
         cfg = config()
         cfg.token_address = WETH
         self.assertEqual(_managed_assets(cfg), [("WETH", WETH), ("USDG", USDG)])
+
+    def test_keep_usdg_excludes_it_from_managed_assets(self):
+        self.assertEqual(_managed_assets(config(), keep_usdg=True), [("TEST", TOKEN), ("WETH", WETH)])
+
+    @patch("asset_liquidator.create_swap_provider")
+    @patch("asset_liquidator.Wallet")
+    @patch("asset_liquidator.load_config")
+    def test_keep_usdg_never_reads_or_quotes_usdg(self, load, wallet_cls, provider_factory):
+        load.return_value = config()
+        wallet = wallet_cls.return_value
+        wallet.address = "0x0000000000000000000000000000000000000005"
+        wallet.get_token_info.return_value = SimpleNamespace(symbol="TEST", decimals=18)
+        wallet.get_token_balance.side_effect = [(1.0, 10**18), (0.0, 0)]
+        provider_factory.return_value.build_swap_transaction.return_value = SimpleNamespace(
+            success=True, buy_amount=10**18, error=None
+        )
+
+        self.assertEqual(run_asset_liquidation(args(keep_usdg=True)), 0)
+        read_addresses = [call.args[0] for call in wallet.get_token_balance.call_args_list]
+        self.assertEqual(read_addresses, [TOKEN, WETH])
+        quoted_addresses = [call.kwargs["sell_token"] for call in provider_factory.return_value.build_swap_transaction.call_args_list]
+        self.assertEqual(quoted_addresses, [TOKEN])
 
     @patch("asset_liquidator.create_swap_provider")
     @patch("asset_liquidator.Wallet")

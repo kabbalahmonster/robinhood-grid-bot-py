@@ -982,6 +982,9 @@ not discover or touch unrelated tokens:
 # Read-only balances and quote plan
 python grid_bot.py --liquidate-assets --confirm-liquidate-assets
 
+# Same plan, but preserve the configured USDG balance
+python grid_bot.py --liquidate-assets --confirm-liquidate-assets --keep-usdg
+
 # Broadcast only after review and after stopping this bot
 python grid_bot.py \
   --liquidate-assets \
@@ -997,6 +1000,9 @@ backups created and both `data/positions.json` and
 `data/gridless_positions.json` atomically cleared. Any partial failure leaves
 position data intact. Execution events are durable in
 `data/asset_liquidations.json`. See the fleet guide for the guarded batch form.
+Add `--keep-usdg` to both the reviewed plan and execution command when USDG
+must remain untouched; excluded USDG is not quoted, approved, swapped, or
+included in final zero-balance verification.
 
 #### Fleet batch sweep
 
