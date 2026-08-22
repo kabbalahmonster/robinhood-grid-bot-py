@@ -8,11 +8,12 @@ class TestDashboardReporter(unittest.TestCase):
     @patch("dashboard_reporter.threading.Thread.start")
     def test_usdg_balance_is_in_status_payload(self, _start):
         reporter = DashboardReporter("https://doomdash.ca/api/status")
-        reporter.report(eth_balance=0.25, usdg_balance=123.456, poll_interval_seconds=30)
+        reporter.report(eth_balance=0.25, usdg_balance=123.456, poll_interval_seconds=30, token_symbol="TENDIES")
 
         self.assertEqual(len(reporter._queue), 1)
         self.assertEqual(reporter._queue[0]["usdg_balance"], 123.456)
         self.assertEqual(reporter._queue[0]["poll_interval_seconds"], 30)
+        self.assertEqual(reporter._queue[0]["token_symbol"], "TENDIES")
 
     @patch("dashboard_reporter.threading.Thread.start")
     def test_sell_attempt_is_round_scoped_payload_field(self, _start):

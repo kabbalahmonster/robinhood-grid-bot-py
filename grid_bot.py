@@ -1927,6 +1927,7 @@ class GridBot:
                     sell_attempt=self._sell_attempt,
                     chain_id=self.config.chain_id,
                     swap_provider=self.provider.name,
+                    token_symbol=self.config.token_symbol,
                     token_address=self.config.token_address,
                     wallet_address=self.wallet.address,
                     display_name=self.config.dashboard_name,
