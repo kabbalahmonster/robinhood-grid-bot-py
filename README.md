@@ -118,6 +118,7 @@ python grid_bot.py
 | `BANK_MIN_AMOUNT` | No | 0.2 | Minimum stablecoin output required before banking |
 | `FAST_PROFIT` | No | true | Sell above minimum profit without waiting for the classic sell range |
 | `TRADEABLE_BALANCE_PERCENT` | No | 100 | Percentage of ETH/WETH balance available for trading |
+| `ETH_GAS_RESERVE` | No | 0.0005 | Native ETH retained for transaction gas and protected by guarded ETH treasury transfers |
 | **Bot Behavior** ||||
 | `POLL_INTERVAL_SECONDS` | No | 6 | Price check interval in seconds |
 | `ANTI_MEV_JITTER` | No | true | Enable anti-MEV timing jitter |
@@ -191,12 +192,13 @@ INITIAL_BUY_AMOUNT=0.01      # Higher amounts due to gas costs
 ### Operating multiple bots with tmux
 
 The repository includes aligned `start-fleet`, `stop-fleet`, `restart-fleet`,
-`update-fleet`, and guarded `usdg-sweep` templates under
+`update-fleet`, guarded treasury-transfer tools, and a reusable fleet variable
+updater under
 [`ops/fleet`](ops/fleet/README.md). They run independently configured clones in
 tiled tmux panes while preserving an interactive Bash shell, command history,
 and normal job control beneath every bot. The fleet guide covers fresh-clone
 setup, local configuration, virtual environments, command installation,
-updates, treasury sweep safety, tmux navigation, and the exact
+updates, native/ERC-20 treasury safety, fleet `.env` updates, tmux navigation, and the exact
 `Ctrl+C`/`Ctrl+Z` behavior.
 
 Start with:
@@ -860,10 +862,10 @@ CHAIN_CONFIG = {
 
 ### Treasury sweeps
 
-The guarded treasury CLI transfers banked USDG, or a specified ERC-20, from a
-bot wallet without exporting its private key to a separate sweep script. It is
-intended for moving funds from an individual bot to a known central treasury;
-it is not part of the normal trading loop and never transfers native ETH.
+The guarded treasury CLI transfers banked USDG, a specified ERC-20, or an exact
+native ETH amount from a bot wallet without exporting its private key to a
+separate sweep script. It is intended for moving funds from an individual bot
+to a known central treasury and is not part of the normal trading loop.
 
 #### Before broadcasting
 
@@ -872,8 +874,9 @@ it is not part of the normal trading loop and never transfers native ETH.
    the same account nonce.
 2. Verify the destination address out of band. Do not paste an address from an
    untrusted chat message or browser prompt.
-3. Keep enough native ETH in the bot wallet for gas; ERC-20 sweeps deliberately
-   leave its native balance untouched.
+3. Keep enough native ETH in the bot wallet for gas. ERC-20 sweeps deliberately
+   leave it untouched; native ETH transfers enforce the configured
+   `ETH_GAS_RESERVE` after the amount and estimated maximum fee.
 4. Run the dry run, review its wallet, token contract, balance, amount, and
    recipient, then run the identical command with the two execution guards.
 
@@ -917,6 +920,31 @@ The command refuses a self-transfer, malformed recipient, unsupported token
 identifier, nonpositive amount, amount above balance, empty balance, or a
 non-allowlisted recipient that was not repeated exactly.
 
+For an exact native ETH transfer, use `--transfer-eth`. There is intentionally
+no native `all` mode:
+
+```bash
+python grid_bot.py \
+  --transfer-eth \
+  --recipient "$TREASURY" \
+  --amount 0.0005
+
+# Broadcast only after reviewing the balance, maximum gas, reserve, and
+# minimum-remaining figures, and after stopping the bot.
+python grid_bot.py \
+  --transfer-eth \
+  --recipient "$TREASURY" \
+  --amount 0.0005 \
+  --execute \
+  --confirm-bot-stopped
+```
+
+Native transfers use current RPC gas estimates with the configured gas limit
+and gas price multipliers. They are refused unless the wallet can send the
+exact amount, cover the estimated maximum transaction fee, and still retain
+`ETH_GAS_RESERVE`. Successful and failed broadcasts use the same local
+`data/treasury_transfers.json` audit trail as ERC-20 transfers.
+
 #### Fleet batch sweep
 
 For fleets configured through `ops/fleet/fleet.conf`, prefer the aligned
@@ -924,6 +952,11 @@ For fleets configured through `ops/fleet/fleet.conf`, prefer the aligned
 [tmux fleet operations guide](ops/fleet/README.md). It uses the same explicit
 bot list as start/stop/restart/update, refuses broadcast while the configured
 tmux session is running, and remains dry-run by default.
+
+Use `ops/fleet/treasury-transfer` for native ETH or another ERC-20 across the
+same explicit fleet. The fleet guide also documents `ops/fleet/update-variable`
+for previewed, backed-up, atomic `.env` changes such as
+`ETH_GAS_RESERVE=0.0005`.
 
 `scripts/sweep_fleet_usdg.sh` runs the USDG sweep command in every checkout
 under a fleet root (each checkout is identified by a `grid_bot.py` file). It

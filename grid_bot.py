@@ -127,27 +127,33 @@ def _resolve_transfer_token(config, token):
     return Web3.to_checksum_address(token)
 
 
+def _validated_treasury_recipient(config, wallet, args):
+    """Validate a guarded transfer recipient and return its policy status."""
+    if not Web3.is_address(args.recipient):
+        raise ValueError("Recipient is not a valid EVM address")
+    recipient = Web3.to_checksum_address(args.recipient)
+    if recipient.lower() == wallet.address.lower():
+        raise ValueError("Recipient cannot be the bot wallet")
+
+    allowed = {address.lower() for address in config.treasury_allowed_recipients}
+    recipient_is_allowed = recipient.lower() in allowed
+    if not recipient_is_allowed:
+        confirmation = (args.confirm_recipient or "").lower()
+        if confirmation != recipient.lower():
+            raise ValueError(
+                "Recipient is not allowlisted. Repeat it exactly with "
+                "--confirm-recipient <recipient> to authorize this one transfer."
+            )
+    return recipient, recipient_is_allowed
+
+
 def run_treasury_transfer(args):
     """Plan or execute one deliberately guarded ERC-20 treasury transfer."""
     try:
         config = load_config()
-        if not Web3.is_address(args.recipient):
-            raise ValueError("Recipient is not a valid EVM address")
-        recipient = Web3.to_checksum_address(args.recipient)
         token_address = _resolve_transfer_token(config, args.transfer_token)
         wallet = Wallet(config)
-        if recipient.lower() == wallet.address.lower():
-            raise ValueError("Recipient cannot be the bot wallet")
-
-        allowed = {address.lower() for address in config.treasury_allowed_recipients}
-        recipient_is_allowed = recipient.lower() in allowed
-        if not recipient_is_allowed:
-            confirmation = (args.confirm_recipient or "").lower()
-            if confirmation != recipient.lower():
-                raise ValueError(
-                    "Recipient is not allowlisted. Repeat it exactly with "
-                    "--confirm-recipient <recipient> to authorize this one transfer."
-                )
+        recipient, recipient_is_allowed = _validated_treasury_recipient(config, wallet, args)
 
         token_info = wallet.get_token_info(token_address)
         balance, balance_raw = wallet.get_token_balance(token_address)
@@ -202,6 +208,78 @@ def run_treasury_transfer(args):
         return 0
     except Exception as exc:
         print(f"TREASURY TRANSFER REFUSED: {exc}")
+        return 2
+
+
+def run_native_treasury_transfer(args):
+    """Plan or execute one reserve-preserving native-ETH transfer."""
+    try:
+        config = load_config()
+        wallet = Wallet(config)
+        recipient, recipient_is_allowed = _validated_treasury_recipient(config, wallet, args)
+
+        requested = Decimal(args.amount)
+        if not requested.is_finite() or requested <= 0:
+            raise ValueError("--amount must be a positive decimal ETH amount")
+        amount_wei = int(requested * Decimal(10**18))
+        if amount_wei <= 0:
+            raise ValueError("--amount is below one wei")
+
+        balance_wei = wallet.get_eth_balance_wei()
+        tx = wallet.build_eth_transfer_transaction(recipient, amount_wei)
+        fee_wei = int(tx["gas"]) * int(tx["gasPrice"])
+        reserve_wei = int(Decimal(str(config.eth_gas_reserve)) * Decimal(10**18))
+        required_wei = amount_wei + fee_wei + reserve_wei
+        if required_wei > balance_wei:
+            raise ValueError(
+                "Insufficient ETH to send the requested amount while paying the "
+                f"estimated maximum fee and retaining ETH_GAS_RESERVE={config.eth_gas_reserve}"
+            )
+
+        amount = Decimal(amount_wei) / Decimal(10**18)
+        balance = Decimal(balance_wei) / Decimal(10**18)
+        fee = Decimal(fee_wei) / Decimal(10**18)
+        remaining = Decimal(balance_wei - amount_wei - fee_wei) / Decimal(10**18)
+        print("NATIVE ETH TREASURY TRANSFER PLAN")
+        print(f"Wallet:       {wallet.address}")
+        print(f"Balance:      {balance} ETH")
+        print(f"Send:         {amount} ETH")
+        print(f"Max gas cost: {fee} ETH")
+        print(f"Reserve:      {config.eth_gas_reserve} ETH")
+        print(f"Min remaining after gas: {remaining} ETH")
+        print(f"Recipient:    {recipient} ({'allowlisted' if recipient_is_allowed else 'one-time confirmed'})")
+
+        if not args.execute:
+            print("DRY RUN: no transaction broadcast. Add --execute after reviewing this plan.")
+            return 0
+        if not args.confirm_bot_stopped:
+            raise ValueError(
+                "Refusing to broadcast while a trading bot may share this wallet. "
+                "Stop it first, then pass --confirm-bot-stopped."
+            )
+
+        result = wallet.transfer_eth(tx, wait_for_receipt=True)
+        record = {
+            "timestamp": datetime.now().astimezone().isoformat(),
+            "wallet": wallet.address,
+            "token": "ETH",
+            "token_address": "native",
+            "amount": str(amount),
+            "recipient": recipient,
+            "estimated_max_gas_eth": str(fee),
+            "gas_reserve_eth": str(config.eth_gas_reserve),
+            "success": result.success,
+            "tx_hash": result.tx_hash,
+            "error": result.error,
+        }
+        _append_treasury_receipt(record)
+        if not result.success:
+            print(f"TRANSFER FAILED: {result.error}")
+            return 1
+        print(f"TRANSFER CONFIRMED: {_terminal_transaction_link(config.chain_id, result.tx_hash)}")
+        return 0
+    except Exception as exc:
+        print(f"NATIVE ETH TRANSFER REFUSED: {exc}")
         return 2
 
 
@@ -1965,26 +2043,33 @@ if __name__ == "__main__":
     parser.add_argument("--check-config", action="store_true", help="Validate config without trading")
     parser.add_argument("--sweep-usdg", metavar="RECIPIENT", help="Transfer USDG; shorthand for --transfer-token USDG")
     parser.add_argument("--transfer-token", metavar="USDG_OR_ADDRESS", help="ERC-20 token to transfer")
-    parser.add_argument("--recipient", help="Recipient for --transfer-token")
+    parser.add_argument("--transfer-eth", action="store_true", help="Transfer an exact native ETH amount")
+    parser.add_argument("--recipient", help="Recipient for --transfer-token or --transfer-eth")
     parser.add_argument("--amount", default="all", help="Token amount or 'all' (default: all)")
     parser.add_argument("--confirm-recipient", help="Required exact recipient for a non-allowlisted address")
     parser.add_argument("--confirm-bot-stopped", action="store_true", help="Acknowledge the bot sharing this wallet is stopped")
     parser.add_argument("--execute", action="store_true", help="Broadcast the planned transfer")
     args = parser.parse_args()
     if args.check_config:
-        if any([args.sweep_usdg, args.transfer_token, args.recipient, args.execute]):
+        if any([args.sweep_usdg, args.transfer_token, args.transfer_eth, args.recipient, args.execute]):
             parser.error("--check-config cannot be combined with a transfer command")
         raise SystemExit(check_config())
     if args.sweep_usdg:
-        if args.transfer_token or args.recipient:
-            parser.error("--sweep-usdg cannot be combined with --transfer-token or --recipient")
+        if args.transfer_token or args.transfer_eth or args.recipient:
+            parser.error("--sweep-usdg cannot be combined with --transfer-token, --transfer-eth, or --recipient")
         args.transfer_token = "USDG"
         args.recipient = args.sweep_usdg
+    if args.transfer_eth:
+        if args.transfer_token or not args.recipient:
+            parser.error("--transfer-eth requires --recipient and cannot be combined with --transfer-token")
+        if args.amount == "all":
+            parser.error("--transfer-eth requires an exact positive --amount")
+        raise SystemExit(run_native_treasury_transfer(args))
     if args.transfer_token or args.recipient:
         if not args.transfer_token or not args.recipient:
             parser.error("--transfer-token and --recipient must be supplied together")
         raise SystemExit(run_treasury_transfer(args))
     if any([args.amount != "all", args.confirm_recipient, args.confirm_bot_stopped, args.execute]):
-        parser.error("transfer options require --sweep-usdg or --transfer-token with --recipient")
+        parser.error("transfer options require --sweep-usdg, --transfer-token, or --transfer-eth with --recipient")
     bot = GridBot()
     bot.run()

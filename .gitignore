@@ -29,6 +29,7 @@ ENV/
 .env
 .env.local
 .env.*.local
+.env.bak.*
 
 # Local fleet topology (copy from ops/fleet/fleet.conf.example)
 ops/fleet/fleet.conf

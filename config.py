@@ -131,7 +131,7 @@ class BotConfig:
     
     # ETH Trading Mode
     use_eth_trading: bool  # If True, trade native ETH instead of WETH
-    eth_gas_reserve: float  # ETH amount to reserve for gas (default: 0.001)
+    eth_gas_reserve: float  # ETH amount to reserve for gas (default: 0.0005)
     
     # Gas Settings
     gas_limit_multiplier: float  # Multiplier for gas limit (default: 1.05)
@@ -331,7 +331,7 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
         
         # ETH Trading Mode
         use_eth_trading=os.getenv("USE_ETH_TRADING", "false").lower() == "true",
-        eth_gas_reserve=float(os.getenv("ETH_GAS_RESERVE", "0.001")),
+        eth_gas_reserve=float(os.getenv("ETH_GAS_RESERVE", "0.0005")),
         
         # Gas Settings
         gas_limit_multiplier=float(os.getenv("GAS_LIMIT_MULTIPLIER", "1.05")),

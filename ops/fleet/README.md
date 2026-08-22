@@ -67,7 +67,8 @@ sudo apt install tmux git python3 python3-venv
    cp ops/fleet/fleet.conf.example ops/fleet/fleet.conf
    nano ops/fleet/fleet.conf
    chmod +x ops/fleet/start-fleet ops/fleet/stop-fleet \
-     ops/fleet/restart-fleet ops/fleet/update-fleet ops/fleet/usdg-sweep
+     ops/fleet/restart-fleet ops/fleet/update-fleet ops/fleet/usdg-sweep \
+     ops/fleet/treasury-transfer ops/fleet/update-variable
    ```
 
    Replace the example directories in `FLEET_BOT_DIRS` with every real bot
@@ -82,6 +83,8 @@ sudo apt install tmux git python3 python3-venv
    ln -sf "$PWD/ops/fleet/restart-fleet" "$HOME/bin/restart-fleet"
    ln -sf "$PWD/ops/fleet/update-fleet" "$HOME/bin/update-fleet"
    ln -sf "$PWD/ops/fleet/usdg-sweep" "$HOME/bin/usdg-sweep"
+   ln -sf "$PWD/ops/fleet/treasury-transfer" "$HOME/bin/treasury-transfer"
+   ln -sf "$PWD/ops/fleet/update-variable" "$HOME/bin/update-variable"
    ```
 
    Ensure `~/bin` is in `PATH`, or invoke the scripts by their repository paths.
@@ -181,6 +184,80 @@ the output and receipts first. The tmux-session check cannot detect bots
 started elsewhere, so the explicit stopped-fleet confirmation remains a human
 safety assertion.
 
+## Native ETH and other fleet treasury transfers
+
+`treasury-transfer` is the general guarded batch command. Its `--asset` may be
+`ETH`, `USDG`, or an ERC-20 contract address. Native ETH always requires an
+exact amount; deliberately, there is no `all` mode for ETH.
+
+To plan sending exactly `0.0005 ETH` from every configured wallet:
+
+```bash
+TREASURY=0xYourActualCentralWalletAddress
+ops/fleet/treasury-transfer \
+  --asset ETH \
+  --amount 0.0005 \
+  --recipient "$TREASURY"
+```
+
+For each wallet, the plan prints its balance, exact send amount, estimated
+maximum gas cost, configured reserve, and minimum remaining balance. The bot
+refuses the transfer unless:
+
+```text
+balance >= amount + estimated maximum gas cost + ETH_GAS_RESERVE
+```
+
+After reviewing every plan, stop the fleet and repeat with the guards:
+
+```bash
+ops/fleet/stop-fleet
+ops/fleet/treasury-transfer \
+  --asset ETH \
+  --amount 0.0005 \
+  --recipient "$TREASURY" \
+  --execute \
+  --confirm-fleet-stopped
+```
+
+For another ERC-20, use its contract address and either an exact token amount
+or `all`. USDG is accepted as a named asset. All recipient allowlist,
+one-time-confirmation, stopped-process, receipt, partial-failure, and non-atomic
+warnings from `usdg-sweep` apply equally here.
+
+## Updating one variable across the fleet
+
+`update-variable` previews or updates variables in every configured checkout's
+`.env`. It requires an existing variable by default, refuses duplicate
+definitions and malformed names, writes atomically, preserves file permissions
+and inline comments, and creates timestamped `.env.bak.*` files before applying
+anything. If an apply step fails, it restores every `.env` from that run.
+
+Preview changing the fleet gas reserve:
+
+```bash
+ops/fleet/update-variable ETH_GAS_RESERVE=0.0005
+```
+
+Review every old/new line, then apply and restart so all processes load it:
+
+```bash
+ops/fleet/update-variable --apply --restart ETH_GAS_RESERVE=0.0005
+```
+
+Multiple assignments may be updated together:
+
+```bash
+ops/fleet/update-variable POLL_INTERVAL_SECONDS=8 ETH_GAS_RESERVE=0.0005
+```
+
+Use `--allow-add` only when intentionally adding a variable missing from one or
+more files. Without `--restart`, running bots keep their old in-memory values
+until the next restart. Values must already be valid dotenv syntax; quote a
+value as required by dotenv itself. Avoid secrets on the command line because
+shell history and process listings can expose arguments (the preview redacts
+common secret-like names, but the shell cannot).
+
 ## Safety and update behavior
 
 - `start-fleet` validates every directory, entrypoint, interpreter, and
@@ -203,6 +280,11 @@ safety assertion.
 - `usdg-sweep` is dry-run by default, validates the recipient format, and uses
   each checkout's existing `.env`; treasury addresses and keys never belong in
   `fleet.conf`.
+- `treasury-transfer` applies the same batch guards to native ETH, USDG, and
+  arbitrary ERC-20 contracts. Native transfers also enforce the configured gas
+  reserve after the amount and estimated maximum fee.
+- `update-variable` is preview-only without `--apply`; backups are intentionally
+  retained for operator recovery and gitignored.
 
 ## Tmux navigation and troubleshooting
 

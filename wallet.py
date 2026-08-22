@@ -193,6 +193,10 @@ class Wallet:
         """
         balance_wei = self.w3.eth.get_balance(self.address)
         return wei_to_eth(balance_wei)
+
+    def get_eth_balance_wei(self) -> int:
+        """Get the wallet's native ETH balance without losing wei precision."""
+        return int(self.w3.eth.get_balance(self.address))
     
     def get_token_balance(self, token_address: str) -> tuple[float, int]:
         """
@@ -294,6 +298,35 @@ class Wallet:
             "gas": 100000,
             "gasPrice": gas_price,
         })
+        return self._send_transaction(tx, wait_for_receipt)
+
+    def build_eth_transfer_transaction(self, recipient: str, amount_wei: int) -> TxParams:
+        """Build an exact native-ETH transfer with buffered current gas values.
+
+        Policy checks such as recipient allowlists, stopped-bot confirmation,
+        and preservation of the configured gas reserve belong to the guarded
+        CLI caller. This method only constructs the requested transaction.
+        """
+        if amount_wei <= 0:
+            raise ValueError("Transfer amount must be positive")
+        if not Web3.is_address(recipient):
+            raise ValueError("Invalid recipient address")
+
+        tx: TxParams = {
+            "from": self.address,
+            "to": Web3.to_checksum_address(recipient),
+            "value": amount_wei,
+            "nonce": self.w3.eth.get_transaction_count(self.address),
+        }
+        estimated_gas = int(self.w3.eth.estimate_gas(tx))
+        gas_multiplier = max(float(self.config.gas_limit_multiplier), 1.0)
+        price_multiplier = max(float(self.config.gas_price_multiplier), 1.0)
+        tx["gas"] = max(estimated_gas, int(estimated_gas * gas_multiplier))
+        tx["gasPrice"] = int(self.w3.eth.gas_price * price_multiplier)
+        return tx
+
+    def transfer_eth(self, tx: TxParams, wait_for_receipt: bool = True) -> TransactionResult:
+        """Sign and send a previously reviewed native-ETH transfer."""
         return self._send_transaction(tx, wait_for_receipt)
     
     def approve_token(

@@ -13,6 +13,7 @@ from grid_bot import (
     _terminal_transaction_link,
     _total_successful_treasury_sent_usdg,
     check_config,
+    run_native_treasury_transfer,
     run_treasury_transfer,
 )
 
@@ -140,6 +141,62 @@ class TestCliCommands(unittest.TestCase):
 
         self.assertEqual(run_treasury_transfer(args), 2)
         wallet_class.return_value.get_token_balance.assert_not_called()
+
+    @patch("grid_bot._append_treasury_receipt")
+    @patch("grid_bot.Wallet")
+    @patch("grid_bot.load_config")
+    def test_native_eth_dry_run_preserves_reserve_and_never_broadcasts(
+        self, load_config, wallet_class, append_receipt
+    ):
+        load_config.return_value = SimpleNamespace(
+            treasury_allowed_recipients=["0x0000000000000000000000000000000000000004"],
+            eth_gas_reserve=0.0005,
+        )
+        wallet = wallet_class.return_value
+        wallet.address = "0x0000000000000000000000000000000000000002"
+        wallet.get_eth_balance_wei.return_value = 2_000_000_000_000_000
+        wallet.build_eth_transfer_transaction.return_value = {
+            "gas": 21_000,
+            "gasPrice": 1_000_000_000,
+        }
+        args = SimpleNamespace(
+            recipient="0x0000000000000000000000000000000000000004",
+            amount="0.0005",
+            confirm_recipient=None,
+            execute=False,
+            confirm_bot_stopped=False,
+        )
+
+        self.assertEqual(run_native_treasury_transfer(args), 0)
+        wallet.transfer_eth.assert_not_called()
+        append_receipt.assert_not_called()
+
+    @patch("grid_bot.Wallet")
+    @patch("grid_bot.load_config")
+    def test_native_eth_transfer_refuses_to_spend_configured_reserve(
+        self, load_config, wallet_class
+    ):
+        load_config.return_value = SimpleNamespace(
+            treasury_allowed_recipients=["0x0000000000000000000000000000000000000004"],
+            eth_gas_reserve=0.0005,
+        )
+        wallet = wallet_class.return_value
+        wallet.address = "0x0000000000000000000000000000000000000002"
+        wallet.get_eth_balance_wei.return_value = 1_000_000_000_000_000
+        wallet.build_eth_transfer_transaction.return_value = {
+            "gas": 21_000,
+            "gasPrice": 1_000_000_000,
+        }
+        args = SimpleNamespace(
+            recipient="0x0000000000000000000000000000000000000004",
+            amount="0.0005",
+            confirm_recipient=None,
+            execute=True,
+            confirm_bot_stopped=True,
+        )
+
+        self.assertEqual(run_native_treasury_transfer(args), 2)
+        wallet.transfer_eth.assert_not_called()
 
 
 if __name__ == "__main__":
