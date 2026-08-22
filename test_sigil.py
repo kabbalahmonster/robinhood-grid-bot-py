@@ -1,9 +1,14 @@
 import unittest
 
-from sigil import create_sigil, reduce_intention
+from sigil import create_sigil, load_intentions, reduce_intention
 
 
 class TestSigil(unittest.TestCase):
+    def test_grimoire_contains_23_unique_curated_intentions(self):
+        intentions = load_intentions()
+        self.assertEqual(len(intentions), 23)
+        self.assertEqual(len(set(intentions)), 23)
+
     def test_reduction_removes_vowels_nonletters_and_duplicates(self):
         self.assertEqual(reduce_intention("Prosperity, prosperity! Luck."), "PRSTYLCK")
 
