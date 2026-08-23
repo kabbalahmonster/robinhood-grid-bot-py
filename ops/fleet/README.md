@@ -69,6 +69,7 @@ sudo apt install tmux git python3 python3-venv
    chmod +x ops/fleet/start-fleet ops/fleet/stop-fleet \
      ops/fleet/restart-fleet ops/fleet/update-fleet ops/fleet/usdg-sweep \
      ops/fleet/treasury-transfer ops/fleet/update-variable \
+     ops/fleet/backup-private-keys ops/fleet/fleet-discover \
      ops/fleet/liquidate-assets ops/fleet/fleet-doctor \
      ops/fleet/fleet-inventory ops/fleet/fleet-audit
    ```
@@ -92,6 +93,8 @@ sudo apt install tmux git python3 python3-venv
    ln -sf "$PWD/ops/fleet/usdg-sweep" "$HOME/bin/usdg-sweep"
    ln -sf "$PWD/ops/fleet/treasury-transfer" "$HOME/bin/treasury-transfer"
    ln -sf "$PWD/ops/fleet/update-variable" "$HOME/bin/update-variable"
+   ln -sf "$PWD/ops/fleet/backup-private-keys" "$HOME/bin/backup-private-keys"
+   ln -sf "$PWD/ops/fleet/fleet-discover" "$HOME/bin/fleet-discover"
    ln -sf "$PWD/ops/fleet/liquidate-assets" "$HOME/bin/liquidate-assets"
    ln -sf "$PWD/ops/fleet/fleet-doctor" "$HOME/bin/fleet-doctor"
    ln -sf "$PWD/ops/fleet/fleet-inventory" "$HOME/bin/fleet-inventory"
@@ -109,7 +112,22 @@ The scripts look for configuration in this order:
 
 ### Fleet membership: root discovery or explicit list
 
-The default configuration discovers bot checkouts below one root:
+The recommended configuration names the authoritative fleet below one root:
+
+```bash
+FLEET_BOT_ROOT="$HOME/bot-farm/rh-bots"
+FLEET_CHECKOUT_DIRNAME="robinhood-grid-bot-py"
+FLEET_BOT_NAMES=(ai brodie cashcat)
+```
+
+Every name resolves to
+`$FLEET_BOT_ROOT/<name>/$FLEET_CHECKOUT_DIRNAME`. All fleet commands therefore
+share the same membership and deterministic order. `fleet-discover` scans the
+root and prints a suggested `FLEET_BOT_NAMES` block; review it before copying
+it into `fleet.conf`.
+
+For backward compatibility, a configuration without `FLEET_BOT_NAMES` or
+`FLEET_BOT_DIRS` discovers bot checkouts below one root:
 
 ```bash
 FLEET_BOT_ROOT="$HOME/bot-farm/rh-bots"
@@ -517,6 +535,23 @@ Skipped bots are named in the summary and receive no backup or edit. An apply
 remains atomic across the valid subset. If combined with `--restart`, the
 normal fleet-wide restart still includes skipped bots, which retain their old
 environment.
+
+## Backing up fleet private keys
+
+`backup-private-keys` reads `PRIVATE_KEY` and `TOKEN_SYMBOL` from every
+configured bot and creates a structured plaintext JSON backup:
+
+```bash
+ops/fleet/backup-private-keys --output "$HOME/fleet-private-keys.json"
+```
+
+The command requires an explicit output path, creates it with owner-only mode
+`0600`, never prints key material, and uses exclusive creation: if anything
+already exists at that path, it fails without changing the file. It validates
+the entire fleet before creating the backup so a missing `.env`, missing or
+duplicate field, or malformed private key cannot silently produce an
+incomplete file. The resulting file contains all fleet signing authority in
+plaintext; protect and remove copies accordingly.
 
 ## Safety and update behavior
 

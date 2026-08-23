@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+SCRIPT_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)"
+# shellcheck source=fleet-common.sh
+source "$SCRIPT_DIR/fleet-common.sh"
+
+config_path=""
+if (($#)); then
+  [[ "$1" == "--config" && $# == 2 ]] || fleet_die "Usage: fleet-discover [--config PATH]"
+  config_path="$2"
+fi
+
+fleet_load_config "$config_path"
+root_path="$(readlink -f -- "$FLEET_BOT_ROOT")"
+discovery_file="$(mktemp)" || fleet_die "Could not create fleet discovery workspace"
+trap 'rm -f -- "$discovery_file"' EXIT
+find "$root_path" -mindepth 2 -maxdepth "$FLEET_DISCOVERY_MAX_DEPTH" \
+  \( -type d \( -name .git -o -name .venv -o -name venv -o -name __pycache__ \) -prune \) -o \
+  \( -type f -name "$FLEET_ENTRYPOINT" -print0 \) | sort -z > "$discovery_file"
+
+printf 'FLEET_BOT_NAMES=(\n'
+while IFS= read -r -d '' bot_file; do
+  bot_dir="$(dirname -- "$bot_file")"
+  printf '  %q\n' "$(fleet_bot_name "$bot_dir")"
+done < "$discovery_file"
+printf ')\n'

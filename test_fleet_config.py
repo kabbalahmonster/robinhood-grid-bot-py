@@ -61,6 +61,26 @@ class TestFleetConfig(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(result.stdout.splitlines()[0].startswith("discovered under "))
 
+    def test_bot_names_resolve_standard_checkout_paths(self):
+        result = self._load(
+            'FLEET_BOT_ROOT="__BOT_ROOT__"\nFLEET_BOT_NAMES=(alpha zeta)\n',
+            ("alpha/robinhood-grid-bot-py", "zeta/robinhood-grid-bot-py"),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = result.stdout.splitlines()
+        self.assertEqual(lines[0], "explicit FLEET_BOT_NAMES")
+        self.assertTrue(lines[1].endswith("alpha/robinhood-grid-bot-py"))
+        self.assertTrue(lines[2].endswith("zeta/robinhood-grid-bot-py"))
+
+    def test_bot_names_and_dirs_are_mutually_exclusive(self):
+        result = self._load(
+            'FLEET_BOT_ROOT="__BOT_ROOT__"\nFLEET_BOT_NAMES=(alpha)\n'
+            'FLEET_BOT_DIRS=("__BOT_ROOT__/alpha/robinhood-grid-bot-py")\n',
+            ("alpha/robinhood-grid-bot-py",),
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not both", result.stderr)
+
     def test_only_and_exclude_select_by_checkout_name(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "bots"

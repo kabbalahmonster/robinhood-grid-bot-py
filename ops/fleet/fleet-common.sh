@@ -27,7 +27,7 @@ fleet_default_config() {
 }
 
 fleet_load_config() {
-  local requested_config="${1:-}" root_path home_path bot_file bot_dir discovery_file
+  local requested_config="${1:-}" root_path home_path bot_file bot_dir discovery_file name names_configured dirs_configured
   FLEET_CONFIG_PATH="${requested_config:-${FLEET_CONFIG:-$(fleet_default_config)}}"
   [[ -f "$FLEET_CONFIG_PATH" ]] || fleet_die "Fleet config not found: $FLEET_CONFIG_PATH
 Copy ops/fleet/fleet.conf.example to ops/fleet/fleet.conf and edit it,
@@ -44,6 +44,7 @@ or pass --config PATH / set FLEET_CONFIG."
   : "${FLEET_START_STAGGER:=1}"
   : "${FLEET_TREASURY_RECIPIENT:=}"
   : "${FLEET_BOT_ROOT:=${HOME}/bot-farm/rh-bots}"
+  : "${FLEET_CHECKOUT_DIRNAME:=robinhood-grid-bot-py}"
   : "${FLEET_DISCOVERY_MAX_DEPTH:=4}"
 
   [[ "$FLEET_RESTART_DELAY" =~ ^[0-9]+([.][0-9]+)?$ ]] || fleet_die "FLEET_RESTART_DELAY must be a non-negative number"
@@ -53,7 +54,21 @@ or pass --config PATH / set FLEET_CONFIG."
     fleet_die "FLEET_TREASURY_RECIPIENT must be empty or a 20-byte 0x-prefixed EVM address"
   fi
 
-  if declare -p FLEET_BOT_DIRS >/dev/null 2>&1 && ((${#FLEET_BOT_DIRS[@]} > 0)); then
+  names_configured=0
+  dirs_configured=0
+  declare -p FLEET_BOT_NAMES >/dev/null 2>&1 && ((${#FLEET_BOT_NAMES[@]} > 0)) && names_configured=1
+  declare -p FLEET_BOT_DIRS >/dev/null 2>&1 && ((${#FLEET_BOT_DIRS[@]} > 0)) && dirs_configured=1
+  ((names_configured == 0 || dirs_configured == 0)) || fleet_die "Configure FLEET_BOT_NAMES or FLEET_BOT_DIRS, not both"
+
+  if ((names_configured)); then
+    [[ "$FLEET_CHECKOUT_DIRNAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || fleet_die "FLEET_CHECKOUT_DIRNAME must be one safe directory name"
+    FLEET_BOT_DIRS=()
+    for name in "${FLEET_BOT_NAMES[@]}"; do
+      [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || fleet_die "Invalid bot name in FLEET_BOT_NAMES: $name"
+      FLEET_BOT_DIRS+=("$FLEET_BOT_ROOT/$name/$FLEET_CHECKOUT_DIRNAME")
+    done
+    FLEET_MEMBERSHIP_SOURCE="explicit FLEET_BOT_NAMES"
+  elif ((dirs_configured)); then
     FLEET_MEMBERSHIP_SOURCE="explicit FLEET_BOT_DIRS"
   else
     [[ "$FLEET_ENTRYPOINT" != */* ]] || fleet_die "Root discovery requires FLEET_ENTRYPOINT to be a filename, not a path"

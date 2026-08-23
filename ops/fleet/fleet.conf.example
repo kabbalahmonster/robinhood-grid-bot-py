@@ -13,10 +13,19 @@ FLEET_START_STAGGER=1
 # --confirm-recipient override).
 FLEET_TREASURY_RECIPIENT=""
 
-# Default membership mode: recursively discover checkouts containing
-# FLEET_ENTRYPOINT below this root. Discovery is sorted and excludes .git,
-# .venv, venv, and __pycache__ directories.
+# Fleet checkout layout and authoritative membership. Every name resolves to
+# $FLEET_BOT_ROOT/<name>/$FLEET_CHECKOUT_DIRNAME. Add or remove names here so
+# every fleet command uses the same deterministic target list and pane order.
 FLEET_BOT_ROOT="$HOME/bot-farm/rh-bots"
+FLEET_CHECKOUT_DIRNAME="robinhood-grid-bot-py"
+FLEET_BOT_NAMES=(
+  example-one
+  example-two
+)
+
+# Legacy fallback: when neither FLEET_BOT_NAMES nor FLEET_BOT_DIRS is set,
+# recursively discover checkouts containing FLEET_ENTRYPOINT below the root.
+# `fleet-discover` prints a suggested FLEET_BOT_NAMES block for migration.
 FLEET_DISCOVERY_MAX_DEPTH=4
 
 # Optional explicit membership override. If this array exists and is non-empty,
