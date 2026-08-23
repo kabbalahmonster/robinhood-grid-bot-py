@@ -18,6 +18,8 @@ Dry run is the default. Unknown/airdrop tokens are intentionally ignored.
   --keep-usdg                  Leave each wallet's configured USDG untouched
   --confirm-fleet-stopped      Required with --execute
   --config PATH                Use an alternate fleet configuration
+  --only NAMES                 Target comma-separated bot names
+  --exclude NAMES              Omit comma-separated bot names
   -h, --help                   Show this help
 EOF
 }
@@ -27,6 +29,8 @@ execute=0
 confirmed=0
 fleet_stopped=0
 keep_usdg=0
+only=""
+exclude=""
 while (($#)); do
   case "$1" in
     --config) (($# >= 2)) || fleet_die "--config requires a path"; config_path="$2"; shift 2 ;;
@@ -34,6 +38,8 @@ while (($#)); do
     --confirm-liquidate-assets) confirmed=1; shift ;;
     --keep-usdg) keep_usdg=1; shift ;;
     --confirm-fleet-stopped) fleet_stopped=1; shift ;;
+    --only) (($# >= 2)) || fleet_die "--only requires comma-separated names"; only="$2"; shift 2 ;;
+    --exclude) (($# >= 2)) || fleet_die "--exclude requires comma-separated names"; exclude="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) fleet_die "Unknown option: $1" ;;
   esac
@@ -45,6 +51,7 @@ if ((execute && !fleet_stopped)); then
 fi
 
 fleet_load_config "$config_path"
+fleet_apply_selection "$only" "$exclude"
 fleet_validate_bots
 if ((execute)); then
   fleet_require_tmux

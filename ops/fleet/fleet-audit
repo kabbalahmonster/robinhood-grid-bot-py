@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+SCRIPT_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)"
+source "$SCRIPT_DIR/fleet-common.sh"
+
+usage() { cat <<'EOF'
+Usage: fleet-audit [--json] [--failures-only] [--emit-only] [--only NAMES] [--exclude NAMES] [--config PATH]
+Reconcile local treasury/liquidation receipts. Never broadcasts or retries.
+--emit-only prints comma-separated bot names requiring attention for reviewed use with another command's --only.
+EOF
+}
+config_path=""; only=""; exclude=""; json=0; failures_only=0; emit_only=0
+while (($#)); do case "$1" in
+  --config|--only|--exclude)
+    (($# >= 2)) || fleet_die "$1 requires a value"
+    case "$1" in --config) config_path="$2";; --only) only="$2";; --exclude) exclude="$2";; esac
+    shift 2;;
+  --json) json=1; shift;; --failures-only) failures_only=1; shift;; --emit-only) emit_only=1; shift;;
+  -h|--help) usage; exit 0;; *) fleet_die "Unknown option: $1";; esac; done
+((json == 0 || emit_only == 0)) || fleet_die "--json and --emit-only cannot be combined"
+fleet_load_config "$config_path"; fleet_apply_selection "$only" "$exclude"; fleet_validate_bots >&2
+command -v python3 >/dev/null 2>&1 || fleet_die "python3 is required for fleet-audit"
+args=(); ((json == 0)) || args+=(--json); ((failures_only == 0)) || args+=(--failures-only); ((emit_only == 0)) || args+=(--emit-only)
+for bot_dir in "${FLEET_BOT_DIRS[@]}"; do args+=(--bot "$(fleet_bot_name "$bot_dir")=$bot_dir"); done
+python3 "$SCRIPT_DIR/audit-fleet.py" "${args[@]}"

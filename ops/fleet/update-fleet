@@ -8,7 +8,7 @@ source "$SCRIPT_DIR/fleet-common.sh"
 
 usage() {
   cat <<'EOF'
-Usage: update-fleet [--restart] [--detach] [--config PATH]
+Usage: update-fleet [--restart] [--detach] [--only NAMES] [--exclude NAMES] [--config PATH]
 
 Fast-forward every configured bot checkout from its current upstream branch.
 All checkouts are preflighted before any pull. Dirty worktrees, detached HEADs,
@@ -22,6 +22,8 @@ EOF
 config_path=""
 restart=0
 detach=0
+only=""
+exclude=""
 while (($#)); do
   case "$1" in
     --config)
@@ -31,13 +33,17 @@ while (($#)); do
       ;;
     --restart) restart=1; shift ;;
     --detach) detach=1; shift ;;
+    --only) (($# >= 2)) || fleet_die "--only requires comma-separated names"; only="$2"; shift 2 ;;
+    --exclude) (($# >= 2)) || fleet_die "--exclude requires comma-separated names"; exclude="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) fleet_die "Unknown option: $1" ;;
   esac
 done
 ((detach == 0 || restart == 1)) || fleet_die "--detach is only meaningful with --restart"
+[[ -z "$only$exclude" || $restart == 0 ]] || fleet_die "--restart cannot be combined with --only/--exclude; restart the selected bots manually"
 
 fleet_load_config "$config_path"
+fleet_apply_selection "$only" "$exclude"
 command -v git >/dev/null 2>&1 || fleet_die "git is required but was not found in PATH"
 fleet_validate_bots
 

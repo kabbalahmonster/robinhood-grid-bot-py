@@ -193,11 +193,13 @@ INITIAL_BUY_AMOUNT=0.01      # Higher amounts due to gas costs
 
 The repository includes aligned `start-fleet`, `stop-fleet`, `restart-fleet`,
 `update-fleet`, guarded treasury-transfer and managed-asset liquidation tools,
-and a reusable fleet variable updater under
+read-only doctor/inventory/audit commands, shared `--only`/`--exclude`
+targeting, and a reusable fleet variable updater under
 [`ops/fleet`](ops/fleet/README.md). They run independently configured clones in
 tiled tmux panes while preserving an interactive Bash shell, command history,
 and normal job control beneath every bot. The fleet guide covers fresh-clone
 setup, local configuration, virtual environments, command installation,
+fleet health checks, balance/position inventory, receipt reconciliation,
 updates, native/ERC-20 treasury safety, verified position-clearing liquidation,
 fleet `.env` updates, tmux navigation, and the exact
 `Ctrl+C`/`Ctrl+Z` behavior.

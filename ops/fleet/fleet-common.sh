@@ -106,11 +106,73 @@ fleet_python_for() {
   fi
 }
 
+fleet_bot_name() {
+  local bot_dir="$1" repo_name
+  repo_name="$(basename -- "$bot_dir")"
+  if [[ "$repo_name" == "robinhood-grid-bot-py" ]]; then
+    basename -- "$(dirname -- "$bot_dir")"
+  else
+    printf '%s\n' "$repo_name"
+  fi
+}
+
+fleet_apply_selection() {
+  local only_csv="${1:-}" exclude_csv="${2:-}"
+  local bot_dir name token match
+  local -a selected=() tokens=()
+  local -A known=() included=() excluded=()
+
+  for bot_dir in "${FLEET_BOT_DIRS[@]}"; do
+    name="$(fleet_bot_name "$bot_dir")"
+    [[ -z "${known[$name]+x}" ]] || fleet_die "Duplicate fleet bot name '$name'; use unique checkout parent names"
+    known["$name"]="$bot_dir"
+  done
+
+  if [[ -n "$only_csv" ]]; then
+    IFS=',' read -r -a tokens <<< "$only_csv"
+    for token in "${tokens[@]}"; do
+      token="${token#"${token%%[![:space:]]*}"}"
+      token="${token%"${token##*[![:space:]]}"}"
+      [[ -n "$token" ]] || fleet_die "--only contains an empty bot name"
+      [[ -n "${known[$token]+x}" ]] || fleet_die "Unknown bot in --only: $token"
+      included["$token"]=1
+    done
+  fi
+
+  tokens=()
+  if [[ -n "$exclude_csv" ]]; then
+    IFS=',' read -r -a tokens <<< "$exclude_csv"
+    for token in "${tokens[@]}"; do
+      token="${token#"${token%%[![:space:]]*}"}"
+      token="${token%"${token##*[![:space:]]}"}"
+      [[ -n "$token" ]] || fleet_die "--exclude contains an empty bot name"
+      [[ -n "${known[$token]+x}" ]] || fleet_die "Unknown bot in --exclude: $token"
+      excluded["$token"]=1
+    done
+  fi
+
+  FLEET_SELECTED_NAMES=()
+  for bot_dir in "${FLEET_BOT_DIRS[@]}"; do
+    name="$(fleet_bot_name "$bot_dir")"
+    match=1
+    [[ -z "$only_csv" || -n "${included[$name]+x}" ]] || match=0
+    [[ -z "${excluded[$name]+x}" ]] || match=0
+    if ((match)); then
+      selected+=("$bot_dir")
+      FLEET_SELECTED_NAMES+=("$name")
+    fi
+  done
+  ((${#selected[@]} > 0)) || fleet_die "Fleet selection resolved to zero bots"
+  FLEET_BOT_DIRS=("${selected[@]}")
+  FLEET_SELECTION_DESCRIPTION="${FLEET_SELECTED_NAMES[*]}"
+}
+
 fleet_validate_bots() {
   local bot_dir bot_file python_bin
   local -A seen=()
 
-  printf 'Fleet membership: %s (%d bots)\n' "$FLEET_MEMBERSHIP_SOURCE" "${#FLEET_BOT_DIRS[@]}"
+  printf 'Fleet membership: %s (%d selected)\n' "$FLEET_MEMBERSHIP_SOURCE" "${#FLEET_BOT_DIRS[@]}"
+  printf 'Fleet targets: %s\n' "${FLEET_SELECTION_DESCRIPTION:-$(for bot_dir in "${FLEET_BOT_DIRS[@]}"; do fleet_bot_name "$bot_dir"; done | paste -sd' ' -)}"
 
   for bot_dir in "${FLEET_BOT_DIRS[@]}"; do
     [[ "$bot_dir" != *$'\n'* ]] || fleet_die "Bot directory contains a newline: $bot_dir"

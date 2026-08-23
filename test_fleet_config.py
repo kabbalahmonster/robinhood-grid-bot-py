@@ -61,6 +61,39 @@ class TestFleetConfig(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(result.stdout.splitlines()[0].startswith("discovered under "))
 
+    def test_only_and_exclude_select_by_checkout_name(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "bots"
+            for name in ("alpha", "beta", "gamma"):
+                checkout = root / name / "robinhood-grid-bot-py"
+                checkout.mkdir(parents=True)
+                (checkout / "grid_bot.py").touch()
+            config = Path(directory) / "fleet.conf"
+            config.write_text(f'FLEET_BOT_ROOT="{root}"\n')
+            command = (
+                f'source "{COMMON}"; fleet_load_config "{config}"; '
+                'fleet_apply_selection "alpha,gamma" "gamma"; '
+                "printf '%s\\n' \"${FLEET_SELECTED_NAMES[@]}\""
+            )
+            result = subprocess.run(["bash", "-c", command], text=True, capture_output=True,
+                                    env={**os.environ, "HOME": directory})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.splitlines(), ["alpha"])
+
+    def test_selector_rejects_unknown_name(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "bots"
+            checkout = root / "alpha" / "robinhood-grid-bot-py"
+            checkout.mkdir(parents=True)
+            (checkout / "grid_bot.py").touch()
+            config = Path(directory) / "fleet.conf"
+            config.write_text(f'FLEET_BOT_ROOT="{root}"\n')
+            command = f'source "{COMMON}"; fleet_load_config "{config}"; fleet_apply_selection missing ""'
+            failed = subprocess.run(["bash", "-c", command], text=True, capture_output=True,
+                                    env={**os.environ, "HOME": directory})
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertIn("Unknown bot in --only", failed.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -8,7 +8,7 @@ source "$SCRIPT_DIR/fleet-common.sh"
 
 usage() {
   cat <<'EOF'
-Usage: update-variable [--apply] [--restart] [--allow-add] [--config PATH] NAME=VALUE [NAME=VALUE ...]
+Usage: update-variable [--apply] [--restart] [--allow-add] [--only NAMES] [--exclude NAMES] [--config PATH] NAME=VALUE [NAME=VALUE ...]
 
 Preview or atomically update one or more variables in every configured bot's
 .env file. Preview is the default. Existing .env files are required, variables
@@ -26,12 +26,16 @@ apply=0
 restart=0
 allow_add=0
 assignments=()
+only=""
+exclude=""
 while (($#)); do
   case "$1" in
     --config) (($# >= 2)) || fleet_die "--config requires a path"; config_path="$2"; shift 2 ;;
     --apply) apply=1; shift ;;
     --restart) restart=1; shift ;;
     --allow-add) allow_add=1; shift ;;
+    --only) (($# >= 2)) || fleet_die "--only requires comma-separated names"; only="$2"; shift 2 ;;
+    --exclude) (($# >= 2)) || fleet_die "--exclude requires comma-separated names"; exclude="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     --*) fleet_die "Unknown option: $1" ;;
     *) assignments+=("$1"); shift ;;
@@ -40,7 +44,9 @@ done
 
 ((${#assignments[@]} > 0)) || fleet_die "At least one NAME=VALUE assignment is required"
 ((restart == 0 || apply == 1)) || fleet_die "--restart requires --apply"
+[[ -z "$only$exclude" || $restart == 0 ]] || fleet_die "--restart cannot be combined with --only/--exclude; restart deliberately afterward"
 fleet_load_config "$config_path"
+fleet_apply_selection "$only" "$exclude"
 fleet_validate_bots
 command -v python3 >/dev/null 2>&1 || fleet_die "python3 is required to update dotenv files safely"
 

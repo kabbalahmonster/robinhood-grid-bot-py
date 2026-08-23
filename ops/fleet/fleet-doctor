@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+SCRIPT_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)"
+source "$SCRIPT_DIR/fleet-common.sh"
+
+usage() { cat <<'EOF'
+Usage: fleet-doctor [--json] [--no-quote] [--only NAMES] [--exclude NAMES] [--config PATH]
+Run read-only configuration, Git, RPC, contract, provider-route, and dashboard checks.
+EOF
+}
+config_path=""; only=""; exclude=""; json=0; no_quote=0
+while (($#)); do case "$1" in
+  --config|--only|--exclude)
+    (($# >= 2)) || fleet_die "$1 requires a value"
+    case "$1" in --config) config_path="$2";; --only) only="$2";; --exclude) exclude="$2";; esac
+    shift 2;;
+  --json) json=1; shift;; --no-quote) no_quote=1; shift;; -h|--help) usage; exit 0;; *) fleet_die "Unknown option: $1";; esac; done
+fleet_load_config "$config_path"; fleet_apply_selection "$only" "$exclude"; fleet_validate_bots >&2
+if command -v tmux >/dev/null 2>&1; then
+  if fleet_session_exists; then printf 'Fleet tmux session: running (%s)\n' "$FLEET_SESSION" >&2
+  else printf 'Fleet tmux session: stopped (%s)\n' "$FLEET_SESSION" >&2; fi
+else
+  printf 'Fleet tmux session: unavailable (tmux not installed)\n' >&2
+fi
+failures=0; first=1; ((json == 0)) || printf '['
+for bot_dir in "${FLEET_BOT_DIRS[@]}"; do
+  python_bin="$(fleet_python_for "$bot_dir")"; name="$(fleet_bot_name "$bot_dir")"
+  args=("$SCRIPT_DIR/probe-bot.py" --mode doctor --name "$name"); ((json == 0)) || args+=(--json); ((no_quote == 0)) || args+=(--no-quote)
+  if ((json)); then output="$(cd "$bot_dir" && "$python_bin" "${args[@]}")" || failures=$((failures+1)); ((first)) || printf ','; printf '%s' "$output"; first=0
+  else (cd "$bot_dir" && "$python_bin" "${args[@]}") || failures=$((failures+1)); fi
+done
+((json == 0)) || printf ']\n'; ((failures == 0))

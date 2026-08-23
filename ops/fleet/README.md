@@ -69,7 +69,8 @@ sudo apt install tmux git python3 python3-venv
    chmod +x ops/fleet/start-fleet ops/fleet/stop-fleet \
      ops/fleet/restart-fleet ops/fleet/update-fleet ops/fleet/usdg-sweep \
      ops/fleet/treasury-transfer ops/fleet/update-variable \
-     ops/fleet/liquidate-assets
+     ops/fleet/liquidate-assets ops/fleet/fleet-doctor \
+     ops/fleet/fleet-inventory ops/fleet/fleet-audit
    ```
 
    Set `FLEET_BOT_ROOT` to the directory containing your bot checkouts. The
@@ -92,6 +93,9 @@ sudo apt install tmux git python3 python3-venv
    ln -sf "$PWD/ops/fleet/treasury-transfer" "$HOME/bin/treasury-transfer"
    ln -sf "$PWD/ops/fleet/update-variable" "$HOME/bin/update-variable"
    ln -sf "$PWD/ops/fleet/liquidate-assets" "$HOME/bin/liquidate-assets"
+   ln -sf "$PWD/ops/fleet/fleet-doctor" "$HOME/bin/fleet-doctor"
+   ln -sf "$PWD/ops/fleet/fleet-inventory" "$HOME/bin/fleet-inventory"
+   ln -sf "$PWD/ops/fleet/fleet-audit" "$HOME/bin/fleet-audit"
    ```
 
    Ensure `~/bin` is in `PATH`, or invoke the scripts by their repository paths.
@@ -182,12 +186,106 @@ ops/fleet/update-fleet --restart
 Add `--detach` to either restart form to leave the new session in the
 background. Every command accepts `--config PATH`.
 
+## Selecting part of the fleet
+
+Batch and diagnostic commands accept exact, comma-separated bot names through
+`--only` and `--exclude`. For the standard layout, the bot name is the parent
+directory containing `robinhood-grid-bot-py`:
+
+```bash
+ops/fleet/fleet-doctor --only seedcoin,tendies
+ops/fleet/fleet-inventory --exclude ai,closed
+ops/fleet/treasury-transfer --only seedcoin --asset ETH --amount 0.0005
+```
+
+Selection happens after configured membership is resolved: `--only` narrows
+the fleet first, then `--exclude` removes names. Unknown names, duplicate bot
+names, empty list items, and a selection containing no bots are errors. Every
+command prints the final names before doing work. Selectors are supported by
+`start-fleet`, `update-fleet`, `update-variable`, both treasury tools,
+`liquidate-assets`, `fleet-doctor`, `fleet-inventory`, and `fleet-audit`.
+
+`stop-fleet` and `restart-fleet` remain whole-session operations because tmux
+owns one fleet session. `update-fleet --restart` and
+`update-variable --restart` deliberately reject selectors: update a subset,
+then perform an explicitly reviewed whole-fleet restart separately if needed.
+This prevents a partial maintenance command from unexpectedly recycling every
+bot.
+
+## Read-only health checks and inventory
+
+Run the doctor before starting a new fleet or moving funds:
+
+```bash
+ops/fleet/fleet-doctor
+ops/fleet/fleet-doctor --only seedcoin,tendies
+ops/fleet/fleet-doctor --json > fleet-doctor.json
+```
+
+For each checkout it checks Git branch/commit/upstream/dirty state, `.env`
+existence and permissions, configuration loading, configured versus actual RPC
+chain ID, derived public wallet address, configured token/USDG/WETH contract
+code and metadata, dashboard settings, and a small read-only WETH-to-token route
+quote through the configured provider/fallback. It also reports local
+ahead/behind tracking state and whether the configured tmux fleet session is
+running. `--no-quote` skips only the
+provider quote when offline diagnosis is desired. It never prints a private key
+or API credential and never signs, approves, broadcasts, or modifies files.
+Failures make the command exit nonzero; warnings (such as an intentionally
+disabled dashboard) remain visible but do not.
+
+Use inventory for a concise current-state snapshot without the route probe:
+
+```bash
+ops/fleet/fleet-inventory
+ops/fleet/fleet-inventory --json > fleet-inventory.json
+```
+
+It reports each public wallet, chain, native balance, configured reserve and
+spendable native balance, configured managed-token balances and raw units,
+classic/gridless position counts, Git identity, and latest local treasury and
+liquidation timestamps. JSON retains raw integer balances for automation;
+human output is deliberately shorter. Inventory is read-only, but it does make
+RPC calls and therefore may fail on an unavailable or misconfigured endpoint.
+
+## Reconciling fleet transaction history
+
+`fleet-audit` reads the durable local logs written immediately by treasury and
+managed-liquidation operations. It never contacts a signer and never retries a
+transaction:
+
+```bash
+ops/fleet/fleet-audit
+ops/fleet/fleet-audit --failures-only
+ops/fleet/fleet-audit --json > fleet-audit.json
+```
+
+It summarizes confirmed and failed treasury records, liquidation asset
+receipts, incomplete/failed liquidation runs, whether successful liquidation
+cleared positions, and chain-appropriate explorer links for known transaction
+hashes. Missing terminal records and uncleared positions are marked for
+attention and produce a nonzero exit status.
+
+After a partial batch, this emits only the exact comma-separated names needing
+review:
+
+```bash
+ops/fleet/fleet-audit --emit-only
+```
+
+That output can help construct a later reviewed `--only` command, but is never
+executed automatically. Audit is historical reconciliation, not proof of live
+balances; use `fleet-inventory` to inspect current residual balances before a
+retry. Local files can also be missing or manually altered, so retain explorer
+receipts and never treat audit output as an automatic authorization to resend.
+
 ## Whole-fleet USDG sweep
 
 `usdg-sweep` invokes each bot's guarded `--sweep-usdg` maintenance command
-sequentially using the same explicit `FLEET_BOT_DIRS` list and per-checkout
-Python selection as the lifecycle commands. It never discovers extra
-directories and never stops bots automatically.
+sequentially using the same membership resolution and per-checkout Python
+selection as the lifecycle commands. Membership comes from the explicit list
+when non-empty, otherwise from guarded root discovery. It never stops bots
+automatically.
 
 First set a shell variable to the actual reviewed treasury address and run a
 dry run while the fleet is still available:
@@ -427,8 +525,8 @@ common secret-like names, but the shell cannot).
 - The config is sourced as Bash and must be treated as trusted local code. It
   should contain paths/topology only—never private keys or API credentials.
 - `usdg-sweep` is dry-run by default, validates the recipient format, and uses
-  each checkout's existing `.env`; treasury addresses and keys never belong in
-  `fleet.conf`.
+  each checkout's existing `.env`. A public default recipient may live in
+  `fleet.conf`; private keys and API credentials never should.
 - `treasury-transfer` applies the same batch guards to native ETH, USDG, and
   arbitrary ERC-20 contracts. Native transfers also enforce the configured gas
   reserve after an exact amount and estimated maximum fee. Native liquidation

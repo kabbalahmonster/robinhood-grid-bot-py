@@ -8,7 +8,7 @@ source "$SCRIPT_DIR/fleet-common.sh"
 
 usage() {
   cat <<'EOF'
-Usage: start-fleet [--detach] [--config PATH]
+Usage: start-fleet [--detach] [--only NAMES] [--exclude NAMES] [--config PATH]
 
 Create the configured tmux session and start every bot in its own tiled pane.
 By default, attach to the session after startup. --detach leaves it running in
@@ -18,6 +18,8 @@ EOF
 
 config_path=""
 detach=0
+only=""
+exclude=""
 while (($#)); do
   case "$1" in
     --config)
@@ -26,12 +28,15 @@ while (($#)); do
       shift 2
       ;;
     --detach) detach=1; shift ;;
+    --only) (($# >= 2)) || fleet_die "--only requires comma-separated names"; only="$2"; shift 2 ;;
+    --exclude) (($# >= 2)) || fleet_die "--exclude requires comma-separated names"; exclude="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) fleet_die "Unknown option: $1" ;;
   esac
 done
 
 fleet_load_config "$config_path"
+fleet_apply_selection "$only" "$exclude"
 fleet_require_tmux
 fleet_validate_bots
 

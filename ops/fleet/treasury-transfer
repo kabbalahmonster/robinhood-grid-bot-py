@@ -26,6 +26,8 @@ Guards:
   --execute                   Broadcast after reviewing the complete dry run
   --confirm-fleet-stopped     Required with --execute
   --config PATH               Use an alternate fleet configuration
+  --only NAMES                Target comma-separated bot names
+  --exclude NAMES             Omit comma-separated bot names
   -h, --help                  Show this help
 
 Execution is refused while the configured tmux fleet session exists. Native
@@ -43,6 +45,8 @@ confirmed_recipient=""
 execute=0
 fleet_stopped=0
 confirm_liquidate=0
+only=""
+exclude=""
 
 while (($#)); do
   case "$1" in
@@ -54,12 +58,15 @@ while (($#)); do
     --confirm-liquidate) confirm_liquidate=1; shift ;;
     --execute) execute=1; shift ;;
     --confirm-fleet-stopped) fleet_stopped=1; shift ;;
+    --only) (($# >= 2)) || fleet_die "--only requires comma-separated names"; only="$2"; shift 2 ;;
+    --exclude) (($# >= 2)) || fleet_die "--exclude requires comma-separated names"; exclude="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) fleet_die "Unknown option: $1" ;;
   esac
 done
 
 fleet_load_config "$config_path"
+fleet_apply_selection "$only" "$exclude"
 recipient="${recipient:-$FLEET_TREASURY_RECIPIENT}"
 [[ -n "$recipient" ]] || fleet_die "No recipient supplied. Pass --recipient ADDRESS or set FLEET_TREASURY_RECIPIENT in fleet.conf"
 [[ "$recipient" =~ ^0x[0-9a-fA-F]{40}$ ]] || fleet_die "Recipient must be a 20-byte 0x-prefixed EVM address"
