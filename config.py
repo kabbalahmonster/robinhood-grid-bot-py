@@ -150,6 +150,7 @@ class BotConfig:
     bot_id: str = "grid-bot-1"    # Unique identifier shown on dashboard
     dashboard_name: str = ""      # Optional display name
     dashboard_group: str = ""     # Optional dashboard grouping label
+    mercury_evocation: bool = True  # Print the Mercury evocation once at bot startup
     
     # Derived properties
     @property
@@ -347,6 +348,7 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
         bot_id=os.getenv("BOT_ID", os.getenv("TOKEN_SYMBOL", f"grid-bot-{chain_id}")),
         dashboard_name=os.getenv("DASHBOARD_NAME", ""),
         dashboard_group=os.getenv("DASHBOARD_GROUP", ""),
+        mercury_evocation=os.getenv("MERCURY_EVOCATION", "true").lower() == "true",
     )
     
     # Validate the configuration

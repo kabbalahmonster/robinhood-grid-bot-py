@@ -126,6 +126,7 @@ python grid_bot.py
 | `STATE_FILE` | No | ./data/positions.json | Position state file path |
 | `COMPACT_MODE` | No | false | Compact single-line output for tmux |
 | `MINIMAL_LOGS` | No | false | Remove timestamps from console output |
+| `MERCURY_EVOCATION` | No | true | Print the Mercury trading evocation once after successful startup |
 | **Dashboard Reporting** ||||
 | `DASHBOARD_URL` | No | empty | Full status endpoint URL; empty disables reporting |
 | `DASHBOARD_API_KEY` | No* | empty | Shared dashboard key; required when reporting is enabled |

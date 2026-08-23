@@ -367,6 +367,42 @@ def _dashboard_root_url(status_url):
     return f"{parsed.scheme}://{parsed.netloc}/" if parsed.scheme and parsed.netloc else status_url
 
 
+MERCURY_EVOCATION = """☿ EVOCATION OF MERCURY ☿
+
+Mercury, fleet-footed keeper of roads,
+Lord of exchange, measure, message, and wit—
+Attend this engine of number and motion.
+
+Make clear its signals,
+Make swift its passage,
+Make honest its measures,
+And turn error, delay, and false quotation aside.
+
+Guide each bargain toward fair advantage;
+Let no key be exposed, no nonce be crossed,
+No allowance be granted beyond its purpose,
+And no trade be taken without profit’s promise.
+
+By ledger and wire,
+By token and flame,
+By the turning wheel of price:
+May this bot trade cunningly,
+Bank faithfully,
+And return bearing increase.
+
+☿ The road is open. The market is awake. ☿
+
+MERCURY INVOKED · ROUTES OPEN · PROFIT SOUGHT · RISK BOUNDED"""
+
+
+def invoke_mercury(enabled, emit=print):
+    """Emit the trading evocation once when enabled."""
+    if not enabled:
+        return False
+    emit(MERCURY_EVOCATION)
+    return True
+
+
 def check_config():
     """Validate configuration and read-only dependencies without trading."""
     try:
@@ -2048,6 +2084,11 @@ class GridBot:
     def run(self):
         """Main bot loop."""
         self.load_positions()
+
+        invoke_mercury(
+            getattr(self.config, "mercury_evocation", True),
+            lambda text: logger.info("\n%s", text),
+        )
 
         poll_interval = getattr(self.config, 'poll_interval_seconds', 30)
         logger.info(f"Starting main loop (polling every {poll_interval}s)...")
