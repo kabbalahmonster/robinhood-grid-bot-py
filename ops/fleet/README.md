@@ -73,7 +73,9 @@ sudo apt install tmux git python3 python3-venv
    ```
 
    Replace the example directories in `FLEET_BOT_DIRS` with every real bot
-   checkout. `ops/fleet/fleet.conf` is gitignored.
+   checkout. Optionally set `FLEET_TREASURY_RECIPIENT` to the public address
+   that should be used when a transfer command omits `--recipient`.
+   `ops/fleet/fleet.conf` is gitignored.
 
 5. Optional: put convenient command names in `~/bin`:
 
@@ -171,6 +173,18 @@ ops/fleet/usdg-sweep \
   --confirm-fleet-stopped
 ```
 
+If `FLEET_TREASURY_RECIPIENT` is set in `fleet.conf`, `--recipient` may be
+omitted:
+
+```bash
+ops/fleet/usdg-sweep
+```
+
+An explicit `--recipient ADDRESS` always overrides the configured default for
+that run. The default recipient does not replace per-bot
+`TREASURY_ALLOWED_RECIPIENTS`; every bot still independently enforces its
+allowlist or requires the exact `--confirm-recipient` acknowledgement.
+
 Broadcast mode requires both `--execute` and `--confirm-fleet-stopped`, and it
 also refuses to run if the configured tmux session still exists. Each bot must
 allow the destination through its own `TREASURY_ALLOWED_RECIPIENTS`. For an
@@ -192,6 +206,14 @@ safety assertion.
 `ETH`, `USDG`, or an ERC-20 contract address. Exact native transfers preserve
 the gas reserve. Native `all` is a separate, explicitly confirmed liquidation
 mode.
+
+When `FLEET_TREASURY_RECIPIENT` is configured, the same default applies here:
+
+```bash
+ops/fleet/treasury-transfer --asset ETH --amount 0.0005
+```
+
+Pass `--recipient ADDRESS` to deliberately override it for one invocation.
 
 To plan sending exactly `0.0005 ETH` from every configured wallet:
 

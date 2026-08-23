@@ -202,6 +202,11 @@ updates, native/ERC-20 treasury safety, verified position-clearing liquidation,
 fleet `.env` updates, tmux navigation, and the exact
 `Ctrl+C`/`Ctrl+Z` behavior.
 
+The gitignored `ops/fleet/fleet.conf` may also define a public
+`FLEET_TREASURY_RECIPIENT`. Fleet USDG sweeps and generic treasury transfers
+use it whenever `--recipient` is omitted; an explicit recipient overrides it,
+and every bot's `.env` allowlist is still enforced.
+
 Start with:
 
 ```bash

@@ -42,11 +42,15 @@ or pass --config PATH / set FLEET_CONFIG."
   : "${FLEET_ENTRYPOINT:=grid_bot.py}"
   : "${FLEET_RESTART_DELAY:=5}"
   : "${FLEET_START_STAGGER:=1}"
+  : "${FLEET_TREASURY_RECIPIENT:=}"
 
   declare -p FLEET_BOT_DIRS >/dev/null 2>&1 || fleet_die "FLEET_BOT_DIRS is not defined in $FLEET_CONFIG_PATH"
   ((${#FLEET_BOT_DIRS[@]} > 0)) || fleet_die "FLEET_BOT_DIRS is empty in $FLEET_CONFIG_PATH"
   [[ "$FLEET_RESTART_DELAY" =~ ^[0-9]+([.][0-9]+)?$ ]] || fleet_die "FLEET_RESTART_DELAY must be a non-negative number"
   [[ "$FLEET_START_STAGGER" =~ ^[0-9]+([.][0-9]+)?$ ]] || fleet_die "FLEET_START_STAGGER must be a non-negative number"
+  if [[ -n "$FLEET_TREASURY_RECIPIENT" && ! "$FLEET_TREASURY_RECIPIENT" =~ ^0x[0-9a-fA-F]{40}$ ]]; then
+    fleet_die "FLEET_TREASURY_RECIPIENT must be empty or a 20-byte 0x-prefixed EVM address"
+  fi
 }
 
 fleet_require_tmux() {

@@ -8,7 +8,7 @@ source "$SCRIPT_DIR/fleet-common.sh"
 
 usage() {
   cat <<'EOF'
-Usage: treasury-transfer --asset ASSET --amount AMOUNT --recipient ADDRESS [options]
+Usage: treasury-transfer --asset ASSET --amount AMOUNT [--recipient ADDRESS] [options]
 
 Plan or execute the same guarded treasury transfer from every configured bot.
 Dry run is the default.
@@ -16,7 +16,9 @@ Dry run is the default.
 Required:
   --asset ETH|USDG|ADDRESS     Native ETH, configured USDG, or an ERC-20 contract
   --amount DECIMAL|all        Exact amount, or a guarded whole-balance transfer
-  --recipient ADDRESS         Treasury receiving each transfer
+
+Destination:
+  --recipient ADDRESS         Override FLEET_TREASURY_RECIPIENT for this run
 
 Guards:
   --confirm-recipient ADDRESS Exact repeat for a non-allowlisted recipient
@@ -29,6 +31,7 @@ Guards:
 Execution is refused while the configured tmux fleet session exists. Native
 Exact ETH transfers retain each bot's ETH_GAS_RESERVE after amount and maximum
 fee. ETH "all" intentionally bypasses it and requires --confirm-liquidate.
+When --recipient is omitted, FLEET_TREASURY_RECIPIENT from fleet.conf is used.
 EOF
 }
 
@@ -56,7 +59,10 @@ while (($#)); do
   esac
 done
 
-[[ "$recipient" =~ ^0x[0-9a-fA-F]{40}$ ]] || fleet_die "--recipient must be a 20-byte 0x-prefixed EVM address"
+fleet_load_config "$config_path"
+recipient="${recipient:-$FLEET_TREASURY_RECIPIENT}"
+[[ -n "$recipient" ]] || fleet_die "No recipient supplied. Pass --recipient ADDRESS or set FLEET_TREASURY_RECIPIENT in fleet.conf"
+[[ "$recipient" =~ ^0x[0-9a-fA-F]{40}$ ]] || fleet_die "Recipient must be a 20-byte 0x-prefixed EVM address"
 [[ -n "$asset" ]] || fleet_die "--asset is required"
 [[ "$amount" == "all" || "$amount" =~ ^[0-9]+([.][0-9]+)?$ ]] || fleet_die "--amount must be a positive decimal or 'all'"
 [[ "$amount" != "0" && "$amount" != "0.0" ]] || fleet_die "--amount must be positive"
@@ -85,7 +91,6 @@ case "$asset_upper" in
     ;;
 esac
 
-fleet_load_config "$config_path"
 fleet_validate_bots
 if ((execute)); then
   fleet_require_tmux
