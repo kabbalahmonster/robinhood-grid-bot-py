@@ -505,6 +505,19 @@ value as required by dotenv itself. Avoid secrets on the command line because
 shell history and process listings can expose arguments (the preview redacts
 common secret-like names, but the shell cannot).
 
+The command remains fail-fast by default. Use `--skip-errors` to inspect every
+target and exclude bots with a missing/unwritable `.env` or invalid dotenv
+assignment while previewing or applying to the valid remainder:
+
+```bash
+ops/fleet/update-variable --apply --allow-add --skip-errors ETH_GAS_RESERVE=0.0005
+```
+
+Skipped bots are named in the summary and receive no backup or edit. An apply
+remains atomic across the valid subset. If combined with `--restart`, the
+normal fleet-wide restart still includes skipped bots, which retain their old
+environment.
+
 ## Safety and update behavior
 
 - `start-fleet` validates every directory, entrypoint, interpreter, and
