@@ -13,9 +13,16 @@ FLEET_START_STAGGER=1
 # --confirm-recipient override).
 FLEET_TREASURY_RECIPIENT=""
 
-# Each directory must be a complete, independently configured checkout with its
-# own .env and data directory. Paths may use $HOME because this is Bash config.
-FLEET_BOT_DIRS=(
-  "$HOME/bot-farm/rh-bots/example-one/robinhood-grid-bot-py"
-  "$HOME/bot-farm/rh-bots/example-two/robinhood-grid-bot-py"
-)
+# Default membership mode: recursively discover checkouts containing
+# FLEET_ENTRYPOINT below this root. Discovery is sorted and excludes .git,
+# .venv, venv, and __pycache__ directories.
+FLEET_BOT_ROOT="$HOME/bot-farm/rh-bots"
+FLEET_DISCOVERY_MAX_DEPTH=4
+
+# Optional explicit membership override. If this array exists and is non-empty,
+# it takes priority over FLEET_BOT_ROOT. Uncomment when exact membership is
+# preferable to discovery. Each checkout needs its own .env and data directory.
+# FLEET_BOT_DIRS=(
+#   "$HOME/bot-farm/rh-bots/example-one/robinhood-grid-bot-py"
+#   "$HOME/bot-farm/rh-bots/example-two/robinhood-grid-bot-py"
+# )

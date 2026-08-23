@@ -1,0 +1,66 @@
+import os
+import subprocess
+import tempfile
+import unittest
+from pathlib import Path
+
+
+COMMON = Path(__file__).parent / "ops" / "fleet" / "fleet-common.sh"
+
+
+class TestFleetConfig(unittest.TestCase):
+    def _load(self, config_text, checkout_paths=()):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "bots"
+            root.mkdir()
+            for relative in checkout_paths:
+                checkout = root / relative
+                checkout.mkdir(parents=True)
+                (checkout / "grid_bot.py").touch()
+            config = Path(directory) / "fleet.conf"
+            config.write_text(config_text.replace("__BOT_ROOT__", str(root)))
+            command = (
+                f'source "{COMMON}"; fleet_load_config "{config}"; '
+                "printf '%s\\n' \"$FLEET_MEMBERSHIP_SOURCE\"; "
+                "printf '%s\\n' \"${FLEET_BOT_DIRS[@]}\""
+            )
+            return subprocess.run(
+                ["bash", "-c", command],
+                text=True,
+                capture_output=True,
+                env={**os.environ, "HOME": directory},
+            )
+
+    def test_root_discovers_sorted_checkouts(self):
+        result = self._load(
+            'FLEET_BOT_ROOT="__BOT_ROOT__"\n',
+            ("zeta/robinhood-grid-bot-py", "alpha/robinhood-grid-bot-py"),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = result.stdout.splitlines()
+        self.assertTrue(lines[0].startswith("discovered under "))
+        self.assertTrue(lines[1].endswith("alpha/robinhood-grid-bot-py"))
+        self.assertTrue(lines[2].endswith("zeta/robinhood-grid-bot-py"))
+
+    def test_nonempty_explicit_list_overrides_root(self):
+        result = self._load(
+            'FLEET_BOT_ROOT="__BOT_ROOT__"\nFLEET_BOT_DIRS=("__BOT_ROOT__/chosen/repo")\n',
+            ("chosen/repo", "ignored/repo"),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = result.stdout.splitlines()
+        self.assertEqual(lines[0], "explicit FLEET_BOT_DIRS")
+        self.assertEqual(len(lines), 2)
+        self.assertTrue(lines[1].endswith("chosen/repo"))
+
+    def test_empty_explicit_list_falls_back_to_root(self):
+        result = self._load(
+            'FLEET_BOT_ROOT="__BOT_ROOT__"\nFLEET_BOT_DIRS=()\n',
+            ("only/repo",),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(result.stdout.splitlines()[0].startswith("discovered under "))
+
+
+if __name__ == "__main__":
+    unittest.main()

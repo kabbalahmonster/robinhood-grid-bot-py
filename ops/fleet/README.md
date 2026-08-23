@@ -72,9 +72,12 @@ sudo apt install tmux git python3 python3-venv
      ops/fleet/liquidate-assets
    ```
 
-   Replace the example directories in `FLEET_BOT_DIRS` with every real bot
-   checkout. Optionally set `FLEET_TREASURY_RECIPIENT` to the public address
-   that should be used when a transfer command omits `--recipient`.
+   Set `FLEET_BOT_ROOT` to the directory containing your bot checkouts. The
+   default is `$HOME/bot-farm/rh-bots`. Checkouts containing
+   `FLEET_ENTRYPOINT` are discovered recursively and sorted. If you instead
+   define a non-empty `FLEET_BOT_DIRS` array, that explicit list takes complete
+   priority over root discovery. Optionally set `FLEET_TREASURY_RECIPIENT` to
+   the public address used when a transfer command omits `--recipient`.
    `ops/fleet/fleet.conf` is gitignored.
 
 5. Optional: put convenient command names in `~/bin`:
@@ -99,6 +102,38 @@ The scripts look for configuration in this order:
 2. the `FLEET_CONFIG` environment variable
 3. `ops/fleet/fleet.conf`
 4. `${XDG_CONFIG_HOME:-$HOME/.config}/rh-grid-bot/fleet.conf`
+
+### Fleet membership: root discovery or explicit list
+
+The default configuration discovers bot checkouts below one root:
+
+```bash
+FLEET_BOT_ROOT="$HOME/bot-farm/rh-bots"
+FLEET_DISCOVERY_MAX_DEPTH=4
+```
+
+A directory joins the discovered fleet only when a regular file named by
+`FLEET_ENTRYPOINT` (normally `grid_bot.py`) is found within the configured
+depth. `.git`, `.venv`, `venv`, and `__pycache__` trees are excluded. Results
+are sorted for deterministic pane and batch-operation order. The loader rejects
+`/` and the whole home directory as dangerously broad roots, and fails rather
+than operating when discovery finds no bots.
+
+For exact membership, define a non-empty array:
+
+```bash
+FLEET_BOT_DIRS=(
+  "$HOME/bot-farm/rh-bots/seedcoin/robinhood-grid-bot-py"
+  "$HOME/bot-farm/rh-bots/tendies/robinhood-grid-bot-py"
+)
+```
+
+A non-empty `FLEET_BOT_DIRS` always wins and `FLEET_BOT_ROOT` is ignored. An
+undefined or empty array falls back to root discovery. Every operational
+command prints whether membership was explicit or discovered and the resolved
+bot count before acting. Root discovery is convenient, but it also means any
+valid checkout placed beneath that root can join future financial operations;
+use the explicit array whenever that is not desirable.
 
 ## Commands
 

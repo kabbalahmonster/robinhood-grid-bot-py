@@ -207,6 +207,11 @@ The gitignored `ops/fleet/fleet.conf` may also define a public
 use it whenever `--recipient` is omitted; an explicit recipient overrides it,
 and every bot's `.env` allowlist is still enforced.
 
+Fleet membership defaults to recursive checkout discovery below
+`FLEET_BOT_ROOT` (`$HOME/bot-farm/rh-bots` by default). A non-empty explicit
+`FLEET_BOT_DIRS` array overrides discovery completely. The fleet guide explains
+depth limits, exclusions, deterministic ordering, and the safety tradeoff.
+
 Start with:
 
 ```bash

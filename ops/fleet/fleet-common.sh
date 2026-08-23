@@ -27,7 +27,7 @@ fleet_default_config() {
 }
 
 fleet_load_config() {
-  local requested_config="${1:-}"
+  local requested_config="${1:-}" root_path home_path bot_file bot_dir discovery_file
   FLEET_CONFIG_PATH="${requested_config:-${FLEET_CONFIG:-$(fleet_default_config)}}"
   [[ -f "$FLEET_CONFIG_PATH" ]] || fleet_die "Fleet config not found: $FLEET_CONFIG_PATH
 Copy ops/fleet/fleet.conf.example to ops/fleet/fleet.conf and edit it,
@@ -43,13 +43,45 @@ or pass --config PATH / set FLEET_CONFIG."
   : "${FLEET_RESTART_DELAY:=5}"
   : "${FLEET_START_STAGGER:=1}"
   : "${FLEET_TREASURY_RECIPIENT:=}"
+  : "${FLEET_BOT_ROOT:=${HOME}/bot-farm/rh-bots}"
+  : "${FLEET_DISCOVERY_MAX_DEPTH:=4}"
 
-  declare -p FLEET_BOT_DIRS >/dev/null 2>&1 || fleet_die "FLEET_BOT_DIRS is not defined in $FLEET_CONFIG_PATH"
-  ((${#FLEET_BOT_DIRS[@]} > 0)) || fleet_die "FLEET_BOT_DIRS is empty in $FLEET_CONFIG_PATH"
   [[ "$FLEET_RESTART_DELAY" =~ ^[0-9]+([.][0-9]+)?$ ]] || fleet_die "FLEET_RESTART_DELAY must be a non-negative number"
   [[ "$FLEET_START_STAGGER" =~ ^[0-9]+([.][0-9]+)?$ ]] || fleet_die "FLEET_START_STAGGER must be a non-negative number"
+  [[ "$FLEET_DISCOVERY_MAX_DEPTH" =~ ^[2-9][0-9]*$ ]] || fleet_die "FLEET_DISCOVERY_MAX_DEPTH must be an integer of at least 2"
   if [[ -n "$FLEET_TREASURY_RECIPIENT" && ! "$FLEET_TREASURY_RECIPIENT" =~ ^0x[0-9a-fA-F]{40}$ ]]; then
     fleet_die "FLEET_TREASURY_RECIPIENT must be empty or a 20-byte 0x-prefixed EVM address"
+  fi
+
+  if declare -p FLEET_BOT_DIRS >/dev/null 2>&1 && ((${#FLEET_BOT_DIRS[@]} > 0)); then
+    FLEET_MEMBERSHIP_SOURCE="explicit FLEET_BOT_DIRS"
+  else
+    [[ "$FLEET_ENTRYPOINT" != */* ]] || fleet_die "Root discovery requires FLEET_ENTRYPOINT to be a filename, not a path"
+    [[ -d "$FLEET_BOT_ROOT" ]] || fleet_die "Fleet bot root does not exist: $FLEET_BOT_ROOT"
+    root_path="$(readlink -f -- "$FLEET_BOT_ROOT")"
+    home_path="$(readlink -f -- "$HOME")"
+    [[ "$root_path" != "/" && "$root_path" != "$home_path" ]] || fleet_die "Refusing dangerously broad fleet bot root: $root_path"
+
+    discovery_file="$(mktemp)" || fleet_die "Could not create fleet discovery workspace"
+    if ! (
+      set -o pipefail
+      find "$root_path" -mindepth 2 -maxdepth "$FLEET_DISCOVERY_MAX_DEPTH" \
+        \( -type d \( -name .git -o -name .venv -o -name venv -o -name __pycache__ \) -prune \) -o \
+        \( -type f -name "$FLEET_ENTRYPOINT" -print0 \) | sort -z > "$discovery_file"
+    ); then
+      rm -f -- "$discovery_file"
+      fleet_die "Fleet discovery failed while scanning: $root_path"
+    fi
+
+    FLEET_BOT_DIRS=()
+    while IFS= read -r -d '' bot_file; do
+      bot_dir="$(dirname -- "$bot_file")"
+      FLEET_BOT_DIRS+=("$bot_dir")
+    done < "$discovery_file"
+    rm -f -- "$discovery_file"
+    ((${#FLEET_BOT_DIRS[@]} > 0)) || fleet_die "No bot checkouts containing '$FLEET_ENTRYPOINT' found under: $root_path"
+    FLEET_BOT_ROOT="$root_path"
+    FLEET_MEMBERSHIP_SOURCE="discovered under $FLEET_BOT_ROOT"
   fi
 }
 
@@ -77,6 +109,8 @@ fleet_python_for() {
 fleet_validate_bots() {
   local bot_dir bot_file python_bin
   local -A seen=()
+
+  printf 'Fleet membership: %s (%d bots)\n' "$FLEET_MEMBERSHIP_SOURCE" "${#FLEET_BOT_DIRS[@]}"
 
   for bot_dir in "${FLEET_BOT_DIRS[@]}"; do
     [[ "$bot_dir" != *$'\n'* ]] || fleet_die "Bot directory contains a newline: $bot_dir"
