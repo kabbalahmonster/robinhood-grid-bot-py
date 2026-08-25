@@ -2,6 +2,7 @@ import json
 import os
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 
 from profit_tracker import ProfitTracker
 
@@ -55,6 +56,26 @@ class TestProfitTracker(unittest.TestCase):
     def test_missing_transaction_hash_is_rejected(self):
         with self.assertRaises(ValueError):
             self.tracker.record_sale(1, "")
+
+    def test_period_profits_use_rolling_windows(self):
+        now = datetime.now(timezone.utc)
+        self.tracker.state["tracking_started_at"] = (now - timedelta(days=40)).isoformat()
+        self.tracker.state["profit_history"] = [
+            {"timestamp": (now - timedelta(minutes=30)).isoformat(), "profit_wei": 10**18, "tx_hash": "0x1"},
+            {"timestamp": (now - timedelta(hours=3)).isoformat(), "profit_wei": 2 * 10**18, "tx_hash": "0x2"},
+            {"timestamp": (now - timedelta(days=2)).isoformat(), "profit_wei": 4 * 10**18, "tx_hash": "0x3"},
+        ]
+        periods = self.tracker.period_profits_eth(now)
+        self.assertEqual(periods["1h"], 1.0)
+        self.assertEqual(periods["6h"], 3.0)
+        self.assertEqual(periods["24h"], 3.0)
+        self.assertEqual(periods["week"], 7.0)
+
+    def test_period_uses_total_when_tracking_started_inside_window(self):
+        now = datetime.now(timezone.utc)
+        self.tracker.state["tracking_started_at"] = (now - timedelta(hours=2)).isoformat()
+        self.tracker.state["realized_profit_wei"] = 3 * 10**18
+        self.assertEqual(self.tracker.period_profits_eth(now)["6h"], 3.0)
 
 
 if __name__ == "__main__":

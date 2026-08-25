@@ -501,6 +501,7 @@ class GridBot:
         self.profit_tracker = ProfitTracker()
         self.dashboard_trades_file = "data/dashboard_trades.json"
         self.dashboard_trades = self._load_dashboard_trades()
+        self.profit_tracker.seed_profit_history(self.dashboard_trades)
         
         # Cooldown tracking for gridless buys
         self.last_buy_time = 0
@@ -2055,6 +2056,7 @@ class GridBot:
                     profit_percent=round(profit_percent, 2),
                     session_profit_eth=self.session_profit_weth,
                     realized_profit_eth=self.profit_tracker.realized_profit_eth,
+                    realized_profit_periods=self.profit_tracker.period_profits_eth(),
                     realized_sales=self.profit_tracker.realized_sales,
                     profit_tracking_started_at=self.profit_tracker.tracking_started_at,
                     buys=self.session_buys,
