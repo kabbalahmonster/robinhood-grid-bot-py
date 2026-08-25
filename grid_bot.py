@@ -2049,6 +2049,7 @@ class GridBot:
                 self._reporter.report(
                     price=price,
                     eth_balance=eth_bal,
+                    gas_reserve_eth=getattr(self.config, 'eth_gas_reserve', 0.001),
                     usdg_balance=usdg_bal,
                     treasury_sent_usdg=_total_successful_treasury_sent_usdg(self.config.usdg_address),
                     token_balance=token_bal,
