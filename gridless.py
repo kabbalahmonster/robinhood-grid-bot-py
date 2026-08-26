@@ -12,7 +12,14 @@ from typing import Dict, Optional, Tuple, Any
 POSITIONS_FILE = "data/gridless_positions.json"
 
 
-def calculate_pnl(position: Dict[str, int], current_price: float) -> float:
+def _configured_token_decimals(config: Any) -> int:
+    """Return validated runtime metadata while tolerating legacy test configs."""
+    value = getattr(config, 'token_decimals', 18)
+    return value if isinstance(value, int) and 0 <= value <= 255 else 18
+
+
+def calculate_pnl(position: Dict[str, int], current_price: float,
+                  token_decimals: int = 18) -> float:
     """Calculate P&L using wei units throughout for precision.
     
     Args:
@@ -34,7 +41,7 @@ def calculate_pnl(position: Dict[str, int], current_price: float) -> float:
         return 0.0
     
     # Calculate buy price in wei per wei-token for precise comparison
-    buy_price_eth_per_token = (cost_wei / 1e18) / (balance / 1e18)
+    buy_price_eth_per_token = (cost_wei / 1e18) / (balance / (10 ** token_decimals))
     
     if buy_price_eth_per_token <= 0:
         return 0.0
@@ -47,7 +54,7 @@ def calculate_pnl(position: Dict[str, int], current_price: float) -> float:
     return ((current_price - buy_price_eth_per_token) / buy_price_eth_per_token) * 100
 
 
-def get_buy_price(position: Dict[str, int]) -> float:
+def get_buy_price(position: Dict[str, int], token_decimals: int = 18) -> float:
     """Calculate buy price in WETH per token."""
     # Migrate from old cost (nano-ETH) if needed
     cost_wei = position.get('cost_wei', 0)
@@ -59,16 +66,16 @@ def get_buy_price(position: Dict[str, int]) -> float:
     balance = position.get('balance', 0)
     if balance <= 0 or cost_wei <= 0:
         return 0.0
-    return (cost_wei / 1e18) / (balance / 1e18)
+    return (cost_wei / 1e18) / (balance / (10 ** token_decimals))
 
 
-def get_top_position(positions: Dict[str, Dict]) -> Optional[Tuple[str, Dict]]:
+def get_top_position(positions: Dict[str, Dict], token_decimals: int = 18) -> Optional[Tuple[str, Dict]]:
     """Get position with lowest buy price (best position)."""
     if not positions:
         return None
     top_id, top_pos, top_price = None, None, float('inf')
     for pos_id, pos in positions.items():
-        buy_price = get_buy_price(pos)
+        buy_price = get_buy_price(pos, token_decimals)
         if buy_price > 0 and buy_price < top_price:
             top_price, top_id, top_pos = buy_price, pos_id, pos
     return (top_id, top_pos) if top_id else None
@@ -84,6 +91,7 @@ def should_buy(positions: Dict[str, Dict], current_price: float, config: Any) ->
     buy_threshold = getattr(config, 'gridless_buy_threshold', -10.0)
     sell_threshold = getattr(config, 'gridless_sell_threshold', 5.0)
     leading_edge_enabled = getattr(config, 'gridless_leading_edge', False)
+    token_decimals = _configured_token_decimals(config)
     
     # No positions - initial buy
     if len(positions) == 0 and max_active > 0:
@@ -94,11 +102,11 @@ def should_buy(positions: Dict[str, Dict], current_price: float, config: Any) ->
         return (False, f"Max positions reached ({len(positions)}/{max_active})")
     
     # Standard dip-buying logic
-    top = get_top_position(positions)
+    top = get_top_position(positions, token_decimals)
     if top is None:
         return (True, "No holding positions found")
     
-    top_pnl = calculate_pnl(top[1], current_price)
+    top_pnl = calculate_pnl(top[1], current_price, token_decimals)
     if top_pnl <= buy_threshold:
         return (True, f"Top position P&L {top_pnl:.2f}% <= threshold {buy_threshold}%")
     
@@ -118,14 +126,15 @@ def get_capacity_warning(positions: Dict[str, Dict], current_price: float, confi
     """Describe a dip buy blocked only because all gridless slots are filled."""
     max_active = getattr(config, 'max_active_positions', 10)
     buy_threshold = getattr(config, 'gridless_buy_threshold', -10.0)
+    token_decimals = _configured_token_decimals(config)
     if max_active <= 0 or len(positions) < max_active:
         return None
 
-    top = get_top_position(positions)
+    top = get_top_position(positions, token_decimals)
     if top is None:
         return None
 
-    top_pnl = calculate_pnl(top[1], current_price)
+    top_pnl = calculate_pnl(top[1], current_price, token_decimals)
     if top_pnl > buy_threshold:
         return None
 
@@ -146,7 +155,8 @@ def should_sell(position: Dict[str, int], current_price: float, config: Any,
     stoploss_threshold = getattr(config, 'gridless_stoploss_threshold', -25.0)
     stoploss_enabled = getattr(config, 'gridless_stoploss_enabled', False)
     min_profit = getattr(config, 'min_profit_percent', 1.5)
-    pnl = calculate_pnl(position, current_price)
+    token_decimals = _configured_token_decimals(config)
+    pnl = calculate_pnl(position, current_price, token_decimals)
     # Stoploss check (highest priority)
     if stoploss_enabled and pnl <= stoploss_threshold:
         if quote_profit_eth < 0:
@@ -170,9 +180,10 @@ def find_sell_candidate(positions: Dict[str, Dict], current_price: float,
     """Find best position to sell (stoploss first, then highest P&L)."""
     stoploss_enabled = getattr(config, 'gridless_stoploss_enabled', False)
     stoploss_threshold = getattr(config, 'gridless_stoploss_threshold', -25.0)
+    token_decimals = _configured_token_decimals(config)
     candidates = []
     for pos_id, pos in positions.items():
-        pnl = calculate_pnl(pos, current_price)
+        pnl = calculate_pnl(pos, current_price, token_decimals)
         should_sell_flag, reason = should_sell(pos, current_price, config, quote_profit_eth)
         if should_sell_flag:
             priority = 0 if (stoploss_enabled and pnl <= stoploss_threshold) else 1
@@ -267,8 +278,9 @@ def migrate_from_grid(grid_positions: Dict[str, Dict]) -> Dict[str, Dict[str, in
     return gridless
 
 
-def migrate_to_grid(gridless_positions: Dict[str, Dict[str, int]], 
-                    grid_spacing_percent: float = 6.0) -> Dict[str, Dict]:
+def migrate_to_grid(gridless_positions: Dict[str, Dict[str, int]],
+                    grid_spacing_percent: float = 6.0,
+                    token_decimals: int = 18) -> Dict[str, Dict]:
     """Migrate gridless positions back to grid format.
     
     Args:
@@ -288,7 +300,7 @@ def migrate_to_grid(gridless_positions: Dict[str, Dict[str, int]],
             continue
         
         # Calculate buy price
-        buy_price = (cost / 1e9) / (balance / 1e18)
+        buy_price = (cost / 1e9) / (balance / (10 ** token_decimals))
         
         # Calculate grid range based on buy price
         # Position covers range around its buy price

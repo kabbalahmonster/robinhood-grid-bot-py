@@ -243,9 +243,15 @@ class Wallet:
             symbol = "UNKNOWN"
         
         try:
-            decimals = token.functions.decimals().call()
-        except Exception:
-            decimals = 18
+            decimals = int(token.functions.decimals().call())
+        except Exception as exc:
+            raise RuntimeError(
+                f"Could not read decimals() for configured token {token_address}"
+            ) from exc
+        if not 0 <= decimals <= 255:
+            raise ValueError(
+                f"Invalid decimals() value {decimals} for configured token {token_address}"
+            )
         
         info = TokenInfo(
             address=token_address,

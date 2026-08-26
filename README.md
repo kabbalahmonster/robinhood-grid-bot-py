@@ -9,6 +9,7 @@ A production-grade grid trading bot for Robinhood Chain and other EVM networks, 
   - **Gridless**: Dynamic position-based trading without fixed grid levels
 - **Dynamic Grid Trading**: Automatically places buy orders at decreasing price levels
 - **Cost Basis Tracking**: Each position tracks actual WETH spent for accurate P&L
+- **Dynamic Token Decimals**: Reads and caches each configured ERC-20's on-chain `decimals()` value; non-18-decimal assets use correct prices, balances, P&L, moonbags, and dashboard valuation
 - **Moonbag Support**: Retain a percentage of tokens after each sell
 - **Profit Banking**: Automatically banks profits to USDG/USDC stablecoin
 - **Session Statistics**: Track total buys, sells, and accumulated profit

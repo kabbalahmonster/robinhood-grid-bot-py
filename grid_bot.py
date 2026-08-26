@@ -485,6 +485,16 @@ class GridBot:
         self._setup_logging()
         
         self.wallet = Wallet(self.config)
+        token_info = self.wallet.get_token_info(self.config.token_address)
+        self.token_decimals = token_info.decimals
+        self.token_unit = 10 ** self.token_decimals
+        # Strategy helpers receive config rather than the bot instance. Attach
+        # discovered metadata at runtime; position files continue storing raw
+        # integer balances and therefore require no migration.
+        self.config.token_decimals = self.token_decimals
+        logger.info(
+            f"Trading token: {token_info.symbol} ({self.token_decimals} decimals)"
+        )
         
         self.provider = create_swap_provider(self.config)
         self.api_client = self.provider  # compatibility alias during refactor
@@ -687,18 +697,19 @@ class GridBot:
                 apply_jitter_to_price=False,
             )
             if result.success and result.price:
-                logger.debug(f"API price: {result.price}")
-                return result.price
+                price = result.price * self.token_unit / 10**18
+                logger.debug(f"API price: {price}")
+                return price
             else:
                 logger.debug(f"API price failed: success={result.success}, price={result.price}, error={result.error}")
             return None
         else:
-            price = self.provider.get_price(
+            raw_price = self.provider.get_price(
                 sell_token=self.trade_token_address,
                 buy_token=self.config.token_address,
                 sell_amount=10**15,  # 0.001 ETH/WETH
             )
-            return price
+            return raw_price * self.token_unit / 10**18 if raw_price is not None else None
     
     def check_buys(self, price):
         """Check for buy opportunities."""
@@ -757,7 +768,7 @@ class GridBot:
                 sell_min = pos['sellMin'] / 10**9
                 
                 # Calculate actual profit %
-                tokens = pos['balance'] / 10**18
+                tokens = pos['balance'] / self.token_unit
                 cost_weth = pos['cost'] / 10**9
                 buy_price = cost_weth / tokens if tokens > 0 else 0
                 current_profit = ((price - buy_price) / buy_price * 100) if buy_price > 0 else 0
@@ -861,16 +872,16 @@ class GridBot:
             if gridless_positions:
                 top_id, top_pos, top_price = None, None, float('inf')
                 for pos_id, pos in gridless_positions.items():
-                    buy_price = get_buy_price(pos)
+                    buy_price = get_buy_price(pos, self.token_decimals)
                     if buy_price > 0 and buy_price < top_price:
                         top_price, top_id, top_pos = buy_price, pos_id, pos
                 top = (top_id, top_pos) if top_id else None
             
             if top:
                 # Calculate what the P&L would be at the quoted price
-                tokens_at_quote = quote.buy_amount / 1e18
+                tokens_at_quote = quote.buy_amount / self.token_unit
                 quote_buy_price = buy_amount_eth / tokens_at_quote if tokens_at_quote > 0 else 0
-                pnl_at_quote = calculate_pnl(top[1], quote_buy_price)
+                pnl_at_quote = calculate_pnl(top[1], quote_buy_price, self.token_decimals)
                 buy_threshold = getattr(self.config, 'gridless_buy_threshold', -10.0)
                 
                 # Calculate block threshold as percentage of threshold distance from 0
@@ -882,7 +893,7 @@ class GridBot:
                 # Block if price recovered too much (quote P&L above block threshold)
                 if pnl_at_quote > block_threshold:
                     logger.info(f"⏸️ Buy aborted: Quote P&L ({pnl_at_quote:.1f}%) recovered past {execution_margin_pct}% margin (block above {block_threshold:.1f}%)")
-                    logger.info(f"   Price moved from trigger. Buy price: {quote_buy_price:.10f}, Top position buy: {get_buy_price(top[1]):.10f}")
+                    logger.info(f"   Price moved from trigger. Buy price: {quote_buy_price:.10f}, Top position buy: {get_buy_price(top[1], self.token_decimals):.10f}")
                     return
         
         # Determine approval spender
@@ -955,7 +966,7 @@ class GridBot:
             
             pos_id = add_position(cost_wei, tokens_received)
             
-            tokens = tokens_received / 10**18
+            tokens = tokens_received / self.token_unit
             buy_price = buy_amount_eth / tokens if tokens > 0 else 0
             self.session_buys += 1
             self.last_buy_time = time.time()  # Update cooldown timer
@@ -990,7 +1001,7 @@ class GridBot:
         best_pnl = float('-inf')
         
         for pos_id, pos in gridless_positions.items():
-            pnl = calculate_pnl(pos, price)
+            pnl = calculate_pnl(pos, price, self.token_decimals)
             
             # Check stoploss first (highest priority)
             if stoploss_enabled and pnl <= stoploss_threshold:
@@ -1041,8 +1052,8 @@ class GridBot:
         quote_profit_eth = quote_return_eth - cost_eth
         
         if quote_profit_eth < min_profit_eth:
-            buy_price = get_buy_price(pos)
-            pnl_at_check = calculate_pnl(pos, price)
+            buy_price = get_buy_price(pos, self.token_decimals)
+            pnl_at_check = calculate_pnl(pos, price, self.token_decimals)
             logger.info(f"⏸️  Position #{pos_id} at {pnl_at_check:.1f}% P&L but quote profit ({quote_profit_eth:.6f}) < min ({min_profit_eth:.6f}) - skipping")
             self._sell_attempt = {
                 "status": "quote_below_minimum",
@@ -1072,18 +1083,18 @@ class GridBot:
             logger.warning(f"Invalid position #{pos_id}: balance={balance}, cost_wei={cost_wei}")
             return
         
-        tokens = balance / 10**18
+        tokens = balance / self.token_unit
         cost_eth = cost_wei / 1e18
         buy_price = cost_eth / tokens if tokens > 0 else 0
-        pnl = calculate_pnl(pos, price)
+        pnl = calculate_pnl(pos, price, self.token_decimals)
         
         # Moonbag logic
         moonbag_pct = getattr(self.config, 'moonbag_percentage', 0)
         if moonbag_pct > 0:
             moonbag_tokens = int(balance * moonbag_pct / 100)
             sell_amount = balance - moonbag_tokens
-            sell_tokens = sell_amount / 10**18
-            logger.info(f"🌙 Moonbag: Keeping {moonbag_tokens/1e18:.4f} ({moonbag_pct}%), selling {sell_tokens:.4f}")
+            sell_tokens = sell_amount / self.token_unit
+            logger.info(f"🌙 Moonbag: Keeping {moonbag_tokens/self.token_unit:.4f} ({moonbag_pct}%), selling {sell_tokens:.4f}")
         else:
             sell_amount = balance
             sell_tokens = tokens
@@ -1335,7 +1346,7 @@ class GridBot:
             remove_position(pos_id)
             
             if moonbag_tokens > 0:
-                logger.info(f"   Moonbag: {moonbag_tokens/1e18:.4f} tokens to wallet")
+                logger.info(f"   Moonbag: {moonbag_tokens/self.token_unit:.4f} tokens to wallet")
             
             profit_pct = (actual_profit / sold_cost_eth * 100) if sold_cost_eth > 0 else 0
             self._record_dashboard_trade("sell", eth_received, sell_tokens, price, result.tx_hash, actual_profit)
@@ -1473,7 +1484,7 @@ class GridBot:
         if result.success:
             # Update position - store actual WETH cost (not price) in nano-WETH
             tokens_received = quote.buy_amount
-            tokens = tokens_received / 10**18
+            tokens = tokens_received / self.token_unit
             self.positions[pos_id]['balance'] = tokens_received
             # Cost = actual WETH spent for profit calculation (in wei for precision)
             cost_wei = quote.sell_amount if quote.sell_amount else buy_amount_wei
@@ -1503,7 +1514,7 @@ class GridBot:
         """Execute a sell order with moonbag and banking."""
         pos = self.positions[pos_id]
         total_balance = pos['balance']
-        total_tokens = total_balance / 10**18
+        total_tokens = total_balance / self.token_unit
         
         # Validate position has tokens and cost basis
         cost_wei = pos.get('cost_wei', pos.get('cost', 0) * 10**9)
@@ -1526,8 +1537,8 @@ class GridBot:
         if moonbag_pct > 0:
             moonbag_tokens = int(total_balance * moonbag_pct / 100)
             sell_amount = total_balance - moonbag_tokens
-            sell_tokens = sell_amount / 10**18
-            logger.info(f"🌙 Moonbag: Keeping {moonbag_tokens / 10**18:.4f} tokens ({moonbag_pct}%), selling {sell_tokens:.4f}")
+            sell_tokens = sell_amount / self.token_unit
+            logger.info(f"🌙 Moonbag: Keeping {moonbag_tokens / self.token_unit:.4f} tokens ({moonbag_pct}%), selling {sell_tokens:.4f}")
         else:
             sell_amount = total_balance
             sell_tokens = total_tokens
@@ -1664,7 +1675,7 @@ class GridBot:
             self.save_positions()
             
             if moonbag_tokens > 0:
-                logger.info(f"   Moonbag: {moonbag_tokens / 10**18:.4f} tokens added to wallet balance")
+                logger.info(f"   Moonbag: {moonbag_tokens / self.token_unit:.4f} tokens added to wallet balance")
             
             logger.info(f"✅ Sell successful!")
             logger.info(f"   Actual return: {eth_received:.6f} {self.trade_token_name}")
@@ -1823,11 +1834,11 @@ class GridBot:
             gridless_positions = load_positions()
             active = len(gridless_positions)
             empty = 0  # Gridless doesn't have empty slots
-            position_balance_total = sum(p.get('balance', 0) for p in gridless_positions.values()) / 10**18
+            position_balance_total = sum(p.get('balance', 0) for p in gridless_positions.values()) / self.token_unit
         else:
             active = sum(1 for p in self.positions.values() if p['balance'] > 0)
             empty = sum(1 for p in self.positions.values() if p['balance'] == 0)
-            position_balance_total = sum(p['balance'] for p in self.positions.values()) / 10**18
+            position_balance_total = sum(p['balance'] for p in self.positions.values()) / self.token_unit
         
         # Calculate moonbag (tokens in wallet not in positions)
         moonbag_balance = token_bal - position_balance_total
@@ -1853,10 +1864,10 @@ class GridBot:
                 from gridless import get_buy_price
                 active_positions = sorted(
                     [(pid, p) for pid, p in gridless_positions.items()],
-                    key=lambda x: get_buy_price(x[1])
+                    key=lambda x: get_buy_price(x[1], self.token_decimals)
                 )
                 for pos_id, pos in active_positions[:3]:
-                    tokens = pos.get('balance', 0) / 10**18
+                    tokens = pos.get('balance', 0) / self.token_unit
                     # Support both cost_wei (new) and cost (legacy nano-ETH)
                     cost_wei = pos.get('cost_wei', 0)
                     if cost_wei <= 0 and 'cost' in pos:
@@ -1873,7 +1884,7 @@ class GridBot:
             else:
                 active_positions = [(pid, p) for pid, p in self.positions.items() if p['balance'] > 0]
                 for pos_id, pos in active_positions[:3]:
-                    tokens = pos['balance'] / 10**18
+                    tokens = pos['balance'] / self.token_unit
                     cost_weth = pos['cost'] / 10**9
                     if tokens > 0 and cost_weth > 0:
                         buy_price = cost_weth / tokens
@@ -1916,7 +1927,7 @@ class GridBot:
                     sell_threshold = getattr(self.config, 'gridless_sell_threshold', 5.0)
                     sorted_positions = sorted(
                         gridless_positions.items(),
-                        key=lambda x: get_buy_price(x[1])
+                        key=lambda x: get_buy_price(x[1], self.token_decimals)
                     )
                     for pos_id, pos in sorted_positions:
                         balance_raw = pos.get('balance', 0)
@@ -1926,7 +1937,7 @@ class GridBot:
                             old_cost = pos.get('cost', 0)
                             if old_cost > 0:
                                 cost_wei = old_cost * 10**9
-                        tokens = balance_raw / 10**18
+                        tokens = balance_raw / self.token_unit
                         cost_eth = cost_wei / 10**18
                         # Calculate buy_price from cost/balance
                         if tokens > 0 and cost_eth > 0:
@@ -1944,7 +1955,7 @@ class GridBot:
                         if pos['balance'] > 0:
                             balance_raw = pos['balance']
                             cost_raw = pos['cost']
-                            tokens = balance_raw / 10**18
+                            tokens = balance_raw / self.token_unit
                             cost_weth = cost_raw / 10**9
                             sell_min = pos['sellMin'] / 10**9
                             # Buy price = WETH spent / tokens received
@@ -2010,7 +2021,7 @@ class GridBot:
                     for pos_id, pos in gpos.items():
                         bal = pos.get('balance', 0)
                         if bal > 0:
-                            tokens = bal / 10**18
+                            tokens = bal / self.token_unit
                             cost_wei = pos.get('cost_wei', pos.get('cost', 0) * 10**9)
                             cost_eth = cost_wei / 10**18
                             if tokens > 0 and cost_eth > 0:
@@ -2026,7 +2037,7 @@ class GridBot:
                 else:
                     for pos_id, pos in self.positions.items():
                         if pos['balance'] > 0:
-                            tokens = pos['balance'] / 10**18
+                            tokens = pos['balance'] / self.token_unit
                             cost_eth = pos.get('cost', 0) / 10**9
                             if tokens > 0 and cost_eth > 0:
                                 buy_price = cost_eth / tokens
