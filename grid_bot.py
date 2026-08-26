@@ -2084,6 +2084,8 @@ class GridBot:
                     wallet_address=self.wallet.address,
                     display_name=self.config.dashboard_name,
                     group=self.config.dashboard_group,
+                    buy_point_percent=self.config.gridless_buy_threshold,
+                    sell_point_percent=self.config.gridless_sell_threshold,
                     poll_interval_seconds=self.config.poll_interval_seconds,
                     trades_history=self.dashboard_trades,
                     events=self.dashboard_events,
