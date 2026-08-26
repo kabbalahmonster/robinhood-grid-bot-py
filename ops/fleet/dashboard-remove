@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+SCRIPT_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)"
+# shellcheck source=fleet-common.sh
+source "$SCRIPT_DIR/fleet-common.sh"
+
+usage() {
+  cat <<'EOF'
+Usage: dashboard-remove [options] BOT_ID [BOT_ID ...]
+
+Preview or permanently remove retired bot cards and their saved DoomDash
+status history. Preview is the default; it performs no network request.
+
+Options:
+  --execute                    Send the authenticated DELETE requests
+  --confirm-retired            Required with --execute
+  --credentials-from NAME      Read dashboard settings from this fleet bot
+  --config PATH                Use an alternate fleet configuration
+  -h, --help                   Show this help
+
+Stop each retired bot first. If it reports again, DoomDash recreates its card.
+The dashboard API key is read from the selected checkout's .env and is never
+printed or passed on the command line.
+EOF
+}
+
+config_path=""
+credentials_from=""
+execute=0
+confirm_retired=0
+bot_ids=()
+
+while (($#)); do
+  case "$1" in
+    --config) (($# >= 2)) || fleet_die "--config requires a path"; config_path="$2"; shift 2 ;;
+    --credentials-from) (($# >= 2)) || fleet_die "--credentials-from requires a bot name"; credentials_from="$2"; shift 2 ;;
+    --execute) execute=1; shift ;;
+    --confirm-retired) confirm_retired=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    --*) fleet_die "Unknown option: $1" ;;
+    *) bot_ids+=("$1"); shift ;;
+  esac
+done
+
+((${#bot_ids[@]} > 0)) || fleet_die "At least one BOT_ID is required"
+((execute == 0 || confirm_retired == 1)) || fleet_die "--execute requires --confirm-retired"
+
+fleet_load_config "$config_path"
+fleet_validate_bots
+
+credentials_dir=""
+for bot_dir in "${FLEET_BOT_DIRS[@]}"; do
+  name="$(fleet_bot_name "$bot_dir")"
+  if [[ -z "$credentials_from" || "$name" == "$credentials_from" ]]; then
+    credentials_dir="$bot_dir"
+    break
+  fi
+done
+[[ -n "$credentials_dir" ]] || fleet_die "Unknown bot for --credentials-from: $credentials_from"
+[[ -f "$credentials_dir/.env" ]] || fleet_die "Missing credentials file: $credentials_dir/.env"
+
+python_bin="$(fleet_python_for "$credentials_dir")" || fleet_die "No Python interpreter found for: $credentials_dir"
+args=(--env-file "$credentials_dir/.env")
+((execute == 0)) || args+=(--execute)
+for bot_id in "${bot_ids[@]}"; do args+=(--bot-id "$bot_id"); done
+
+exec "$python_bin" "$SCRIPT_DIR/dashboard-remove.py" "${args[@]}"

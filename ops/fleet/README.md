@@ -71,7 +71,8 @@ sudo apt install tmux git python3 python3-venv
      ops/fleet/treasury-transfer ops/fleet/update-variable \
      ops/fleet/backup-private-keys ops/fleet/fleet-discover \
      ops/fleet/liquidate-assets ops/fleet/fleet-doctor \
-     ops/fleet/fleet-inventory ops/fleet/fleet-audit
+     ops/fleet/fleet-inventory ops/fleet/fleet-audit \
+     ops/fleet/dashboard-remove
    ```
 
    Set `FLEET_BOT_ROOT` to the directory containing your bot checkouts. The
@@ -99,6 +100,7 @@ sudo apt install tmux git python3 python3-venv
    ln -sf "$PWD/ops/fleet/fleet-doctor" "$HOME/bin/fleet-doctor"
    ln -sf "$PWD/ops/fleet/fleet-inventory" "$HOME/bin/fleet-inventory"
    ln -sf "$PWD/ops/fleet/fleet-audit" "$HOME/bin/fleet-audit"
+   ln -sf "$PWD/ops/fleet/dashboard-remove" "$HOME/bin/dashboard-remove"
    ```
 
    Ensure `~/bin` is in `PATH`, or invoke the scripts by their repository paths.
@@ -552,6 +554,25 @@ the entire fleet before creating the backup so a missing `.env`, missing or
 duplicate field, or malformed private key cannot silently produce an
 incomplete file. The resulting file contains all fleet signing authority in
 plaintext; protect and remove copies accordingly.
+
+## Removing permanently retired bots from DoomDash
+
+`dashboard-remove` deletes one or more retired bot cards and their persisted
+DoomDash status histories. It previews by default and reads `DASHBOARD_URL`
+and `DASHBOARD_API_KEY` from the first configured checkout without printing or
+passing the key on the command line.
+
+Stop the retired bot processes first. Preview the exact IDs, then execute:
+
+```bash
+ops/fleet/dashboard-remove OLDCOIN ABANDONED-BOT
+ops/fleet/dashboard-remove --execute --confirm-retired OLDCOIN ABANDONED-BOT
+```
+
+Use `--credentials-from NAME` when the first checkout does not contain the
+shared dashboard credentials. A bot that reports again will recreate its card.
+Each deletion is attempted independently; the command exits nonzero if any
+target fails.
 
 ## Safety and update behavior
 
