@@ -336,6 +336,9 @@ inputs, and does not automatically admit incomplete bots to fleet membership.
 Private-key output stays disabled unless `--show-private-keys` is explicitly
 supplied; that flag prints a MetaMask-ready import list after successful batch
 creation while preserving each checkout's normal protected `wallet.txt`.
+Repeatable `--overwrite-default NAME=VALUE` arguments can replace or append
+shared strategy values such as `MAX_POSITIONS=6` and
+`POLL_INTERVAL_SECONDS=12` across the entire new batch.
 See the [fleet guide](ops/fleet/README.md#initialize-new-bot-checkouts) for the
 full setup, dependency, validation, backup, and registration workflow.
 

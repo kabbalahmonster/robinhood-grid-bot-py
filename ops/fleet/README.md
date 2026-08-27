@@ -250,6 +250,24 @@ initialize-bots --template "$HOME/bot.env.template" \
   OTHER=0xabcdefabcdefabcdefabcdefabcdefabcdefabcd
 ```
 
+Apply shared strategy defaults to every new `.env` by repeating
+`--overwrite-default NAME=VALUE`:
+
+```bash
+initialize-bots --template "$HOME/bot.env.template" --apply \
+  --overwrite-default MAX_POSITIONS=6 \
+  --overwrite-default POLL_INTERVAL_SECONDS=12 \
+  NET INDEX OTHER
+```
+
+An override replaces one existing assignment or appends it when the template
+does not contain that name. Empty values are allowed (`NAME=`). Variable names
+and duplicate overrides are validated before cloning. `PRIVATE_KEY`,
+`TOKEN_SYMBOL`, and `TOKEN_ADDRESS` remain managed by the initializer and
+cannot be overridden through this option. Put secrets in the protected template
+instead: command-line values can remain in shell history and process listings,
+although secret-like values are redacted from the initializer's preview.
+
 `NET` becomes folder `net` and `TOKEN_SYMBOL=NET`. `INDEX` becomes folder
 `index` with an intentionally blank `TOKEN_ADDRESS=`. Apply the same plan with:
 
@@ -272,6 +290,8 @@ Useful options:
 - `--repo URL` overrides the operations checkout's `origin`.
 - `--branch NAME` clones one explicit branch.
 - `--install-deps` creates `.venv` and installs `requirements.txt` for each bot.
+- Repeatable `--overwrite-default NAME=VALUE` applies shared `.env` defaults to
+  the entire new batch.
 - `--show-private-keys` prints `SYMBOL`, public wallet address, and private key
   as a tab-separated MetaMask import list after the full batch succeeds.
 - `--config PATH` uses another fleet root/layout configuration.

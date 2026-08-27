@@ -12,6 +12,21 @@ from pathlib import Path
 
 PRIVATE_KEY_RE = re.compile(r"^(?:0x)?[0-9a-fA-F]{64}$")
 ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
+NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+RESERVED_NAMES = {"PRIVATE_KEY", "TOKEN_SYMBOL", "TOKEN_ADDRESS"}
+
+
+def parse_override(raw: str) -> tuple[str, str]:
+    if "=" not in raw:
+        raise ValueError(f"Override must be NAME=VALUE: {raw}")
+    name, value = raw.split("=", 1)
+    if not NAME_RE.fullmatch(name):
+        raise ValueError(f"Invalid override variable name: {name}")
+    if name in RESERVED_NAMES:
+        raise ValueError(f"{name} is managed by initialize-bots and cannot be overridden")
+    if "\n" in value or "\r" in value:
+        raise ValueError(f"Override for {name} contains a newline")
+    return name, value
 
 
 def load_generator(path: Path):
@@ -71,6 +86,7 @@ def main() -> None:
     parser.add_argument("--wallet-output", required=True, type=Path)
     parser.add_argument("--symbol", required=True)
     parser.add_argument("--address", default="")
+    parser.add_argument("--override", action="append", default=[])
     parser.add_argument("--reveal-private-key", action="store_true")
     args = parser.parse_args()
 
@@ -91,14 +107,16 @@ def main() -> None:
 
     generator.save_wallet(wallet, str(args.wallet_output), chmod=True)
     os.chmod(args.wallet_output, stat.S_IRUSR | stat.S_IWUSR)
-    env_text = replace_assignments(
-        template,
-        {
-            "PRIVATE_KEY": private_key,
-            "TOKEN_SYMBOL": args.symbol,
-            "TOKEN_ADDRESS": args.address,
-        },
-    )
+    overrides = dict(parse_override(raw) for raw in args.override)
+    if len(overrides) != len(args.override):
+        raise ValueError("Each override variable may be assigned only once")
+    assignments = {
+        "PRIVATE_KEY": private_key,
+        "TOKEN_SYMBOL": args.symbol,
+        "TOKEN_ADDRESS": args.address,
+    }
+    assignments.update(overrides)
+    env_text = replace_assignments(template, assignments)
     write_exclusive(args.env_output, env_text)
     if args.reveal_private_key:
         print(f"{public_address}\t{private_key}")

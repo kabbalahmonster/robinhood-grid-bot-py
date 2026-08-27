@@ -30,10 +30,22 @@ Options:
   --branch NAME        Clone one branch instead of the remote default
   --python PATH        Python used for secure wallet generation
   --install-deps       Create .venv and install requirements.txt in each clone
+  --overwrite-default NAME=VALUE
+                       Set/append one .env value in every new bot; repeatable
   --show-private-keys  After success, print a MetaMask import list (sensitive)
   --apply              Perform the previewed creation
   -h, --help           Show this help
 EOF
+}
+
+display_override() {
+  local assignment="$1" name="${1%%=*}" upper_name
+  upper_name="${name^^}"
+  if [[ "$upper_name" =~ (KEY|SECRET|TOKEN|PASSWORD|MNEMONIC|CREDENTIAL) ]]; then
+    printf '%s=<redacted>\n' "$name"
+  else
+    printf '%s\n' "$assignment"
+  fi
 }
 
 template=""
@@ -46,6 +58,7 @@ install_deps=0
 show_private_keys=0
 declare -a specs=() symbols=() folders=() addresses=() final_parents=()
 declare -a public_addresses=() private_keys=()
+declare -a overrides=()
 
 while (($#)); do
   case "$1" in
@@ -55,6 +68,11 @@ while (($#)); do
     --branch) (($# >= 2)) || fleet_die "--branch requires a name"; branch="$2"; shift 2 ;;
     --python) (($# >= 2)) || fleet_die "--python requires a path"; python_bin="$2"; shift 2 ;;
     --install-deps) install_deps=1; shift ;;
+    --overwrite-default)
+      (($# >= 2)) || fleet_die "--overwrite-default requires NAME=VALUE"
+      overrides+=("$2")
+      shift 2
+      ;;
     --show-private-keys) show_private_keys=1; shift ;;
     --apply) apply=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -92,6 +110,20 @@ if [[ -z "$python_bin" ]]; then
 fi
 [[ -x "$python_bin" ]] || fleet_die "Python interpreter is not executable: $python_bin"
 
+declare -A seen_overrides=()
+for override in "${overrides[@]}"; do
+  [[ "$override" == *=* ]] || fleet_die "Override must be NAME=VALUE: $override"
+  override_name="${override%%=*}"
+  override_value="${override#*=}"
+  [[ "$override_name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || fleet_die "Invalid override variable name: $override_name"
+  case "$override_name" in
+    PRIVATE_KEY|TOKEN_SYMBOL|TOKEN_ADDRESS) fleet_die "$override_name is managed by initialize-bots and cannot be overridden" ;;
+  esac
+  [[ "$override_value" != *$'\n'* && "$override_value" != *$'\r'* ]] || fleet_die "Override for $override_name contains a newline"
+  [[ -z "${seen_overrides[$override_name]+x}" ]] || fleet_die "Duplicate override variable: $override_name"
+  seen_overrides["$override_name"]=1
+done
+
 declare -A seen=()
 for spec in "${specs[@]}"; do
   raw_symbol="${spec%%=*}"
@@ -113,6 +145,13 @@ done
 
 printf 'New bot plan (%d):\n' "${#symbols[@]}"
 printf '  Root:     %s\n  Checkout: %s\n  Template: %s\n  Repository: %s\n' "$root_real" "$FLEET_CHECKOUT_DIRNAME" "$template" "$repo_url"
+if ((${#overrides[@]})); then
+  printf '  Shared .env overrides:\n'
+  for override in "${overrides[@]}"; do
+    printf '    '
+    display_override "$override"
+  done
+fi
 for index in "${!symbols[@]}"; do
   shown_address="${addresses[$index]:-(blank; configure before starting)}"
   printf '  %-12s -> %s/%s  TOKEN_ADDRESS=%s\n' "${symbols[$index]}" "${final_parents[$index]}" "$FLEET_CHECKOUT_DIRNAME" "$shown_address"
@@ -146,6 +185,7 @@ for index in "${!symbols[@]}"; do
     --symbol "${symbols[$index]}"
     --address "${addresses[$index]}"
   )
+  for override in "${overrides[@]}"; do helper_args+=(--override "$override"); done
   ((show_private_keys == 0)) || helper_args+=(--reveal-private-key)
   wallet_result="$($python_bin "${helper_args[@]}")"
   if ((show_private_keys)); then

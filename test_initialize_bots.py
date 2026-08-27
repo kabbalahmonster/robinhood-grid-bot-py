@@ -73,7 +73,9 @@ def save_wallet(wallet, filepath, chmod=True):
             check=True,
         )
 
-    def run_initializer(self, *tokens, apply=False, template=None, show_private_keys=False):
+    def run_initializer(
+        self, *tokens, apply=False, template=None, show_private_keys=False, overrides=()
+    ):
         command = [
             str(INITIALIZE_BOTS),
             "--config",
@@ -89,6 +91,8 @@ def save_wallet(wallet, filepath, chmod=True):
             command.append("--apply")
         if show_private_keys:
             command.append("--show-private-keys")
+        for override in overrides:
+            command.extend(("--overwrite-default", override))
         command.extend(tokens)
         return subprocess.run(
             command,
@@ -142,6 +146,27 @@ def save_wallet(wallet, filepath, chmod=True):
         self.assertIn("SENSITIVE — MetaMask private-key import list", result.stdout)
         self.assertIn(f"NET\t{PUBLIC_WALLET}\t{PRIVATE_KEY}", result.stdout)
         self.assertTrue((self.bot_root / "net" / "checkout" / "wallet.txt").exists())
+
+    def test_repeatable_defaults_update_existing_and_append_missing_variables(self):
+        result = self.run_initializer(
+            "NET",
+            apply=True,
+            overrides=("POLL_INTERVAL_SECONDS=12", "MAX_POSITIONS=6"),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        env_text = (self.bot_root / "net" / "checkout" / ".env").read_text(encoding="utf-8")
+        self.assertIn("POLL_INTERVAL_SECONDS=12\n", env_text)
+        self.assertIn("MAX_POSITIONS=6\n", env_text)
+
+    def test_generated_identity_fields_cannot_be_overridden(self):
+        result = self.run_initializer(
+            "NET", apply=True, overrides=("PRIVATE_KEY=not-the-generated-key",)
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("managed by initialize-bots", result.stderr)
+        self.assertFalse(self.bot_root.exists())
 
     def test_existing_destination_blocks_batch_before_clone(self):
         (self.bot_root / "two").mkdir(parents=True)
