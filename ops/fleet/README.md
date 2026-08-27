@@ -555,6 +555,29 @@ duplicate field, or malformed private key cannot silently produce an
 incomplete file. The resulting file contains all fleet signing authority in
 plaintext; protect and remove copies accordingly.
 
+### Full fleet recovery set
+
+The private-key JSON alone cannot recreate the fleet. Maintain an encrypted,
+access-controlled recovery set containing:
+
+- every checkout's `.env` and entire `data/` directory
+- `ops/fleet/fleet.conf` (or the selected external `FLEET_CONFIG`)
+- the Git remote, branch, and deployed commit for each checkout
+- the key backup above, preferably stored separately from config/state
+- host-level tmux/systemd conventions and DoomDash endpoint/DNS details
+
+Never commit this recovery set. Verify it periodically on an isolated host:
+clone one checkout, restore its `.env` and `data/`, run `--check-config`, then
+run `fleet-doctor` and `fleet-inventory` without starting trading. A useful
+backup must preserve file ownership/mode and decrypt successfully; merely
+having an archive filename is not verification.
+
+For a single-bot rebuild, restore into the deterministic path implied by
+`FLEET_BOT_ROOT`, `FLEET_BOT_NAMES`, and `FLEET_CHECKOUT_DIRNAME`. Review the
+wallet, chain, token, provider, reserve, positions, and dashboard ID before
+starting it. If position state is missing for a funded wallet, stop and
+reconcile on-chain assets and receipts rather than generating fresh positions.
+
 ## Removing permanently retired bots from DoomDash
 
 `dashboard-remove` deletes one or more retired bot cards and their persisted

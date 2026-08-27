@@ -93,7 +93,9 @@ python grid_bot.py
 | `CHAIN_ID` | Yes | 4663 | Chain ID (4663=Robinhood, 8453=Base, 1=Mainnet) |
 | `ZEROX_API_KEY` | Yes* | - | 0x API key from 0x.org (if using 0x) |
 | `LI_FI_API_KEY` | Yes* | - | LI.FI API key from li.fi (if using LI.FI) |
+| `LI_FI_INTEGRATOR` | No | empty | Optional LI.FI integrator identifier loaded for provider compatibility |
 | `UNISWAP_API_KEY` | Yes* | - | Uniswap API key (if using Uniswap) |
+| `UNISWAP_PERMIT2_DISABLED` | No | true | Request direct approval flow instead of Permit2 in the Uniswap API client |
 | `SUSHI_API_KEY` | No | empty | Optional Sushi portal API key; the public v7 API works without one |
 | `SWAP_PROVIDER` | No | empty | Explicit provider: `0x`, `lifi`, `uniswap`, or `sushiswap`; empty uses legacy flags |
 | `SWAP_FALLBACK_PROVIDER` | No | sushiswap | Immediate per-operation fallback after retryable pre-broadcast failures; empty disables fallback |
@@ -120,6 +122,9 @@ python grid_bot.py
 | `FAST_PROFIT` | No | true | Sell above minimum profit without waiting for the classic sell range |
 | `TRADEABLE_BALANCE_PERCENT` | No | 100 | Percentage of ETH/WETH balance available for trading |
 | `ETH_GAS_RESERVE` | No | 0.0005 | Native ETH retained for transaction gas and protected by guarded ETH treasury transfers |
+| `USE_ETH_TRADING` | No | false | Trade native ETH rather than WETH; chain templates may override this to true |
+| `GAS_LIMIT_MULTIPLIER` | No | 1.05 | Safety multiplier applied to estimated transaction gas limits; values below 1 are clamped |
+| `GAS_PRICE_MULTIPLIER` | No | 1.05 | Safety multiplier applied to current/quoted gas price; values below 1 are clamped |
 | **Bot Behavior** ||||
 | `POLL_INTERVAL_SECONDS` | No | 6 | Price check interval in seconds |
 | `ANTI_MEV_JITTER` | No | true | Enable anti-MEV timing jitter |
@@ -223,6 +228,81 @@ cp ops/fleet/fleet.conf.example ops/fleet/fleet.conf
 nano ops/fleet/fleet.conf
 ops/fleet/start-fleet
 ```
+
+#### Fleet command map
+
+All mutating financial commands preview by default and keep their explicit
+execution guards. See [`ops/fleet/README.md`](ops/fleet/README.md) for every
+option and safety invariant.
+
+| Command | Purpose | Mutates/broadcasts? |
+|---|---|---|
+| `start-fleet` / `stop-fleet` / `restart-fleet` | Tmux lifecycle for the configured fleet | Processes only |
+| `update-fleet` | Preflight and fast-forward clean checkouts; optional restart | Git/processes |
+| `fleet-discover` | Print deterministic membership for review | No |
+| `fleet-doctor` | Check config, Git, RPC, contracts, provider route, and dashboard | No |
+| `fleet-inventory` | Read addresses, reserves, managed balances, positions, and audit ages | No |
+| `fleet-audit` | Reconcile local treasury/liquidation receipts | No |
+| `update-variable` | Preview/atomically change selected `.env` variables | Config only; `--apply` required |
+| `backup-private-keys` | Validate every configured bot and write one sensitive key backup | Sensitive file output |
+| `usdg-sweep` | Plan or execute fleet USDG transfers | Broadcast only with all guards |
+| `treasury-transfer` | Plan or execute native/ERC-20 transfers | Broadcast only with all guards |
+| `liquidate-assets` | Plan or sell verified bot-managed assets and clear matching positions | Broadcast only with all guards |
+| `dashboard-remove` | Preview/remove permanently retired DoomDash cards/history | Network mutation only with both confirmations |
+
+Common `--only name1,name2` and `--exclude name3` selectors are supported by
+start, update, variable update, treasury/liquidation, doctor, inventory, and
+audit operations. `stop-fleet` and `restart-fleet` remain whole-session actions.
+
+### Production architecture and repository boundaries
+
+Each fleet member is an independent clone with its own Git worktree, virtual
+environment, `.env`, wallet, and `data/` directory. Shared fleet scripts only
+coordinate those clones; they do not merge config or state.
+
+```text
+fleet.conf -> independent bot clones -> RPC + selected swap provider
+                                     -> authenticated status reports to DoomDash
+DoomDash -> browser snapshot/SSE + server-side Telegram monitoring
+```
+
+The trading repository is authoritative for execution logic and templates.
+DoomDash is authoritative only for monitoring state; it is not a source-code,
+secret, strategy-config, or wallet backup. Telegram monitoring lives in the
+DoomDash repository and intentionally exposes no remote trading controls.
+
+### Recreating one bot or the whole fleet
+
+For an exact recoverable bot, back up the following outside Git and encrypt any
+copy containing signing material:
+
+- the bot's `.env` (strategy, chain/token/provider addresses, API credentials,
+  dashboard identity, and `PRIVATE_KEY`)
+- the entire `data/` directory, especially position state, persistent profit
+  totals, dashboard trade/Event history, and treasury/liquidation receipts
+- the Git remote, branch, and preferably the deployed commit SHA
+- the fleet's gitignored `fleet.conf` and host service/tmux conventions
+
+`backup-private-keys` validates and exports signing keys only. It does **not**
+replace backups of `.env`, `data/`, or `fleet.conf`.
+
+Rebuild procedure:
+
+1. Clone the repository into the expected per-bot path and check out the saved
+   commit/branch.
+2. Create `.venv` and install `requirements.txt`.
+3. Restore `.env` with mode `0600`; restore `data/` before starting the bot.
+4. Run `python grid_bot.py --check-config`, then fleet `fleet-doctor` and
+   `fleet-inventory` for read-only verification.
+5. Confirm wallet, chain, token, provider, reserve, position count, and
+   dashboard identity against the backup.
+6. Start one bot and verify price/status reporting before admitting it to the
+   full fleet session. DoomDash recreates a missing card on the next report.
+
+Without old `data/`, the code and wallet can still be restored, but existing
+position cost bases, persistent accounting, and audit continuity may not be
+reconstructable safely. Do not generate a fresh grid over an unknown funded
+wallet merely because the code starts.
 
 ### Safe maintenance commands
 
