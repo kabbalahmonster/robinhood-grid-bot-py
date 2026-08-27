@@ -11,8 +11,9 @@ usage() {
 Usage: update-fleet [--restart] [--detach] [--only NAMES] [--exclude NAMES] [--config PATH]
 
 Fast-forward every configured bot checkout from its current upstream branch.
-All checkouts are preflighted before any pull. Dirty worktrees, detached HEADs,
-missing upstreams, and non-fast-forward updates are refused.
+All checkouts are preflighted before any pull. Tracked modifications, detached
+HEADs, missing upstreams, and non-fast-forward updates are refused. Untracked
+files are allowed unless Git determines an incoming file would overwrite them.
 
 --restart  Restart the fleet after every checkout updates successfully.
 --detach   With --restart, leave the restarted fleet detached.
@@ -48,13 +49,32 @@ command -v git >/dev/null 2>&1 || fleet_die "git is required but was not found i
 fleet_validate_bots
 
 printf 'Preflighting %d fleet checkouts...\n' "${#FLEET_BOT_DIRS[@]}"
+preflight_failures=0
 for bot_dir in "${FLEET_BOT_DIRS[@]}"; do
-  [[ -d "$bot_dir/.git" ]] || fleet_die "Not a Git checkout: $bot_dir"
-  [[ -z "$(git -C "$bot_dir" status --porcelain)" ]] || fleet_die "Dirty worktree; refusing fleet update: $bot_dir"
-  branch="$(git -C "$bot_dir" symbolic-ref --quiet --short HEAD)" || fleet_die "Detached HEAD; refusing fleet update: $bot_dir"
-  upstream="$(git -C "$bot_dir" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null)" || fleet_die "Branch has no upstream: $bot_dir ($branch)"
+  if ! git -C "$bot_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    printf '  BLOCKED  Not a Git checkout: %s\n' "$bot_dir" >&2
+    preflight_failures=$((preflight_failures + 1))
+    continue
+  fi
+  if [[ -n "$(git -C "$bot_dir" status --porcelain --untracked-files=no)" ]]; then
+    printf '  BLOCKED  Tracked modifications: %s\n' "$bot_dir" >&2
+    git -C "$bot_dir" status --short --untracked-files=no >&2
+    preflight_failures=$((preflight_failures + 1))
+    continue
+  fi
+  if ! branch="$(git -C "$bot_dir" symbolic-ref --quiet --short HEAD)"; then
+    printf '  BLOCKED  Detached HEAD: %s\n' "$bot_dir" >&2
+    preflight_failures=$((preflight_failures + 1))
+    continue
+  fi
+  if ! upstream="$(git -C "$bot_dir" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null)"; then
+    printf '  BLOCKED  Branch has no upstream: %s (%s)\n' "$bot_dir" "$branch" >&2
+    preflight_failures=$((preflight_failures + 1))
+    continue
+  fi
   printf '  OK  %s (%s -> %s)\n' "$bot_dir" "$branch" "$upstream"
 done
+((preflight_failures == 0)) || fleet_die "$preflight_failures checkout(s) blocked fleet update; no repositories were changed"
 
 failures=0
 for bot_dir in "${FLEET_BOT_DIRS[@]}"; do

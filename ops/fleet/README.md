@@ -632,12 +632,14 @@ target fails.
   `venv/bin/python`, then `python3` from `PATH`.
 - `stop-fleet` terminates the tmux session and therefore every bot process in
   it. It does not delete files or persistent bot state.
-- `update-fleet` preflights all repositories before changing any of them. It
-  refuses dirty worktrees, detached HEADs, and branches without upstreams, and
-  only permits fast-forward pulls.
-- `update-this-checkout` applies the same Git safety rules to the repository
-  containing the script, without consulting fleet membership or restarting
-  anything. Use it for a dedicated operations clone outside the bot farm.
+- `update-fleet` preflights all repositories before changing any of them and
+  reports every blocker in one pass. It refuses tracked modifications,
+  detached HEADs, and branches without upstreams, and only permits
+  fast-forward pulls. Untracked runtime/local files are allowed; Git still
+  refuses a pull if an incoming tracked path would overwrite one.
+- `update-this-checkout` uses a stricter completely-clean-worktree rule for the
+  dedicated operations clone containing the script. It does not consult fleet
+  membership or restart anything; keep that clone free of bot runtime files.
 - Separate Git repositories cannot be updated as one atomic transaction. A
   later network/pull failure may occur after earlier repositories updated; in
   that case the script reports failure and does not restart the fleet.

@@ -239,7 +239,7 @@ option and safety invariant.
 | Command | Purpose | Mutates/broadcasts? |
 |---|---|---|
 | `start-fleet` / `stop-fleet` / `restart-fleet` | Tmux lifecycle for the configured fleet | Processes only |
-| `update-fleet` | Preflight and fast-forward clean checkouts; optional restart | Git/processes |
+| `update-fleet` | Preflight and fast-forward checkouts without tracked changes; optional restart | Git/processes |
 | `update-this-checkout` | Fast-forward only the clone containing the script; ignores fleet membership | Git only |
 | `fleet-discover` | Print deterministic membership for review | No |
 | `fleet-doctor` | Check config, Git, RPC, contracts, provider route, and dashboard | No |
