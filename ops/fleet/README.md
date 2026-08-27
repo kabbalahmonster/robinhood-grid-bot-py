@@ -26,6 +26,8 @@ copies of the same bot checkout simultaneously.
 - Bash 4 or newer
 - tmux
 - Git (for `update-fleet`)
+- A Python environment containing `eth-account` (for `initialize-bots` wallet
+  generation)
 - One complete bot checkout per fleet member
 - A working `.venv`, `venv`, or system `python3` for every checkout
 
@@ -73,7 +75,8 @@ sudo apt install tmux git python3 python3-venv
      ops/fleet/backup-private-keys ops/fleet/fleet-discover \
      ops/fleet/liquidate-assets ops/fleet/fleet-doctor \
      ops/fleet/fleet-inventory ops/fleet/fleet-audit \
-     ops/fleet/dashboard-remove
+     ops/fleet/dashboard-remove ops/fleet/initialize-bots \
+     ops/fleet/initialize-bot-env.py
    ```
 
    Set `FLEET_BOT_ROOT` to the directory containing your bot checkouts. The
@@ -103,6 +106,7 @@ sudo apt install tmux git python3 python3-venv
    ln -sf "$PWD/ops/fleet/fleet-inventory" "$HOME/bin/fleet-inventory"
    ln -sf "$PWD/ops/fleet/fleet-audit" "$HOME/bin/fleet-audit"
    ln -sf "$PWD/ops/fleet/dashboard-remove" "$HOME/bin/dashboard-remove"
+   ln -sf "$PWD/ops/fleet/initialize-bots" "$HOME/bin/initialize-bots"
    ```
 
    Ensure `~/bin` is in `PATH`, or invoke the scripts by their repository paths.
@@ -228,6 +232,62 @@ setup still identifies the correct checkout. It never loads `fleet.conf`,
 discovers or updates bot clones, or restarts processes. It refuses dirty
 worktrees, detached HEADs, missing upstreams, and diverged branches; after a
 fetch it performs only a fast-forward merge.
+
+### Initialize new bot checkouts
+
+`initialize-bots` provisions one or many independent bots using the standard
+`$FLEET_BOT_ROOT/<lowercase-symbol>/$FLEET_CHECKOUT_DIRNAME` layout. It clones
+the repository, copies a caller-supplied dotenv template, generates a new
+wallet, and fills `PRIVATE_KEY`, `TOKEN_SYMBOL`, and `TOKEN_ADDRESS`. It never
+prints private keys; only each public wallet address appears in the summary.
+
+Preview a mixed batch in one command:
+
+```bash
+initialize-bots --template "$HOME/bot.env.template" \
+  NET=0x1234567890abcdef1234567890abcdef12345678 \
+  INDEX \
+  OTHER=0xabcdefabcdefabcdefabcdefabcdefabcdefabcd
+```
+
+`NET` becomes folder `net` and `TOKEN_SYMBOL=NET`. `INDEX` becomes folder
+`index` with an intentionally blank `TOKEN_ADDRESS=`. Apply the same plan with:
+
+```bash
+initialize-bots --template "$HOME/bot.env.template" --apply \
+  NET=0x1234567890abcdef1234567890abcdef12345678 INDEX
+```
+
+The template may already contain the three managed assignments; if one is
+absent, it is appended. Duplicate definitions are rejected. `.env` and
+`wallet.txt` are created with mode `0600`. Existing destination folders,
+duplicate case-normalized symbols, malformed addresses, and unsafe names are
+rejected before cloning anything. All clones and wallets are prepared beneath
+a private staging directory; a failure leaves no published bot from that
+batch. The helper uses the operations checkout's `.venv`, then `venv`, then
+`python3`; use `--python PATH` to select another interpreter.
+
+Useful options:
+
+- `--repo URL` overrides the operations checkout's `origin`.
+- `--branch NAME` clones one explicit branch.
+- `--install-deps` creates `.venv` and installs `requirements.txt` for each bot.
+- `--config PATH` uses another fleet root/layout configuration.
+
+The command does **not** add names to `FLEET_BOT_NAMES`, start processes, fund
+wallets, or guess token contracts. For every new bot, finish the remaining
+`.env` settings, fill any blank token address, install dependencies if that was
+not requested, back up the signing material securely, and run:
+
+```bash
+cd "$HOME/bot-farm/rh-bots/net/robinhood-grid-bot-py"
+.venv/bin/python grid_bot.py --check-config
+```
+
+Only after that check succeeds should you add the lowercase folder name to
+`FLEET_BOT_NAMES`, run `fleet-doctor --only net`, fund it, and start/restart
+the fleet. Initialization does not create position state; never point a fresh
+bot at an already-funded trading wallet with unknown holdings.
 
 Add `--detach` to either restart form to leave the new session in the
 background. Every command accepts `--config PATH`.

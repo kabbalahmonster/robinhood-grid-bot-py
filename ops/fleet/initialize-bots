@@ -1,0 +1,168 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)"
+REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null)" || {
+  printf 'Error: initialize-bots must live inside a Git checkout\n' >&2
+  exit 1
+}
+
+# shellcheck source=ops/fleet/fleet-common.sh
+source "$SCRIPT_DIR/fleet-common.sh"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  initialize-bots --template PATH [options] SYMBOL[=ADDRESS]...
+
+Create independent bot checkouts below FLEET_BOT_ROOT. Preview is the default;
+add --apply to clone, generate wallets, and create protected .env files.
+
+Token forms:
+  NET=0x1234...abcd   Set TOKEN_ADDRESS
+  INDEX               Leave TOKEN_ADDRESS blank for later configuration
+
+Options:
+  --template PATH      Required dotenv template copied into every new bot
+  --config PATH        Fleet config (normal fleet lookup order by default)
+  --repo URL           Git source (defaults to this checkout's origin)
+  --branch NAME        Clone one branch instead of the remote default
+  --python PATH        Python used for secure wallet generation
+  --install-deps       Create .venv and install requirements.txt in each clone
+  --apply              Perform the previewed creation
+  -h, --help           Show this help
+EOF
+}
+
+template=""
+config_path=""
+repo_url=""
+branch=""
+python_bin=""
+apply=0
+install_deps=0
+declare -a specs=() symbols=() folders=() addresses=() final_parents=()
+
+while (($#)); do
+  case "$1" in
+    --template) (($# >= 2)) || fleet_die "--template requires a path"; template="$2"; shift 2 ;;
+    --config) (($# >= 2)) || fleet_die "--config requires a path"; config_path="$2"; shift 2 ;;
+    --repo) (($# >= 2)) || fleet_die "--repo requires a URL or path"; repo_url="$2"; shift 2 ;;
+    --branch) (($# >= 2)) || fleet_die "--branch requires a name"; branch="$2"; shift 2 ;;
+    --python) (($# >= 2)) || fleet_die "--python requires a path"; python_bin="$2"; shift 2 ;;
+    --install-deps) install_deps=1; shift ;;
+    --apply) apply=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    --) shift; specs+=("$@"); break ;;
+    -*) fleet_die "Unknown option: $1" ;;
+    *) specs+=("$1"); shift ;;
+  esac
+done
+
+[[ -n "$template" ]] || fleet_die "--template PATH is required"
+((${#specs[@]} > 0)) || fleet_die "Provide at least one SYMBOL or SYMBOL=ADDRESS"
+template="$(readlink -f -- "$template")"
+[[ -f "$template" && -r "$template" ]] || fleet_die "Template is not a readable file: $template"
+
+FLEET_CONFIG_PATH="${config_path:-${FLEET_CONFIG:-$(fleet_default_config)}}"
+[[ -f "$FLEET_CONFIG_PATH" ]] || fleet_die "Fleet config not found: $FLEET_CONFIG_PATH"
+# fleet.conf is trusted local Bash configuration.
+# shellcheck disable=SC1090
+source "$FLEET_CONFIG_PATH"
+: "${FLEET_BOT_ROOT:=${HOME}/bot-farm/rh-bots}"
+: "${FLEET_CHECKOUT_DIRNAME:=robinhood-grid-bot-py}"
+[[ "$FLEET_CHECKOUT_DIRNAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || fleet_die "Invalid FLEET_CHECKOUT_DIRNAME"
+root_real="$(readlink -m -- "$FLEET_BOT_ROOT")"
+home_real="$(readlink -f -- "$HOME")"
+[[ "$root_real" != / && "$root_real" != "$home_real" ]] || fleet_die "Refusing dangerously broad FLEET_BOT_ROOT: $root_real"
+
+repo_url="${repo_url:-$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null || true)}"
+[[ -n "$repo_url" ]] || fleet_die "No origin remote found; pass --repo URL"
+
+if [[ -z "$python_bin" ]]; then
+  if [[ -x "$REPO_ROOT/.venv/bin/python" ]]; then python_bin="$REPO_ROOT/.venv/bin/python"
+  elif [[ -x "$REPO_ROOT/venv/bin/python" ]]; then python_bin="$REPO_ROOT/venv/bin/python"
+  else python_bin="$(command -v python3 || true)"
+  fi
+fi
+[[ -x "$python_bin" ]] || fleet_die "Python interpreter is not executable: $python_bin"
+
+declare -A seen=()
+for spec in "${specs[@]}"; do
+  raw_symbol="${spec%%=*}"
+  address=""
+  [[ "$spec" != *=* ]] || address="${spec#*=}"
+  [[ "$raw_symbol" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] || fleet_die "Invalid symbol '$raw_symbol'; use letters, digits, underscore, or hyphen"
+  symbol="${raw_symbol^^}"
+  folder="${raw_symbol,,}"
+  [[ -z "$address" || "$address" =~ ^0x[0-9a-fA-F]{40}$ ]] || fleet_die "Invalid address for $symbol: $address"
+  [[ -z "${seen[$folder]+x}" ]] || fleet_die "Duplicate token resolves to folder '$folder'"
+  seen["$folder"]=1
+  final_parent="$root_real/$folder"
+  [[ ! -e "$final_parent" ]] || fleet_die "Destination already exists: $final_parent"
+  symbols+=("$symbol")
+  folders+=("$folder")
+  addresses+=("$address")
+  final_parents+=("$final_parent")
+done
+
+printf 'New bot plan (%d):\n' "${#symbols[@]}"
+printf '  Root:     %s\n  Checkout: %s\n  Template: %s\n  Repository: %s\n' "$root_real" "$FLEET_CHECKOUT_DIRNAME" "$template" "$repo_url"
+for index in "${!symbols[@]}"; do
+  shown_address="${addresses[$index]:-(blank; configure before starting)}"
+  printf '  %-12s -> %s/%s  TOKEN_ADDRESS=%s\n' "${symbols[$index]}" "${final_parents[$index]}" "$FLEET_CHECKOUT_DIRNAME" "$shown_address"
+done
+if ((apply == 0)); then
+  printf '\nPreview only. Re-run with --apply to create these bots.\n'
+  exit 0
+fi
+
+mkdir -p -- "$root_real"
+stage_root="$(mktemp -d "$root_real/.initialize-bots.XXXXXX")"
+cleanup() { [[ ! -d "$stage_root" ]] || rm -rf -- "$stage_root"; }
+trap cleanup EXIT
+
+for index in "${!symbols[@]}"; do
+  staged_parent="$stage_root/${folders[$index]}"
+  staged_checkout="$staged_parent/$FLEET_CHECKOUT_DIRNAME"
+  mkdir -p -- "$staged_parent"
+  clone_args=(clone --quiet)
+  [[ -z "$branch" ]] || clone_args+=(--branch "$branch" --single-branch)
+  clone_args+=(-- "$repo_url" "$staged_checkout")
+  printf 'Cloning %s...\n' "${symbols[$index]}"
+  git "${clone_args[@]}"
+
+  public_address="$($python_bin "$SCRIPT_DIR/initialize-bot-env.py" \
+    --template "$template" \
+    --env-output "$staged_checkout/.env" \
+    --wallet-generator "$staged_checkout/generate_wallet.py" \
+    --wallet-output "$staged_checkout/wallet.txt" \
+    --symbol "${symbols[$index]}" \
+    --address "${addresses[$index]}")"
+
+  if ((install_deps)); then
+    printf 'Installing dependencies for %s...\n' "${symbols[$index]}"
+    "$python_bin" -m venv "$staged_checkout/.venv"
+    "$staged_checkout/.venv/bin/pip" install -r "$staged_checkout/requirements.txt"
+  fi
+  printf 'Prepared %s (wallet %s)\n' "${symbols[$index]}" "$public_address"
+done
+
+# Every expensive/fallible step completed in staging. Publish only new paths.
+declare -a published=()
+for index in "${!symbols[@]}"; do
+  if mv -- "$stage_root/${folders[$index]}" "${final_parents[$index]}"; then
+    published+=("$index")
+    continue
+  fi
+  printf 'Error: Could not publish %s; rolling back this batch\n' "${symbols[$index]}" >&2
+  for published_index in "${published[@]}"; do
+    mv -- "${final_parents[$published_index]}" "$stage_root/${folders[$published_index]}" || \
+      printf 'Error: Manual cleanup required: %s\n' "${final_parents[$published_index]}" >&2
+  done
+  exit 1
+done
+
+printf '\nCreated %d bot(s). Private keys were not printed.\n' "${#symbols[@]}"
+printf 'Complete blank token addresses and remaining .env settings, install dependencies if omitted, then run --check-config before adding names to FLEET_BOT_NAMES.\n'
