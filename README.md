@@ -199,7 +199,8 @@ INITIAL_BUY_AMOUNT=0.01      # Higher amounts due to gas costs
 ### Operating multiple bots with tmux
 
 The repository includes aligned `start-fleet`, `stop-fleet`, `restart-fleet`,
-`update-fleet`, guarded treasury-transfer and managed-asset liquidation tools,
+`update-fleet`, a safe updater for a standalone operations clone, guarded
+treasury-transfer and managed-asset liquidation tools,
 read-only doctor/inventory/audit commands, shared `--only`/`--exclude`
 targeting, and a reusable fleet variable updater under
 [`ops/fleet`](ops/fleet/README.md). They run independently configured clones in
@@ -239,6 +240,7 @@ option and safety invariant.
 |---|---|---|
 | `start-fleet` / `stop-fleet` / `restart-fleet` | Tmux lifecycle for the configured fleet | Processes only |
 | `update-fleet` | Preflight and fast-forward clean checkouts; optional restart | Git/processes |
+| `update-this-checkout` | Fast-forward only the clone containing the script; ignores fleet membership | Git only |
 | `fleet-discover` | Print deterministic membership for review | No |
 | `fleet-doctor` | Check config, Git, RPC, contracts, provider route, and dashboard | No |
 | `fleet-inventory` | Read addresses, reserves, managed balances, positions, and audit ages | No |

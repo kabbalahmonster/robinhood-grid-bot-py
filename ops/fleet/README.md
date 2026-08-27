@@ -67,7 +67,8 @@ sudo apt install tmux git python3 python3-venv
    cp ops/fleet/fleet.conf.example ops/fleet/fleet.conf
    nano ops/fleet/fleet.conf
    chmod +x ops/fleet/start-fleet ops/fleet/stop-fleet \
-     ops/fleet/restart-fleet ops/fleet/update-fleet ops/fleet/usdg-sweep \
+     ops/fleet/restart-fleet ops/fleet/update-fleet \
+     ops/fleet/update-this-checkout ops/fleet/usdg-sweep \
      ops/fleet/treasury-transfer ops/fleet/update-variable \
      ops/fleet/backup-private-keys ops/fleet/fleet-discover \
      ops/fleet/liquidate-assets ops/fleet/fleet-doctor \
@@ -91,6 +92,7 @@ sudo apt install tmux git python3 python3-venv
    ln -sf "$PWD/ops/fleet/stop-fleet" "$HOME/bin/stop-fleet"
    ln -sf "$PWD/ops/fleet/restart-fleet" "$HOME/bin/restart-fleet"
    ln -sf "$PWD/ops/fleet/update-fleet" "$HOME/bin/update-fleet"
+   ln -sf "$PWD/ops/fleet/update-this-checkout" "$HOME/bin/update-this-checkout"
    ln -sf "$PWD/ops/fleet/usdg-sweep" "$HOME/bin/usdg-sweep"
    ln -sf "$PWD/ops/fleet/treasury-transfer" "$HOME/bin/treasury-transfer"
    ln -sf "$PWD/ops/fleet/update-variable" "$HOME/bin/update-variable"
@@ -202,6 +204,30 @@ Update all checkouts and restart only after every update succeeds:
 ```bash
 ops/fleet/update-fleet --restart
 ```
+
+### Update the operations checkout only
+
+An operations clone may live outside `FLEET_BOT_ROOT` and remain absent from
+`FLEET_BOT_DIRS`. That is the recommended home for the fleet scripts: it can
+manage the live clones without becoming a runnable fleet member itself.
+
+From that clone, check for an update without changing files:
+
+```bash
+ops/fleet/update-this-checkout --check
+```
+
+Then fast-forward only that clone:
+
+```bash
+ops/fleet/update-this-checkout
+```
+
+The script follows its own canonical path, so the `~/bin` symlink shown during
+setup still identifies the correct checkout. It never loads `fleet.conf`,
+discovers or updates bot clones, or restarts processes. It refuses dirty
+worktrees, detached HEADs, missing upstreams, and diverged branches; after a
+fetch it performs only a fast-forward merge.
 
 Add `--detach` to either restart form to leave the new session in the
 background. Every command accepts `--config PATH`.
@@ -609,6 +635,9 @@ target fails.
 - `update-fleet` preflights all repositories before changing any of them. It
   refuses dirty worktrees, detached HEADs, and branches without upstreams, and
   only permits fast-forward pulls.
+- `update-this-checkout` applies the same Git safety rules to the repository
+  containing the script, without consulting fleet membership or restarting
+  anything. Use it for a dedicated operations clone outside the bot farm.
 - Separate Git repositories cannot be updated as one atomic transaction. A
   later network/pull failure may occur after earlier repositories updated; in
   that case the script reports failure and does not restart the fleet.
