@@ -736,6 +736,9 @@ python generate_wallet.py --no-chmod
 - Uses Python's `secrets` module (cryptographically secure randomness)
 - Creates files with 600 permissions (owner read/write only)
 - Appends to existing files (numbered wallets: #1, #2, #3...)
+- Standard local wallet-export filenames (`wallet.txt`, `trading_wallet.txt`,
+  `my_wallet.txt`, and their numbered variants) are gitignored because they may
+  contain private keys. Keep permissions at `600` and never force-add them.
 - Includes warnings and next steps in output
 
 **Example output file:**

@@ -31,6 +31,14 @@ ENV/
 .env.*.local
 .env.bak.*
 
+# Local wallet exports (may contain private keys)
+wallet.txt
+trading_wallet.txt
+my_wallet.txt
+wallet_[0-9]*.txt
+trading_wallet_[0-9]*.txt
+my_wallet_[0-9]*.txt
+
 # Local fleet topology (copy from ops/fleet/fleet.conf.example)
 ops/fleet/fleet.conf
 
