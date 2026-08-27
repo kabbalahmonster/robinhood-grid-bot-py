@@ -41,6 +41,20 @@ class TestDashboardReporter(unittest.TestCase):
         self.assertEqual(reporter._queue[0]["sell_attempt"], attempt)
         self.assertIsNone(reporter._queue[1]["sell_attempt"])
 
+    @patch("dashboard_reporter.threading.Thread.start")
+    def test_taxed_token_execution_metadata_is_reported(self, _start):
+        reporter = DashboardReporter("https://doomdash.ca/api/status")
+        reporter.report(
+            taxed_token=True,
+            token_transfer_fee_percent=5.0,
+            swap_slippage_percent=7.0,
+        )
+
+        payload = reporter._queue[0]
+        self.assertTrue(payload["taxed_token"])
+        self.assertEqual(payload["token_transfer_fee_percent"], 5.0)
+        self.assertEqual(payload["swap_slippage_percent"], 7.0)
+
 
 if __name__ == "__main__":
     unittest.main()

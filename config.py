@@ -99,6 +99,10 @@ class BotConfig:
     bank_min_amount: float
     fast_profit: bool
     tradeable_balance_percent: float
+    taxed_token: bool
+    token_transfer_fee_percent: float
+    taxed_token_slippage_buffer_percent: float
+    taxed_token_failure_cooldown_seconds: int
     
     # Bot Behavior
     poll_interval_seconds: int
@@ -227,6 +231,21 @@ class BotConfig:
         
         if not 0 <= self.bank_percentage <= 100:
             raise ValueError("BANK_PERCENTAGE must be between 0 and 100")
+
+        if not 0 <= self.token_transfer_fee_percent <= 15:
+            raise ValueError("TOKEN_TRANSFER_FEE_PERCENT must be between 0 and 15")
+
+        if not 0 <= self.taxed_token_slippage_buffer_percent <= 10:
+            raise ValueError("TAXED_TOKEN_SLIPPAGE_BUFFER_PERCENT must be between 0 and 10")
+
+        if self.taxed_token and self.token_transfer_fee_percent <= 0:
+            raise ValueError("TAXED_TOKEN=true requires TOKEN_TRANSFER_FEE_PERCENT greater than 0")
+
+        if self.token_transfer_fee_percent + self.taxed_token_slippage_buffer_percent > 15:
+            raise ValueError("Taxed-token fee plus slippage buffer must not exceed 15 percent")
+
+        if self.taxed_token_failure_cooldown_seconds < 0:
+            raise ValueError("TAXED_TOKEN_FAILURE_COOLDOWN_SECONDS must be non-negative")
         
         if self.poll_interval_seconds < 1:
             raise ValueError("POLL_INTERVAL_SECONDS must be at least 1 second")
@@ -301,6 +320,10 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
         bank_min_amount=float(os.getenv("BANK_MIN_AMOUNT", "0.2")),
         fast_profit=os.getenv("FAST_PROFIT", "true").lower() == "true",
         tradeable_balance_percent=float(os.getenv("TRADEABLE_BALANCE_PERCENT", "100")),
+        taxed_token=os.getenv("TAXED_TOKEN", "false").lower() == "true",
+        token_transfer_fee_percent=float(os.getenv("TOKEN_TRANSFER_FEE_PERCENT", "0")),
+        taxed_token_slippage_buffer_percent=float(os.getenv("TAXED_TOKEN_SLIPPAGE_BUFFER_PERCENT", "2")),
+        taxed_token_failure_cooldown_seconds=int(os.getenv("TAXED_TOKEN_FAILURE_COOLDOWN_SECONDS", "300")),
         
         # Bot Behavior
         poll_interval_seconds=int(os.getenv("POLL_INTERVAL_SECONDS", "6")),

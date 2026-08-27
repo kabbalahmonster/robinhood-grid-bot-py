@@ -115,6 +115,10 @@ python grid_bot.py
 | `MIN_PROFIT_PERCENT` | No | 5.0 | Minimum profit % before selling |
 | `INITIAL_BUY_AMOUNT` | No | 0.01 | Initial ETH/WETH amount for first buys |
 | `SLIPPAGE_TOLERANCE` | No | 2.0 | Slippage tolerance % for swaps |
+| `TAXED_TOKEN` | No | false | Enable fee-on-transfer accounting and bounded taxed-token execution |
+| `TOKEN_TRANSFER_FEE_PERCENT` | With taxed mode | 0 | Declared one-way token transfer fee %, validated from 0–15 |
+| `TAXED_TOKEN_SLIPPAGE_BUFFER_PERCENT` | No | 2 | Additional market-slippage allowance above the declared token fee, validated from 0–10; fee + buffer is hard-capped at 15% |
+| `TAXED_TOKEN_FAILURE_COOLDOWN_SECONDS` | No | 300 | Pause taxed-token buy retries after a failed quote/simulation |
 | **Profit Distribution** ||||
 | `BANK_PERCENTAGE` | No | 20 | % of profit to swap to stablecoin (0 to disable) |
 | `MOONBAG_PERCENTAGE` | No | 1 | % of tokens to keep after sell (0 to disable) |
@@ -158,6 +162,39 @@ SWAP_PROVIDER=sushiswap  # sushiswap, uniswap, lifi, or 0x
 ```
 
 Explicit `SWAP_PROVIDER` takes precedence. `sushi` is accepted as an alias for `sushiswap`. When the setting is empty, backward-compatible selection checks `USE_UNISWAP_API=true`, then `USE_LI_FI=true`, otherwise 0x. The normalized templates currently select Uniswap through the legacy flag and configure Sushi as the fallback. On a retryable primary failure (HTTP 404/408/425/429/5xx, timeout, or connection failure), the current pre-broadcast operation stops and immediately restarts from the beginning with the fallback. The next operation gives the configured primary the first opportunity again. This avoids mixing approvals and calldata from different routers inside one transaction flow. When Sushi is primary and the default Sushi fallback value is unchanged, the bot automatically uses Uniswap as the reverse fallback if `UNISWAP_API_KEY` is configured; set `SWAP_FALLBACK_PROVIDER` empty to disable fallback. Sushi uses its v7 quote/swap API and supports an optional `SUSHI_API_KEY`; the other providers require their matching credentials. When Sushi returns HTTP 429, that bot honors `Retry-After` when supplied and otherwise enters a jittered exponential cooldown (30 seconds up to 15 minutes). Requests are skipped locally during the cooldown and a successful response resets the backoff.
+
+#### Fee-on-transfer (taxed) tokens
+
+Leave taxed-token mode disabled for ordinary ERC-20s. For a token with a
+verified fixed 5% transfer fee, configure that bot only:
+
+```dotenv
+TAXED_TOKEN=true
+TOKEN_TRANSFER_FEE_PERCENT=5
+TAXED_TOKEN_SLIPPAGE_BUFFER_PERCENT=2
+TAXED_TOKEN_FAILURE_COOLDOWN_SECONDS=300
+```
+
+The provider receives a 7% maximum-slippage value: the declared 5% token fee
+plus a separate 2% allowance for route movement. Configuration rejects a
+missing/non-positive declared fee, negative values, a market buffer above 10%,
+or any fee-plus-buffer total above 15%. This is deliberately not an automatic
+tax detector: verify the contract and configure the known one-way fee.
+
+After a successful buy, the recorded position balance is the wallet's actual
+token balance increase, not the provider's quoted output. After a sell, realized
+proceeds and profit use the actual ETH/WETH balance increase; native-ETH gas is
+added back from the confirmed receipt so network cost does not masquerade as a
+token transfer fee. Before selling, the minimum-profit guard conservatively
+reduces the provider quote by the declared fee. Existing position files need no
+migration, but only trades executed after enabling this mode gain measured
+post-fee accounting.
+
+A failed taxed-token buy quote/simulation starts the configured cooldown before
+another buy attempt. Monitoring and sell checks continue during that period.
+The mode does not make arbitrary taxed tokens safe: mutable fees, blacklists,
+honeypots, poor liquidity, or fees above the configured ceiling remain reasons
+not to trade a token.
 
 ### Chain-Specific Configuration
 
@@ -859,7 +896,7 @@ DASHBOARD_GROUP=Robinhood Farm
 
 Restart the bot after changing `.env`. Reporting runs in a daemon thread with a bounded queue and a five-second HTTP timeout, so dashboard downtime does not block trading. Successful requests are logged only at `DEBUG`; failures remain warnings.
 
-Each status payload includes schema version, chain/token/public-wallet metadata, ETH, USDG, and trading-token balances, positions, AVG P&L, session and persistent realized profit, buy/sell counts, capacity, the current round's optional `sell_attempt`, and up to 50 trades. It also includes `treasury_sent_usdg`: the all-time total of successful USDG sweep receipts in `data/treasury_transfers.json`. Dry runs, refused commands, failed broadcasts, and sweeps of other ERC-20s are excluded. Sell checks run before the status report so a blocked attempt is visible in the same round rather than one report late. The USDG balance is a read-only ERC-20 call made once per cycle when `USDG_ADDRESS` is configured; a failed read is omitted and never interrupts trading. Only the public wallet address is sent—never the private key.
+Each status payload includes schema version, chain/token/public-wallet metadata, ETH, USDG, and trading-token balances, positions, AVG P&L, session and persistent realized profit, buy/sell counts, capacity, the current round's optional `sell_attempt`, and up to 50 trades. Taxed-token bots additionally identify the mode, declared transfer fee, and effective swap tolerance through `taxed_token`, `token_transfer_fee_percent`, and `swap_slippage_percent`. It also includes `treasury_sent_usdg`: the all-time total of successful USDG sweep receipts in `data/treasury_transfers.json`. Dry runs, refused commands, failed broadcasts, and sweeps of other ERC-20s are excluded. Sell checks run before the status report so a blocked attempt is visible in the same round rather than one report late. The USDG balance is a read-only ERC-20 call made once per cycle when `USDG_ADDRESS` is configured; a failed read is omitted and never interrupts trading. Only the public wallet address is sent—never the private key.
 
 Experimental builds also include a versioned `sigil` descriptor created once per process incarnation. One of exactly 23 curated positive, present-tense intentions in `sigil_intentions.json` is selected from cryptographic startup entropy, reduced to unique consonants, and bound with the bot ID and incarnation nonce into a SHA-256 visual seed. Only `{version, method, key, seed}` is reported; the readable intention and nonce are discarded. The dashboard can therefore render the symbol deterministically without an image service, while every restart produces a new working. A missing or malformed grimoire falls back to one built-in intention because dashboard ornamentation must never prevent trading from starting.
 

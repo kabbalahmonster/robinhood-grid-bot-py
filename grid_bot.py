@@ -418,6 +418,17 @@ def check_config():
     print(f"PASS provider: {provider} ({selection})")
     if fallback and fallback != provider:
         print(f"PASS fallback provider: {fallback}")
+    if getattr(config, "taxed_token", False):
+        total_tolerance = (
+            config.token_transfer_fee_percent
+            + config.taxed_token_slippage_buffer_percent
+        )
+        print(
+            "PASS taxed-token mode: "
+            f"fee {config.token_transfer_fee_percent:g}% + "
+            f"market buffer {config.taxed_token_slippage_buffer_percent:g}% = "
+            f"{total_tolerance:g}% total tolerance"
+        )
 
     try:
         wallet = Wallet(config)
@@ -516,6 +527,7 @@ class GridBot:
         # Cooldown tracking for gridless buys
         self.last_buy_time = 0
         self.gridless_buy_cooldown = getattr(self.config, 'gridless_buy_cooldown_seconds', 300)  # Default 5 min
+        self.last_taxed_token_failure_time = 0
         
         # Trading token setup (WETH or native ETH)
         if getattr(self.config, 'use_eth_trading', False):
@@ -527,6 +539,15 @@ class GridBot:
             self.trade_token_address = self.config.weth_address
             self.trade_token_name = "WETH"
             logger.info("Trading mode: WETH")
+
+        if getattr(self.config, 'taxed_token', False):
+            logger.warning(
+                "Taxed-token mode enabled: declared fee %.2f%%, market-slippage "
+                "buffer %.2f%%, total swap tolerance %.2f%%",
+                self.config.token_transfer_fee_percent,
+                self.config.taxed_token_slippage_buffer_percent,
+                self._swap_slippage_fraction() * 100,
+            )
         
         logger.info(f"Grid Bot initialized")
         
@@ -535,6 +556,55 @@ class GridBot:
         logger.info(f"DEBUG: dashboard_url={self.config.dashboard_url!r}, reporter={self._reporter}")
         if self._reporter:
             logger.info(f"Dashboard reporting enabled (bot_id={self._reporter.bot_id})")
+
+    def _swap_slippage_fraction(self):
+        """Return bounded provider slippage, including a declared token fee."""
+        if getattr(self.config, 'taxed_token', False):
+            total_percent = (
+                self.config.token_transfer_fee_percent
+                + self.config.taxed_token_slippage_buffer_percent
+            )
+        else:
+            total_percent = self.config.slippage_tolerance
+        return total_percent / 100.0
+
+    def _raw_token_balance(self, token_address):
+        """Return the wallet's integer ERC-20 balance."""
+        _, raw_balance = self.wallet.get_token_balance(token_address)
+        return int(raw_balance)
+
+    def _raw_trade_balance(self):
+        if getattr(self.config, 'use_eth_trading', False):
+            return int(self.wallet.get_eth_balance_wei())
+        return self._raw_token_balance(self.config.weth_address)
+
+    def _measured_token_received_raw(self, before_balance):
+        return max(
+            0,
+            self._raw_token_balance(self.config.token_address) - int(before_balance),
+        )
+
+    @staticmethod
+    def _receipt_gas_cost_wei(result):
+        receipt = getattr(result, 'receipt', None) or {}
+        gas_used = receipt.get('gasUsed') or getattr(result, 'gas_used', None) or 0
+        gas_price = receipt.get('effectiveGasPrice') or getattr(result, 'effective_gas_price', None) or 0
+        return int(gas_used) * int(gas_price)
+
+    def _measured_trade_received_wei(self, before_balance, result):
+        after_balance = self._raw_trade_balance()
+        received = after_balance - int(before_balance)
+        if getattr(self.config, 'use_eth_trading', False):
+            received += self._receipt_gas_cost_wei(result)
+        return max(0, received)
+
+    def _taxed_quote_return_wei(self, quote):
+        """Conservatively fee-adjust a sell quote before the pre-trade guard."""
+        quoted = int(quote.buy_amount or 0)
+        if not getattr(self.config, 'taxed_token', False):
+            return quoted
+        fee_fraction = self.config.token_transfer_fee_percent / 100.0
+        return int(quoted * (1.0 - fee_fraction))
 
     def _load_dashboard_trades(self):
         try:
@@ -793,6 +863,17 @@ class GridBot:
     def _check_buys_gridless(self, price):
         """Gridless buy logic - buy when no positions or top position P&L <= threshold."""
         from gridless import should_buy, load_positions, add_position
+
+        if getattr(self.config, 'taxed_token', False):
+            failure_cooldown = self.config.taxed_token_failure_cooldown_seconds
+            since_failure = time.time() - self.last_taxed_token_failure_time
+            if self.last_taxed_token_failure_time and since_failure < failure_cooldown:
+                logger.debug(
+                    "Gridless: Taxed-token failure cooldown active (%.0fs < %ss)",
+                    since_failure,
+                    failure_cooldown,
+                )
+                return
         
         # Check cooldown
         time_since_last_buy = time.time() - self.last_buy_time
@@ -850,11 +931,13 @@ class GridBot:
             buy_token=self.config.token_address,
             sell_amount=buy_amount_wei,
             taker_address=self.wallet.address,
-            slippage_percentage=0.02,
+            slippage_percentage=self._swap_slippage_fraction(),
         )
         
         if not quote.success:
             logger.error(f"Gridless buy quote failed: {quote.error}")
+            if getattr(self.config, 'taxed_token', False):
+                self.last_taxed_token_failure_time = time.time()
             return
         
         # Load positions for execution margin check
@@ -917,7 +1000,7 @@ class GridBot:
                         buy_token=self.config.token_address,
                         sell_amount=buy_amount_wei,
                         taker_address=self.wallet.address,
-                        slippage_percentage=0.02,
+                    slippage_percentage=self._swap_slippage_fraction(),
                     )
                     if not quote.success:
                         logger.error(f"Refreshed quote failed: {quote.error}")
@@ -953,11 +1036,21 @@ class GridBot:
             "chainId": self.config.chain_id,
         }
         
+        token_balance_before = (
+            self._raw_token_balance(self.config.token_address)
+            if getattr(self.config, 'taxed_token', False) else None
+        )
         result = self.wallet._send_transaction(tx_params)
         
         if result.success:
             # Record position in gridless format
             tokens_received = quote.buy_amount if quote.buy_amount else 0
+            if token_balance_before is not None:
+                tokens_received = self._measured_token_received_raw(token_balance_before)
+                logger.info("Measured post-fee token receipt: %s raw units", tokens_received)
+                if tokens_received <= 0:
+                    logger.error("Taxed-token buy confirmed but no token balance increase was measured")
+                    return
             # Use the actual sell amount from the quote in wei for precision
             cost_wei = quote.sell_amount if quote.sell_amount else buy_amount_wei
             
@@ -1031,7 +1124,7 @@ class GridBot:
             buy_token=self.trade_token_address,
             sell_amount=balance,
             taker_address=self.wallet.address,
-            slippage_percentage=0.02,
+            slippage_percentage=self._swap_slippage_fraction(),
         )
         
         if not quote.success:
@@ -1048,7 +1141,7 @@ class GridBot:
         cost_eth = cost_wei / 1e18
         min_profit = getattr(self.config, 'min_profit_percent', 1.5)
         min_profit_eth = cost_eth * (min_profit / 100)
-        quote_return_eth = quote.buy_amount / 10**18 if quote.buy_amount else 0
+        quote_return_eth = self._taxed_quote_return_wei(quote) / 10**18
         quote_profit_eth = quote_return_eth - cost_eth
         
         if quote_profit_eth < min_profit_eth:
@@ -1121,7 +1214,7 @@ class GridBot:
                 buy_token=self.trade_token_address,
                 sell_amount=sell_amount,
                 taker_address=self.wallet.address,
-                slippage_percentage=0.02,
+                slippage_percentage=self._swap_slippage_fraction(),
             )
         
         if not quote.success:
@@ -1132,7 +1225,7 @@ class GridBot:
         min_profit = getattr(self.config, 'min_profit_percent', 1.5)
         min_profit_eth = sold_cost_eth * (min_profit / 100)
         min_return_eth = sold_cost_eth + min_profit_eth
-        quote_return_eth = quote.buy_amount / 10**18 if quote.buy_amount else 0
+        quote_return_eth = self._taxed_quote_return_wei(quote) / 10**18
         
         # Skip min_profit check for stoploss
         stoploss_enabled = getattr(self.config, 'gridless_stoploss_enabled', False)
@@ -1272,7 +1365,7 @@ class GridBot:
                     buy_token=self.trade_token_address,
                     sell_amount=sell_amount,
                     taker_address=self.wallet.address,
-                    slippage_percentage=0.02,
+                        slippage_percentage=self._swap_slippage_fraction(),
                 )
                 if not quote.success:
                     logger.error(f"Fresh quote after approval failed: {quote.error}")
@@ -1302,7 +1395,7 @@ class GridBot:
                         buy_token=self.trade_token_address,
                         sell_amount=sell_amount,
                         taker_address=self.wallet.address,
-                        slippage_percentage=0.02,
+                        slippage_percentage=self._swap_slippage_fraction(),
                     )
                     if not quote.success:
                         logger.error(f"Refreshed quote failed: {quote.error}")
@@ -1319,6 +1412,10 @@ class GridBot:
             gas_price = int(self.wallet.w3.eth.gas_price * gas_price_mult)
         
         from web3 import Web3
+        trade_balance_before = (
+            self._raw_trade_balance()
+            if getattr(self.config, 'taxed_token', False) else None
+        )
         result = self.wallet._send_transaction({
             "from": Web3.to_checksum_address(self.wallet.address),
             "to": Web3.to_checksum_address(quote.to),
@@ -1331,13 +1428,17 @@ class GridBot:
         })
         
         if result.success:
-            eth_received = quote.buy_amount / 10**18 if quote.buy_amount else 0
+            received_wei = int(quote.buy_amount or 0)
+            if trade_balance_before is not None:
+                received_wei = self._measured_trade_received_wei(trade_balance_before, result)
+                logger.info("Measured post-fee trade-token receipt: %s wei", received_wei)
+            eth_received = received_wei / 10**18
             actual_profit = eth_received - sold_cost_eth
             
             self.session_sells += 1
             self.session_profit_weth += actual_profit
             try:
-                profit_wei = int(quote.buy_amount or 0) - int(round(sold_cost_eth * 10**18))
+                profit_wei = received_wei - int(round(sold_cost_eth * 10**18))
                 self.profit_tracker.record_sale(profit_wei, result.tx_hash)
             except (OSError, ValueError) as exc:
                 logger.error(f"Could not persist realized profit: {exc}")
@@ -1401,7 +1502,7 @@ class GridBot:
             buy_token=self.config.token_address,
             sell_amount=buy_amount_wei,
             taker_address=self.wallet.address,
-            slippage_percentage=0.02,
+            slippage_percentage=self._swap_slippage_fraction(),
         )
         
         if not quote.success:
@@ -1438,7 +1539,7 @@ class GridBot:
                         buy_token=self.config.token_address,
                         sell_amount=buy_amount_wei,
                         taker_address=self.wallet.address,
-                        slippage_percentage=0.02,
+                        slippage_percentage=self._swap_slippage_fraction(),
                     )
                     if not quote.success:
                         logger.error(f"Refreshed quote failed: {quote.error}")
@@ -1479,11 +1580,21 @@ class GridBot:
         }
         
         logger.info(f"Sending tx to {quote.to} with gas {gas_limit}")
+        token_balance_before = (
+            self._raw_token_balance(self.config.token_address)
+            if getattr(self.config, 'taxed_token', False) else None
+        )
         result = self.wallet._send_transaction(tx_params)
         
         if result.success:
             # Update position - store actual WETH cost (not price) in nano-WETH
             tokens_received = quote.buy_amount
+            if token_balance_before is not None:
+                tokens_received = self._measured_token_received_raw(token_balance_before)
+                logger.info("Measured post-fee token receipt: %s raw units", tokens_received)
+                if tokens_received <= 0:
+                    logger.error("Taxed-token buy confirmed but no token balance increase was measured")
+                    return
             tokens = tokens_received / self.token_unit
             self.positions[pos_id]['balance'] = tokens_received
             # Cost = actual WETH spent for profit calculation (in wei for precision)
@@ -1565,7 +1676,7 @@ class GridBot:
             buy_token=self.trade_token_address,
             sell_amount=sell_amount,
             taker_address=self.wallet.address,
-            slippage_percentage=0.02,
+            slippage_percentage=self._swap_slippage_fraction(),
         )
         
         if not quote.success:
@@ -1602,7 +1713,7 @@ class GridBot:
                     buy_token=self.trade_token_address,
                     sell_amount=sell_amount,
                     taker_address=self.wallet.address,
-                    slippage_percentage=0.02,
+                    slippage_percentage=self._swap_slippage_fraction(),
                 )
                 if not quote.success:
                     logger.error(f"Refreshed quote failed: {quote.error}")
@@ -1615,7 +1726,7 @@ class GridBot:
         min_return_eth = sold_cost_eth + min_profit_eth
         
         # quote.buy_amount is in wei
-        quote_return_eth = quote.buy_amount / 10**18 if quote.buy_amount else 0
+        quote_return_eth = self._taxed_quote_return_wei(quote) / 10**18
         
         if quote_return_eth < min_return_eth:
             logger.warning(f"❌ Sell ABORTED: Quote return ({quote_return_eth:.6f} {self.trade_token_name}) < minimum ({min_return_eth:.6f} {self.trade_token_name})")
@@ -1642,6 +1753,10 @@ class GridBot:
         else:
             gas_price = int(self.wallet.w3.eth.gas_price * gas_price_mult)
         
+        trade_balance_before = (
+            self._raw_trade_balance()
+            if getattr(self.config, 'taxed_token', False) else None
+        )
         result = self.wallet._send_transaction({
             "from": Web3.to_checksum_address(self.wallet.address),
             "to": Web3.to_checksum_address(quote.to),
@@ -1655,14 +1770,18 @@ class GridBot:
         
         if result.success:
             # Get actual ETH/WETH received from transaction
-            eth_received = quote.buy_amount / 10**18 if quote.buy_amount else 0
+            received_wei = int(quote.buy_amount or 0)
+            if trade_balance_before is not None:
+                received_wei = self._measured_trade_received_wei(trade_balance_before, result)
+                logger.info("Measured post-fee trade-token receipt: %s wei", received_wei)
+            eth_received = received_wei / 10**18
             actual_profit_eth = eth_received - sold_cost_eth
             
             # Track session stats
             self.session_sells += 1
             self.session_profit_weth += actual_profit_eth
             try:
-                profit_wei = int(quote.buy_amount or 0) - int(round(sold_cost_eth * 10**18))
+                profit_wei = received_wei - int(round(sold_cost_eth * 10**18))
                 self.profit_tracker.record_sale(profit_wei, result.tx_hash)
             except (OSError, ValueError) as exc:
                 logger.error(f"Could not persist realized profit: {exc}")
@@ -2079,6 +2198,9 @@ class GridBot:
                     sell_attempt=self._sell_attempt,
                     chain_id=self.config.chain_id,
                     swap_provider=self.provider.name,
+                    taxed_token=getattr(self.config, 'taxed_token', False),
+                    token_transfer_fee_percent=getattr(self.config, 'token_transfer_fee_percent', 0.0),
+                    swap_slippage_percent=self._swap_slippage_fraction() * 100,
                     token_symbol=self.config.token_symbol,
                     token_address=self.config.token_address,
                     wallet_address=self.wallet.address,
