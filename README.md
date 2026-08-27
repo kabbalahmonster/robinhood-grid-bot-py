@@ -333,6 +333,9 @@ generates distinct wallets, and fills uppercase `TOKEN_SYMBOL`, optional
 `TOKEN_ADDRESS`, and `PRIVATE_KEY` without printing private keys. It stages the
 whole batch before publishing directories, refuses collisions and malformed
 inputs, and does not automatically admit incomplete bots to fleet membership.
+Private-key output stays disabled unless `--show-private-keys` is explicitly
+supplied; that flag prints a MetaMask-ready import list after successful batch
+creation while preserving each checkout's normal protected `wallet.txt`.
 See the [fleet guide](ops/fleet/README.md#initialize-new-bot-checkouts) for the
 full setup, dependency, validation, backup, and registration workflow.
 

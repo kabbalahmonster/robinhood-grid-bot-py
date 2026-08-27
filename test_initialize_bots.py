@@ -73,7 +73,7 @@ def save_wallet(wallet, filepath, chmod=True):
             check=True,
         )
 
-    def run_initializer(self, *tokens, apply=False, template=None):
+    def run_initializer(self, *tokens, apply=False, template=None, show_private_keys=False):
         command = [
             str(INITIALIZE_BOTS),
             "--config",
@@ -87,6 +87,8 @@ def save_wallet(wallet, filepath, chmod=True):
         ]
         if apply:
             command.append("--apply")
+        if show_private_keys:
+            command.append("--show-private-keys")
         command.extend(tokens)
         return subprocess.run(
             command,
@@ -132,6 +134,14 @@ def save_wallet(wallet, filepath, chmod=True):
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse((self.bot_root / "one").exists())
         self.assertFalse((self.bot_root / "two").exists())
+
+    def test_explicit_reveal_flag_prints_import_list_after_success(self):
+        result = self.run_initializer("NET", apply=True, show_private_keys=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("SENSITIVE — MetaMask private-key import list", result.stdout)
+        self.assertIn(f"NET\t{PUBLIC_WALLET}\t{PRIVATE_KEY}", result.stdout)
+        self.assertTrue((self.bot_root / "net" / "checkout" / "wallet.txt").exists())
 
     def test_existing_destination_blocks_batch_before_clone(self):
         (self.bot_root / "two").mkdir(parents=True)

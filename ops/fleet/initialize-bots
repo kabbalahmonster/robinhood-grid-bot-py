@@ -30,6 +30,7 @@ Options:
   --branch NAME        Clone one branch instead of the remote default
   --python PATH        Python used for secure wallet generation
   --install-deps       Create .venv and install requirements.txt in each clone
+  --show-private-keys  After success, print a MetaMask import list (sensitive)
   --apply              Perform the previewed creation
   -h, --help           Show this help
 EOF
@@ -42,7 +43,9 @@ branch=""
 python_bin=""
 apply=0
 install_deps=0
+show_private_keys=0
 declare -a specs=() symbols=() folders=() addresses=() final_parents=()
+declare -a public_addresses=() private_keys=()
 
 while (($#)); do
   case "$1" in
@@ -52,6 +55,7 @@ while (($#)); do
     --branch) (($# >= 2)) || fleet_die "--branch requires a name"; branch="$2"; shift 2 ;;
     --python) (($# >= 2)) || fleet_die "--python requires a path"; python_bin="$2"; shift 2 ;;
     --install-deps) install_deps=1; shift ;;
+    --show-private-keys) show_private_keys=1; shift ;;
     --apply) apply=1; shift ;;
     -h|--help) usage; exit 0 ;;
     --) shift; specs+=("$@"); break ;;
@@ -133,13 +137,25 @@ for index in "${!symbols[@]}"; do
   printf 'Cloning %s...\n' "${symbols[$index]}"
   git "${clone_args[@]}"
 
-  public_address="$($python_bin "$SCRIPT_DIR/initialize-bot-env.py" \
-    --template "$template" \
-    --env-output "$staged_checkout/.env" \
-    --wallet-generator "$staged_checkout/generate_wallet.py" \
-    --wallet-output "$staged_checkout/wallet.txt" \
-    --symbol "${symbols[$index]}" \
-    --address "${addresses[$index]}")"
+  helper_args=(
+    "$SCRIPT_DIR/initialize-bot-env.py"
+    --template "$template"
+    --env-output "$staged_checkout/.env"
+    --wallet-generator "$staged_checkout/generate_wallet.py"
+    --wallet-output "$staged_checkout/wallet.txt"
+    --symbol "${symbols[$index]}"
+    --address "${addresses[$index]}"
+  )
+  ((show_private_keys == 0)) || helper_args+=(--reveal-private-key)
+  wallet_result="$($python_bin "${helper_args[@]}")"
+  if ((show_private_keys)); then
+    IFS=$'\t' read -r public_address private_key <<< "$wallet_result"
+    [[ -n "$public_address" && -n "$private_key" ]] || fleet_die "Wallet helper returned an incomplete result for ${symbols[$index]}"
+    public_addresses+=("$public_address")
+    private_keys+=("$private_key")
+  else
+    public_address="$wallet_result"
+  fi
 
   if ((install_deps)); then
     printf 'Installing dependencies for %s...\n' "${symbols[$index]}"
@@ -164,5 +180,14 @@ for index in "${!symbols[@]}"; do
   exit 1
 done
 
-printf '\nCreated %d bot(s). Private keys were not printed.\n' "${#symbols[@]}"
+printf '\nCreated %d bot(s).\n' "${#symbols[@]}"
+if ((show_private_keys)); then
+  printf '\nSENSITIVE — MetaMask private-key import list (protect terminal logs/scrollback):\n'
+  for index in "${!symbols[@]}"; do
+    printf '%s\t%s\t%s\n' "${symbols[$index]}" "${public_addresses[$index]}" "${private_keys[$index]}"
+  done
+  printf 'Each key also remains in its bot wallet.txt and protected .env (mode 0600).\n'
+else
+  printf 'Private keys were not printed. Use --show-private-keys only when terminal output is private.\n'
+fi
 printf 'Complete blank token addresses and remaining .env settings, install dependencies if omitted, then run --check-config before adding names to FLEET_BOT_NAMES.\n'

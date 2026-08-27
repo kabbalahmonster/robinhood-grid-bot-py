@@ -71,6 +71,7 @@ def main() -> None:
     parser.add_argument("--wallet-output", required=True, type=Path)
     parser.add_argument("--symbol", required=True)
     parser.add_argument("--address", default="")
+    parser.add_argument("--reveal-private-key", action="store_true")
     args = parser.parse_args()
 
     if args.address and not ADDRESS_RE.fullmatch(args.address):
@@ -99,7 +100,10 @@ def main() -> None:
         },
     )
     write_exclusive(args.env_output, env_text)
-    print(public_address)
+    if args.reveal_private_key:
+        print(f"{public_address}\t{private_key}")
+    else:
+        print(public_address)
 
 
 if __name__ == "__main__":

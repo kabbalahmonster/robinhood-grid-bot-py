@@ -272,7 +272,15 @@ Useful options:
 - `--repo URL` overrides the operations checkout's `origin`.
 - `--branch NAME` clones one explicit branch.
 - `--install-deps` creates `.venv` and installs `requirements.txt` for each bot.
+- `--show-private-keys` prints `SYMBOL`, public wallet address, and private key
+  as a tab-separated MetaMask import list after the full batch succeeds.
 - `--config PATH` uses another fleet root/layout configuration.
+
+Private-key display is disabled by default. Only use `--show-private-keys` in a
+private terminal whose scrollback and session logs are protected; the output
+grants full control of every newly created wallet. With or without that flag,
+each checkout retains the normal generator output at `wallet.txt` as well as
+the key in `.env`, both with mode `0600`.
 
 The command does **not** add names to `FLEET_BOT_NAMES`, start processes, fund
 wallets, or guess token contracts. For every new bot, finish the remaining
