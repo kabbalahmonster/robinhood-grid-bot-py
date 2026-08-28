@@ -33,7 +33,8 @@ Options:
   --overwrite-default NAME=VALUE
                        Set/append one .env value in every new bot; repeatable
   --show-private-keys  After success, print a MetaMask import list (sensitive)
-  --apply              Perform the previewed creation
+  --apply              EXECUTE: create folders/clones/wallets/.env files
+                       (without it, validation and preview only; no files change)
   -h, --help           Show this help
 EOF
 }

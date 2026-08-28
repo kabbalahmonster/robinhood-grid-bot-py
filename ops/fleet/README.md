@@ -241,6 +241,22 @@ the repository, copies a caller-supplied dotenv template, generates a new
 wallet, and fills `PRIVATE_KEY`, `TOKEN_SYMBOL`, and `TOKEN_ADDRESS`. It never
 prints private keys; only each public wallet address appears in the summary.
 
+#### Preview versus `--apply`
+
+The command is a dry run unless `--apply` is present:
+
+- **Without `--apply`:** validate the template, symbols, addresses, overrides,
+  destinations, fleet layout, repository, and Python interpreter; then print
+  the exact plan. It does **not** create folders, clone Git, generate wallets,
+  write `.env`/`wallet.txt`, or install dependencies.
+- **With `--apply`:** perform that validated plan: stage the clones, generate
+  wallets, create protected `.env` and `wallet.txt` files, optionally install
+  dependencies, and publish the completed bot folders.
+
+The intended workflow is to run the command once without `--apply`, review the
+plan, then repeat the same command with `--apply` added. `--apply` does not add
+bots to fleet membership, fund wallets, or start/restart processes.
+
 Preview a mixed batch in one command:
 
 ```bash
