@@ -103,6 +103,8 @@ class BotConfig:
     token_transfer_fee_percent: float
     taxed_token_slippage_buffer_percent: float
     taxed_token_failure_cooldown_seconds: int
+    auto_detect_token_transfer_fee: bool
+    auto_detect_token_transfer_fee_max_percent: float
     
     # Bot Behavior
     poll_interval_seconds: int
@@ -246,6 +248,15 @@ class BotConfig:
 
         if self.taxed_token_failure_cooldown_seconds < 0:
             raise ValueError("TAXED_TOKEN_FAILURE_COOLDOWN_SECONDS must be non-negative")
+
+        if not 0.5 <= self.auto_detect_token_transfer_fee_max_percent <= 15:
+            raise ValueError("AUTO_DETECT_TOKEN_TRANSFER_FEE_MAX_PERCENT must be between 0.5 and 15")
+
+        if (
+            self.auto_detect_token_transfer_fee_max_percent
+            + self.taxed_token_slippage_buffer_percent > 15
+        ):
+            raise ValueError("Auto-detected token fee plus slippage buffer must not exceed 15 percent")
         
         if self.poll_interval_seconds < 1:
             raise ValueError("POLL_INTERVAL_SECONDS must be at least 1 second")
@@ -324,6 +335,13 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
         token_transfer_fee_percent=float(os.getenv("TOKEN_TRANSFER_FEE_PERCENT", "0")),
         taxed_token_slippage_buffer_percent=float(os.getenv("TAXED_TOKEN_SLIPPAGE_BUFFER_PERCENT", "2")),
         taxed_token_failure_cooldown_seconds=int(os.getenv("TAXED_TOKEN_FAILURE_COOLDOWN_SECONDS", "300")),
+        auto_detect_token_transfer_fee=os.getenv(
+            "AUTO_DETECT_TOKEN_TRANSFER_FEE",
+            "true" if chain_id == 4663 else "false",
+        ).lower() == "true",
+        auto_detect_token_transfer_fee_max_percent=float(
+            os.getenv("AUTO_DETECT_TOKEN_TRANSFER_FEE_MAX_PERCENT", "13")
+        ),
         
         # Bot Behavior
         poll_interval_seconds=int(os.getenv("POLL_INTERVAL_SECONDS", "6")),

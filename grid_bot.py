@@ -18,6 +18,7 @@ from decimal import Decimal
 from urllib.parse import urlsplit
 
 from profit_tracker import ProfitTracker
+from token_tax_detector import TokenTaxDetector
 
 
 def _with_swap_provider_fallback(method):
@@ -494,6 +495,17 @@ class GridBot:
         
         # Setup logging FIRST so we capture all initialization logs
         self._setup_logging()
+
+        self.tax_detector = TokenTaxDetector(
+            path="data/token_tax_detection.json",
+            chain_id=self.config.chain_id,
+            token_address=self.config.token_address,
+            enabled=(
+                self.config.auto_detect_token_transfer_fee
+                and not self.config.taxed_token
+            ),
+            max_fee_percent=self.config.auto_detect_token_transfer_fee_max_percent,
+        )
         
         self.wallet = Wallet(self.config)
         token_info = self.wallet.get_token_info(self.config.token_address)
@@ -540,11 +552,13 @@ class GridBot:
             self.trade_token_name = "WETH"
             logger.info("Trading mode: WETH")
 
-        if getattr(self.config, 'taxed_token', False):
+        if self._taxed_token_active():
+            source = "declared" if self.config.taxed_token else "auto-detected"
             logger.warning(
-                "Taxed-token mode enabled: declared fee %.2f%%, market-slippage "
+                "Taxed-token mode enabled (%s): fee %.2f%%, market-slippage "
                 "buffer %.2f%%, total swap tolerance %.2f%%",
-                self.config.token_transfer_fee_percent,
+                source,
+                self._effective_token_transfer_fee_percent(),
                 self.config.taxed_token_slippage_buffer_percent,
                 self._swap_slippage_fraction() * 100,
             )
@@ -557,11 +571,57 @@ class GridBot:
         if self._reporter:
             logger.info(f"Dashboard reporting enabled (bot_id={self._reporter.bot_id})")
 
+    def _effective_token_transfer_fee_percent(self):
+        if getattr(self.config, 'taxed_token', False):
+            return float(self.config.token_transfer_fee_percent)
+        detector = getattr(self, "tax_detector", None)
+        return float(detector.detected_fee_percent) if detector is not None else 0.0
+
+    def _taxed_token_active(self):
+        return self._effective_token_transfer_fee_percent() > 0
+
+    def _observe_token_tax_failure(self, quote, *, direction, position_id=None):
+        """Record bounded simulation evidence without broadcasting or editing .env."""
+        if self.config.taxed_token:
+            return None
+        detection = self.tax_detector.observe(
+            getattr(quote, "error", quote),
+            direction=direction,
+        )
+        if not detection:
+            return None
+        self._sell_attempt = {
+            "status": "token_tax_detected" if detection["confirmed"] else "token_tax_observed",
+            "position_id": str(position_id) if position_id is not None else None,
+            "observed_fee_percent": detection["observed_fee_percent"],
+            "matching_observations": detection["matching_observations"],
+            "confirmations_required": detection["confirmations_required"],
+            "detected_fee_percent": detection["detected_fee_percent"],
+        }
+        if detection["newly_confirmed"]:
+            logger.warning(
+                "Probable %.1f%% token transfer fee auto-detected after %d consistent "
+                "simulations; using %.1f%% total execution tolerance without changing .env",
+                detection["detected_fee_percent"],
+                detection["matching_observations"],
+                detection["detected_fee_percent"]
+                + self.config.taxed_token_slippage_buffer_percent,
+            )
+        else:
+            logger.warning(
+                "Possible %.3f%% token transfer fee observed (%d/%d confirmations); "
+                "no execution tolerance changed yet",
+                detection["observed_fee_percent"],
+                detection["matching_observations"],
+                detection["confirmations_required"],
+            )
+        return detection
+
     def _swap_slippage_fraction(self):
         """Return bounded provider slippage, including a declared token fee."""
-        if getattr(self.config, 'taxed_token', False):
+        if self._taxed_token_active():
             total_percent = (
-                self.config.token_transfer_fee_percent
+                self._effective_token_transfer_fee_percent()
                 + self.config.taxed_token_slippage_buffer_percent
             )
         else:
@@ -601,9 +661,9 @@ class GridBot:
     def _taxed_quote_return_wei(self, quote):
         """Conservatively fee-adjust a sell quote before the pre-trade guard."""
         quoted = int(quote.buy_amount or 0)
-        if not getattr(self.config, 'taxed_token', False):
+        if not self._taxed_token_active():
             return quoted
-        fee_fraction = self.config.token_transfer_fee_percent / 100.0
+        fee_fraction = self._effective_token_transfer_fee_percent() / 100.0
         return int(quoted * (1.0 - fee_fraction))
 
     def _load_dashboard_trades(self):
@@ -864,7 +924,7 @@ class GridBot:
         """Gridless buy logic - buy when no positions or top position P&L <= threshold."""
         from gridless import should_buy, load_positions, add_position
 
-        if getattr(self.config, 'taxed_token', False):
+        if self._taxed_token_active():
             failure_cooldown = self.config.taxed_token_failure_cooldown_seconds
             since_failure = time.time() - self.last_taxed_token_failure_time
             if self.last_taxed_token_failure_time and since_failure < failure_cooldown:
@@ -936,7 +996,8 @@ class GridBot:
         
         if not quote.success:
             logger.error(f"Gridless buy quote failed: {quote.error}")
-            if getattr(self.config, 'taxed_token', False):
+            self._observe_token_tax_failure(quote, direction="buy")
+            if self._taxed_token_active():
                 self.last_taxed_token_failure_time = time.time()
             return
         
@@ -1038,7 +1099,7 @@ class GridBot:
         
         token_balance_before = (
             self._raw_token_balance(self.config.token_address)
-            if getattr(self.config, 'taxed_token', False) else None
+            if self._taxed_token_active() else None
         )
         result = self.wallet._send_transaction(tx_params)
         
@@ -1128,7 +1189,12 @@ class GridBot:
         )
         
         if not quote.success:
-            logger.debug(f"Sell candidate #{pos_id} but quote failed: {quote.error}")
+            logger.warning(f"Sell candidate #{pos_id} but quote failed: {quote.error}")
+            self._observe_token_tax_failure(
+                quote,
+                direction="sell",
+                position_id=pos_id,
+            )
             return
         
         # Check min profit requirement against individual position quote
@@ -1219,6 +1285,7 @@ class GridBot:
         
         if not quote.success:
             logger.error(f"Gridless sell quote failed: {quote.error}")
+            self._observe_token_tax_failure(quote, direction="sell", position_id=pos_id)
             return
         
         # Validate minimum profit
@@ -1414,7 +1481,7 @@ class GridBot:
         from web3 import Web3
         trade_balance_before = (
             self._raw_trade_balance()
-            if getattr(self.config, 'taxed_token', False) else None
+            if self._taxed_token_active() else None
         )
         result = self.wallet._send_transaction({
             "from": Web3.to_checksum_address(self.wallet.address),
@@ -1507,6 +1574,7 @@ class GridBot:
         
         if not quote.success:
             logger.error(f"Quote failed: {quote.error}")
+            self._observe_token_tax_failure(quote, direction="buy")
             return
         
         # Determine approval spender - use quote's allowance_target if available (LI.FI)
@@ -1547,6 +1615,7 @@ class GridBot:
         
         if not quote.success:
             logger.error(f"Quote failed: {quote.error}")
+            self._observe_token_tax_failure(quote, direction="buy")
             return
         
         # Prepare executable calldata when the provider separates quote and swap.
@@ -1582,7 +1651,7 @@ class GridBot:
         logger.info(f"Sending tx to {quote.to} with gas {gas_limit}")
         token_balance_before = (
             self._raw_token_balance(self.config.token_address)
-            if getattr(self.config, 'taxed_token', False) else None
+            if self._taxed_token_active() else None
         )
         result = self.wallet._send_transaction(tx_params)
         
@@ -1681,6 +1750,7 @@ class GridBot:
         
         if not quote.success:
             logger.error(f"Quote failed: {quote.error}")
+            self._observe_token_tax_failure(quote, direction="sell", position_id=pos_id)
             return
         
         # Determine approval spender - use quote's allowance_target if available (LI.FI)
@@ -1755,7 +1825,7 @@ class GridBot:
         
         trade_balance_before = (
             self._raw_trade_balance()
-            if getattr(self.config, 'taxed_token', False) else None
+            if self._taxed_token_active() else None
         )
         result = self.wallet._send_transaction({
             "from": Web3.to_checksum_address(self.wallet.address),
@@ -2198,8 +2268,14 @@ class GridBot:
                     sell_attempt=self._sell_attempt,
                     chain_id=self.config.chain_id,
                     swap_provider=self.provider.name,
-                    taxed_token=getattr(self.config, 'taxed_token', False),
-                    token_transfer_fee_percent=getattr(self.config, 'token_transfer_fee_percent', 0.0),
+                    taxed_token=self._taxed_token_active(),
+                    token_transfer_fee_percent=self._effective_token_transfer_fee_percent(),
+                    token_tax_detection_source=(
+                        "declared" if self.config.taxed_token
+                        else "auto-detected" if self.tax_detector.confirmed
+                        else "none"
+                    ),
+                    token_tax_detection_observations=self.tax_detector.observation_count,
                     swap_slippage_percent=self._swap_slippage_fraction() * 100,
                     token_symbol=self.config.token_symbol,
                     token_address=self.config.token_address,
