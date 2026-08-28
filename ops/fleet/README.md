@@ -76,7 +76,8 @@ sudo apt install tmux git python3 python3-venv
      ops/fleet/liquidate-assets ops/fleet/fleet-doctor \
      ops/fleet/fleet-inventory ops/fleet/fleet-audit \
      ops/fleet/dashboard-remove ops/fleet/initialize-bots \
-     ops/fleet/initialize-bot-env.py
+     ops/fleet/initialize-bot-env.py ops/fleet/fleet-watch \
+     ops/fleet/fleet-watch.py
    ```
 
    Set `FLEET_BOT_ROOT` to the directory containing your bot checkouts. The
@@ -107,9 +108,39 @@ sudo apt install tmux git python3 python3-venv
    ln -sf "$PWD/ops/fleet/fleet-audit" "$HOME/bin/fleet-audit"
    ln -sf "$PWD/ops/fleet/dashboard-remove" "$HOME/bin/dashboard-remove"
    ln -sf "$PWD/ops/fleet/initialize-bots" "$HOME/bin/initialize-bots"
+   ln -sf "$PWD/ops/fleet/fleet-watch" "$HOME/bin/fleet-watch"
    ```
 
    Ensure `~/bin` is in `PATH`, or invoke the scripts by their repository paths.
+
+### Phone-friendly live view
+
+The tiled tmux window remains useful for opening an individual bot's complete
+console, but dozens of panes cannot carry useful information on a narrow phone.
+Run this from a second terminal tab (or detach from tmux first):
+
+```bash
+fleet-watch
+```
+
+`fleet-watch` gives every bot one row containing its name, filled/capacity
+positions, best open-position P&L, native balance, session profit (when the
+terminal is wide enough), and operational state. Recent errors, warnings,
+capacity blocks, sell-quote waits, stale reports, and missing reports sort above
+healthy bots. The display adapts at 54 columns, refreshes every two seconds, and
+uses local atomic snapshots: it creates no additional RPC or dashboard traffic.
+
+Useful variants:
+
+```bash
+fleet-watch --only prism,net
+fleet-watch --interval 5
+fleet-watch --once --no-color
+```
+
+The snapshots begin appearing after each updated bot completes its first round.
+Use the normal tmux fleet window when an alerted bot needs full logs or keyboard
+control.
 
 The scripts look for configuration in this order:
 

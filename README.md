@@ -519,6 +519,12 @@ MINIMAL_LOGS=true
 
 File logs always retain full timestamps for debugging.
 
+For fleets too large to display as readable tmux tiles—especially from a phone—
+use `ops/fleet/fleet-watch`. It renders one adaptive row per bot, sorts problems
+to the top, and reads local status snapshots without adding RPC/API traffic. See
+the fleet operations guide for setup and filters. The tiled session remains the
+drill-down view for a single bot's complete console.
+
 ### Example Session Output
 
 ```

@@ -8,6 +8,7 @@ The bot must never crash because of dashboard connectivity issues.
 
 import json
 import logging
+import os
 import threading
 import time
 from datetime import datetime, timezone
@@ -50,10 +51,12 @@ class DashboardReporter:
         dashboard_url: str,
         api_key: str = "",
         bot_id: str = "grid-bot-1",
+        local_status_path: str = "",
     ):
         self._url = dashboard_url.rstrip("/")
         self._api_key = api_key
         self._bot_id = bot_id
+        self._local_status_path = local_status_path
         self._start_time = time.monotonic()
         self._sigil = create_sigil(bot_id)
 
@@ -182,6 +185,22 @@ class DashboardReporter:
             "rpc_status": rpc_status,
             "sigil": self._sigil,
         }
+
+        # Keep a tiny local mirror for terminal-only fleet monitoring.  This is
+        # deliberately written before the network queue: a slow/unreachable
+        # dashboard must not make the local operator view stale.  The payload
+        # contains public operational state only (never credentials or keys).
+        if self._local_status_path:
+            try:
+                directory = os.path.dirname(self._local_status_path)
+                if directory:
+                    os.makedirs(directory, exist_ok=True)
+                temporary = self._local_status_path + ".tmp"
+                with open(temporary, "w", encoding="utf-8") as handle:
+                    json.dump(payload, handle, separators=(",", ":"))
+                os.replace(temporary, self._local_status_path)
+            except OSError as exc:
+                logger.debug("Local fleet status snapshot failed: %s", exc)
 
         with self._lock:
             if len(self._queue) >= _MAX_QUEUE_SIZE:
@@ -347,4 +366,5 @@ def create_reporter_from_config(config) -> Optional[DashboardReporter]:
         dashboard_url=url,
         api_key=getattr(config, "dashboard_api_key", "") or "",
         bot_id=getattr(config, "bot_id", "grid-bot-1") or "grid-bot-1",
+        local_status_path="data/fleet_status.json",
     )

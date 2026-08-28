@@ -1,4 +1,6 @@
 import unittest
+import json
+import tempfile
 from unittest.mock import patch
 
 from dashboard_reporter import DashboardReporter
@@ -54,6 +56,23 @@ class TestDashboardReporter(unittest.TestCase):
         self.assertTrue(payload["taxed_token"])
         self.assertEqual(payload["token_transfer_fee_percent"], 5.0)
         self.assertEqual(payload["swap_slippage_percent"], 7.0)
+
+    @patch("dashboard_reporter.threading.Thread.start")
+    def test_local_status_snapshot_is_atomic_and_contains_public_status(self, _start):
+        with tempfile.TemporaryDirectory() as directory:
+            path = f"{directory}/data/fleet_status.json"
+            reporter = DashboardReporter(
+                "https://doomdash.ca/api/status",
+                api_key="secret-not-for-snapshot",
+                bot_id="PRISM",
+                local_status_path=path,
+            )
+            reporter.report(token_symbol="PRISM", filled_positions=3, max_positions=7)
+            with open(path, encoding="utf-8") as handle:
+                payload = json.load(handle)
+            self.assertEqual(payload["bot_id"], "PRISM")
+            self.assertEqual(payload["filled_positions"], 3)
+            self.assertNotIn("api_key", payload)
 
 
 if __name__ == "__main__":
