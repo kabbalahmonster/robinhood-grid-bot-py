@@ -328,7 +328,12 @@ class Wallet:
             "from": self.address,
             "to": Web3.to_checksum_address(recipient),
             "value": amount_wei,
-            "nonce": self.w3.eth.get_transaction_count(self.address),
+            "nonce": self.w3.eth.get_transaction_count(self.address, "pending"),
+            # Plain native transfers do not pass through a swap provider that
+            # injects the network ID.  Include it explicitly so eth-account
+            # creates an EIP-155 replay-protected signature that the RPC can
+            # recover to the configured sender.
+            "chainId": int(self.config.chain_id),
         }
         estimated_gas = int(self.w3.eth.estimate_gas(tx))
         gas_multiplier = max(float(self.config.gas_limit_multiplier), 1.0)
