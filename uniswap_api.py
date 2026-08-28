@@ -150,8 +150,11 @@ class UniswapAPIClient:
         
         # Optional parameters - slippageTolerance in percent (e.g., 0.5 = 0.5%)
         # Convert from fraction (0.02 = 2%) to percent value (2.0 = 2%)
+        # and normalize to the API's maximum of two decimal places. Adding a
+        # token fee and market buffer can otherwise produce values such as
+        # 7.000000000000001, which Uniswap rejects as invalid.
         if slippage_percentage is not None:
-            payload["slippageTolerance"] = float(slippage_percentage * 100)  # e.g., 0.02 -> 2.0 (2%)
+            payload["slippageTolerance"] = round(slippage_percentage * 100, 2)
         
         try:
             url = f"{self.BASE_URL}/quote"
