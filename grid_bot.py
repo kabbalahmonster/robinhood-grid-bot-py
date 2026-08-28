@@ -651,12 +651,62 @@ class GridBot:
         gas_price = receipt.get('effectiveGasPrice') or getattr(result, 'effective_gas_price', None) or 0
         return int(gas_used) * int(gas_price)
 
-    def _measured_trade_received_wei(self, before_balance, result):
-        after_balance = self._raw_trade_balance()
-        received = after_balance - int(before_balance)
-        if getattr(self.config, 'use_eth_trading', False):
-            received += self._receipt_gas_cost_wei(result)
-        return max(0, received)
+    def _receipt_trade_received_wei(self, result):
+        """Recover trade-token output from receipt logs when an RPC balance is stale."""
+        receipt = getattr(result, 'receipt', None) or {}
+        logs = receipt.get('logs') or []
+        weth_address = str(getattr(self.config, 'weth_address', '')).lower()
+        wallet_topic = "0x" + str(self.wallet.address).lower().removeprefix("0x").rjust(64, "0")
+        zero_topic = "0x" + "0" * 64
+        transfer_topic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+        output_topic = zero_topic if getattr(self.config, 'use_eth_trading', False) else wallet_topic
+        total = 0
+        for entry in logs:
+            if str(entry.get('address', '')).lower() != weth_address:
+                continue
+            topics = [topic.hex() if hasattr(topic, 'hex') else str(topic) for topic in entry.get('topics', [])]
+            if len(topics) < 3 or topics[0].lower() != transfer_topic or topics[2].lower() != output_topic:
+                continue
+            data = entry.get('data', 0)
+            total += int(data.hex(), 16) if hasattr(data, 'hex') else int(data, 16) if isinstance(data, str) else int(data)
+        return total
+
+    def _measured_trade_received_wei(self, before_balance, result, expected_wei=0):
+        """Measure proceeds, reconciling stale RPC balances against receipt logs."""
+        gas_cost = self._receipt_gas_cost_wei(result) if getattr(self.config, 'use_eth_trading', False) else 0
+        expected_wei = max(0, int(expected_wei or 0))
+        plausible_floor = int(expected_wei * 0.90) if expected_wei else 0
+        attempts = 6 if plausible_floor else 1
+        measured = 0
+        for attempt in range(attempts):
+            after_balance = self._raw_trade_balance()
+            measured = max(0, after_balance - int(before_balance) + gas_cost)
+            if not plausible_floor or measured >= plausible_floor:
+                return measured
+            if attempt < attempts - 1:
+                logger.warning(
+                    "Post-trade balance appears stale (%s wei; expected about %s); retrying",
+                    measured,
+                    expected_wei,
+                )
+                time.sleep(0.5)
+
+        receipt_amount = self._receipt_trade_received_wei(result)
+        if receipt_amount >= plausible_floor:
+            logger.warning(
+                "RPC balance remained stale; reconciled %s wei of proceeds from receipt logs",
+                receipt_amount,
+            )
+            return receipt_amount
+
+        # A successful, validated swap must not be finalized as a fabricated loss.
+        # The router transaction enforces its quoted minimum, so preserve that
+        # conservative amount and surface the reconciliation failure loudly.
+        logger.critical(
+            "Could not reconcile post-trade balance or receipt logs; using validated quote floor %s wei",
+            expected_wei,
+        )
+        return expected_wei
 
     def _taxed_quote_return_wei(self, quote):
         """Conservatively fee-adjust a sell quote before the pre-trade guard."""
@@ -1580,7 +1630,9 @@ class GridBot:
         })
         
         if result.success:
-            received_wei = self._measured_trade_received_wei(trade_balance_before, result)
+            received_wei = self._measured_trade_received_wei(
+                trade_balance_before, result, self._taxed_quote_return_wei(quote)
+            )
             logger.info("Measured trade-token receipt: %s wei", received_wei)
             eth_received = received_wei / 10**18
             actual_profit = eth_received - sold_cost_eth
@@ -1922,7 +1974,9 @@ class GridBot:
         
         if result.success:
             # Get actual ETH/WETH received from transaction
-            received_wei = self._measured_trade_received_wei(trade_balance_before, result)
+            received_wei = self._measured_trade_received_wei(
+                trade_balance_before, result, self._taxed_quote_return_wei(quote)
+            )
             logger.info("Measured trade-token receipt: %s wei", received_wei)
             eth_received = received_wei / 10**18
             actual_profit_eth = eth_received - sold_cost_eth

@@ -102,6 +102,35 @@ class TaxedTokenModeTests(unittest.TestCase):
         )
         self.assertEqual(bot._measured_trade_received_wei(before, result), 1_000)
 
+    @patch("grid_bot.time.sleep", return_value=None)
+    def test_stale_native_balance_reconciles_from_weth_unwrap_log(self, _sleep):
+        bot = self.bot(wallet=SequenceWallet(eth_balances=[10_000] * 7))
+        bot.wallet.address = "0x" + "a" * 40
+        bot.config.weth_address = "0x" + "b" * 40
+        before = bot._raw_trade_balance()
+        result = SimpleNamespace(receipt={
+            "gasUsed": 100,
+            "effectiveGasPrice": 3,
+            "logs": [{
+                "address": bot.config.weth_address,
+                "topics": [
+                    "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+                    "0x" + "c" * 64,
+                    "0x" + "0" * 64,
+                ],
+                "data": hex(2_000),
+            }],
+        })
+        self.assertEqual(bot._measured_trade_received_wei(before, result, 1_900), 2_000)
+
+    @patch("grid_bot.time.sleep", return_value=None)
+    def test_unreconciled_stale_balance_uses_validated_quote_floor(self, _sleep):
+        bot = self.bot(wallet=SequenceWallet(eth_balances=[10_000] * 7))
+        bot.wallet.address = "0x" + "a" * 40
+        before = bot._raw_trade_balance()
+        result = SimpleNamespace(receipt={"gasUsed": 100, "effectiveGasPrice": 3, "logs": []})
+        self.assertEqual(bot._measured_trade_received_wei(before, result, 1_900), 1_900)
+
     def test_sell_guard_conservatively_applies_declared_fee_to_quote(self):
         quote = SimpleNamespace(buy_amount=1_000)
         self.assertEqual(self.bot()._taxed_quote_return_wei(quote), 950)
