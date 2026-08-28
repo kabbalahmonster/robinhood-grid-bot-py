@@ -666,6 +666,94 @@ class GridBot:
         fee_fraction = self._effective_token_transfer_fee_percent() / 100.0
         return int(quoted * (1.0 - fee_fraction))
 
+    def _record_profit_fee(self, entry):
+        """Append one fee attempt to the local audit trail atomically."""
+        path = "data/profit_fees.json"
+        try:
+            with open(path, "r") as handle:
+                entries = json.load(handle)
+            if not isinstance(entries, list):
+                entries = []
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            entries = []
+        entries.append(entry)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        temp_path = f"{path}.tmp"
+        with open(temp_path, "w") as handle:
+            json.dump(entries[-1000:], handle, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+
+    def _charge_profit_fee(self, profit_wei, sale_tx_hash):
+        """Send the configured share of positive realized profit."""
+        fee_percent = getattr(self.config, "profit_fee_percent", 0)
+        if fee_percent <= 0 or profit_wei <= 0:
+            return None
+
+        fee_wei = int(Decimal(int(profit_wei)) * Decimal(str(fee_percent)) / Decimal(100))
+        if fee_wei <= 0:
+            return None
+
+        recipient = self.config.profit_fee_wallet
+        if recipient.lower() == self.wallet.address.lower():
+            logger.error("Profit fee refused: PROFIT_FEE_WALLET is the bot's own wallet")
+            return None
+        entry = {
+            "timestamp": datetime.now().astimezone().isoformat(),
+            "sale_tx_hash": sale_tx_hash,
+            "recipient": recipient,
+            "asset": self.trade_token_name,
+            "profit_wei": int(profit_wei),
+            "fee_percent": float(fee_percent),
+            "fee_wei": fee_wei,
+            "status": "failed",
+        }
+        try:
+            if getattr(self.config, "use_eth_trading", False):
+                tx = self.wallet.build_eth_transfer_transaction(recipient, fee_wei)
+                max_cost = fee_wei + int(tx.get("gas", 0)) * int(tx.get("gasPrice", 0))
+                reserve_wei = int(self.config.eth_gas_reserve * 10**18)
+                if self.wallet.get_eth_balance_wei() - max_cost < reserve_wei:
+                    raise ValueError("profit-fee transfer would breach ETH_GAS_RESERVE")
+                result = self.wallet.transfer_eth(tx, wait_for_receipt=True)
+            else:
+                result = self.wallet.transfer_erc20(
+                    self.config.weth_address,
+                    recipient,
+                    fee_wei,
+                    wait_for_receipt=True,
+                )
+            entry["status"] = "success" if result.success else "failed"
+            entry["fee_tx_hash"] = result.tx_hash
+            if result.error:
+                entry["error"] = result.error
+        except Exception as exc:
+            entry["error"] = str(exc)
+            result = None
+
+        try:
+            self._record_profit_fee(entry)
+        except OSError as exc:
+            logger.error("Could not persist profit-fee audit record: %s", exc)
+
+        if entry["status"] == "success":
+            logger.info(
+                "💸 Profit fee sent: %.2f%% = %.8f %s → %s (tx: %s)",
+                fee_percent,
+                fee_wei / 10**18,
+                self.trade_token_name,
+                recipient,
+                entry.get("fee_tx_hash"),
+            )
+        else:
+            logger.error(
+                "Profit fee failed after sell %s: %s. The sale remains recorded; inspect data/profit_fees.json before retrying.",
+                sale_tx_hash,
+                entry.get("error") or "transaction failed",
+            )
+        return entry
+
     def _load_dashboard_trades(self):
         try:
             with open(self.dashboard_trades_file, "r") as handle:
@@ -1479,10 +1567,7 @@ class GridBot:
             gas_price = int(self.wallet.w3.eth.gas_price * gas_price_mult)
         
         from web3 import Web3
-        trade_balance_before = (
-            self._raw_trade_balance()
-            if self._taxed_token_active() else None
-        )
+        trade_balance_before = self._raw_trade_balance()
         result = self.wallet._send_transaction({
             "from": Web3.to_checksum_address(self.wallet.address),
             "to": Web3.to_checksum_address(quote.to),
@@ -1495,10 +1580,8 @@ class GridBot:
         })
         
         if result.success:
-            received_wei = int(quote.buy_amount or 0)
-            if trade_balance_before is not None:
-                received_wei = self._measured_trade_received_wei(trade_balance_before, result)
-                logger.info("Measured post-fee trade-token receipt: %s wei", received_wei)
+            received_wei = self._measured_trade_received_wei(trade_balance_before, result)
+            logger.info("Measured trade-token receipt: %s wei", received_wei)
             eth_received = received_wei / 10**18
             actual_profit = eth_received - sold_cost_eth
             
@@ -1519,6 +1602,8 @@ class GridBot:
             profit_pct = (actual_profit / sold_cost_eth * 100) if sold_cost_eth > 0 else 0
             self._record_dashboard_trade("sell", eth_received, sell_tokens, price, result.tx_hash, actual_profit)
             logger.info(f"✅ Gridless sell successful! Profit: {actual_profit:.6f} {self.trade_token_name} ({profit_pct:+.2f}%)")
+
+            self._charge_profit_fee(profit_wei, result.tx_hash)
             
             # Reset buy cooldown so we can buy again immediately after selling
             self.last_buy_time = 0
@@ -1823,10 +1908,7 @@ class GridBot:
         else:
             gas_price = int(self.wallet.w3.eth.gas_price * gas_price_mult)
         
-        trade_balance_before = (
-            self._raw_trade_balance()
-            if self._taxed_token_active() else None
-        )
+        trade_balance_before = self._raw_trade_balance()
         result = self.wallet._send_transaction({
             "from": Web3.to_checksum_address(self.wallet.address),
             "to": Web3.to_checksum_address(quote.to),
@@ -1840,10 +1922,8 @@ class GridBot:
         
         if result.success:
             # Get actual ETH/WETH received from transaction
-            received_wei = int(quote.buy_amount or 0)
-            if trade_balance_before is not None:
-                received_wei = self._measured_trade_received_wei(trade_balance_before, result)
-                logger.info("Measured post-fee trade-token receipt: %s wei", received_wei)
+            received_wei = self._measured_trade_received_wei(trade_balance_before, result)
+            logger.info("Measured trade-token receipt: %s wei", received_wei)
             eth_received = received_wei / 10**18
             actual_profit_eth = eth_received - sold_cost_eth
             
@@ -1869,6 +1949,8 @@ class GridBot:
             logger.info(f"✅ Sell successful!")
             logger.info(f"   Actual return: {eth_received:.6f} {self.trade_token_name}")
             logger.info(f"   Profit: {actual_profit_eth:.6f} {self.trade_token_name} ({(actual_profit_eth/sold_cost_eth*100) if sold_cost_eth > 0 else 0:+.2f}%)")
+
+            self._charge_profit_fee(profit_wei, result.tx_hash)
             
             # Banking: Swap % of profit to USDG
             bank_pct = getattr(self.config, 'bank_percentage', 0)
