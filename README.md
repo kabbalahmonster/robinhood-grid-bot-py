@@ -119,6 +119,8 @@ python grid_bot.py
 | `TOKEN_TRANSFER_FEE_PERCENT` | With taxed mode | 0 | Declared one-way token transfer fee %, validated from 0–15 |
 | `TAXED_TOKEN_SLIPPAGE_BUFFER_PERCENT` | No | 2 | Additional market-slippage allowance above the declared token fee, validated from 0–10; fee + buffer is hard-capped at 15% |
 | `TAXED_TOKEN_FAILURE_COOLDOWN_SECONDS` | No | 300 | Pause taxed-token buy retries after a failed quote/simulation |
+| `AUTO_DETECT_TOKEN_TRANSFER_FEE` | No | true on Robinhood Chain | Require two consistent bounded minimum-output simulation violations before enabling runtime fee-on-transfer protection; never edits `.env` |
+| `AUTO_DETECT_TOKEN_TRANSFER_FEE_MAX_PERCENT` | No | 13 | Hard fee ceiling for automatic classification; with the default 2% buffer total runtime tolerance remains capped at 15% |
 | **Profit Distribution** ||||
 | `BANK_PERCENTAGE` | No | 20 | % of profit to swap to stablecoin (0 to disable) |
 | `PROFIT_FEE_PERCENT` | No | 0 | % of positive realized profit sent automatically after each sell; 0 disables fees |

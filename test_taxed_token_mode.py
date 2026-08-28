@@ -79,6 +79,14 @@ class TaxedTokenModeTests(unittest.TestCase):
         self.assertAlmostEqual(self.bot()._swap_slippage_fraction(), 0.07)
         self.assertAlmostEqual(self.bot(taxed=False)._swap_slippage_fraction(), 0.015)
 
+    def test_auto_detected_fee_uses_same_bounded_accounting_path(self):
+        bot = self.bot(taxed=False, buffer=2.0)
+        bot.tax_detector = SimpleNamespace(detected_fee_percent=3.0)
+        quote = SimpleNamespace(buy_amount=1_000)
+        self.assertTrue(bot._taxed_token_active())
+        self.assertAlmostEqual(bot._swap_slippage_fraction(), 0.05)
+        self.assertEqual(bot._taxed_quote_return_wei(quote), 970)
+
     def test_buy_accounting_uses_actual_post_fee_wallet_delta(self):
         bot = self.bot(wallet=SequenceWallet(token_balances=[1_000, 1_950]))
         before = bot._raw_token_balance("token")
