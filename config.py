@@ -6,6 +6,7 @@ for bot operation across different EVM chains.
 """
 
 import os
+import re
 from dataclasses import dataclass
 from typing import Optional
 from dotenv import load_dotenv
@@ -97,6 +98,8 @@ class BotConfig:
     bank_percentage: float
     moonbag_percentage: float
     bank_min_amount: float
+    profit_fee_percent: float
+    profit_fee_wallet: str
     fast_profit: bool
     tradeable_balance_percent: float
     taxed_token: bool
@@ -232,6 +235,20 @@ class BotConfig:
         if not 0 <= self.bank_percentage <= 100:
             raise ValueError("BANK_PERCENTAGE must be between 0 and 100")
 
+        if not 0 <= self.profit_fee_percent <= 100:
+            raise ValueError("PROFIT_FEE_PERCENT must be between 0 and 100")
+
+        if self.profit_fee_percent > 0:
+            if not re.fullmatch(r"0x[0-9a-fA-F]{40}", self.profit_fee_wallet or ""):
+                raise ValueError(
+                    "PROFIT_FEE_WALLET must be a valid EVM address when PROFIT_FEE_PERCENT is greater than 0"
+                )
+            if self.profit_fee_wallet.lower() == self.private_key.lower():
+                raise ValueError("PROFIT_FEE_WALLET must be an address, not the configured private key")
+
+        if self.bank_percentage + self.profit_fee_percent > 100:
+            raise ValueError("BANK_PERCENTAGE plus PROFIT_FEE_PERCENT must not exceed 100")
+
         if not 0 <= self.token_transfer_fee_percent <= 15:
             raise ValueError("TOKEN_TRANSFER_FEE_PERCENT must be between 0 and 15")
 
@@ -318,6 +335,8 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
         bank_percentage=float(os.getenv("BANK_PERCENTAGE", "20")),
         moonbag_percentage=float(os.getenv("MOONBAG_PERCENTAGE", "1")),
         bank_min_amount=float(os.getenv("BANK_MIN_AMOUNT", "0.2")),
+        profit_fee_percent=float(os.getenv("PROFIT_FEE_PERCENT", "0")),
+        profit_fee_wallet=os.getenv("PROFIT_FEE_WALLET", "").strip(),
         fast_profit=os.getenv("FAST_PROFIT", "true").lower() == "true",
         tradeable_balance_percent=float(os.getenv("TRADEABLE_BALANCE_PERCENT", "100")),
         taxed_token=os.getenv("TAXED_TOKEN", "false").lower() == "true",

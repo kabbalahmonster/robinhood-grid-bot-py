@@ -121,6 +121,8 @@ python grid_bot.py
 | `TAXED_TOKEN_FAILURE_COOLDOWN_SECONDS` | No | 300 | Pause taxed-token buy retries after a failed quote/simulation |
 | **Profit Distribution** ||||
 | `BANK_PERCENTAGE` | No | 20 | % of profit to swap to stablecoin (0 to disable) |
+| `PROFIT_FEE_PERCENT` | No | 0 | % of positive realized profit sent automatically after each sell; 0 disables fees |
+| `PROFIT_FEE_WALLET` | With profit fee | empty | EVM address receiving the fee in the bot's settlement asset (ETH or WETH) |
 | `MOONBAG_PERCENTAGE` | No | 1 | % of tokens to keep after sell (0 to disable) |
 | `BANK_MIN_AMOUNT` | No | 0.2 | Minimum stablecoin output required before banking |
 | `FAST_PROFIT` | No | true | Sell above minimum profit without waiting for the classic sell range |
@@ -653,6 +655,11 @@ python migrate_grid_mode.py to-grid
 
 **Banking**: Swaps a percentage of WETH profit to stablecoin
 - Set `BANK_PERCENTAGE=20` to bank 20% of each profit
+- Set `PROFIT_FEE_PERCENT` and `PROFIT_FEE_WALLET` to send a share of each
+  positive realized sell profit to a fee wallet. Losses and break-even sells
+  pay no fee. Native-ETH transfers preserve `ETH_GAS_RESERVE`; WETH-mode bots
+  transfer WETH. Every attempt is recorded in `data/profit_fees.json`. The fee
+  and banking percentages may total at most 100%.
 - Happens immediately after successful sell
 - Protects gains in volatile markets
 
