@@ -169,8 +169,8 @@ Explicit `SWAP_PROVIDER` takes precedence. `sushi` is accepted as an alias for `
 
 #### Fee-on-transfer (taxed) tokens
 
-Leave taxed-token mode disabled for ordinary ERC-20s. For a token with a
-verified fixed 5% transfer fee, configure that bot only:
+There are two safe paths for fee-on-transfer tokens. Manual mode is appropriate
+when a fixed fee has already been verified. Configure that bot only:
 
 ```dotenv
 TAXED_TOKEN=true
@@ -179,20 +179,42 @@ TAXED_TOKEN_SLIPPAGE_BUFFER_PERCENT=2
 TAXED_TOKEN_FAILURE_COOLDOWN_SECONDS=300
 ```
 
-The provider receives a 7% maximum-slippage value: the declared 5% token fee
+Manual mode takes precedence over automatic detection. The provider receives a
+7% maximum-slippage value: the declared 5% token fee
 plus a separate 2% allowance for route movement. Configuration rejects a
 missing/non-positive declared fee, negative values, a market buffer above 10%,
-or any fee-plus-buffer total above 15%. This is deliberately not an automatic
-tax detector: verify the contract and configure the known one-way fee.
+or any fee-plus-buffer total above 15%.
+
+On Robinhood Chain, guarded automatic detection defaults on when
+`AUTO_DETECT_TOKEN_TRANSFER_FEE` is omitted. Other chains default off. The
+detector watches only tax-specific minimum-output simulation failures and
+requires two consistent same-direction observations before persisting runtime
+protection in `data/token_tax_detection.json`. HTTP 404/429 responses, route
+failures, and unrelated simulation errors do not count. A confirmed measured
+fee is rounded conservatively, must remain below
+`AUTO_DETECT_TOKEN_TRANSFER_FEE_MAX_PERCENT`, and still shares the same 15%
+fee-plus-buffer ceiling. Detection never edits `.env`, and the confirming
+simulation cannot broadcast a transaction; the adjusted tolerance is used on
+the following cycle. Set `AUTO_DETECT_TOKEN_TRANSFER_FEE=false` explicitly to
+disable this behavior, or configure manual mode for a verified known fee.
 
 After a successful buy, the recorded position balance is the wallet's actual
 token balance increase, not the provider's quoted output. After a sell, realized
 proceeds and profit use the actual ETH/WETH balance increase; native-ETH gas is
 added back from the confirmed receipt so network cost does not masquerade as a
 token transfer fee. Before selling, the minimum-profit guard conservatively
-reduces the provider quote by the declared fee. Existing position files need no
+reduces the provider quote by the effective manual or detected fee. Existing position files need no
 migration, but only trades executed after enabling this mode gain measured
 post-fee accounting.
+
+Native-ETH receipt accounting is also protected against stale reads across a
+rotating RPC pool. If the first post-sell wallet delta is implausibly below the
+validated conservative quote, the bot retries the receipt-block balance read up
+to six times. If the RPC remains stale, it reconstructs proceeds from confirmed
+WETH transfer/unwrap receipt logs. If neither source can be reconciled, it uses
+the already validated conservative quote floor and emits a critical operational
+alert. A stale balance can therefore never turn gas cost into fabricated sale
+proceeds or record a giant false loss.
 
 A failed taxed-token buy quote/simulation starts the configured cooldown before
 another buy attempt. Monitoring and sell checks continue during that period.
@@ -924,7 +946,7 @@ DASHBOARD_GROUP=Robinhood Farm
 
 Restart the bot after changing `.env`. Reporting runs in a daemon thread with a bounded queue and a five-second HTTP timeout, so dashboard downtime does not block trading. Successful requests are logged only at `DEBUG`; failures remain warnings.
 
-Each status payload includes schema version, chain/token/public-wallet metadata, ETH, USDG, and trading-token balances, positions, AVG P&L, session and persistent realized profit, buy/sell counts, capacity, the current round's optional `sell_attempt`, and up to 50 trades. Taxed-token bots additionally identify the mode, declared transfer fee, and effective swap tolerance through `taxed_token`, `token_transfer_fee_percent`, and `swap_slippage_percent`. It also includes `treasury_sent_usdg`: the all-time total of successful USDG sweep receipts in `data/treasury_transfers.json`. Dry runs, refused commands, failed broadcasts, and sweeps of other ERC-20s are excluded. Sell checks run before the status report so a blocked attempt is visible in the same round rather than one report late. The USDG balance is a read-only ERC-20 call made once per cycle when `USDG_ADDRESS` is configured; a failed read is omitted and never interrupts trading. Only the public wallet address is sent—never the private key.
+Each status payload includes schema version, chain/token/public-wallet metadata, ETH, USDG, and trading-token balances, positions, AVG P&L, session and persistent realized profit, buy/sell counts, capacity, the current round's optional `sell_attempt`, and up to 50 trades. Taxed-token bots additionally report the effective fee and tolerance through `taxed_token`, `token_transfer_fee_percent`, and `swap_slippage_percent`. `token_tax_detection_source` distinguishes `manual`, `auto-detected`, and `none`; `token_tax_detection_observations` reports the bounded supporting observation count. It also includes `treasury_sent_usdg`: the all-time total of successful USDG sweep receipts in `data/treasury_transfers.json`. Dry runs, refused commands, failed broadcasts, and sweeps of other ERC-20s are excluded. Sell checks run before the status report so a blocked attempt is visible in the same round rather than one report late. The USDG balance is a read-only ERC-20 call made once per cycle when `USDG_ADDRESS` is configured; a failed read is omitted and never interrupts trading. Only the public wallet address is sent—never the private key.
 
 Experimental builds also include a versioned `sigil` descriptor created once per process incarnation. One of exactly 23 curated positive, present-tense intentions in `sigil_intentions.json` is selected from cryptographic startup entropy, reduced to unique consonants, and bound with the bot ID and incarnation nonce into a SHA-256 visual seed. Only `{version, method, key, seed}` is reported; the readable intention and nonce are discarded. The dashboard can therefore render the symbol deterministically without an image service, while every restart produces a new working. A missing or malformed grimoire falls back to one built-in intention because dashboard ornamentation must never prevent trading from starting.
 
