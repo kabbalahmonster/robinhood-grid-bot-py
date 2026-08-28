@@ -8,15 +8,17 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)"
 source "$SCRIPT_DIR/fleet-common.sh"
 
 usage() {
-  printf 'Usage: backup-private-keys --output PATH [--config PATH]\n' >&2
+  printf 'Usage: backup-private-keys --output PATH [--overwrite] [--config PATH]\n' >&2
 }
 
 config_path=""
 output_path=""
+overwrite=false
 while (($#)); do
   case "$1" in
     --config) (($# >= 2)) || fleet_die "--config requires a path"; config_path="$2"; shift 2 ;;
     --output) (($# >= 2)) || fleet_die "--output requires a path"; output_path="$2"; shift 2 ;;
+    --overwrite) overwrite=true; shift ;;
     -h|--help) usage; exit 0 ;;
     *) fleet_die "Unknown argument: $1" ;;
   esac
@@ -28,6 +30,7 @@ fleet_apply_selection "" ""
 fleet_validate_bots
 
 helper_args=(--output "$output_path")
+[[ "$overwrite" == true ]] && helper_args+=(--overwrite)
 for bot_dir in "${FLEET_BOT_DIRS[@]}"; do
   env_file="$bot_dir/.env"
   [[ -f "$env_file" ]] || fleet_die "Missing .env: $env_file"

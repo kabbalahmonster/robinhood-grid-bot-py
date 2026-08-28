@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Create a non-overwriting, owner-readable fleet private-key backup."""
+"""Create or explicitly replace an owner-readable fleet private-key backup."""
 
 import argparse
 import datetime
 import json
 import os
 import re
+import tempfile
 
 
 KEY_RE = re.compile(r"^(?:0x)?[0-9a-fA-F]{64}$")
@@ -40,6 +41,11 @@ def read_fields(path):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", required=True)
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="atomically replace an existing output file",
+    )
     parser.add_argument("--entry", nargs=2, action="append", metavar=("BOT", "ENV"), required=True)
     args = parser.parse_args()
 
@@ -53,21 +59,39 @@ def main():
         "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "entries": entries,
     }
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-    fd = os.open(os.path.abspath(args.output), flags, 0o600)
+    output_path = os.path.abspath(args.output)
+    output_dir = os.path.dirname(output_path)
+    temp_path = None
+    if args.overwrite:
+        fd, temp_path = tempfile.mkstemp(
+            prefix=f".{os.path.basename(output_path)}.", suffix=".tmp", dir=output_dir
+        )
+        os.fchmod(fd, 0o600)
+    else:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        try:
+            fd = os.open(output_path, flags, 0o600)
+        except FileExistsError:
+            parser.error(
+                f"output already exists: {output_path}; use --overwrite to replace it safely"
+            )
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(document, handle, indent=2)
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
+        if temp_path is not None:
+            os.replace(temp_path, output_path)
+            temp_path = None
     except Exception:
         try:
-            os.unlink(os.path.abspath(args.output))
+            os.unlink(temp_path if temp_path is not None else output_path)
         except FileNotFoundError:
             pass
         raise
-    print(f"Private-key backup created with mode 0600: {os.path.abspath(args.output)} ({len(entries)} entries)")
+    action = "replaced" if args.overwrite else "created"
+    print(f"Private-key backup {action} with mode 0600: {output_path} ({len(entries)} entries)")
 
 
 if __name__ == "__main__":

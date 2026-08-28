@@ -39,7 +39,22 @@ class TestBackupPrivateKeys(unittest.TestCase):
             refused = subprocess.run(command, text=True, capture_output=True,
                                      env={**os.environ, "HOME": directory})
             self.assertNotEqual(refused.returncode, 0)
+            self.assertIn("output already exists", refused.stderr)
+            self.assertIn("--overwrite", refused.stderr)
+            self.assertNotIn("Traceback", refused.stderr)
             self.assertEqual(output.read_bytes(), original)
+
+            (root / "alpha" / "robinhood-grid-bot-py" / ".env").write_text(
+                f"PRIVATE_KEY=0x{'3' * 64}\nTOKEN_SYMBOL=ALPHA\n"
+            )
+            replaced = subprocess.run(command + ["--overwrite"], text=True, capture_output=True,
+                                      env={**os.environ, "HOME": directory})
+            self.assertEqual(replaced.returncode, 0, replaced.stderr)
+            self.assertIn("backup replaced", replaced.stdout)
+            self.assertEqual(stat.S_IMODE(output.stat().st_mode), 0o600)
+            updated = json.loads(output.read_text())
+            self.assertEqual(updated["entries"][0]["private_key"], "0x" + "3" * 64)
+            self.assertNotEqual(output.read_bytes(), original)
 
 
 if __name__ == "__main__":

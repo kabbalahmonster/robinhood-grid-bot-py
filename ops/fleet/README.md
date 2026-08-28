@@ -679,7 +679,19 @@ ops/fleet/backup-private-keys --output "$HOME/fleet-private-keys.json"
 
 The command requires an explicit output path, creates it with owner-only mode
 `0600`, never prints key material, and uses exclusive creation: if anything
-already exists at that path, it fails without changing the file. It validates
+already exists at that path, it exits cleanly without a traceback or changing
+the file. To intentionally refresh an existing backup, use explicit atomic
+replacement:
+
+```bash
+ops/fleet/backup-private-keys \
+  --output "$HOME/fleet-private-keys.json" \
+  --overwrite
+```
+
+The replacement is written and synced to a protected temporary file before it
+is moved over the old backup, so an interrupted write does not truncate the
+last good copy. The command validates
 the entire fleet before creating the backup so a missing `.env`, missing or
 duplicate field, or malformed private key cannot silently produce an
 incomplete file. The resulting file contains all fleet signing authority in
