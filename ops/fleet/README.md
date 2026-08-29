@@ -559,6 +559,20 @@ the output and receipts first. The tmux-session check cannot detect bots
 started elsewhere, so the explicit stopped-fleet confirmation remains a human
 safety assertion.
 
+For the frequent stop → execute sweep → start sequence, use `--cycle-fleet`
+after reviewing the normal dry run:
+
+```bash
+usdg-sweep
+usdg-sweep --execute --cycle-fleet
+```
+
+Cycle mode requires the configured tmux fleet to be running, stops it, executes
+the sweep, and restarts the full configured fleet detached. The restart runs
+from an exit trap even if one or more wallet sweeps fail. `--execute` remains
+mandatory; `--cycle-fleet` replaces the manual `--confirm-fleet-stopped`
+acknowledgement because the command performs and verifies the stop itself.
+
 ## Native ETH and other fleet treasury transfers
 
 `treasury-transfer` is the general guarded batch command. Its `--asset` may be

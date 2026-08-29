@@ -18,14 +18,16 @@ Options:
   --confirm-recipient ADDRESS  Exact repeat for a recipient not allowlisted by a bot
   --execute                    Broadcast transfers after all safety checks
   --confirm-fleet-stopped      Required with --execute
+  --cycle-fleet                With --execute, stop a running fleet and always
+                               restart it detached when the sweep finishes
   --config PATH                Use an alternate fleet configuration
   --only NAMES                 Target comma-separated bot names
   --exclude NAMES              Omit comma-separated bot names
   -h, --help                   Show this help
 
-Execution is refused while the configured tmux fleet session exists. The
-script never stops bots itself. Run and review the full dry run first, stop the
-fleet, then repeat with --execute --confirm-fleet-stopped.
+Execution is refused while the configured tmux fleet session exists unless
+--cycle-fleet is supplied. Run and review the full dry run first. Cycle mode
+requires the fleet to be running and restores it even when the sweep fails.
 When --recipient is omitted, FLEET_TREASURY_RECIPIENT from fleet.conf is used.
 EOF
 }
@@ -35,6 +37,7 @@ recipient=""
 confirmed_recipient=""
 execute=0
 fleet_stopped=0
+cycle_fleet=0
 only=""
 exclude=""
 
@@ -57,6 +60,7 @@ while (($#)); do
       ;;
     --execute) execute=1; shift ;;
     --confirm-fleet-stopped) fleet_stopped=1; shift ;;
+    --cycle-fleet) cycle_fleet=1; shift ;;
     --only) (($# >= 2)) || fleet_die "--only requires comma-separated names"; only="$2"; shift 2 ;;
     --exclude) (($# >= 2)) || fleet_die "--exclude requires comma-separated names"; exclude="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
@@ -72,7 +76,8 @@ recipient="${recipient:-$FLEET_TREASURY_RECIPIENT}"
 if [[ -n "$confirmed_recipient" && "$confirmed_recipient" != "$recipient" ]]; then
   fleet_die "--confirm-recipient must exactly match --recipient"
 fi
-if ((execute && !fleet_stopped)); then
+((cycle_fleet == 0 || execute == 1)) || fleet_die "--cycle-fleet requires --execute"
+if ((execute && !fleet_stopped && !cycle_fleet)); then
   fleet_die "--execute requires --confirm-fleet-stopped"
 fi
 
@@ -80,7 +85,26 @@ fleet_validate_bots
 
 if ((execute)); then
   fleet_require_tmux
-  if fleet_session_exists; then
+  if ((cycle_fleet)); then
+    fleet_session_exists || fleet_die "--cycle-fleet requires the configured tmux fleet to be running: $FLEET_SESSION"
+    common_args=()
+    [[ -z "$config_path" ]] || common_args+=(--config "$config_path")
+    restart_after_cycle=0
+    restore_fleet_after_cycle() {
+      local sweep_status=$? restart_status=0
+      trap - EXIT
+      if ((restart_after_cycle)); then
+        printf '\nRestarting fleet after USDG sweep...\n'
+        "$SCRIPT_DIR/start-fleet" --detach "${common_args[@]}" || restart_status=$?
+      fi
+      if ((sweep_status != 0)); then exit "$sweep_status"; fi
+      exit "$restart_status"
+    }
+    trap restore_fleet_after_cycle EXIT
+    "$SCRIPT_DIR/stop-fleet" "${common_args[@]}"
+    restart_after_cycle=1
+    fleet_stopped=1
+  elif fleet_session_exists; then
     fleet_die "Refusing to broadcast while tmux session '$FLEET_SESSION' is running.
 Stop it with: $SCRIPT_DIR/stop-fleet --config '$FLEET_CONFIG_PATH'"
   fi
