@@ -48,6 +48,18 @@ class TestFleetWatch(unittest.TestCase):
             output = fleet_watch.render([healthy, missing], False)
         self.assertLess(output.index("ZETA"), output.index("ALPHA"))
 
+    def test_position_balance_mismatch_is_bad(self):
+        status = {
+            "_snapshot_mtime": 100,
+            "poll_interval_seconds": 8,
+            "sell_attempt": {"status": "position_balance_mismatch"},
+        }
+
+        state, level = fleet_watch.state_for(status, 100)
+
+        self.assertEqual(state, "BAL MISMATCH")
+        self.assertEqual(level, 3)
+
 
 if __name__ == "__main__":
     unittest.main()

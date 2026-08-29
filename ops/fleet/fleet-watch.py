@@ -45,6 +45,8 @@ def state_for(status: dict, now: float) -> tuple[str, int]:
     if age > max(45, poll * 4):
         return f"STALE {age}s", 3
     attempt = status.get("sell_attempt") or {}
+    if attempt.get("status") == "position_balance_mismatch":
+        return "BAL MISMATCH", 3
     if attempt.get("status") == "quote_below_minimum":
         return "SELL WAIT", 2
     if status.get("capacity_warning"):

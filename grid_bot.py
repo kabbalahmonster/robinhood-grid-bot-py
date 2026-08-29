@@ -633,6 +633,41 @@ class GridBot:
         _, raw_balance = self.wallet.get_token_balance(token_address)
         return int(raw_balance)
 
+    def _wallet_can_cover_sell(self, sell_amount, position_id):
+        """Fail closed when local position accounting exceeds wallet reality."""
+        try:
+            wallet_balance = self._raw_token_balance(self.config.token_address)
+        except Exception as exc:
+            logger.error(
+                "SELL SAFETY CHECK FAILED for position #%s: could not read wallet "
+                "token balance: %s",
+                position_id,
+                exc,
+            )
+            return False
+
+        sell_amount = int(sell_amount)
+        if wallet_balance >= sell_amount:
+            return True
+
+        deficit = sell_amount - wallet_balance
+        self._sell_attempt = {
+            "status": "position_balance_mismatch",
+            "position_id": str(position_id),
+            "tracked_sell_amount_raw": sell_amount,
+            "wallet_balance_raw": wallet_balance,
+            "deficit_raw": deficit,
+        }
+        logger.error(
+            "POSITION BALANCE MISMATCH for #%s: tracked sell amount %s exceeds "
+            "wallet balance %s by %s raw units; blocking sell before quote",
+            position_id,
+            sell_amount,
+            wallet_balance,
+            deficit,
+        )
+        return False
+
     def _raw_trade_balance(self):
         if getattr(self.config, 'use_eth_trading', False):
             return int(self.wallet.get_eth_balance_wei())
@@ -1317,6 +1352,8 @@ class GridBot:
         balance = pos.get('balance', 0)
         if balance <= 0:
             return
+        if not self._wallet_can_cover_sell(balance, pos_id):
+            return
             
         quote = self.api_client.build_swap_transaction(
             sell_token=self.config.token_address,
@@ -1860,6 +1897,9 @@ class GridBot:
             sell_amount = total_balance
             sell_tokens = total_tokens
             moonbag_tokens = 0
+
+        if not self._wallet_can_cover_sell(sell_amount, pos_id):
+            return
         
         # Calculate expected ETH/WETH return (proportional to sold amount)
         expected_eth = sell_tokens * price
