@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+SCRIPT_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)"
+# shellcheck source=fleet-common.sh
+source "$SCRIPT_DIR/fleet-common.sh"
+
+usage() {
+  cat <<'EOF'
+Usage: adjust-positions [--remove] [--apply] [--restart] [--config PATH] NAMES [COUNT]
+
+Preview or change MAX_ACTIVE_POSITIONS relatively for one or more fleet bots.
+NAMES is one name or a comma-separated list. COUNT defaults to 1. --remove
+subtracts instead of adding. This changes capacity only; it never creates,
+deletes, or rewrites filled position records.
+
+Examples:
+  adjust-positions earn
+  adjust-positions earn,scopl 2
+  adjust-positions --remove seedcoin 1
+  adjust-positions --apply earn,scopl 2
+  adjust-positions --apply --restart earn
+EOF
+}
+
+config_path=""
+apply=0
+restart=0
+remove=0
+positional=()
+while (($#)); do
+  case "$1" in
+    --config) (($# >= 2)) || fleet_die "--config requires a path"; config_path="$2"; shift 2 ;;
+    --apply) apply=1; shift ;;
+    --restart) restart=1; shift ;;
+    --remove) remove=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    --*) fleet_die "Unknown option: $1" ;;
+    *) positional+=("$1"); shift ;;
+  esac
+done
+
+((${#positional[@]} >= 1 && ${#positional[@]} <= 2)) || fleet_die "Provide NAMES and optional COUNT"
+((restart == 0 || apply == 1)) || fleet_die "--restart requires --apply"
+names="${positional[0]}"
+count="${positional[1]:-1}"
+[[ "$count" =~ ^[1-9][0-9]*$ ]] || fleet_die "COUNT must be a positive integer"
+delta="$count"
+((remove == 0)) || delta="-$count"
+
+fleet_load_config "$config_path"
+fleet_apply_selection "$names" ""
+fleet_validate_bots
+command -v python3 >/dev/null 2>&1 || fleet_die "python3 is required"
+
+declare -A variables=() updated_values=()
+printf 'Fleet position capacity: %s %s by %d\n\n' \
+  "$([[ $apply == 1 ]] && printf APPLY || printf PREVIEW)" \
+  "$([[ $remove == 1 ]] && printf REMOVE || printf ADD)" "$count"
+for bot_dir in "${FLEET_BOT_DIRS[@]}"; do
+  name="$(fleet_bot_name "$bot_dir")"
+  if ! result="$(python3 "$SCRIPT_DIR/position-capacity.py" --bot-dir "$bot_dir" --delta "$delta")"; then
+    fleet_die "Position-capacity validation failed for $name"
+  fi
+  IFS=$'\t' read -r variable current filled updated <<< "$result"
+  variables["$bot_dir"]="$variable"
+  updated_values["$bot_dir"]="$updated"
+  printf '%-16s %s: %d -> %d (%d currently filled)\n' "$name" "$variable" "$current" "$updated" "$filled"
+done
+
+if ((apply == 0)); then
+  printf '\nPREVIEW ONLY: no files changed. Repeat with --apply after review.\n'
+  exit 0
+fi
+
+timestamp="$(date -u +%Y%m%dT%H%M%SZ).$$"
+backups=()
+rollback() {
+  local status=$?
+  if ((status != 0)); then
+    printf 'Update failed; restoring .env files from this run...\n' >&2
+    for item in "${backups[@]}"; do
+      env_file="${item%%|*}"
+      backup="${item#*|}"
+      cp -p -- "$backup" "$env_file" || true
+    done
+  fi
+  exit "$status"
+}
+trap rollback EXIT
+
+for bot_dir in "${FLEET_BOT_DIRS[@]}"; do
+  env_file="$bot_dir/.env"
+  backup="$env_file.bak.$timestamp"
+  cp -p -- "$env_file" "$backup"
+  backups+=("$env_file|$backup")
+done
+for bot_dir in "${FLEET_BOT_DIRS[@]}"; do
+  python3 "$SCRIPT_DIR/update-env-file.py" --apply --file "$bot_dir/.env" \
+    "${variables[$bot_dir]}=${updated_values[$bot_dir]}"
+done
+
+trap - EXIT
+printf '\nUpdated %d bot capacity setting(s). Backups end in .bak.%s.\n' "${#FLEET_BOT_DIRS[@]}" "$timestamp"
+if ((restart)); then
+  restart_args=()
+  [[ -z "$config_path" ]] || restart_args+=(--config "$config_path")
+  exec "$SCRIPT_DIR/restart-fleet" "${restart_args[@]}"
+fi
+printf 'Running bots retain their old capacity until restarted.\n'

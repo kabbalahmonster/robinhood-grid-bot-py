@@ -311,6 +311,7 @@ option and safety invariant.
 | `fleet-inventory` | Read addresses, reserves, managed balances, positions, and audit ages | No |
 | `fleet-audit` | Reconcile local treasury/liquidation receipts | No |
 | `update-variable` | Preview/atomically change selected `.env` variables | Config only; `--apply` required |
+| `adjust-positions` | Preview/add/remove relative position capacity for selected bots | Config only; `--apply` required |
 | `backup-private-keys` | Validate every configured bot and write one sensitive key backup | Sensitive file output |
 | `usdg-sweep` | Plan or execute fleet USDG transfers | Broadcast only with all guards |
 | `treasury-transfer` | Plan or execute native/ERC-20 transfers | Broadcast only with all guards |

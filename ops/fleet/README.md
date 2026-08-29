@@ -73,6 +73,7 @@ sudo apt install tmux git python3 python3-venv
      ops/fleet/update-this-checkout ops/fleet/update-all \
      ops/fleet/usdg-sweep \
      ops/fleet/treasury-transfer ops/fleet/update-variable \
+     ops/fleet/adjust-positions ops/fleet/position-capacity.py \
      ops/fleet/backup-private-keys ops/fleet/fleet-discover \
      ops/fleet/liquidate-assets ops/fleet/fleet-doctor \
      ops/fleet/fleet-inventory ops/fleet/fleet-audit \
@@ -102,6 +103,7 @@ sudo apt install tmux git python3 python3-venv
    ln -sf "$PWD/ops/fleet/usdg-sweep" "$HOME/bin/usdg-sweep"
    ln -sf "$PWD/ops/fleet/treasury-transfer" "$HOME/bin/treasury-transfer"
    ln -sf "$PWD/ops/fleet/update-variable" "$HOME/bin/update-variable"
+   ln -sf "$PWD/ops/fleet/adjust-positions" "$HOME/bin/adjust-positions"
    ln -sf "$PWD/ops/fleet/backup-private-keys" "$HOME/bin/backup-private-keys"
    ln -sf "$PWD/ops/fleet/fleet-discover" "$HOME/bin/fleet-discover"
    ln -sf "$PWD/ops/fleet/liquidate-assets" "$HOME/bin/liquidate-assets"
@@ -697,6 +699,30 @@ retry. The tmux check cannot detect a bot launched outside the configured
 session, so `--confirm-fleet-stopped` remains a human safety assertion.
 
 ## Updating one variable across the fleet
+
+### Adjusting position capacity by bot name
+
+`adjust-positions` changes position capacity relatively for one bot or a
+comma-separated list. It defaults to adding one position and previewing only:
+
+```bash
+adjust-positions earn
+adjust-positions earn,scopl 2
+```
+
+Apply the reviewed change, or subtract capacity with `--remove`:
+
+```bash
+adjust-positions --apply earn,scopl 2
+adjust-positions --remove --apply seedcoin 1
+```
+
+Add `--restart` with `--apply` to restart the configured fleet after all
+changes succeed. Removal is refused if the resulting capacity would be below
+the bot's currently filled-position count. The command changes only
+`MAX_ACTIVE_POSITIONS` (or the legacy `MAX_POSITIONS` fallback); it never
+creates, deletes, or rewrites filled position records. Timestamped `.env`
+backups are created before applying changes.
 
 `update-variable` previews or updates variables in every configured checkout's
 `.env`. It requires an existing variable by default, refuses duplicate
