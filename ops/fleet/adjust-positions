@@ -8,17 +8,24 @@ source "$SCRIPT_DIR/fleet-common.sh"
 
 usage() {
   cat <<'EOF'
-Usage: adjust-positions [--remove] [--apply] [--restart] [--config PATH] NAMES [COUNT]
+Usage:
+  adjust-positions [--remove] [--apply] [--restart] [--config PATH] NAMES [COUNT]
+  adjust-positions [--apply] [--restart] [--config PATH] NAME=DELTA [NAME=DELTA ...]
 
 Preview or change MAX_ACTIVE_POSITIONS relatively for one or more fleet bots.
 NAMES is one name or a comma-separated list. COUNT defaults to 1. --remove
 subtracts instead of adding. This changes capacity only; it never creates,
 deletes, or rewrites filled position records.
 
+Assignment form applies an individual signed DELTA to each bot. Positive
+values add capacity and negative values remove it.
+
 Examples:
   adjust-positions earn
   adjust-positions earn,scopl 2
   adjust-positions --remove seedcoin 1
+  adjust-positions earn=+2 scopl=-1 hookr=+3
+  adjust-positions --apply earn=+2 scopl=-1 hookr=+3
   adjust-positions --apply earn,scopl 2
   adjust-positions --apply --restart earn
 EOF
@@ -41,13 +48,37 @@ while (($#)); do
   esac
 done
 
-((${#positional[@]} >= 1 && ${#positional[@]} <= 2)) || fleet_die "Provide NAMES and optional COUNT"
+((${#positional[@]} >= 1)) || fleet_die "Provide NAMES and optional COUNT, or NAME=DELTA assignments"
 ((restart == 0 || apply == 1)) || fleet_die "--restart requires --apply"
-names="${positional[0]}"
-count="${positional[1]:-1}"
-[[ "$count" =~ ^[1-9][0-9]*$ ]] || fleet_die "COUNT must be a positive integer"
-delta="$count"
-((remove == 0)) || delta="-$count"
+
+declare -A requested_deltas=()
+assignment_mode=0
+for item in "${positional[@]}"; do
+  [[ "$item" != *=* ]] || assignment_mode=1
+done
+
+if ((assignment_mode)); then
+  ((remove == 0)) || fleet_die "--remove cannot be combined with NAME=DELTA assignments; use a negative DELTA"
+  names_list=()
+  for assignment in "${positional[@]}"; do
+    [[ "$assignment" == *=* ]] || fleet_die "Do not mix NAMES/COUNT syntax with NAME=DELTA assignments"
+    name="${assignment%%=*}"
+    delta="${assignment#*=}"
+    [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || fleet_die "Invalid bot name: $name"
+    [[ "$delta" =~ ^[+-]?[1-9][0-9]*$ ]] || fleet_die "DELTA for $name must be a nonzero signed integer"
+    [[ -z "${requested_deltas[$name]+x}" ]] || fleet_die "Duplicate bot assignment: $name"
+    requested_deltas["$name"]="$delta"
+    names_list+=("$name")
+  done
+  names="$(IFS=,; printf '%s' "${names_list[*]}")"
+else
+  ((${#positional[@]} <= 2)) || fleet_die "Provide NAMES and optional COUNT"
+  names="${positional[0]}"
+  count="${positional[1]:-1}"
+  [[ "$count" =~ ^[1-9][0-9]*$ ]] || fleet_die "COUNT must be a positive integer"
+  delta="$count"
+  ((remove == 0)) || delta="-$count"
+fi
 
 fleet_load_config "$config_path"
 fleet_apply_selection "$names" ""
@@ -55,18 +86,23 @@ fleet_validate_bots
 command -v python3 >/dev/null 2>&1 || fleet_die "python3 is required"
 
 declare -A variables=() updated_values=()
-printf 'Fleet position capacity: %s %s by %d\n\n' \
-  "$([[ $apply == 1 ]] && printf APPLY || printf PREVIEW)" \
-  "$([[ $remove == 1 ]] && printf REMOVE || printf ADD)" "$count"
+printf 'Fleet position capacity: %s (%d selected)\n\n' \
+  "$([[ $apply == 1 ]] && printf APPLY || printf PREVIEW)" "${#FLEET_BOT_DIRS[@]}"
 for bot_dir in "${FLEET_BOT_DIRS[@]}"; do
   name="$(fleet_bot_name "$bot_dir")"
-  if ! result="$(python3 "$SCRIPT_DIR/position-capacity.py" --bot-dir "$bot_dir" --delta "$delta")"; then
+  bot_delta="${requested_deltas[$name]:-$delta}"
+  if ! result="$(python3 "$SCRIPT_DIR/position-capacity.py" --bot-dir "$bot_dir" --delta "$bot_delta")"; then
     fleet_die "Position-capacity validation failed for $name"
   fi
   IFS=$'\t' read -r variable current filled updated <<< "$result"
   variables["$bot_dir"]="$variable"
   updated_values["$bot_dir"]="$updated"
-  printf '%-16s %s: %d -> %d (%d currently filled)\n' "$name" "$variable" "$current" "$updated" "$filled"
+  operation="ADD"
+  ((bot_delta > 0)) || operation="REMOVE"
+  magnitude="${bot_delta#-}"
+  magnitude="${magnitude#+}"
+  printf '%-16s %-6s %d  %s: %d -> %d (%d currently filled)\n' \
+    "$name" "$operation" "$magnitude" "$variable" "$current" "$updated" "$filled"
 done
 
 if ((apply == 0)); then

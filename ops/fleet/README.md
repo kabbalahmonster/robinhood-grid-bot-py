@@ -717,6 +717,17 @@ adjust-positions --apply earn,scopl 2
 adjust-positions --remove --apply seedcoin 1
 ```
 
+Use signed `NAME=DELTA` assignments when each bot needs a different change,
+including mixed additions and removals in one atomic run:
+
+```bash
+adjust-positions earn=+2 scopl=-1 hookr=+3
+adjust-positions --apply earn=+2 scopl=-1 hookr=+3
+```
+
+Assignment deltas must be nonzero integers. Do not combine assignment form
+with `--remove`; use a negative delta for each bot being reduced.
+
 Add `--restart` with `--apply` to restart the configured fleet after all
 changes succeed. Removal is refused if the resulting capacity would be below
 the bot's currently filled-position count. The command changes only

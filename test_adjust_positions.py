@@ -59,6 +59,26 @@ class AdjustPositionsTests(unittest.TestCase):
             self.assertIn("bot has 4 filled positions", result.stderr)
             self.assertEqual((bots["scopl"] / ".env").read_text(), "MAX_ACTIVE_POSITIONS=5\n")
 
+    def test_applies_individual_add_and_remove_deltas_atomically(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bots, config = self.fixture(directory)
+            result = self.run_script(directory, config, "--apply", "earn=+3", "scopl=-1")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("earn             ADD    3", result.stdout)
+            self.assertIn("scopl            REMOVE 1", result.stdout)
+            self.assertEqual((bots["earn"] / ".env").read_text(), "MAX_ACTIVE_POSITIONS=10\n")
+            self.assertEqual((bots["scopl"] / ".env").read_text(), "MAX_ACTIVE_POSITIONS=4\n")
+
+    def test_assignment_form_rejects_remove_flag_and_duplicates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _, config = self.fixture(directory)
+            flagged = self.run_script(directory, config, "--remove", "earn=+1")
+            duplicate = self.run_script(directory, config, "earn=+1", "earn=-1")
+            self.assertNotEqual(flagged.returncode, 0)
+            self.assertIn("cannot be combined", flagged.stderr)
+            self.assertNotEqual(duplicate.returncode, 0)
+            self.assertIn("Duplicate bot assignment", duplicate.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
