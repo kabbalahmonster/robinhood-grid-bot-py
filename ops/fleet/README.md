@@ -271,12 +271,35 @@ update-all
 ```
 
 The operations path defaults to
-`$HOME/bot-farm/fleet-command/robinhood-grid-bot-py`. Override it without
-editing the script when the checkout lives elsewhere:
+`$HOME/bot-farm/fleet-command/robinhood-grid-bot-py`.
+`FLEET_COMMAND_CHECKOUT` is a shell environment variable read by `update-all`;
+it is **not** a `fleet.conf` setting. The wrapper needs this path before it can
+locate the repository or any fleet configuration, so putting the override in
+`fleet.conf` would be too late.
+
+Override it for one invocation without editing the script:
 
 ```bash
 FLEET_COMMAND_CHECKOUT=/different/path/robinhood-grid-bot-py update-all
 ```
+
+Set it for the current shell and later `update-all` commands:
+
+```bash
+export FLEET_COMMAND_CHECKOUT=/different/path/robinhood-grid-bot-py
+update-all
+```
+
+For a permanent per-user override, add the export to the deployment user's
+shell startup file (for example `~/.bashrc` when using Bash), then start a new
+shell or source that file:
+
+```bash
+export FLEET_COMMAND_CHECKOUT=/different/path/robinhood-grid-bot-py
+```
+
+Normal deployments using the documented default path do not need to set the
+variable anywhere.
 
 The script follows its own canonical path, so the `~/bin` symlink shown during
 setup still identifies the correct checkout. It never loads `fleet.conf`,
