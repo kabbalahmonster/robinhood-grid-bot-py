@@ -140,7 +140,9 @@ fleet-watch --once --no-color
 
 The snapshots begin appearing after each updated bot completes its first round.
 Use the normal tmux fleet window when an alerted bot needs full logs or keyboard
-control.
+control. In `COMPACT_MODE`, each round ends with a short labelled footer such as
+`------ EARN`, so the bot name remains the bottom visible line in its pane and
+the correct pane is easy to identify before restarting it.
 
 The scripts look for configuration in this order:
 

@@ -2220,17 +2220,18 @@ class GridBot:
             if len(active_positions) > 3:
                 logger.info(f"... and {len(active_positions) - 3} more")
 
-            # Separator matches 26 char width
-            logger.info("-" * 26)
+            # Keep the divider narrow so it does not dominate tiny phone panes.
+            logger.info("-" * 12)
 
-            # Bot identity and balance/session summary
-            logger.info(f"{time_str} R#{self.round_count} | {self.config.token_symbol}")
+            # Balance/session summary, followed by a labelled footer. Keeping the
+            # token on the final line makes the pane identity survive scrolling
+            # and makes it obvious which pane to restart from a phone.
+            logger.info(f"{time_str} R#{self.round_count}")
             balance_letter = "E" if getattr(self.config, 'use_eth_trading', False) else "W"
             logger.info(f"{balance_letter}:{weth_bal:.3f} T:{token_bal:.0f} {active}/{self.config.max_active_positions}/{active+empty}")
             logger.info(f"B:{self.session_buys} S:{self.session_sells} P:{self.session_profit_weth:.6f}")
-            
-            # Final separator
-            logger.info("-" * 26)
+
+            logger.info(f"------ {self.config.token_symbol}")
         else:
             # Verbose round summary (original format)
             balance_label = "ETH" if getattr(self.config, 'use_eth_trading', False) else "WETH"

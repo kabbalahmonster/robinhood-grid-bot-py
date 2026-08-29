@@ -514,7 +514,7 @@ MINIMAL_LOGS=true
 
 | Setting | Effect |
 |---------|--------|
-| `COMPACT_MODE=true` | Single-line status, top 3 positions only |
+| `COMPACT_MODE=true` | Phone-friendly status, top 3 positions, and a final labelled token footer |
 | `MINIMAL_LOGS=true` | Remove timestamps from console output |
 
 File logs always retain full timestamps for debugging.
