@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+# Override this environment variable if the operations checkout moves.
+FLEET_COMMAND_CHECKOUT="${FLEET_COMMAND_CHECKOUT:-$HOME/bot-farm/fleet-command/robinhood-grid-bot-py}"
+
+die() {
+  printf 'Error: %s\n' "$*" >&2
+  exit 1
+}
+
+[[ -d "$FLEET_COMMAND_CHECKOUT" ]] || \
+  die "Fleet command checkout not found: $FLEET_COMMAND_CHECKOUT"
+
+update_self="$FLEET_COMMAND_CHECKOUT/ops/fleet/update-this-checkout"
+update_fleet="$FLEET_COMMAND_CHECKOUT/ops/fleet/update-fleet"
+[[ -x "$update_self" ]] || die "Missing executable: $update_self"
+[[ -x "$update_fleet" ]] || die "Missing executable: $update_fleet"
+
+printf 'Updating fleet command checkout: %s\n' "$FLEET_COMMAND_CHECKOUT"
+"$update_self"
+
+printf '\nUpdating configured bots and restarting the fleet...\n'
+exec "$update_fleet" --restart "$@"

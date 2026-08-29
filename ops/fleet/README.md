@@ -70,7 +70,8 @@ sudo apt install tmux git python3 python3-venv
    nano ops/fleet/fleet.conf
    chmod +x ops/fleet/start-fleet ops/fleet/stop-fleet \
      ops/fleet/restart-fleet ops/fleet/update-fleet \
-     ops/fleet/update-this-checkout ops/fleet/usdg-sweep \
+     ops/fleet/update-this-checkout ops/fleet/update-all \
+     ops/fleet/usdg-sweep \
      ops/fleet/treasury-transfer ops/fleet/update-variable \
      ops/fleet/backup-private-keys ops/fleet/fleet-discover \
      ops/fleet/liquidate-assets ops/fleet/fleet-doctor \
@@ -97,6 +98,7 @@ sudo apt install tmux git python3 python3-venv
    ln -sf "$PWD/ops/fleet/restart-fleet" "$HOME/bin/restart-fleet"
    ln -sf "$PWD/ops/fleet/update-fleet" "$HOME/bin/update-fleet"
    ln -sf "$PWD/ops/fleet/update-this-checkout" "$HOME/bin/update-this-checkout"
+   ln -sf "$PWD/ops/fleet/update-all" "$HOME/bin/update-all"
    ln -sf "$PWD/ops/fleet/usdg-sweep" "$HOME/bin/usdg-sweep"
    ln -sf "$PWD/ops/fleet/treasury-transfer" "$HOME/bin/treasury-transfer"
    ln -sf "$PWD/ops/fleet/update-variable" "$HOME/bin/update-variable"
@@ -258,6 +260,22 @@ Then fast-forward only that clone:
 
 ```bash
 ops/fleet/update-this-checkout
+```
+
+For the common full sequence—update the operations checkout, update every
+configured bot, then restart only after all updates succeed—install and run:
+
+```bash
+ln -sf "$PWD/ops/fleet/update-all" "$HOME/bin/update-all"
+update-all
+```
+
+The operations path defaults to
+`$HOME/bot-farm/fleet-command/robinhood-grid-bot-py`. Override it without
+editing the script when the checkout lives elsewhere:
+
+```bash
+FLEET_COMMAND_CHECKOUT=/different/path/robinhood-grid-bot-py update-all
 ```
 
 The script follows its own canonical path, so the `~/bin` symlink shown during
