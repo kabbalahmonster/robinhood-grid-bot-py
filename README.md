@@ -306,6 +306,7 @@ option and safety invariant.
 | `update-fleet` | Preflight and fast-forward checkouts without tracked changes; optional restart | Git/processes |
 | `update-this-checkout` | Fast-forward only the clone containing the script; ignores fleet membership | Git only |
 | `initialize-bots` | Preview/stage independent clones, wallets, and protected `.env` files for multiple symbols | Files/Git; `--apply` required |
+| `fleet-membership` | Preview/add/remove names in `FLEET_BOT_NAMES` without touching bot folders | Config only; `--apply` required |
 | `fleet-discover` | Print deterministic membership for review | No |
 | `fleet-doctor` | Check config, Git, RPC, contracts, provider route, and dashboard | No |
 | `fleet-inventory` | Read addresses, reserves, managed balances, positions, and audit ages | No |

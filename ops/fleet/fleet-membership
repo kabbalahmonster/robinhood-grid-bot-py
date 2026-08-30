@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+SCRIPT_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)"
+source "$SCRIPT_DIR/fleet-common.sh"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  fleet-membership [--apply] [--config PATH] add NAME [NAME ...]
+  fleet-membership [--apply] [--config PATH] remove NAME [NAME ...]
+
+Preview or update only FLEET_BOT_NAMES in fleet.conf. Names may also be passed
+as comma-separated lists. Adding requires each standard bot checkout to exist;
+removing never deletes or changes its bot folder.
+EOF
+}
+
+config_path=""
+apply=0
+positional=()
+while (($#)); do
+  case "$1" in
+    --config) (($# >= 2)) || fleet_die "--config requires a path"; config_path="$2"; shift 2 ;;
+    --apply) apply=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    --*) fleet_die "Unknown option: $1" ;;
+    *) positional+=("$1"); shift ;;
+  esac
+done
+
+((${#positional[@]} >= 2)) || fleet_die "Provide add/remove and at least one bot name"
+action="${positional[0]}"
+[[ "$action" == add || "$action" == remove ]] || fleet_die "Action must be add or remove"
+
+FLEET_CONFIG_PATH="${config_path:-${FLEET_CONFIG:-$(fleet_default_config)}}"
+[[ -f "$FLEET_CONFIG_PATH" ]] || fleet_die "Fleet config not found: $FLEET_CONFIG_PATH"
+# fleet.conf is trusted local Bash configuration.
+# shellcheck disable=SC1090
+source "$FLEET_CONFIG_PATH"
+config_real="$(readlink -f -- "$FLEET_CONFIG_PATH")"
+: "${FLEET_BOT_ROOT:=${HOME}/bot-farm/rh-bots}"
+: "${FLEET_CHECKOUT_DIRNAME:=robinhood-grid-bot-py}"
+
+if declare -p FLEET_BOT_DIRS >/dev/null 2>&1 && ((${#FLEET_BOT_DIRS[@]} > 0)); then
+  fleet_die "fleet-membership manages FLEET_BOT_NAMES, but FLEET_BOT_DIRS is configured"
+fi
+declare -p FLEET_BOT_NAMES >/dev/null 2>&1 || fleet_die "FLEET_BOT_NAMES is not configured in $config_real"
+
+declare -a requested=() updated=()
+declare -A requested_seen=() current=()
+for item in "${positional[@]:1}"; do
+  IFS=',' read -r -a split_names <<< "$item"
+  for name in "${split_names[@]}"; do
+    [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || fleet_die "Invalid bot name: $name"
+    [[ -z "${requested_seen[$name]+x}" ]] || fleet_die "Duplicate requested bot name: $name"
+    requested_seen["$name"]=1
+    requested+=("$name")
+  done
+done
+
+for name in "${FLEET_BOT_NAMES[@]}"; do
+  [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || fleet_die "Invalid existing FLEET_BOT_NAMES entry: $name"
+  [[ -z "${current[$name]+x}" ]] || fleet_die "Duplicate existing FLEET_BOT_NAMES entry: $name"
+  current["$name"]=1
+done
+
+if [[ "$action" == add ]]; then
+  for name in "${requested[@]}"; do
+    [[ -z "${current[$name]+x}" ]] || fleet_die "Bot is already in FLEET_BOT_NAMES: $name"
+    checkout="$FLEET_BOT_ROOT/$name/$FLEET_CHECKOUT_DIRNAME"
+    [[ -d "$checkout" ]] || fleet_die "Bot checkout does not exist: $checkout"
+  done
+  updated=("${FLEET_BOT_NAMES[@]}" "${requested[@]}")
+else
+  for name in "${requested[@]}"; do
+    [[ -n "${current[$name]+x}" ]] || fleet_die "Bot is not in FLEET_BOT_NAMES: $name"
+  done
+  for name in "${FLEET_BOT_NAMES[@]}"; do
+    [[ -n "${requested_seen[$name]+x}" ]] || updated+=("$name")
+  done
+  ((${#updated[@]} > 0)) || fleet_die "Refusing to remove every bot from FLEET_BOT_NAMES"
+fi
+
+printf 'Fleet membership: %s\n' "$([[ $apply == 1 ]] && printf APPLY || printf PREVIEW)"
+printf 'Config: %s\nAction: %s %s\n' "$config_real" "$action" "${requested[*]}"
+printf 'Before (%d): %s\nAfter  (%d): %s\n' \
+  "${#FLEET_BOT_NAMES[@]}" "${FLEET_BOT_NAMES[*]}" "${#updated[@]}" "${updated[*]}"
+
+if ((apply == 0)); then
+  printf '\nPREVIEW ONLY: no files changed. Repeat with --apply after review.\n'
+  exit 0
+fi
+
+config_stage="$(mktemp "$(dirname -- "$config_real")/.fleet.conf.membership.XXXXXX")"
+cleanup() { [[ ! -e "$config_stage" ]] || rm -f -- "$config_stage"; }
+trap cleanup EXIT
+awk '
+  $0 == "# BEGIN fleet-membership managed override" { managed=1; next }
+  $0 == "# END fleet-membership managed override" { managed=0; next }
+  !managed { print }
+' "$config_real" > "$config_stage"
+{
+  printf '\n# BEGIN fleet-membership managed override\n'
+  printf '# Effective fleet list; edit with fleet-membership.\nFLEET_BOT_NAMES=(\n'
+  for name in "${updated[@]}"; do printf '  %q\n' "$name"; done
+  printf ')\n# END fleet-membership managed override\n'
+} >> "$config_stage"
+chmod --reference="$config_real" "$config_stage"
+mv -- "$config_stage" "$config_real"
+trap - EXIT
+
+printf '\nUpdated FLEET_BOT_NAMES. No bot folder or process was changed.\n'

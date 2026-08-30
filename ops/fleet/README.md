@@ -73,7 +73,8 @@ sudo apt install tmux git python3 python3-venv
      ops/fleet/update-this-checkout ops/fleet/update-all \
      ops/fleet/usdg-sweep \
      ops/fleet/treasury-transfer ops/fleet/update-variable \
-     ops/fleet/adjust-positions ops/fleet/position-capacity.py \
+     ops/fleet/adjust-positions ops/fleet/fleet-membership \
+     ops/fleet/position-capacity.py \
      ops/fleet/backup-private-keys ops/fleet/fleet-discover \
      ops/fleet/liquidate-assets ops/fleet/fleet-doctor \
      ops/fleet/fleet-inventory ops/fleet/fleet-audit \
@@ -104,6 +105,7 @@ sudo apt install tmux git python3 python3-venv
    ln -sf "$PWD/ops/fleet/treasury-transfer" "$HOME/bin/treasury-transfer"
    ln -sf "$PWD/ops/fleet/update-variable" "$HOME/bin/update-variable"
    ln -sf "$PWD/ops/fleet/adjust-positions" "$HOME/bin/adjust-positions"
+   ln -sf "$PWD/ops/fleet/fleet-membership" "$HOME/bin/fleet-membership"
    ln -sf "$PWD/ops/fleet/backup-private-keys" "$HOME/bin/backup-private-keys"
    ln -sf "$PWD/ops/fleet/fleet-discover" "$HOME/bin/fleet-discover"
    ln -sf "$PWD/ops/fleet/liquidate-assets" "$HOME/bin/liquidate-assets"
@@ -170,6 +172,21 @@ Every name resolves to
 share the same membership and deterministic order. `fleet-discover` scans the
 root and prints a suggested `FLEET_BOT_NAMES` block; review it before copying
 it into `fleet.conf`.
+
+Use `fleet-membership` for membership-only changes. It previews by default,
+accepts multiple or comma-separated names, and never edits bot folders or
+processes:
+
+```bash
+fleet-membership add brodie index
+fleet-membership --apply add brodie,index
+fleet-membership remove pausedcoin
+fleet-membership --apply remove pausedcoin oldcoin
+```
+
+Adding validates that each standard checkout already exists. Removing leaves
+every checkout untouched. The applied list is stored as one replaceable managed
+override in `fleet.conf`; configs using `FLEET_BOT_DIRS` are rejected.
 
 For backward compatibility, a configuration without `FLEET_BOT_NAMES` or
 `FLEET_BOT_DIRS` discovers bot checkouts below one root:
