@@ -79,6 +79,7 @@ sudo apt install tmux git python3 python3-venv
      ops/fleet/liquidate-assets ops/fleet/fleet-doctor \
      ops/fleet/fleet-inventory ops/fleet/fleet-audit \
      ops/fleet/dashboard-remove ops/fleet/initialize-bots \
+     ops/fleet/reconcile-position-balances ops/fleet/reconcile-position-balances.py \
      ops/fleet/initialize-bot-env.py ops/fleet/fleet-watch \
      ops/fleet/fleet-watch.py
    ```
@@ -115,6 +116,7 @@ sudo apt install tmux git python3 python3-venv
    ln -sf "$PWD/ops/fleet/dashboard-remove" "$HOME/bin/dashboard-remove"
    ln -sf "$PWD/ops/fleet/initialize-bots" "$HOME/bin/initialize-bots"
    ln -sf "$PWD/ops/fleet/fleet-watch" "$HOME/bin/fleet-watch"
+   ln -sf "$PWD/ops/fleet/reconcile-position-balances" "$HOME/bin/reconcile-position-balances"
    ```
 
    Ensure `~/bin` is in `PATH`, or invoke the scripts by their repository paths.

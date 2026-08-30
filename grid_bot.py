@@ -673,11 +673,42 @@ class GridBot:
             return int(self.wallet.get_eth_balance_wei())
         return self._raw_token_balance(self.config.weth_address)
 
-    def _measured_token_received_raw(self, before_balance):
-        return max(
-            0,
-            self._raw_token_balance(self.config.token_address) - int(before_balance),
-        )
+    def _receipt_token_received_raw(self, result):
+        """Recover managed-token output from Transfer logs when RPC state lags."""
+        receipt = getattr(result, 'receipt', None) or {}
+        token_address = str(self.config.token_address).lower()
+        wallet_topic = "0x" + str(self.wallet.address).lower().removeprefix("0x").rjust(64, "0")
+        transfer_topic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f1639c4a11628f55a4df523b3ef"
+        total = 0
+        for entry in receipt.get('logs') or []:
+            if str(entry.get('address', '')).lower() != token_address:
+                continue
+            topics = [topic.hex() if hasattr(topic, 'hex') else str(topic) for topic in entry.get('topics', [])]
+            if len(topics) < 3 or topics[0].lower() != transfer_topic or topics[2].lower() != wallet_topic:
+                continue
+            data = entry.get('data', 0)
+            total += int(data.hex(), 16) if hasattr(data, 'hex') else int(data, 16) if isinstance(data, str) else int(data)
+        return total
+
+    def _measured_token_received_raw(self, before_balance, result=None, expected_raw=0):
+        """Measure every buy from wallet reality, with receipt-log stale-RPC recovery."""
+        expected_raw = max(0, int(expected_raw or 0))
+        plausible_floor = int(expected_raw * max(0.0, 1.0 - self._swap_slippage_fraction())) if expected_raw else 0
+        attempts = 6 if plausible_floor else 1
+        measured = 0
+        for attempt in range(attempts):
+            measured = max(0, self._raw_token_balance(self.config.token_address) - int(before_balance))
+            if not plausible_floor or measured >= plausible_floor:
+                return measured
+            if attempt < attempts - 1:
+                logger.warning("Post-buy token balance appears stale (%s raw; expected about %s); retrying", measured, expected_raw)
+                time.sleep(0.5)
+        receipt_amount = self._receipt_token_received_raw(result) if result is not None else 0
+        if receipt_amount > 0:
+            logger.warning("RPC balance remained stale; reconciled %s raw bought tokens from receipt logs", receipt_amount)
+            return receipt_amount
+        logger.critical("Confirmed buy could not be reconciled from wallet balance or receipt logs; refusing to create a position")
+        return 0
 
     @staticmethod
     def _receipt_gas_cost_wei(result):
@@ -1270,21 +1301,16 @@ class GridBot:
             "chainId": self.config.chain_id,
         }
         
-        token_balance_before = (
-            self._raw_token_balance(self.config.token_address)
-            if self._taxed_token_active() else None
-        )
+        token_balance_before = self._raw_token_balance(self.config.token_address)
         result = self.wallet._send_transaction(tx_params)
         
         if result.success:
             # Record position in gridless format
-            tokens_received = quote.buy_amount if quote.buy_amount else 0
-            if token_balance_before is not None:
-                tokens_received = self._measured_token_received_raw(token_balance_before)
-                logger.info("Measured post-fee token receipt: %s raw units", tokens_received)
-                if tokens_received <= 0:
-                    logger.error("Taxed-token buy confirmed but no token balance increase was measured")
-                    return
+            tokens_received = self._measured_token_received_raw(token_balance_before, result, quote.buy_amount)
+            logger.info("Measured post-buy token receipt: %s raw units", tokens_received)
+            if tokens_received <= 0:
+                logger.error("Buy confirmed but no token balance increase could be reconciled")
+                return
             # Use the actual sell amount from the quote in wei for precision
             cost_wei = quote.sell_amount if quote.sell_amount else buy_amount_wei
             
@@ -1823,21 +1849,16 @@ class GridBot:
         }
         
         logger.info(f"Sending tx to {quote.to} with gas {gas_limit}")
-        token_balance_before = (
-            self._raw_token_balance(self.config.token_address)
-            if self._taxed_token_active() else None
-        )
+        token_balance_before = self._raw_token_balance(self.config.token_address)
         result = self.wallet._send_transaction(tx_params)
         
         if result.success:
             # Update position - store actual WETH cost (not price) in nano-WETH
-            tokens_received = quote.buy_amount
-            if token_balance_before is not None:
-                tokens_received = self._measured_token_received_raw(token_balance_before)
-                logger.info("Measured post-fee token receipt: %s raw units", tokens_received)
-                if tokens_received <= 0:
-                    logger.error("Taxed-token buy confirmed but no token balance increase was measured")
-                    return
+            tokens_received = self._measured_token_received_raw(token_balance_before, result, quote.buy_amount)
+            logger.info("Measured post-buy token receipt: %s raw units", tokens_received)
+            if tokens_received <= 0:
+                logger.error("Buy confirmed but no token balance increase could be reconciled")
+                return
             tokens = tokens_received / self.token_unit
             self.positions[pos_id]['balance'] = tokens_received
             # Cost = actual WETH spent for profit calculation (in wei for precision)

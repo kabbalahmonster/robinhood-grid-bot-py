@@ -310,6 +310,7 @@ option and safety invariant.
 | `fleet-discover` | Print deterministic membership for review | No |
 | `fleet-doctor` | Check config, Git, RPC, contracts, provider route, and dashboard | No |
 | `fleet-inventory` | Read addresses, reserves, managed balances, positions, and audit ages | No |
+| `reconcile-position-balances` | Preview/apply an audited proportional haircut when tracked tokens exceed wallet reality | Yes |
 | `fleet-audit` | Reconcile local treasury/liquidation receipts | No |
 | `update-variable` | Preview/atomically change selected `.env` variables | Config only; `--apply` required |
 | `adjust-positions` | Preview/add/remove relative position capacity for selected bots | Config only; `--apply` required |

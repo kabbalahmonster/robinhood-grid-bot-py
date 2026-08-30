@@ -92,6 +92,11 @@ class TaxedTokenModeTests(unittest.TestCase):
         before = bot._raw_token_balance("token")
         self.assertEqual(bot._measured_token_received_raw(before), 950)
 
+    def test_buy_accounting_is_measured_even_without_tax_mode(self):
+        bot = self.bot(taxed=False, wallet=SequenceWallet(token_balances=[1_000, 1_940]))
+        before = bot._raw_token_balance("token")
+        self.assertEqual(bot._measured_token_received_raw(before, expected_raw=950), 940)
+
     def test_native_sell_accounting_adds_transaction_gas_back_to_balance_delta(self):
         bot = self.bot(wallet=SequenceWallet(eth_balances=[10_000, 10_700]))
         before = bot._raw_trade_balance()
