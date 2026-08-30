@@ -14,7 +14,7 @@ source "$SCRIPT_DIR/fleet-common.sh"
 usage() {
   cat <<'EOF'
 Usage:
-  initialize-bots --template PATH [options] SYMBOL[=ADDRESS]...
+  initialize-bots [--template PATH] [options] SYMBOL[=ADDRESS]...
 
 Create independent bot checkouts below FLEET_BOT_ROOT. Preview is the default;
 add --apply to clone, generate wallets, and create protected .env files.
@@ -24,7 +24,7 @@ Token forms:
   INDEX               Leave TOKEN_ADDRESS blank for later configuration
 
 Options:
-  --template PATH      Required dotenv template copied into every new bot
+  --template PATH      Dotenv template; overrides FLEET_ENV_TEMPLATE
   --config PATH        Fleet config (normal fleet lookup order by default)
   --repo URL           Git source (defaults to this checkout's origin)
   --branch NAME        Clone one branch instead of the remote default
@@ -86,10 +86,7 @@ while (($#)); do
   esac
 done
 
-[[ -n "$template" ]] || fleet_die "--template PATH is required"
 ((${#specs[@]} > 0)) || fleet_die "Provide at least one SYMBOL or SYMBOL=ADDRESS"
-template="$(readlink -f -- "$template")"
-[[ -f "$template" && -r "$template" ]] || fleet_die "Template is not a readable file: $template"
 
 FLEET_CONFIG_PATH="${config_path:-${FLEET_CONFIG:-$(fleet_default_config)}}"
 [[ -f "$FLEET_CONFIG_PATH" ]] || fleet_die "Fleet config not found: $FLEET_CONFIG_PATH"
@@ -97,8 +94,13 @@ FLEET_CONFIG_PATH="${config_path:-${FLEET_CONFIG:-$(fleet_default_config)}}"
 # shellcheck disable=SC1090
 source "$FLEET_CONFIG_PATH"
 config_real="$(readlink -f -- "$FLEET_CONFIG_PATH")"
+: "${FLEET_ENV_TEMPLATE:=}"
 : "${FLEET_BOT_ROOT:=${HOME}/bot-farm/rh-bots}"
 : "${FLEET_CHECKOUT_DIRNAME:=robinhood-grid-bot-py}"
+template="${template:-$FLEET_ENV_TEMPLATE}"
+[[ -n "$template" ]] || fleet_die "No env template configured; pass --template PATH or set FLEET_ENV_TEMPLATE in fleet.conf"
+template="$(readlink -f -- "$template")"
+[[ -f "$template" && -r "$template" ]] || fleet_die "Template is not a readable file: $template"
 [[ "$FLEET_CHECKOUT_DIRNAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || fleet_die "Invalid FLEET_CHECKOUT_DIRNAME"
 root_real="$(readlink -m -- "$FLEET_BOT_ROOT")"
 home_real="$(readlink -f -- "$HOME")"

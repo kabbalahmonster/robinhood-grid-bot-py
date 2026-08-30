@@ -75,19 +75,19 @@ def save_wallet(wallet, filepath, chmod=True):
 
     def run_initializer(
         self, *tokens, apply=False, template=None, show_private_keys=False,
-        add_to_fleet=False, overrides=()
+        add_to_fleet=False, use_config_template=False, overrides=()
     ):
         command = [
             str(INITIALIZE_BOTS),
             "--config",
             str(self.config),
-            "--template",
-            str(template or self.template),
             "--repo",
             str(self.remote),
             "--python",
             sys.executable,
         ]
+        if not use_config_template:
+            command.extend(("--template", str(template or self.template)))
         if apply:
             command.append("--apply")
         if show_private_keys:
@@ -113,6 +113,33 @@ def save_wallet(wallet, filepath, chmod=True):
         self.assertFalse(self.bot_root.exists())
         self.assertFalse((self.bot_root / "net").exists())
         self.assertFalse((self.bot_root / "index").exists())
+
+    def test_configured_template_is_default_and_cli_can_override_it(self):
+        alternate = self.root / "alternate.env"
+        alternate.write_text(
+            "PRIVATE_KEY=x\nTOKEN_SYMBOL=x\nTOKEN_ADDRESS=x\nPOLL_INTERVAL_SECONDS=17\n",
+            encoding="utf-8",
+        )
+        self.config.write_text(
+            self.config.read_text(encoding="utf-8") + f'FLEET_ENV_TEMPLATE="{self.template}"\n',
+            encoding="utf-8",
+        )
+
+        configured = self.run_initializer("ONE", apply=True, use_config_template=True)
+        overridden = self.run_initializer("TWO", apply=True, template=alternate)
+
+        self.assertEqual(configured.returncode, 0, configured.stderr)
+        self.assertEqual(overridden.returncode, 0, overridden.stderr)
+        one_env = (self.bot_root / "one" / "checkout" / ".env").read_text(encoding="utf-8")
+        two_env = (self.bot_root / "two" / "checkout" / ".env").read_text(encoding="utf-8")
+        self.assertIn("POLL_INTERVAL_SECONDS=8\n", one_env)
+        self.assertIn("POLL_INTERVAL_SECONDS=17\n", two_env)
+
+    def test_missing_template_explains_both_configuration_options(self):
+        result = self.run_initializer("ONE", use_config_template=True)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("pass --template PATH or set FLEET_ENV_TEMPLATE", result.stderr)
 
     def test_apply_creates_multiple_bots_with_mixed_addresses(self):
         result = self.run_initializer(f"NeT={ADDRESS}", "INDEX", apply=True)

@@ -330,7 +330,7 @@ fetch it performs only a fast-forward merge.
 
 `initialize-bots` provisions one or many independent bots using the standard
 `$FLEET_BOT_ROOT/<lowercase-symbol>/$FLEET_CHECKOUT_DIRNAME` layout. It clones
-the repository, copies a caller-supplied dotenv template, generates a new
+the repository, copies the configured dotenv template, generates a new
 wallet, and fills `PRIVATE_KEY`, `TOKEN_SYMBOL`, and `TOKEN_ADDRESS`. It never
 prints private keys; only each public wallet address appears in the summary.
 
@@ -359,6 +359,21 @@ initialize-bots --template "$HOME/bot.env.template" \
   INDEX \
   OTHER=0xabcdefabcdefabcdefabcdefabcdefabcdefabcd
 ```
+
+For the shortest normal command, set the default once in `fleet.conf`:
+
+```bash
+FLEET_ENV_TEMPLATE="$HOME/bot-farm/fleet-command/.env.template"
+```
+
+Then omit `--template`:
+
+```bash
+initialize-bots --add-to-fleet UP=0x1234567890abcdef1234567890abcdef12345678
+```
+
+Pass `--template PATH` whenever one batch needs a different template; the
+command-line path overrides `FLEET_ENV_TEMPLATE` for that run only.
 
 Apply shared strategy defaults to every new `.env` by repeating
 `--overwrite-default NAME=VALUE`:
@@ -398,6 +413,8 @@ batch. The helper uses the operations checkout's `.venv`, then `venv`, then
 
 Useful options:
 
+- `--template PATH` overrides the `FLEET_ENV_TEMPLATE` default from
+  `fleet.conf` for one run.
 - `--repo URL` overrides the operations checkout's `origin`.
 - `--branch NAME` clones one explicit branch.
 - `--install-deps` creates `.venv` and installs `requirements.txt` for each bot.

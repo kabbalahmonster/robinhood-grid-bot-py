@@ -7,6 +7,10 @@ FLEET_ENTRYPOINT="grid_bot.py"
 FLEET_RESTART_DELAY=5
 FLEET_START_STAGGER=1
 
+# Default dotenv template for initialize-bots. A command-line --template PATH
+# overrides this for one run.
+FLEET_ENV_TEMPLATE="$HOME/bot-farm/fleet-command/.env.template"
+
 # Optional default used by usdg-sweep and treasury-transfer when --recipient is
 # omitted. This is a public address, not a secret. Every bot's .env must still
 # include it in TREASURY_ALLOWED_RECIPIENTS (or the command needs an exact
