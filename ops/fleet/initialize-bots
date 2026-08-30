@@ -30,6 +30,7 @@ Options:
   --branch NAME        Clone one branch instead of the remote default
   --python PATH        Python used for secure wallet generation
   --install-deps       Create .venv and install requirements.txt in each clone
+  --add-to-fleet       Add the new folder names to FLEET_BOT_NAMES on --apply
   --overwrite-default NAME=VALUE
                        Set/append one .env value in every new bot; repeatable
   --show-private-keys  After success, print a MetaMask import list (sensitive)
@@ -57,6 +58,7 @@ python_bin=""
 apply=0
 install_deps=0
 show_private_keys=0
+add_to_fleet=0
 declare -a specs=() symbols=() folders=() addresses=() final_parents=()
 declare -a public_addresses=() private_keys=()
 declare -a overrides=()
@@ -69,6 +71,7 @@ while (($#)); do
     --branch) (($# >= 2)) || fleet_die "--branch requires a name"; branch="$2"; shift 2 ;;
     --python) (($# >= 2)) || fleet_die "--python requires a path"; python_bin="$2"; shift 2 ;;
     --install-deps) install_deps=1; shift ;;
+    --add-to-fleet) add_to_fleet=1; shift ;;
     --overwrite-default)
       (($# >= 2)) || fleet_die "--overwrite-default requires NAME=VALUE"
       overrides+=("$2")
@@ -93,6 +96,7 @@ FLEET_CONFIG_PATH="${config_path:-${FLEET_CONFIG:-$(fleet_default_config)}}"
 # fleet.conf is trusted local Bash configuration.
 # shellcheck disable=SC1090
 source "$FLEET_CONFIG_PATH"
+config_real="$(readlink -f -- "$FLEET_CONFIG_PATH")"
 : "${FLEET_BOT_ROOT:=${HOME}/bot-farm/rh-bots}"
 : "${FLEET_CHECKOUT_DIRNAME:=robinhood-grid-bot-py}"
 [[ "$FLEET_CHECKOUT_DIRNAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || fleet_die "Invalid FLEET_CHECKOUT_DIRNAME"
@@ -144,8 +148,26 @@ for spec in "${specs[@]}"; do
   final_parents+=("$final_parent")
 done
 
+if ((add_to_fleet)); then
+  if declare -p FLEET_BOT_DIRS >/dev/null 2>&1 && ((${#FLEET_BOT_DIRS[@]} > 0)); then
+    fleet_die "--add-to-fleet requires FLEET_BOT_NAMES membership; FLEET_BOT_DIRS is configured"
+  fi
+  declare -A configured_names=()
+  if declare -p FLEET_BOT_NAMES >/dev/null 2>&1; then
+    for configured_name in "${FLEET_BOT_NAMES[@]}"; do
+      configured_names["$configured_name"]=1
+    done
+  fi
+  for folder in "${folders[@]}"; do
+    [[ -z "${configured_names[$folder]+x}" ]] || fleet_die "Bot name already exists in FLEET_BOT_NAMES: $folder"
+  done
+fi
+
 printf 'New bot plan (%d):\n' "${#symbols[@]}"
 printf '  Root:     %s\n  Checkout: %s\n  Template: %s\n  Repository: %s\n' "$root_real" "$FLEET_CHECKOUT_DIRNAME" "$template" "$repo_url"
+if ((add_to_fleet)); then
+  printf '  Fleet config: add %s to FLEET_BOT_NAMES in %s\n' "${folders[*]}" "$config_real"
+fi
 if ((${#overrides[@]})); then
   printf '  Shared .env overrides:\n'
   for override in "${overrides[@]}"; do
@@ -164,8 +186,22 @@ fi
 
 mkdir -p -- "$root_real"
 stage_root="$(mktemp -d "$root_real/.initialize-bots.XXXXXX")"
-cleanup() { [[ ! -d "$stage_root" ]] || rm -rf -- "$stage_root"; }
+config_stage=""
+cleanup() {
+  [[ ! -d "$stage_root" ]] || rm -rf -- "$stage_root"
+  [[ -z "$config_stage" || ! -e "$config_stage" ]] || rm -f -- "$config_stage"
+}
 trap cleanup EXIT
+
+if ((add_to_fleet)); then
+  config_stage="$(mktemp "$(dirname -- "$config_real")/.fleet.conf.initialize-bots.XXXXXX")"
+  cp -p -- "$config_real" "$config_stage"
+  {
+    printf '\n# Added by initialize-bots.\nFLEET_BOT_NAMES+=(\n'
+    for folder in "${folders[@]}"; do printf '  %q\n' "$folder"; done
+    printf ')\n'
+  } >> "$config_stage"
+fi
 
 for index in "${!symbols[@]}"; do
   staged_parent="$stage_root/${folders[$index]}"
@@ -221,7 +257,22 @@ for index in "${!symbols[@]}"; do
   exit 1
 done
 
+if ((add_to_fleet)); then
+  if ! mv -- "$config_stage" "$config_real"; then
+    printf 'Error: Could not update fleet config; rolling back this batch\n' >&2
+    for published_index in "${published[@]}"; do
+      mv -- "${final_parents[$published_index]}" "$stage_root/${folders[$published_index]}" || \
+        printf 'Error: Manual cleanup required: %s\n' "${final_parents[$published_index]}" >&2
+    done
+    exit 1
+  fi
+  config_stage=""
+fi
+
 printf '\nCreated %d bot(s).\n' "${#symbols[@]}"
+if ((add_to_fleet)); then
+  printf 'Added %s to FLEET_BOT_NAMES in %s.\n' "${folders[*]}" "$config_real"
+fi
 if ((show_private_keys)); then
   printf '\nSENSITIVE — MetaMask private-key import list (protect terminal logs/scrollback):\n'
   for index in "${!symbols[@]}"; do
@@ -231,4 +282,8 @@ if ((show_private_keys)); then
 else
   printf 'Private keys were not printed. Use --show-private-keys only when terminal output is private.\n'
 fi
-printf 'Complete blank token addresses and remaining .env settings, install dependencies if omitted, then run --check-config before adding names to FLEET_BOT_NAMES.\n'
+if ((add_to_fleet)); then
+  printf 'Complete blank token addresses and remaining .env settings, install dependencies if omitted, then run --check-config before starting them.\n'
+else
+  printf 'Complete blank token addresses and remaining .env settings, install dependencies if omitted, then run --check-config before adding names to FLEET_BOT_NAMES.\n'
+fi

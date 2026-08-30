@@ -330,8 +330,9 @@ The command is a dry run unless `--apply` is present:
   dependencies, and publish the completed bot folders.
 
 The intended workflow is to run the command once without `--apply`, review the
-plan, then repeat the same command with `--apply` added. `--apply` does not add
-bots to fleet membership, fund wallets, or start/restart processes.
+plan, then repeat the same command with `--apply` added. Add `--add-to-fleet` to
+also append the new folder names to `FLEET_BOT_NAMES` after the full batch is
+successfully created. It does not fund wallets or start/restart processes.
 
 Preview a mixed batch in one command:
 
@@ -365,6 +366,7 @@ although secret-like values are redacted from the initializer's preview.
 
 ```bash
 initialize-bots --template "$HOME/bot.env.template" --apply \
+  --add-to-fleet \
   NET=0x1234567890abcdef1234567890abcdef12345678 INDEX
 ```
 
@@ -382,6 +384,9 @@ Useful options:
 - `--repo URL` overrides the operations checkout's `origin`.
 - `--branch NAME` clones one explicit branch.
 - `--install-deps` creates `.venv` and installs `requirements.txt` for each bot.
+- `--add-to-fleet` atomically appends the new lowercase folder names to
+  `FLEET_BOT_NAMES` after successful creation. Preview mode shows the change
+  without writing it. Configs using explicit `FLEET_BOT_DIRS` are rejected.
 - Repeatable `--overwrite-default NAME=VALUE` applies shared `.env` defaults to
   the entire new batch.
 - `--show-private-keys` prints `SYMBOL`, public wallet address, and private key

@@ -74,7 +74,8 @@ def save_wallet(wallet, filepath, chmod=True):
         )
 
     def run_initializer(
-        self, *tokens, apply=False, template=None, show_private_keys=False, overrides=()
+        self, *tokens, apply=False, template=None, show_private_keys=False,
+        add_to_fleet=False, overrides=()
     ):
         command = [
             str(INITIALIZE_BOTS),
@@ -91,6 +92,8 @@ def save_wallet(wallet, filepath, chmod=True):
             command.append("--apply")
         if show_private_keys:
             command.append("--show-private-keys")
+        if add_to_fleet:
+            command.append("--add-to-fleet")
         for override in overrides:
             command.extend(("--overwrite-default", override))
         command.extend(tokens)
@@ -174,6 +177,58 @@ def save_wallet(wallet, filepath, chmod=True):
 
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse((self.bot_root / "one").exists())
+
+    def test_add_to_fleet_preview_does_not_change_config(self):
+        before = self.config.read_text(encoding="utf-8")
+
+        result = self.run_initializer("ONE", "TWO", add_to_fleet=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Fleet config: add one two", result.stdout)
+        self.assertEqual(self.config.read_text(encoding="utf-8"), before)
+
+    def test_add_to_fleet_appends_names_after_success(self):
+        self.config.write_text(
+            self.config.read_text(encoding="utf-8") + "FLEET_BOT_NAMES=(existing)\n",
+            encoding="utf-8",
+        )
+
+        result = self.run_initializer("ONE", "Two", apply=True, add_to_fleet=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        config_text = self.config.read_text(encoding="utf-8")
+        self.assertIn("FLEET_BOT_NAMES=(existing)", config_text)
+        self.assertIn("FLEET_BOT_NAMES+=(\n  one\n  two\n)", config_text)
+        check = subprocess.run(
+            ["bash", "-c", f'source "$1"; printf "%s\\n" "${{FLEET_BOT_NAMES[@]}}"', "bash", str(self.config)],
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(check.returncode, 0, check.stderr)
+        self.assertEqual(check.stdout.splitlines(), ["existing", "one", "two"])
+
+    def test_add_to_fleet_rejects_duplicate_before_clone(self):
+        self.config.write_text(
+            self.config.read_text(encoding="utf-8") + "FLEET_BOT_NAMES=(one)\n",
+            encoding="utf-8",
+        )
+
+        result = self.run_initializer("ONE", apply=True, add_to_fleet=True)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("already exists in FLEET_BOT_NAMES", result.stderr)
+        self.assertFalse(self.bot_root.exists())
+
+    def test_add_to_fleet_rejects_explicit_directory_membership(self):
+        self.config.write_text(
+            self.config.read_text(encoding="utf-8") + 'FLEET_BOT_DIRS=("/tmp/bot")\n',
+            encoding="utf-8",
+        )
+
+        result = self.run_initializer("ONE", add_to_fleet=True)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("FLEET_BOT_DIRS is configured", result.stderr)
 
 
 if __name__ == "__main__":
