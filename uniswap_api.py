@@ -15,6 +15,7 @@ import requests
 from web3 import Web3
 
 from config import BotConfig
+from shared_rate_limit import SharedRateLimiter
 from utils import apply_jitter
 
 
@@ -58,6 +59,14 @@ class UniswapAPIClient:
         self.api_key = getattr(config, 'uniswap_api_key', '')
         self.permit2_disabled = getattr(config, 'uniswap_permit2_disabled', True)
         self.chain_id = config.chain_id
+        self.rate_limiter = SharedRateLimiter(
+            namespace="uniswap",
+            credential=self.api_key,
+            requests_per_second=float(getattr(config, "uniswap_rate_limit_rps", 4.0)),
+            cooldown_base_seconds=float(getattr(config, "uniswap_cooldown_base_seconds", 30)),
+            cooldown_max_seconds=float(getattr(config, "uniswap_cooldown_max_seconds", 900)),
+            state_file=getattr(config, "uniswap_rate_state_file", ""),
+        )
         
         # Headers for API requests (matching working curl)
         self.headers = {
@@ -158,6 +167,13 @@ class UniswapAPIClient:
         
         try:
             url = f"{self.BASE_URL}/quote"
+
+            cooldown = self.rate_limiter.acquire()
+            if cooldown is not None:
+                return QuoteResult(
+                    success=False,
+                    error=f"Uniswap rate-limit cooldown active; retry in {cooldown}s (429)",
+                )
             
             self.logger.debug(f"Fetching Uniswap quote: {payload}")
             
@@ -174,11 +190,20 @@ class UniswapAPIClient:
                 error_text = response.text[:500]
                 self.logger.error(f"Uniswap API error: Status {response.status_code}")
                 self.logger.error(f"Response: {error_text}")
+                if response.status_code == 429:
+                    wait_seconds = self.rate_limiter.record_rate_limit(
+                        response.headers.get("Retry-After", "")
+                    )
+                    self.logger.warning(
+                        "Uniswap rate limited; pausing shared API key for %ss",
+                        wait_seconds,
+                    )
                 return QuoteResult(
                     success=False,
                     error=f"Uniswap API returned status {response.status_code}: {error_text}",
                 )
             
+            self.rate_limiter.record_success()
             data = response.json()
             
             # Extract amounts and calculate price

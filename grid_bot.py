@@ -12,6 +12,7 @@ import re
 import threading
 import sys
 import argparse
+import random
 from functools import wraps
 from datetime import datetime
 from decimal import Decimal
@@ -2503,6 +2504,11 @@ class GridBot:
         )
 
         poll_interval = getattr(self.config, 'poll_interval_seconds', 30)
+        startup_jitter = getattr(self.config, 'startup_jitter_seconds', 0)
+        if startup_jitter > 0:
+            delay = random.uniform(0, startup_jitter)
+            logger.info("Startup jitter: waiting %.1fs before first provider request", delay)
+            time.sleep(delay)
         logger.info(f"Starting main loop (polling every {poll_interval}s)...")
         while self.running:
             try:

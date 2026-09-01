@@ -1,4 +1,5 @@
 import unittest
+import tempfile
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -38,6 +39,35 @@ class TestUniswapAPIClient(unittest.TestCase):
         payload = post.call_args.kwargs["json"]
         self.assertEqual(payload["slippageTolerance"], 7.0)
         self.assertEqual(len(str(payload["slippageTolerance"]).split(".")[1]), 1)
+
+    def test_429_starts_shared_cooldown_and_skips_next_request(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = SimpleNamespace(
+                uniswap_api_key="test-key",
+                uniswap_permit2_disabled=True,
+                chain_id=4663,
+                anti_mev_jitter=False,
+                uniswap_rate_state_file=f"{directory}/rate.json",
+                uniswap_rate_limit_rps=4,
+                uniswap_cooldown_base_seconds=30,
+                uniswap_cooldown_max_seconds=900,
+            )
+            response = SimpleNamespace(
+                status_code=429,
+                text='{"message":"Too Many Requests"}',
+                headers={"Retry-After": "120"},
+            )
+            with patch("uniswap_api.requests.post", return_value=response) as post, patch(
+                "shared_rate_limit.random.uniform", return_value=0
+            ):
+                client = UniswapAPIClient(config)
+                first = client.get_quote("0xin", "0xout", sell_amount=100, taker_address="0xtaker")
+                second = UniswapAPIClient(config).get_quote(
+                    "0xin", "0xout", sell_amount=100, taker_address="0xtaker"
+                )
+            self.assertIn("status 429", first.error)
+            self.assertIn("cooldown active", second.error)
+            self.assertEqual(post.call_count, 1)
 
 
 if __name__ == "__main__":

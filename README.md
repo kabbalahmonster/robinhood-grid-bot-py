@@ -96,6 +96,10 @@ python grid_bot.py
 | `LI_FI_INTEGRATOR` | No | empty | Optional LI.FI integrator identifier loaded for provider compatibility |
 | `UNISWAP_API_KEY` | Yes* | - | Uniswap API key (if using Uniswap) |
 | `UNISWAP_PERMIT2_DISABLED` | No | true | Request direct approval flow instead of Permit2 in the Uniswap API client |
+| `UNISWAP_RATE_LIMIT_RPS` | No | 4 | Fleet-wide request pace for one Uniswap key; safely below the usual 6 RPS allocation |
+| `UNISWAP_COOLDOWN_BASE_SECONDS` | No | 30 | Initial shared cooldown after Uniswap HTTP 429 |
+| `UNISWAP_COOLDOWN_MAX_SECONDS` | No | 900 | Maximum shared exponential cooldown after repeated Uniswap HTTP 429s |
+| `UNISWAP_RATE_STATE_FILE` | No | automatic | Optional shared state path; blank derives an owner-only runtime file from the API-key hash |
 | `SUSHI_API_KEY` | No | empty | Optional Sushi portal API key; the public v7 API works without one |
 | `SWAP_PROVIDER` | No | empty | Explicit provider: `0x`, `lifi`, `uniswap`, or `sushiswap`; empty uses legacy flags |
 | `SWAP_FALLBACK_PROVIDER` | No | sushiswap | Immediate per-operation fallback after retryable pre-broadcast failures; empty disables fallback |
@@ -135,6 +139,7 @@ python grid_bot.py
 | `GAS_PRICE_MULTIPLIER` | No | 1.05 | Safety multiplier applied to current/quoted gas price; values below 1 are clamped |
 | **Bot Behavior** ||||
 | `POLL_INTERVAL_SECONDS` | No | 6 | Price check interval in seconds |
+| `STARTUP_JITTER_SECONDS` | No | 20 | Random delay before the first provider request so fleet restarts do not stampede |
 | `ANTI_MEV_JITTER` | No | true | Enable anti-MEV timing jitter |
 | `LOG_LEVEL` | No | INFO | Logging level (DEBUG/INFO/WARNING/ERROR) |
 | `STATE_FILE` | No | ./data/positions.json | Position state file path |
@@ -782,6 +787,16 @@ SWAP_PROVIDER=sushiswap  # 0x, lifi, uniswap, or sushiswap
 
 The older `USE_UNISWAP_API` and `USE_LI_FI` flags remain backward compatible when `SWAP_PROVIDER` is empty. Explicit `SWAP_PROVIDER` takes precedence. Sushi currently supports exact-input swaps, which is the only execution mode used by this bot. Each provider keeps its own quote, approval, slippage, and transaction behavior behind the common capability layer.
 
+Uniswap clients sharing an API key under one OS user also share a locked runtime
+state file. Requests are paced at 4 RPS by default with no burst allowance. A 429
+honors `Retry-After` when present or starts a fleet-wide jittered exponential
+cooldown from 30 seconds to 15 minutes. Bots skip Uniswap during that cooldown
+and safely invoke their configured fallback instead of letting independent
+processes keep the key rate-limited. The key itself is never written to disk;
+only a truncated SHA-256 identifier names the owner-only state file. The default
+pace supports 50 bots polling every 20 seconds (2.5 average RPS) with headroom
+for execution requests.
+
 For a Sushi bot, set:
 
 ```dotenv
@@ -972,6 +987,7 @@ Common failures:
 - `401`: `DASHBOARD_API_KEY` does not match the server `API_KEY`.
 - Dashboard POST `429`: the dashboard's per-IP fleet rate limit is too low for the number/report interval of bots.
 - `Sushi rate limited`: the provider returned HTTP 429. The bot automatically pauses Sushi calls, reports the warning as an Event, and resumes after `Retry-After` or its exponential cooldown. Do not restart repeatedly; that discards the in-memory cooldown.
+- `Uniswap rate-limit cooldown active`: another bot using the same key received 429. The fleet-wide coordinator pauses Uniswap and routes retryable operations through the configured fallback until the shared cooldown expires. Do not delete the runtime state file or restart repeatedly.
 - Bot absent: confirm `DASHBOARD_URL` ends with `/api/status`, restart the bot, and test connectivity from the bot host.
 
 ### "Failed to connect to RPC"
