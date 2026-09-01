@@ -120,6 +120,24 @@ class TestSharedRateLimiter(unittest.TestCase):
             self.assertIsNone(first.acquire())
             self.assertEqual(second.acquire(), 35)
 
+    def test_older_success_cannot_clear_another_process_probe_lease(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fake = FakeTime()
+            path = Path(directory) / "rate.json"
+            probe = self.limiter(path, fake)
+            older_request = self.limiter(path, fake)
+            other = self.limiter(path, fake)
+            with patch("shared_rate_limit.random.uniform", return_value=0):
+                probe.record_rate_limit("30")
+            fake.value += 31
+
+            self.assertIsNone(probe.acquire())
+            older_request.record_success()
+            self.assertEqual(other.acquire(), 35)
+
+            probe.record_success()
+            self.assertIsNone(other.acquire())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -37,6 +37,7 @@ class SharedRateLimiter:
         self.probe_lease = max(1.0, probe_lease_seconds)
         self.clock = clock
         self.sleeper = sleeper
+        self._owns_probe_lease = False
         self.path = Path(state_file) if state_file else self._default_path(namespace, credential)
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
 
@@ -78,6 +79,7 @@ class SharedRateLimiter:
 
     def acquire(self) -> Optional[int]:
         """Wait for a fleet slot, or return cooldown seconds without blocking."""
+        self._owns_probe_lease = False
         with self._open_locked() as handle:
             state = self._read(handle)
             now = self.clock()
@@ -92,6 +94,7 @@ class SharedRateLimiter:
                 # that process dies before recording a response, the lease
                 # expires and another bot can probe safely.
                 state["probe_until"] = now + self.probe_lease
+                self._owns_probe_lease = True
             scheduled = max(now, float(state.get("next_request_at", 0) or 0))
             state["next_request_at"] = scheduled + self.interval
             self._write(handle, state)
@@ -140,6 +143,7 @@ class SharedRateLimiter:
                 probe_until=0,
             )
             self._write(handle, state)
+            self._owns_probe_lease = False
             return max(1, int(cooldown_until - now + 0.999))
 
     def record_success(self) -> None:
@@ -151,7 +155,13 @@ class SharedRateLimiter:
             # received 429 must not erase the newer fleet cooldown.
             if float(state.get("cooldown_until", 0) or 0) > now:
                 return
+            # Once a post-cooldown recovery lease exists, only its owner may
+            # declare recovery. An older request that finishes successfully
+            # must not clear the lease and admit a second concurrent probe.
+            if float(state.get("probe_until", 0) or 0) > now and not self._owns_probe_lease:
+                return
             state["strikes"] = 0
             state["cooldown_until"] = 0
             state["probe_until"] = 0
             self._write(handle, state)
+            self._owns_probe_lease = False
