@@ -60,6 +60,11 @@ class FallbackSwapProvider:
         "timed out",
         "timeout",
         "temporarily unavailable",
+        # Shared provider coordinators intentionally reject requests locally
+        # while an upstream is quarantined. That is still a retryable primary
+        # failure: the complete operation must immediately use the configured
+        # fallback rather than surfacing "Could not get price".
+        "cooldown active",
     )
 
     def __init__(self, primary, fallback):

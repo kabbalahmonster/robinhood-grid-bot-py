@@ -86,6 +86,25 @@ def test_provider_gateway_409_retries_with_fallback():
     assert attempts == ["uniswap", "sushiswap"]
 
 
+def test_shared_provider_cooldown_retries_with_fallback():
+    primary = SwapProvider(
+        "uniswap",
+        Client([Result(False, "Uniswap shared provider cooldown active; retry in 31s")]),
+        PROVIDERS["uniswap"].capabilities,
+    )
+    fallback = SwapProvider("sushiswap", Client([Result(True)]), PROVIDERS["sushiswap"].capabilities)
+    provider = FallbackSwapProvider(primary, fallback)
+    attempts = []
+
+    def operation():
+        attempts.append(provider.name)
+        return provider.build_swap_transaction()
+
+    result = provider.run_with_fallback(operation, "price")
+    assert result.success is True
+    assert attempts == ["uniswap", "sushiswap"]
+
+
 def test_nonretryable_primary_failure_does_not_activate_fallback():
     primary = SwapProvider("uniswap", Client([Result(False, "Uniswap API returned status 400")]), PROVIDERS["uniswap"].capabilities)
     fallback = SwapProvider("sushiswap", Client([Result(True)]), PROVIDERS["sushiswap"].capabilities)
