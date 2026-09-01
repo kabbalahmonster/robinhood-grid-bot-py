@@ -94,8 +94,31 @@ class TestSharedRateLimiter(unittest.TestCase):
             limiter = self.limiter(Path(directory) / "rate.json", fake)
             with patch("shared_rate_limit.random.uniform", return_value=0):
                 limiter.record_rate_limit()
+                fake.value += 31
                 limiter.record_success()
                 self.assertEqual(limiter.record_rate_limit(), 30)
+
+    def test_late_success_cannot_clear_active_cooldown(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fake = FakeTime()
+            path = Path(directory) / "rate.json"
+            limiter = self.limiter(path, fake)
+            with patch("shared_rate_limit.random.uniform", return_value=0):
+                limiter.record_rate_limit("120")
+                limiter.record_success()
+            self.assertEqual(limiter.acquire(), 120)
+
+    def test_only_one_process_gets_post_cooldown_probe(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fake = FakeTime()
+            path = Path(directory) / "rate.json"
+            first = self.limiter(path, fake)
+            second = self.limiter(path, fake)
+            with patch("shared_rate_limit.random.uniform", return_value=0):
+                first.record_rate_limit("30")
+            fake.value += 31
+            self.assertIsNone(first.acquire())
+            self.assertEqual(second.acquire(), 35)
 
 
 if __name__ == "__main__":
