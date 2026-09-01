@@ -97,6 +97,24 @@ class UniswapAPIClient:
             import time
             time.sleep(random.uniform(0.1, 0.3))
         return headers
+
+    def _cooldown_error(self) -> Optional[str]:
+        cooldown = self.rate_limiter.acquire()
+        if cooldown is None:
+            return None
+        return f"Uniswap rate-limit cooldown active; retry in {cooldown}s (429)"
+
+    def _record_response_limit(self, response) -> None:
+        if response.status_code == 429:
+            wait_seconds = self.rate_limiter.record_rate_limit(
+                response.headers.get("Retry-After", "")
+            )
+            self.logger.warning(
+                "Uniswap rate limited; pausing shared API key for %ss",
+                wait_seconds,
+            )
+        elif response.status_code == 200:
+            self.rate_limiter.record_success()
     
     def get_quote(
         self,
@@ -168,11 +186,11 @@ class UniswapAPIClient:
         try:
             url = f"{self.BASE_URL}/quote"
 
-            cooldown = self.rate_limiter.acquire()
-            if cooldown is not None:
+            cooldown_error = self._cooldown_error()
+            if cooldown_error is not None:
                 return QuoteResult(
                     success=False,
-                    error=f"Uniswap rate-limit cooldown active; retry in {cooldown}s (429)",
+                    error=cooldown_error,
                 )
             
             self.logger.debug(f"Fetching Uniswap quote: {payload}")
@@ -190,20 +208,13 @@ class UniswapAPIClient:
                 error_text = response.text[:500]
                 self.logger.error(f"Uniswap API error: Status {response.status_code}")
                 self.logger.error(f"Response: {error_text}")
-                if response.status_code == 429:
-                    wait_seconds = self.rate_limiter.record_rate_limit(
-                        response.headers.get("Retry-After", "")
-                    )
-                    self.logger.warning(
-                        "Uniswap rate limited; pausing shared API key for %ss",
-                        wait_seconds,
-                    )
+                self._record_response_limit(response)
                 return QuoteResult(
                     success=False,
                     error=f"Uniswap API returned status {response.status_code}: {error_text}",
                 )
             
-            self.rate_limiter.record_success()
+            self._record_response_limit(response)
             data = response.json()
             
             # Extract amounts and calculate price
@@ -360,6 +371,10 @@ class UniswapAPIClient:
         
         try:
             url = f"{self.BASE_URL}/check_approval"
+
+            cooldown_error = self._cooldown_error()
+            if cooldown_error is not None:
+                return {"error": cooldown_error}
             
             payload = {
                 "walletAddress": wallet,
@@ -383,8 +398,10 @@ class UniswapAPIClient:
                 error_text = response.text[:500]
                 self.logger.error(f"Uniswap check_approval error: Status {response.status_code}")
                 self.logger.error(f"Response: {error_text}")
+                self._record_response_limit(response)
                 return {"error": f"check_approval failed: {response.status_code}", "detail": error_text}
             
+            self._record_response_limit(response)
             data = response.json()
             self.logger.debug(f"Uniswap check_approval response: {data}")
             return data
@@ -422,6 +439,10 @@ class UniswapAPIClient:
         
         try:
             url = f"{self.BASE_URL}/swap"
+
+            cooldown_error = self._cooldown_error()
+            if cooldown_error is not None:
+                return QuoteResult(success=False, error=cooldown_error)
             
             # Build payload according to Uniswap API spec
             # Extract ONLY the nested quote object from the /quote response
@@ -460,11 +481,13 @@ class UniswapAPIClient:
                 error_text = response.text[:500]
                 self.logger.error(f"Uniswap swap API error: Status {response.status_code}")
                 self.logger.error(f"Response: {error_text}")
+                self._record_response_limit(response)
                 return QuoteResult(
                     success=False,
                     error=f"Uniswap swap API returned status {response.status_code}: {error_text}",
                 )
             
+            self._record_response_limit(response)
             data = response.json()
             
             # Extract transaction data from "swap" field (not "tx")

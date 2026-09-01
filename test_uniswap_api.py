@@ -69,6 +69,33 @@ class TestUniswapAPIClient(unittest.TestCase):
             self.assertIn("cooldown active", second.error)
             self.assertEqual(post.call_count, 1)
 
+    def test_shared_gate_covers_approval_and_swap_endpoints(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = SimpleNamespace(
+                uniswap_api_key="test-key",
+                uniswap_permit2_disabled=True,
+                chain_id=4663,
+                anti_mev_jitter=False,
+                uniswap_rate_state_file=f"{directory}/rate.json",
+                uniswap_rate_limit_rps=4,
+                uniswap_cooldown_base_seconds=30,
+                uniswap_cooldown_max_seconds=900,
+            )
+            limited = SimpleNamespace(
+                status_code=429,
+                text='{"message":"Too Many Requests"}',
+                headers={"Retry-After": "120"},
+            )
+            with patch("uniswap_api.requests.post", return_value=limited) as post, patch(
+                "shared_rate_limit.random.uniform", return_value=0
+            ):
+                client = UniswapAPIClient(config)
+                approval = client.check_approval("0xtoken", 100, "0xwallet")
+                swap = client.get_swap_transaction({"quote": {}})
+            self.assertIn("429", approval["error"])
+            self.assertIn("cooldown active", swap.error)
+            self.assertEqual(post.call_count, 1)
+
 
 if __name__ == "__main__":
     unittest.main()
