@@ -131,6 +131,20 @@ fleet_bot_name() {
   fi
 }
 
+fleet_sort_targets_by_name() {
+  local bot_dir name record
+  local -a records=() sorted=()
+  for bot_dir in "${FLEET_BOT_DIRS[@]}"; do
+    name="$(fleet_bot_name "$bot_dir")"
+    records+=("${name}"$'\t'"${bot_dir}")
+  done
+  mapfile -t sorted < <(printf '%s\n' "${records[@]}" | LC_ALL=C sort -f -t $'\t' -k1,1 -k2,2)
+  FLEET_BOT_DIRS=()
+  for record in "${sorted[@]}"; do
+    FLEET_BOT_DIRS+=("${record#*$'\t'}")
+  done
+}
+
 fleet_apply_selection() {
   local only_csv="${1:-}" exclude_csv="${2:-}"
   local bot_dir name token match

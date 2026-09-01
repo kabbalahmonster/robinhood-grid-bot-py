@@ -5,6 +5,10 @@ fleet. Each bot gets its own pane, working directory, `.env`, virtual
 environment, and persistent `data/` directory. The same local fleet
 configuration also drives guarded whole-fleet USDG sweeps.
 
+`start-fleet` creates panes alphabetically by bot name regardless of membership
+order in `fleet.conf`, so next/previous navigation stays predictable as the
+fleet grows.
+
 The start command deliberately creates an **interactive shell first** and uses
 `tmux send-keys` to enter the restart loop. This preserves the established
 operator workflow:

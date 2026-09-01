@@ -72,6 +72,25 @@ class TestFleetConfig(unittest.TestCase):
         self.assertTrue(lines[1].endswith("alpha/robinhood-grid-bot-py"))
         self.assertTrue(lines[2].endswith("zeta/robinhood-grid-bot-py"))
 
+    def test_console_targets_sort_alphabetically_by_bot_name(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "bots"
+            paths = []
+            for name in ("zeta", "Alpha", "beta"):
+                checkout = root / name / "robinhood-grid-bot-py"
+                checkout.mkdir(parents=True)
+                (checkout / "grid_bot.py").touch()
+                paths.append(str(checkout))
+            quoted = " ".join(f'"{path}"' for path in paths)
+            command = (
+                f'source "{COMMON}"; FLEET_BOT_DIRS=({quoted}); '
+                "fleet_sort_targets_by_name; "
+                'for path in "${FLEET_BOT_DIRS[@]}"; do fleet_bot_name "$path"; done'
+            )
+            result = subprocess.run(["bash", "-c", command], text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.splitlines(), ["Alpha", "beta", "zeta"])
+
     def test_bot_names_and_dirs_are_mutually_exclusive(self):
         result = self._load(
             'FLEET_BOT_ROOT="__BOT_ROOT__"\nFLEET_BOT_NAMES=(alpha)\n'

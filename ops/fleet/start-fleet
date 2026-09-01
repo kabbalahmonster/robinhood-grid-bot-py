@@ -39,6 +39,7 @@ fleet_load_config "$config_path"
 fleet_apply_selection "$only" "$exclude"
 fleet_require_tmux
 fleet_validate_bots
+fleet_sort_targets_by_name
 
 if fleet_session_exists; then
   fleet_die "tmux session already exists: $FLEET_SESSION
