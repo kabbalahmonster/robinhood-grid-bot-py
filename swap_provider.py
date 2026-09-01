@@ -47,7 +47,11 @@ class FallbackSwapProvider:
     provider-consistent while avoiding a one-poll delay.
     """
 
-    RETRYABLE_STATUS_CODES = {404, 408, 425, 429, 500, 502, 503, 504}
+    # 409 is normally a semantic conflict, but provider gateways also use it
+    # for transient upstream/proxy failures (for example Uniswap's
+    # "client packet length exceeds 255 buffer"). Those failures are not
+    # actionable by the bot and must fail over instead of freezing pricing.
+    RETRYABLE_STATUS_CODES = {404, 408, 409, 425, 429, 500, 502, 503, 504}
     RETRYABLE_ERROR_MARKERS = (
         "connection error",
         "connection reset",

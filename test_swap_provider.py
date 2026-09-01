@@ -67,6 +67,25 @@ def test_retryable_primary_failure_retries_complete_operation_immediately():
     assert provider.name == "uniswap"
 
 
+def test_provider_gateway_409_retries_with_fallback():
+    primary = SwapProvider(
+        "uniswap",
+        Client([Result(False, 'Uniswap API returned status 409: {"error":"client packet length exceeds 255 buffer"}')]),
+        PROVIDERS["uniswap"].capabilities,
+    )
+    fallback = SwapProvider("sushiswap", Client([Result(True)]), PROVIDERS["sushiswap"].capabilities)
+    provider = FallbackSwapProvider(primary, fallback)
+    attempts = []
+
+    def operation():
+        attempts.append(provider.name)
+        return provider.build_swap_transaction()
+
+    result = provider.run_with_fallback(operation, "price")
+    assert result.success is True
+    assert attempts == ["uniswap", "sushiswap"]
+
+
 def test_nonretryable_primary_failure_does_not_activate_fallback():
     primary = SwapProvider("uniswap", Client([Result(False, "Uniswap API returned status 400")]), PROVIDERS["uniswap"].capabilities)
     fallback = SwapProvider("sushiswap", Client([Result(True)]), PROVIDERS["sushiswap"].capabilities)
