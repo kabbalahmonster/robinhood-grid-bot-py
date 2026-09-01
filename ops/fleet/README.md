@@ -374,6 +374,19 @@ Then omit `--template`:
 initialize-bots --add-to-fleet UP=0x1234567890abcdef1234567890abcdef12345678
 ```
 
+Optionally fail closed against a fresh DoomScout verdict before any clone or
+wallet is created. The public endpoint is read-only; the guard requires an
+assessment no older than one hour and accepts only `PASS` (not `CAUTION`):
+
+```bash
+initialize-bots --require-scout-pass --scout-url https://doomdash.ca \
+  --add-to-fleet LEMON=0xf0E17e54239CD945Cd7bEa471a3a2CA6a8C7f7A3
+```
+
+`DOOM_SCOUT_URL=https://doomdash.ca` may be configured instead of repeating
+`--scout-url`. Run `/scout` or `/watch` first; missing, stale, caution, and
+rejected reports all stop initialization safely.
+
 Pass `--template PATH` whenever one batch needs a different template; the
 command-line path overrides `FLEET_ENV_TEMPLATE` for that run only.
 

@@ -31,6 +31,8 @@ Options:
   --python PATH        Python used for secure wallet generation
   --install-deps       Create .venv and install requirements.txt in each clone
   --add-to-fleet       Add the new folder names to FLEET_BOT_NAMES on --apply
+  --require-scout-pass Refuse tokens without a fresh DoomScout PASS
+  --scout-url URL      DoomDash base URL (or set DOOM_SCOUT_URL)
   --overwrite-default NAME=VALUE
                        Set/append one .env value in every new bot; repeatable
   --show-private-keys  After success, print a MetaMask import list (sensitive)
@@ -59,6 +61,8 @@ apply=0
 install_deps=0
 show_private_keys=0
 add_to_fleet=0
+require_scout_pass=0
+scout_url="${DOOM_SCOUT_URL:-}"
 declare -a specs=() symbols=() folders=() addresses=() final_parents=()
 declare -a public_addresses=() private_keys=()
 declare -a overrides=()
@@ -72,6 +76,8 @@ while (($#)); do
     --python) (($# >= 2)) || fleet_die "--python requires a path"; python_bin="$2"; shift 2 ;;
     --install-deps) install_deps=1; shift ;;
     --add-to-fleet) add_to_fleet=1; shift ;;
+    --require-scout-pass) require_scout_pass=1; shift ;;
+    --scout-url) (($# >= 2)) || fleet_die "--scout-url requires a URL"; scout_url="$2"; shift 2 ;;
     --overwrite-default)
       (($# >= 2)) || fleet_die "--overwrite-default requires NAME=VALUE"
       overrides+=("$2")
@@ -149,6 +155,15 @@ for spec in "${specs[@]}"; do
   addresses+=("$address")
   final_parents+=("$final_parent")
 done
+
+if ((require_scout_pass)); then
+  [[ -n "$scout_url" ]] || fleet_die "--require-scout-pass requires --scout-url or DOOM_SCOUT_URL"
+  for address in "${addresses[@]}"; do
+    [[ -n "$address" ]] || fleet_die "--require-scout-pass requires an address for every token"
+    "$python_bin" "$SCRIPT_DIR/scout-admission.py" --url "$scout_url" --address "$address" \
+      || fleet_die "DoomScout admission failed for $address"
+  done
+fi
 
 if ((add_to_fleet)); then
   if declare -p FLEET_BOT_DIRS >/dev/null 2>&1 && ((${#FLEET_BOT_DIRS[@]} > 0)); then
