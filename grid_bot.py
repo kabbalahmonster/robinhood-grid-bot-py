@@ -1165,6 +1165,13 @@ class GridBot:
         
         if trade_balance < 0.001:
             logger.warning(f"Gridless: Low {self.trade_token_name} balance: {trade_balance:.6f}")
+            self._funding_warning = {
+                "asset": self.trade_token_name,
+                "trade_balance": trade_balance,
+                "minimum_trade_balance": 0.001,
+                "available_slots": max(0, self.config.max_active_positions - len(gridless_positions)),
+                "reason": reason,
+            }
             return
         
         # Calculate buy amount
@@ -2210,6 +2217,7 @@ class GridBot:
         # Ephemeral by design: a sell attempt must be re-established by this
         # round's quote check or it disappears from the next dashboard report.
         self._sell_attempt = None
+        self._funding_warning = None
         elapsed = time.time() - self.start_time
         
         # Get balances
@@ -2491,6 +2499,7 @@ class GridBot:
                     max_positions=self.config.max_active_positions,
                     capacity_warning=capacity_warning,
                     needs_gas=needs_gas,
+                    funding_warning=self._funding_warning,
                     sell_attempt=self._sell_attempt,
                     chain_id=self.config.chain_id,
                     swap_provider=self.provider.name,

@@ -39,6 +39,21 @@ class TestDashboardReporter(unittest.TestCase):
         self.assertEqual(reporter._queue[0]["needs_gas"], warning)
 
     @patch("dashboard_reporter.threading.Thread.start")
+    def test_funding_warning_is_in_status_payload(self, _start):
+        reporter = DashboardReporter("https://doomdash.ca/api/status")
+        warning = {
+            "asset": "ETH",
+            "trade_balance": 0.0008,
+            "minimum_trade_balance": 0.001,
+            "available_slots": 1,
+            "reason": "Top position below buy threshold",
+        }
+
+        reporter.report(funding_warning=warning)
+
+        self.assertEqual(reporter._queue[0]["funding_warning"], warning)
+
+    @patch("dashboard_reporter.threading.Thread.start")
     def test_sell_attempt_is_round_scoped_payload_field(self, _start):
         reporter = DashboardReporter("https://doomdash.ca/api/status")
         attempt = {
