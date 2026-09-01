@@ -89,30 +89,43 @@ class UniswapAPIClient:
             self.logger.info(f"Uniswap API Client initialized for chain {self.chain_id}")
     
     def _get_headers(self) -> dict:
-        """Get headers with fresh timestamp for each request."""
-        headers = self.headers.copy()
-        # Add anti-MEV jitter if enabled
+        """Return a fresh copy of the request headers."""
+        return self.headers.copy()
+
+    def _cooldown_error(self) -> Optional[str]:
+        # Jitter before reserving the shared slot. Applying it afterward can
+        # compress two adjacent reservations into a much smaller wire-level
+        # gap and defeat the coordinator's strict request spacing.
         if self.config.anti_mev_jitter:
             import random
             import time
             time.sleep(random.uniform(0.1, 0.3))
-        return headers
-
-    def _cooldown_error(self) -> Optional[str]:
         cooldown = self.rate_limiter.acquire()
         if cooldown is None:
             return None
-        return f"Uniswap rate-limit cooldown active; retry in {cooldown}s (429)"
+        return f"Uniswap shared provider cooldown active; retry in {cooldown}s"
 
     def _record_response_limit(self, response) -> None:
-        if response.status_code == 429:
+        error_text = response.text[:500].lower() if response.status_code != 200 else ""
+        gateway_packet_failure = (
+            response.status_code == 409
+            and "packet length exceeds" in error_text
+            and "buffer" in error_text
+        )
+        if response.status_code == 429 or gateway_packet_failure:
             wait_seconds = self.rate_limiter.record_rate_limit(
                 response.headers.get("Retry-After", "")
             )
-            self.logger.warning(
-                "Uniswap rate limited; pausing shared API key for %ss",
-                wait_seconds,
-            )
+            if gateway_packet_failure:
+                self.logger.warning(
+                    "Uniswap gateway packet failure; pausing shared provider for %ss",
+                    wait_seconds,
+                )
+            else:
+                self.logger.warning(
+                    "Uniswap rate limited; pausing shared API key for %ss",
+                    wait_seconds,
+                )
         elif response.status_code == 200:
             self.rate_limiter.record_success()
     

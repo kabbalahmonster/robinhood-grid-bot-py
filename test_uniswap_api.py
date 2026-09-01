@@ -69,6 +69,37 @@ class TestUniswapAPIClient(unittest.TestCase):
             self.assertIn("cooldown active", second.error)
             self.assertEqual(post.call_count, 1)
 
+    def test_gateway_packet_409_starts_shared_cooldown(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = SimpleNamespace(
+                uniswap_api_key="test-key",
+                uniswap_permit2_disabled=True,
+                chain_id=4663,
+                anti_mev_jitter=False,
+                uniswap_rate_state_file=f"{directory}/rate.json",
+                uniswap_rate_limit_rps=4,
+                uniswap_cooldown_base_seconds=30,
+                uniswap_cooldown_max_seconds=900,
+            )
+            response = SimpleNamespace(
+                status_code=409,
+                text='{"error":"client packet length exceeds 255 buffer"}',
+                headers={},
+            )
+            with patch("uniswap_api.requests.post", return_value=response) as post, patch(
+                "shared_rate_limit.random.uniform", return_value=0
+            ):
+                first = UniswapAPIClient(config).get_quote(
+                    "0xin", "0xout", sell_amount=100, taker_address="0xtaker"
+                )
+                second = UniswapAPIClient(config).get_quote(
+                    "0xin", "0xout", sell_amount=100, taker_address="0xtaker"
+                )
+
+            self.assertIn("status 409", first.error)
+            self.assertIn("shared provider cooldown active", second.error)
+            self.assertEqual(post.call_count, 1)
+
     def test_shared_gate_covers_approval_and_swap_endpoints(self):
         with tempfile.TemporaryDirectory() as directory:
             config = SimpleNamespace(
