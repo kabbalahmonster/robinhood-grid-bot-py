@@ -64,7 +64,12 @@ first_pane="$(tmux display-message -p -t "=$FLEET_SESSION" '#{pane_id}')"
 tmux select-pane -t "$first_pane" -T "$(basename -- "$(dirname -- "$first_dir")")"
 fleet_send_command "$first_pane" "$(fleet_bot_command "$first_dir")"
 
-for bot_dir in "${FLEET_BOT_DIRS[@]:1}"; do
+# tmux inserts each detached split immediately after the window's still-active
+# first pane. Creating the remaining panes in ascending order therefore renders
+# them in reverse order (first, Z..B). Feed tmux the remainder in reverse so
+# the visible tiled traversal is the intended alphabetical A..Z order.
+for ((index=${#FLEET_BOT_DIRS[@]} - 1; index >= 1; index--)); do
+  bot_dir="${FLEET_BOT_DIRS[index]}"
   if [[ "$FLEET_START_STAGGER" != "0" ]]; then
     sleep "$FLEET_START_STAGGER"
   fi
