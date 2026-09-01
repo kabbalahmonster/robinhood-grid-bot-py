@@ -1679,7 +1679,7 @@ class GridBot:
             gas_price = int(quote.gas_price * gas_price_mult)
         else:
             gas_price = int(self.wallet.w3.eth.gas_price * gas_price_mult)
-        
+
         from web3 import Web3
         trade_balance_before = self._raw_trade_balance()
         result = self.wallet._send_transaction({
@@ -2160,6 +2160,23 @@ class GridBot:
             gas_price = int(quote.gas_price * gas_price_mult)
         else:
             gas_price = int(self.wallet.w3.eth.gas_price * gas_price_mult)
+
+        # A native-ETH banking swap spends both the amount being banked and
+        # gas from the same balance. Never let profit extraction consume the
+        # reserve required for the bot's next trade.
+        if getattr(self.config, 'use_eth_trading', False):
+            balance_wei = self.wallet.get_eth_balance_wei()
+            reserve_wei = int(Decimal(str(getattr(self.config, 'eth_gas_reserve', 0))) * Decimal(10**18))
+            maximum_cost_wei = int(quote.value or 0) + gas_limit * gas_price
+            if balance_wei - maximum_cost_wei < reserve_wei:
+                logger.warning(
+                    "🏦 Banking skipped: transaction could reduce native ETH below "
+                    "ETH_GAS_RESERVE (balance %.8f, required %.8f including gas, reserve %.8f ETH)",
+                    balance_wei / 10**18,
+                    maximum_cost_wei / 10**18,
+                    reserve_wei / 10**18,
+                )
+                return
         
         result = self.wallet._send_transaction({
             "from": Web3.to_checksum_address(self.wallet.address),
@@ -2445,10 +2462,19 @@ class GridBot:
                     if total_cost > 0 else 0.0
                 )
                 
+                gas_reserve_eth = getattr(self.config, 'eth_gas_reserve', 0.001)
+                needs_gas = None
+                if eth_bal < gas_reserve_eth:
+                    needs_gas = {
+                        'balance_eth': eth_bal,
+                        'reserve_eth': gas_reserve_eth,
+                        'shortfall_eth': gas_reserve_eth - eth_bal,
+                    }
+
                 self._reporter.report(
                     price=price,
                     eth_balance=eth_bal,
-                    gas_reserve_eth=getattr(self.config, 'eth_gas_reserve', 0.001),
+                    gas_reserve_eth=gas_reserve_eth,
                     usdg_balance=usdg_bal,
                     treasury_sent_usdg=_total_successful_treasury_sent_usdg(self.config.usdg_address),
                     token_balance=token_bal,
@@ -2464,6 +2490,7 @@ class GridBot:
                     filled_positions=active,
                     max_positions=self.config.max_active_positions,
                     capacity_warning=capacity_warning,
+                    needs_gas=needs_gas,
                     sell_attempt=self._sell_attempt,
                     chain_id=self.config.chain_id,
                     swap_provider=self.provider.name,

@@ -30,6 +30,15 @@ class TestDashboardReporter(unittest.TestCase):
         self.assertEqual(reporter._queue[0]["sigil"], reporter._sigil)
 
     @patch("dashboard_reporter.threading.Thread.start")
+    def test_needs_gas_is_in_status_payload(self, _start):
+        reporter = DashboardReporter("https://doomdash.ca/api/status")
+        warning = {"balance_eth": 0.00004, "reserve_eth": 0.0002, "shortfall_eth": 0.00016}
+
+        reporter.report(needs_gas=warning)
+
+        self.assertEqual(reporter._queue[0]["needs_gas"], warning)
+
+    @patch("dashboard_reporter.threading.Thread.start")
     def test_sell_attempt_is_round_scoped_payload_field(self, _start):
         reporter = DashboardReporter("https://doomdash.ca/api/status")
         attempt = {
