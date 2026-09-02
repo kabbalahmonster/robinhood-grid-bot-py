@@ -51,6 +51,22 @@ class BankingGasReserveTests(unittest.TestCase):
 
         bot.wallet._send_transaction.assert_called_once()
 
+    def test_banking_skips_when_amount_plus_gas_exceeds_net_profit_budget(self):
+        bot = self.make_bot(balance_wei=2_000_000_000_000_000)
+
+        GridBot.bank_profit.__wrapped__(bot, 0.0004, profit_budget_eth=0.00045)
+
+        # 0.0004 principal + 0.0001 projected gas would consume principal.
+        bot.wallet._send_transaction.assert_not_called()
+
+    def test_banking_executes_when_amount_plus_gas_fits_net_profit_budget(self):
+        bot = self.make_bot(balance_wei=2_000_000_000_000_000)
+        bot.wallet._send_transaction.return_value = SimpleNamespace(success=False, error="test", tx_hash=None)
+
+        GridBot.bank_profit.__wrapped__(bot, 0.0004, profit_budget_eth=0.0006)
+
+        bot.wallet._send_transaction.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

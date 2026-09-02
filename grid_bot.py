@@ -722,6 +722,26 @@ class GridBot:
         gas_price = receipt.get('effectiveGasPrice') or getattr(result, 'effective_gas_price', None) or 0
         return int(gas_used) * int(gas_price)
 
+    def _projected_gas_cost_wei(self, quote, default_gas=300000):
+        """Conservative native-ETH cost of broadcasting a prepared swap."""
+        gas_limit_mult = getattr(self.config, 'gas_limit_multiplier', 1.05)
+        gas_price_mult = getattr(self.config, 'gas_price_multiplier', 1.05)
+        gas_limit = int((quote.gas or default_gas) * gas_limit_mult)
+        if quote.gas_price and quote.gas_price > 0:
+            gas_price = int(quote.gas_price * gas_price_mult)
+        else:
+            gas_price = int(self.wallet.w3.eth.gas_price * gas_price_mult)
+        return gas_limit * gas_price
+
+    def _net_sale_profit_wei(self, received_wei, sold_cost_wei, result):
+        """Economic profit after position cost basis and confirmed sell gas."""
+        return int(received_wei) - int(sold_cost_wei) - self._receipt_gas_cost_wei(result)
+
+    def _minimum_gas_aware_return_wei(self, sold_cost_wei, quote, min_profit_percent):
+        """Return required to preserve principal, pay sell gas, and earn target profit."""
+        minimum_profit_wei = int(int(sold_cost_wei) * (float(min_profit_percent) / 100.0))
+        return int(sold_cost_wei) + minimum_profit_wei + self._projected_gas_cost_wei(quote)
+
     def _receipt_trade_received_wei(self, result):
         """Recover trade-token output from receipt logs when an RPC balance is stale."""
         receipt = getattr(result, 'receipt', None) or {}
@@ -1324,22 +1344,31 @@ class GridBot:
                 logger.error("Buy confirmed but no token balance increase could be reconciled")
                 return
             # Use the actual sell amount from the quote in wei for precision
-            cost_wei = quote.sell_amount if quote.sell_amount else buy_amount_wei
+            principal_cost_wei = quote.sell_amount if quote.sell_amount else buy_amount_wei
+            buy_gas_wei = self._receipt_gas_cost_wei(result)
+            cost_wei = principal_cost_wei + buy_gas_wei
             
-            logger.debug(f"Recording position: cost_wei={cost_wei}, tokens_received={tokens_received}")
+            logger.debug(
+                "Recording position: cost_wei=%s (principal=%s + buy_gas=%s), tokens_received=%s",
+                cost_wei, principal_cost_wei, buy_gas_wei, tokens_received,
+            )
             logger.debug(f"Quote buy_amount: {quote.buy_amount}, sell_amount: {quote.sell_amount}")
             
             pos_id = add_position(cost_wei, tokens_received)
             
             tokens = tokens_received / self.token_unit
-            buy_price = buy_amount_eth / tokens if tokens > 0 else 0
+            economic_cost_eth = cost_wei / 10**18
+            buy_price = economic_cost_eth / tokens if tokens > 0 else 0
             self.session_buys += 1
             self.last_buy_time = time.time()  # Update cooldown timer
-            self._record_dashboard_trade("buy", buy_amount_eth, tokens, buy_price, result.tx_hash)
+            self._record_dashboard_trade("buy", economic_cost_eth, tokens, buy_price, result.tx_hash)
             
             logger.info(f"✅ Gridless buy successful! Position #{pos_id}")
             logger.info(f"   Tokens: {tokens:.6f} {self.config.token_symbol}")
-            logger.info(f"   Cost: {buy_amount_eth:.6f} {self.trade_token_name}")
+            logger.info(
+                "   Economic cost: %.6f %s (principal %.6f + gas %.6f)",
+                economic_cost_eth, self.trade_token_name, principal_cost_wei / 10**18, buy_gas_wei / 10**18,
+            )
             logger.info(f"   Buy price: {buy_price:.10f} {self.trade_token_name}/token")
             logger.info(f"   Tx: {result.tx_hash}")
         else:
@@ -1422,16 +1451,24 @@ class GridBot:
         min_profit_eth = cost_eth * (min_profit / 100)
         quote_return_eth = self._taxed_quote_return_wei(quote) / 10**18
         quote_profit_eth = quote_return_eth - cost_eth
+        projected_gas_eth = self._projected_gas_cost_wei(quote) / 10**18
+        projected_net_profit_eth = quote_profit_eth - projected_gas_eth
         
-        if quote_profit_eth < min_profit_eth:
+        if projected_net_profit_eth < min_profit_eth:
             buy_price = get_buy_price(pos, self.token_decimals)
             pnl_at_check = calculate_pnl(pos, price, self.token_decimals)
-            logger.info(f"⏸️  Position #{pos_id} at {pnl_at_check:.1f}% P&L but quote profit ({quote_profit_eth:.6f}) < min ({min_profit_eth:.6f}) - skipping")
+            logger.info(
+                "⏸️  Position #%s at %.1f%% P&L but projected net profit "
+                "(%.6f after %.6f gas) < min (%.6f) - skipping",
+                pos_id, pnl_at_check, projected_net_profit_eth, projected_gas_eth, min_profit_eth,
+            )
             self._sell_attempt = {
                 "status": "quote_below_minimum",
                 "position_id": str(pos_id),
                 "pnl_percent": round(pnl_at_check, 2),
                 "quoted_profit_eth": round(quote_profit_eth, 8),
+                "projected_gas_eth": round(projected_gas_eth, 8),
+                "projected_net_profit_eth": round(projected_net_profit_eth, 8),
                 "minimum_profit_eth": round(min_profit_eth, 8),
             }
             return
@@ -1504,7 +1541,9 @@ class GridBot:
         # Validate minimum profit
         min_profit = getattr(self.config, 'min_profit_percent', 1.5)
         min_profit_eth = sold_cost_eth * (min_profit / 100)
-        min_return_eth = sold_cost_eth + min_profit_eth
+        min_return_eth = self._minimum_gas_aware_return_wei(
+            int(round(sold_cost_eth * 10**18)), quote, min_profit
+        ) / 10**18
         quote_return_eth = self._taxed_quote_return_wei(quote) / 10**18
         
         # Skip min_profit check for stoploss
@@ -1680,6 +1719,21 @@ class GridBot:
                     if not quote.success:
                         logger.error(f"Refreshed quote failed: {quote.error}")
                         return
+
+        # Approval/refresh can replace both route calldata and gas estimate.
+        # Re-run the economic guard against the final transaction immediately
+        # before broadcast; only an explicit stop-loss may bypass profitability.
+        if not is_stoploss:
+            final_return_wei = self._taxed_quote_return_wei(quote)
+            final_minimum_wei = self._minimum_gas_aware_return_wei(
+                int(round(sold_cost_eth * 10**18)), quote, min_profit
+            )
+            if final_return_wei < final_minimum_wei:
+                logger.warning(
+                    "❌ Sell aborted after route refresh: return %.8f ETH < gas-aware minimum %.8f ETH",
+                    final_return_wei / 10**18, final_minimum_wei / 10**18,
+                )
+                return
         
         # Execute swap with configurable gas multipliers
         # Use API's gas price estimate if available (more accurate than network average)
@@ -1710,12 +1764,13 @@ class GridBot:
             )
             logger.info("Measured trade-token receipt: %s wei", received_wei)
             eth_received = received_wei / 10**18
-            actual_profit = eth_received - sold_cost_eth
+            sold_cost_wei = int(round(sold_cost_eth * 10**18))
+            profit_wei = self._net_sale_profit_wei(received_wei, sold_cost_wei, result)
+            actual_profit = profit_wei / 10**18
             
             self.session_sells += 1
             self.session_profit_weth += actual_profit
             try:
-                profit_wei = received_wei - int(round(sold_cost_eth * 10**18))
                 self.profit_tracker.record_sale(profit_wei, result.tx_hash)
             except (OSError, ValueError) as exc:
                 logger.error(f"Could not persist realized profit: {exc}")
@@ -1741,7 +1796,7 @@ class GridBot:
             if bank_pct > 0 and actual_profit > 0:
                 bank_amount = actual_profit * bank_pct / 100
                 logger.info(f"🏦 Banking {bank_pct}% of profit = {bank_amount:.6f} {self.trade_token_name} → USDG")
-                self.bank_profit(bank_amount)
+                self.bank_profit(bank_amount, profit_budget_eth=actual_profit)
             
             logger.info(f"   Tx: {result.tx_hash}")
         else:
@@ -1837,7 +1892,7 @@ class GridBot:
                 logger.error(f"{self.provider.name} swap preparation failed: {swap_result.error}")
                 return
             quote = swap_result
-        
+
         # Execute swap with checksummed addresses and configurable gas multipliers
         # Use API's gas price estimate if available (more accurate than network average)
         gas_limit_mult = getattr(self.config, 'gas_limit_multiplier', 1.05)
@@ -1874,23 +1929,29 @@ class GridBot:
             tokens = tokens_received / self.token_unit
             self.positions[pos_id]['balance'] = tokens_received
             # Cost = actual WETH spent for profit calculation (in wei for precision)
-            cost_wei = quote.sell_amount if quote.sell_amount else buy_amount_wei
+            principal_cost_wei = quote.sell_amount if quote.sell_amount else buy_amount_wei
+            buy_gas_wei = self._receipt_gas_cost_wei(result)
+            cost_wei = principal_cost_wei + buy_gas_wei
             self.positions[pos_id]['cost_wei'] = cost_wei
             # Keep legacy 'cost' field for backward compatibility
             self.positions[pos_id]['cost'] = cost_wei // 10**9
             self.save_positions()
             
             # Calculate buy price for logging
-            buy_price = buy_amount_eth / tokens if tokens > 0 else 0
+            economic_cost_eth = cost_wei / 10**18
+            buy_price = economic_cost_eth / tokens if tokens > 0 else 0
             
             # Track session stats
             self.session_buys += 1
-            self._record_dashboard_trade("buy", buy_amount_eth, tokens, buy_price, result.tx_hash)
+            self._record_dashboard_trade("buy", economic_cost_eth, tokens, buy_price, result.tx_hash)
             
             logger.info(f"✅ Buy successful!")
             logger.info(f"   Position: #{pos_id}")
             logger.info(f"   Tokens: {tokens:.6f} {self.config.token_symbol}")
-            logger.info(f"   Cost: {buy_amount_eth:.6f} {self.trade_token_name}")
+            logger.info(
+                "   Economic cost: %.6f %s (principal %.6f + gas %.6f)",
+                economic_cost_eth, self.trade_token_name, principal_cost_wei / 10**18, buy_gas_wei / 10**18,
+            )
             logger.info(f"   Buy price: {buy_price:.10f} {self.trade_token_name} per token")
             logger.info(f"   Tx: {result.tx_hash}")
         else:
@@ -1999,11 +2060,12 @@ class GridBot:
                     logger.error(f"Refreshed quote failed: {quote.error}")
                     return
         
-        # Validate quote meets minimum profit requirement (NEVER sell at loss)
-        # Minimum return = cost + min_profit% (gas excluded for now)
+        # Validate quote meets minimum profit requirement after projected gas.
         min_profit_percent = getattr(self.config, 'min_profit_percent', 2.0)
         min_profit_eth = sold_cost_eth * (min_profit_percent / 100)
-        min_return_eth = sold_cost_eth + min_profit_eth
+        min_return_eth = self._minimum_gas_aware_return_wei(
+            int(round(sold_cost_eth * 10**18)), quote, min_profit_percent
+        ) / 10**18
         
         # quote.buy_amount is in wei
         quote_return_eth = self._taxed_quote_return_wei(quote) / 10**18
@@ -2022,6 +2084,18 @@ class GridBot:
                 logger.error(f"{self.provider.name} swap preparation failed: {swap_result.error}")
                 return
             quote = swap_result
+
+        final_return_wei = self._taxed_quote_return_wei(quote)
+        final_minimum_wei = self._minimum_gas_aware_return_wei(
+            int(round(sold_cost_eth * 10**18)), quote, min_profit_percent
+        )
+        if final_return_wei < final_minimum_wei:
+            logger.warning(
+                "❌ Sell ABORTED after transaction preparation: return %.8f ETH < "
+                "gas-aware minimum %.8f ETH",
+                final_return_wei / 10**18, final_minimum_wei / 10**18,
+            )
+            return
         
         # Execute swap with checksummed addresses and configurable gas multipliers
         # Use API's gas price estimate if available (more accurate than network average)
@@ -2052,13 +2126,14 @@ class GridBot:
             )
             logger.info("Measured trade-token receipt: %s wei", received_wei)
             eth_received = received_wei / 10**18
-            actual_profit_eth = eth_received - sold_cost_eth
+            sold_cost_wei = int(round(sold_cost_eth * 10**18))
+            profit_wei = self._net_sale_profit_wei(received_wei, sold_cost_wei, result)
+            actual_profit_eth = profit_wei / 10**18
             
             # Track session stats
             self.session_sells += 1
             self.session_profit_weth += actual_profit_eth
             try:
-                profit_wei = received_wei - int(round(sold_cost_eth * 10**18))
                 self.profit_tracker.record_sale(profit_wei, result.tx_hash)
             except (OSError, ValueError) as exc:
                 logger.error(f"Could not persist realized profit: {exc}")
@@ -2084,14 +2159,14 @@ class GridBot:
             if bank_pct > 0 and actual_profit_eth > 0:
                 bank_amount = actual_profit_eth * bank_pct / 100
                 logger.info(f"🏦 Banking: Swapping {bank_pct}% of profit = {bank_amount:.6f} {self.trade_token_name} → USDG")
-                self.bank_profit(bank_amount)
+                self.bank_profit(bank_amount, profit_budget_eth=actual_profit_eth)
             
             logger.info(f"   Tx: {result.tx_hash}")
         else:
             logger.error(f"❌ Sell failed: {result.error}")
     
     @_with_swap_provider_fallback
-    def bank_profit(self, eth_amount):
+    def bank_profit(self, eth_amount, profit_budget_eth=None):
         """Swap ETH/WETH profit to USDG for banking."""
         if eth_amount <= 0:
             return
@@ -2171,6 +2246,19 @@ class GridBot:
             gas_price = int(quote.gas_price * gas_price_mult)
         else:
             gas_price = int(self.wallet.w3.eth.gas_price * gas_price_mult)
+
+        # Banking is profit extraction, so its principal plus gas must fit
+        # entirely inside the confirmed net-profit budget from the sale.
+        if profit_budget_eth is not None:
+            budget_wei = int(float(profit_budget_eth) * 10**18)
+            economic_cost_wei = eth_wei + gas_limit * gas_price
+            if economic_cost_wei > budget_wei:
+                logger.warning(
+                    "🏦 Banking skipped: amount plus projected gas (%.8f ETH) exceeds "
+                    "confirmed net-profit budget (%.8f ETH)",
+                    economic_cost_wei / 10**18, budget_wei / 10**18,
+                )
+                return
 
         # A native-ETH banking swap spends both the amount being banked and
         # gas from the same balance. Never let profit extraction consume the
