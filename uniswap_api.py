@@ -180,16 +180,24 @@ class UniswapAPIClient:
                     key: value for key, value in wire_headers.items()
                     if key.lower() not in {"x-api-key", "authorization"}
                 }
+                edge_header_names = {
+                    "server", "via", "x-cache", "x-amz-cf-id", "x-amz-cf-pop",
+                    "cf-ray", "x-request-id", "request-id", "traceparent",
+                    "x-envoy-upstream-service-time", "x-served-by", "x-timer",
+                }
+                edge_headers = {
+                    key: value for key, value in response.headers.items()
+                    if key.lower() in edge_header_names
+                }
                 payload_id = hashlib.sha256(wire_body).hexdigest()[:12]
                 self.logger.info(
                     "SATURDAY_DIAGNOSTIC status=%s payload_bytes=%s payload_id=%s "
-                    "request_headers=%s response_request_id=%s body=%s",
+                    "request_headers=%s response_edge_headers=%s body=%s",
                     response.status_code,
                     len(wire_body),
                     payload_id,
                     safe_headers,
-                    response.headers.get("x-request-id")
-                    or response.headers.get("request-id") or "",
+                    edge_headers,
                     wire_body.decode("utf-8", errors="replace"),
                 )
                 curl_headers = " ".join(
