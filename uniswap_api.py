@@ -8,7 +8,9 @@ Docs: https://developers.uniswap.org/docs/api-reference
 """
 
 import json
+import hashlib
 import logging
+import shlex
 from typing import Optional, Any
 from dataclasses import dataclass
 import requests
@@ -167,6 +169,42 @@ class UniswapAPIClient:
                 json=payload,
                 timeout=30,
             )
+
+            prepared = getattr(response, "request", None)
+            wire_body = getattr(prepared, "body", None)
+            wire_headers = getattr(prepared, "headers", None)
+            if isinstance(wire_body, str):
+                wire_body = wire_body.encode("utf-8")
+            if isinstance(wire_body, bytes) and hasattr(wire_headers, "items"):
+                safe_headers = {
+                    key: value for key, value in wire_headers.items()
+                    if key.lower() not in {"x-api-key", "authorization"}
+                }
+                payload_id = hashlib.sha256(wire_body).hexdigest()[:12]
+                self.logger.info(
+                    "SATURDAY_DIAGNOSTIC status=%s payload_bytes=%s payload_id=%s "
+                    "request_headers=%s response_request_id=%s body=%s",
+                    response.status_code,
+                    len(wire_body),
+                    payload_id,
+                    safe_headers,
+                    response.headers.get("x-request-id")
+                    or response.headers.get("request-id") or "",
+                    wire_body.decode("utf-8", errors="replace"),
+                )
+                curl_headers = " ".join(
+                    f"--header {shlex.quote(f'{key}: {value}')}"
+                    for key, value in safe_headers.items()
+                )
+                curl_headers += ' --header "x-api-key: ${UNISWAP_API_KEY}"'
+                self.logger.info(
+                    "SATURDAY_DIAGNOSTIC_CURL payload_id=%s curl --request POST "
+                    "--url %s %s --data-binary %s",
+                    payload_id,
+                    url,
+                    curl_headers,
+                    shlex.quote(wire_body.decode("utf-8", errors="replace")),
+                )
             
             self.logger.debug(f"Uniswap API response status: {response.status_code}")
             
