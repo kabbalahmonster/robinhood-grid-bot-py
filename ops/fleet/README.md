@@ -76,7 +76,7 @@ sudo apt install tmux git python3 python3-venv
      ops/fleet/restart-fleet ops/fleet/update-fleet \
      ops/fleet/update-this-checkout ops/fleet/update-all \
      ops/fleet/usdg-sweep \
-     ops/fleet/treasury-transfer ops/fleet/update-variable \
+     ops/fleet/treasury-transfer ops/fleet/fund-bots ops/fleet/update-variable \
      ops/fleet/adjust-positions ops/fleet/fleet-membership \
      ops/fleet/position-capacity.py \
      ops/fleet/backup-private-keys ops/fleet/fleet-discover \
@@ -108,6 +108,7 @@ sudo apt install tmux git python3 python3-venv
    ln -sf "$PWD/ops/fleet/update-all" "$HOME/bin/update-all"
    ln -sf "$PWD/ops/fleet/usdg-sweep" "$HOME/bin/usdg-sweep"
    ln -sf "$PWD/ops/fleet/treasury-transfer" "$HOME/bin/treasury-transfer"
+   ln -sf "$PWD/ops/fleet/fund-bots" "$HOME/bin/fund-bots"
    ln -sf "$PWD/ops/fleet/update-variable" "$HOME/bin/update-variable"
    ln -sf "$PWD/ops/fleet/adjust-positions" "$HOME/bin/adjust-positions"
    ln -sf "$PWD/ops/fleet/fleet-membership" "$HOME/bin/fleet-membership"
@@ -730,6 +731,45 @@ account (an address without deployed bytecode), because a contract's receive
 logic may consume different gas and invalidate the subtraction. Other failures
 may consume gas without completing the transfer. Inspect every receipt before
 retrying.
+
+## Funding selected bots from treasury
+
+`fund-bots` performs the reverse operation: it tops selected bot wallets up to
+one target total ETH balance from a treasury key stored in a separate env file.
+The file must be mode `600` and contain `PRIVATE_KEY`, `RPC_URL`, `CHAIN_ID`,
+and `ETH_GAS_RESERVE` (or pass `--treasury-reserve`). The key is never printed.
+
+Preview three selected wallets at a `0.013933 ETH` target:
+
+```bash
+chmod 600 ~/bot-farm/treasury.env
+ops/fleet/fund-bots \
+  --only bow,hookr,earn \
+  --from-env ~/bot-farm/treasury.env \
+  --target-balance 0.013933
+```
+
+The plan prints the derived treasury address, current destination balances,
+individual top-ups, total value, maximum planned transfer gas, and treasury
+reserve. A bot already at or above the target receives nothing. After stopping
+the fleet, repeat the command with the exact source address printed by preview:
+
+```bash
+ops/fleet/stop-fleet
+ops/fleet/fund-bots \
+  --only bow,hookr,earn \
+  --from-env ~/bot-farm/treasury.env \
+  --target-balance 0.013933 \
+  --confirm-source 0xExactDerivedTreasuryAddress \
+  --execute \
+  --confirm-fleet-stopped
+```
+
+Immediately before each transfer, the command refreshes the destination and
+treasury balances, gas, pending nonce, and reserve check. A stale-base-fee RPC
+rejection before any hash is assigned rebuilds once. Confirmed and failed
+attempts are recorded in `data/fleet_funding.json`; execution stops at the first
+failure because a multi-wallet funding batch is not atomic.
 
 ## Liquidating bot-managed assets to native ETH
 

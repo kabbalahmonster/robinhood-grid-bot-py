@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+SCRIPT_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)"
+# shellcheck source=fleet-common.sh
+source "$SCRIPT_DIR/fleet-common.sh"
+
+usage() {
+  cat <<'EOF'
+Usage: fund-bots --from-env PATH --target-balance ETH [options]
+
+Preview or execute native-ETH top-ups from one treasury wallet to selected
+fleet wallets. Each destination receives only enough to reach TARGET.
+
+Required:
+  --from-env PATH             Treasury .env containing PRIVATE_KEY and RPC_URL
+  --target-balance ETH        Desired total ETH balance in each bot wallet
+
+Selection:
+  --only NAMES                Target comma-separated bot names
+  --exclude NAMES             Omit comma-separated bot names
+  --config PATH               Use an alternate fleet configuration
+
+Execution guards:
+  --treasury-reserve ETH      Override treasury ETH_GAS_RESERVE
+  --confirm-source ADDRESS    Exact derived treasury address; required to execute
+  --execute                   Broadcast after reviewing the dry run
+  --confirm-fleet-stopped     Required with --execute
+  -h, --help                  Show this help
+
+Dry run is the default. The fleet must be stopped for execution.
+EOF
+}
+
+config_path=""
+from_env=""
+target_balance=""
+treasury_reserve=""
+confirm_source=""
+only=""
+exclude=""
+execute=0
+fleet_stopped=0
+
+while (($#)); do
+  case "$1" in
+    --config) (($# >= 2)) || fleet_die "--config requires a path"; config_path="$2"; shift 2 ;;
+    --from-env) (($# >= 2)) || fleet_die "--from-env requires a path"; from_env="$2"; shift 2 ;;
+    --target-balance) (($# >= 2)) || fleet_die "--target-balance requires ETH"; target_balance="$2"; shift 2 ;;
+    --treasury-reserve) (($# >= 2)) || fleet_die "--treasury-reserve requires ETH"; treasury_reserve="$2"; shift 2 ;;
+    --confirm-source) (($# >= 2)) || fleet_die "--confirm-source requires an address"; confirm_source="$2"; shift 2 ;;
+    --only) (($# >= 2)) || fleet_die "--only requires comma-separated names"; only="$2"; shift 2 ;;
+    --exclude) (($# >= 2)) || fleet_die "--exclude requires comma-separated names"; exclude="$2"; shift 2 ;;
+    --execute) execute=1; shift ;;
+    --confirm-fleet-stopped) fleet_stopped=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) fleet_die "Unknown option: $1" ;;
+  esac
+done
+
+[[ -n "$from_env" ]] || fleet_die "--from-env is required"
+[[ -f "$from_env" ]] || fleet_die "Treasury env not found: $from_env"
+[[ -n "$target_balance" ]] || fleet_die "--target-balance is required"
+[[ "$target_balance" =~ ^[0-9]+([.][0-9]+)?$ && "$target_balance" != "0" && "$target_balance" != "0.0" ]] \
+  || fleet_die "--target-balance must be positive decimal ETH"
+if ((execute && !fleet_stopped)); then
+  fleet_die "--execute requires --confirm-fleet-stopped"
+fi
+
+fleet_load_config "$config_path"
+fleet_apply_selection "$only" "$exclude"
+fleet_validate_bots
+if ((execute)); then
+  fleet_require_tmux
+  fleet_session_exists && fleet_die "Refusing to fund while tmux session '$FLEET_SESSION' is running. Stop the fleet first."
+fi
+
+python_bin="$(fleet_python_for "${FLEET_BOT_DIRS[0]}")" || fleet_die "No Python interpreter found"
+command_args=(
+  "$python_bin" "$SCRIPT_DIR/fund-bots.py"
+  --from-env "$from_env"
+  --target-balance "$target_balance"
+)
+[[ -z "$treasury_reserve" ]] || command_args+=(--treasury-reserve "$treasury_reserve")
+[[ -z "$confirm_source" ]] || command_args+=(--confirm-source "$confirm_source")
+((execute == 0)) || command_args+=(--execute)
+for bot_dir in "${FLEET_BOT_DIRS[@]}"; do
+  command_args+=(--bot "$(fleet_bot_name "$bot_dir")=$bot_dir/.env")
+done
+
+"${command_args[@]}"
