@@ -72,6 +72,7 @@ class FallbackSwapProvider:
         self.fallback = fallback
         self.active = primary
         self._operation_retries = []
+        self._operation_sealed = []
         self.logger = logging.getLogger("grid_bot.swap_provider")
 
     @property
@@ -111,11 +112,18 @@ class FallbackSwapProvider:
 
     def _run_operation_attempt(self, operation):
         self._operation_retries.append(None)
+        self._operation_sealed.append(False)
         try:
             result = operation()
             return result, self._operation_retries[-1]
         finally:
             self._operation_retries.pop()
+            self._operation_sealed.pop()
+
+    def seal_current_operation(self):
+        """Disable provider failover after this operation broadcasts on-chain."""
+        if self._operation_sealed:
+            self._operation_sealed[-1] = True
 
     def __getattr__(self, method_name):
         method = getattr(self.active, method_name)
@@ -139,7 +147,11 @@ class FallbackSwapProvider:
         return result
 
     def _request_retry_after_failure(self, method_name, result):
-        if self.active is not self.primary or not self._is_retryable_failure(result):
+        if (
+            self.active is not self.primary
+            or (self._operation_sealed and self._operation_sealed[-1])
+            or not self._is_retryable_failure(result)
+        ):
             return
         original_error = self._error_text(result)
         message = (

@@ -129,6 +129,29 @@ def test_direct_transaction_call_never_activates_fallback():
     assert provider.name == "uniswap"
 
 
+def test_complete_operation_fails_closed_after_first_onchain_broadcast():
+    primary = SwapProvider(
+        "uniswap",
+        Client([Result(True), Result(False, "Uniswap API returned status 409")]),
+        PROVIDERS["uniswap"].capabilities,
+    )
+    fallback_client = Client([Result(True)])
+    fallback = SwapProvider("sushiswap", fallback_client, PROVIDERS["sushiswap"].capabilities)
+    provider = FallbackSwapProvider(primary, fallback)
+
+    def operation():
+        approval = provider.build_swap_transaction()
+        assert approval.success
+        provider.seal_current_operation()
+        return provider.build_swap_transaction()
+
+    result = provider.run_with_fallback(operation, "sealed sell")
+
+    assert result.success is False
+    assert "status 409" in result.error
+    assert len(fallback_client.results) == 1
+
+
 def test_retryable_refreshed_quote_restarts_without_mixing_providers():
     class RefreshClient:
         def __init__(self, quote, refresh):

@@ -23,16 +23,11 @@ from token_tax_detector import TokenTaxDetector
 
 
 def _with_swap_provider_fallback(method):
-    """Use fallback only for read-only price discovery by default.
-
-    A cheaper price source is interchangeable; an executable route is not.
-    Transaction operations therefore fail closed on their configured primary
-    provider instead of silently changing gas economics.
-    """
+    """Retry one complete pre-broadcast operation with the fallback provider."""
     @wraps(method)
     def wrapped(self, *args, **kwargs):
         runner = getattr(self.provider, "run_with_fallback", None)
-        if runner is None or method.__name__ != "get_token_price":
+        if runner is None:
             return method(self, *args, **kwargs)
         return runner(
             lambda: method(self, *args, **kwargs),
@@ -766,6 +761,12 @@ class GridBot:
         )
         return False
 
+    def _seal_provider_fallback(self):
+        """Fail closed after an operation has spent gas on an approval/setup tx."""
+        seal = getattr(self.provider, "seal_current_operation", None)
+        if seal is not None:
+            seal()
+
     def _net_sale_profit_wei(self, received_wei, sold_cost_wei, result, setup_gas_wei=0):
         """Economic profit after position cost basis and confirmed sell gas."""
         return (
@@ -1341,6 +1342,7 @@ class GridBot:
                     logger.error(f"Approval failed: {result.error}")
                     return
                 buy_setup_gas_wei += self._receipt_gas_cost_wei(result)
+                self._seal_provider_fallback()
                 # Refresh quote after approval for LI.FI
                 if self.provider.capabilities.refresh_after_approval:
                     quote = self.api_client.refresh_quote(
@@ -1678,6 +1680,7 @@ class GridBot:
                         logger.error(f"Cancel transaction failed: {result.error}")
                         return
                     sell_setup_gas_wei += self._receipt_gas_cost_wei(result)
+                    self._seal_provider_fallback()
                     logger.info(f"Cancel transaction confirmed: {result.tx_hash}")
                     # Wait for confirmation
                     import time
@@ -1692,6 +1695,7 @@ class GridBot:
                         logger.error(f"Approval transaction failed: {result.error}")
                         return
                     sell_setup_gas_wei += self._receipt_gas_cost_wei(result)
+                    self._seal_provider_fallback()
                     logger.info(f"Approval transaction confirmed: {result.tx_hash}")
                     # Wait for confirmation
                     import time
@@ -1764,6 +1768,7 @@ class GridBot:
                     logger.error(f"Approval failed: {result.error}")
                     return
                 sell_setup_gas_wei += self._receipt_gas_cost_wei(result)
+                self._seal_provider_fallback()
             
                 # Refresh provider routes after approval when required.
                 if self.provider.capabilities.refresh_after_approval:
@@ -1932,6 +1937,7 @@ class GridBot:
                     logger.error(f"Approval failed: {result.error}")
                     return
                 buy_setup_gas_wei += self._receipt_gas_cost_wei(result)
+                self._seal_provider_fallback()
                 
                 # Refresh provider routes after approval when required.
                 if self.provider.capabilities.refresh_after_approval:
@@ -2131,6 +2137,7 @@ class GridBot:
                 logger.error(f"Token approval failed: {result.error}")
                 return
             sell_setup_gas_wei += self._receipt_gas_cost_wei(result)
+            self._seal_provider_fallback()
             
             # Refresh provider routes after approval when required.
             # Gas prices, calldata, and routes may have changed
@@ -2292,6 +2299,7 @@ class GridBot:
             return
         
         logger.info(f"🏦 Banking {eth_amount:.6f} {self.trade_token_name} → ~{expected_usdg:.2f} USDG...")
+        bank_setup_gas_wei = 0
         
         # Check/approve WETH for swapping (skip for native ETH)
         if not getattr(self.config, 'use_eth_trading', False):
@@ -2311,6 +2319,8 @@ class GridBot:
                 if not result.success:
                     logger.error(f"WETH approval for banking failed: {result.error}")
                     return
+                bank_setup_gas_wei += self._receipt_gas_cost_wei(result)
+                self._seal_provider_fallback()
                 if self.provider.capabilities.refresh_after_approval:
                     quote = self.provider.refresh_quote(
                         sell_token=self.trade_token_address,
@@ -2341,7 +2351,7 @@ class GridBot:
         # entirely inside the confirmed net-profit budget from the sale.
         if profit_budget_eth is not None:
             budget_wei = int(float(profit_budget_eth) * 10**18)
-            economic_cost_wei = eth_wei + gas_limit * gas_price
+            economic_cost_wei = eth_wei + bank_setup_gas_wei + gas_limit * gas_price
             if economic_cost_wei > budget_wei:
                 logger.warning(
                     "🏦 Banking skipped: amount plus projected gas (%.8f ETH) exceeds "
