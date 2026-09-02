@@ -11,7 +11,11 @@ from grid_bot import GridBot
 class GasAwareProfitTests(unittest.TestCase):
     def make_bot(self):
         bot = GridBot.__new__(GridBot)
-        bot.config = SimpleNamespace(gas_limit_multiplier=1.0, gas_price_multiplier=1.0)
+        bot.config = SimpleNamespace(
+            gas_limit_multiplier=1.0,
+            gas_price_multiplier=1.0,
+            gas_price_freshness_multiplier=1.0,
+        )
         bot.wallet = Mock()
         bot.wallet.w3.eth.gas_price = 400_000_000
         return bot
@@ -60,6 +64,28 @@ class GasAwareProfitTests(unittest.TestCase):
 
         self.assertEqual(gas_limit, 200_000)
         self.assertEqual(gas_price, 400_000_000)
+
+    def test_normal_price_uses_only_configured_freshness_margin(self):
+        bot = self.make_bot()
+        bot.config.gas_price_freshness_multiplier = 1.01
+        quote = SimpleNamespace(gas=200_000, gas_price=2_000_000_000)
+
+        _, gas_price = bot._swap_gas_fields(quote)
+
+        self.assertEqual(gas_price, 404_000_000)
+
+    def test_final_profit_guard_can_use_exact_broadcast_gas_plan(self):
+        bot = self.make_bot()
+        quote = SimpleNamespace(gas=200_000, gas_price=400_000_000)
+
+        required = bot._minimum_gas_aware_return_wei(
+            sold_cost_wei=1_000_000_000_000_000,
+            quote=quote,
+            min_profit_percent=2.0,
+            projected_gas_cost_wei=90_000_000_000_000,
+        )
+
+        self.assertEqual(required, 1_110_000_000_000_000)
 
     def test_setup_and_swap_gas_are_both_deducted_from_sale_profit(self):
         bot = self.make_bot()

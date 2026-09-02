@@ -150,6 +150,7 @@ class BotConfig:
     # Gas Settings
     gas_limit_multiplier: float  # Multiplier for gas limit (default: 1.05)
     gas_price_multiplier: float  # Multiplier for dynamic normal gas price (default: 1.0)
+    gas_price_freshness_multiplier: float  # Minimal margin against a rising base fee
     max_swap_gas_eth: float  # Hard maximum projected fee per swap; 0 disables
     
     # Gridless Cooldown
@@ -293,6 +294,8 @@ class BotConfig:
             raise ValueError("UNISWAP_COOLDOWN_MAX_SECONDS must be at least the base cooldown")
         if self.max_swap_gas_eth < 0:
             raise ValueError("MAX_SWAP_GAS_ETH must be non-negative")
+        if not 1 <= self.gas_price_freshness_multiplier <= 1.10:
+            raise ValueError("GAS_PRICE_FRESHNESS_MULTIPLIER must be between 1.0 and 1.10")
 
         if not 0 <= self.gridless_buy_execution_margin <= 100:
             raise ValueError("GRIDLESS_BUY_EXECUTION_MARGIN must be between 0 and 100")
@@ -418,6 +421,7 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
         # Gas Settings
         gas_limit_multiplier=float(os.getenv("GAS_LIMIT_MULTIPLIER", "1.05")),
         gas_price_multiplier=float(os.getenv("GAS_PRICE_MULTIPLIER", "1.0")),
+        gas_price_freshness_multiplier=float(os.getenv("GAS_PRICE_FRESHNESS_MULTIPLIER", "1.01")),
         max_swap_gas_eth=float(os.getenv("MAX_SWAP_GAS_ETH", "0.00004")),
         
         # Gridless Cooldown

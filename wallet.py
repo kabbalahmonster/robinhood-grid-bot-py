@@ -180,9 +180,10 @@ class Wallet:
         self._token_info_cache: dict[str, TokenInfo] = {}
 
     def normal_gas_price(self) -> int:
-        """Return Robinhood Chain's dynamic normal price with no fast premium."""
+        """Return dynamic Normal gas with a minimal anti-staleness margin."""
         multiplier = max(float(getattr(self.config, "gas_price_multiplier", 1.0)), 1.0)
-        return int(int(self.w3.eth.gas_price) * multiplier)
+        freshness = max(float(getattr(self.config, "gas_price_freshness_multiplier", 1.01)), 1.0)
+        return int(int(self.w3.eth.gas_price) * multiplier * freshness)
         
     @property
     def checksum_address(self) -> ChecksumAddress:

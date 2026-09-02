@@ -739,14 +739,20 @@ class GridBot:
         gas_limit = int((quote.gas or default_gas) * gas_limit_mult)
         normal_gas_price = int(self.wallet.w3.eth.gas_price)
         gas_price_mult = getattr(self.config, 'gas_price_multiplier', 1.0)
-        gas_price = int(normal_gas_price * max(float(gas_price_mult), 1.0))
+        freshness_mult = max(
+            float(getattr(self.config, 'gas_price_freshness_multiplier', 1.01)), 1.0
+        )
+        gas_price = int(
+            normal_gas_price * max(float(gas_price_mult), 1.0) * freshness_mult
+        )
         provider_gas_price = int(quote.gas_price or 0)
         logger.info(
             "Gas plan: strategy=normal gas_limit=%s gas_limit_multiplier=%.3f "
             "normal_gas_price=%s provider_gas_price=%s gas_price_multiplier=%.3f "
+            "freshness_multiplier=%.3f "
             "projected_fee_wei=%s",
             gas_limit, gas_limit_mult, normal_gas_price, provider_gas_price,
-            gas_price_mult, gas_limit * gas_price,
+            gas_price_mult, freshness_mult, gas_limit * gas_price,
         )
         return gas_limit, gas_price
 
@@ -775,13 +781,18 @@ class GridBot:
         )
 
     def _minimum_gas_aware_return_wei(
-        self, sold_cost_wei, quote, min_profit_percent, setup_gas_wei=0
+        self, sold_cost_wei, quote, min_profit_percent, setup_gas_wei=0,
+        projected_gas_cost_wei=None,
     ):
         """Return required to preserve principal, pay sell gas, and earn target profit."""
         minimum_profit_wei = int(int(sold_cost_wei) * (float(min_profit_percent) / 100.0))
         return (
             int(sold_cost_wei) + minimum_profit_wei + int(setup_gas_wei)
-            + self._projected_gas_cost_wei(quote)
+            + (
+                self._projected_gas_cost_wei(quote)
+                if projected_gas_cost_wei is None
+                else int(projected_gas_cost_wei)
+            )
         )
 
     def _receipt_trade_received_wei(self, result):
@@ -1786,11 +1797,15 @@ class GridBot:
         # Approval/refresh can replace both route calldata and gas estimate.
         # Re-run the economic guard against the final transaction immediately
         # before broadcast; only an explicit stop-loss may bypass profitability.
+        # Fetch Normal gas at the final broadcast boundary. The same exact
+        # price is used for both the economic guard and the signed transaction.
+        gas_limit, gas_price = self._swap_gas_fields(quote, 300000)
         if not is_stoploss:
             final_return_wei = self._taxed_quote_return_wei(quote)
             final_minimum_wei = self._minimum_gas_aware_return_wei(
                 int(round(sold_cost_eth * 10**18)), quote, min_profit,
                 setup_gas_wei=sell_setup_gas_wei,
+                projected_gas_cost_wei=gas_limit * gas_price,
             )
             if final_return_wei < final_minimum_wei:
                 logger.warning(
@@ -1801,7 +1816,6 @@ class GridBot:
         
         # Execute swap with configurable gas multipliers
         # Use API's gas price estimate if available (more accurate than network average)
-        gas_limit, gas_price = self._swap_gas_fields(quote, 300000)
         if not self._gas_within_hard_cap(gas_limit, gas_price, "sell"):
             return
 
@@ -2179,10 +2193,14 @@ class GridBot:
                 return
             quote = swap_result
 
+        # Fetch Normal gas at the final broadcast boundary. The same exact
+        # price is used for both the economic guard and the signed transaction.
+        gas_limit, gas_price = self._swap_gas_fields(quote, 300000)
         final_return_wei = self._taxed_quote_return_wei(quote)
         final_minimum_wei = self._minimum_gas_aware_return_wei(
             int(round(sold_cost_eth * 10**18)), quote, min_profit_percent,
             setup_gas_wei=sell_setup_gas_wei,
+            projected_gas_cost_wei=gas_limit * gas_price,
         )
         if final_return_wei < final_minimum_wei:
             logger.warning(
@@ -2194,7 +2212,6 @@ class GridBot:
         
         # Execute swap with checksummed addresses and configurable gas multipliers
         # Use API's gas price estimate if available (more accurate than network average)
-        gas_limit, gas_price = self._swap_gas_fields(quote, 300000)
         if not self._gas_within_hard_cap(gas_limit, gas_price, "sell"):
             return
         

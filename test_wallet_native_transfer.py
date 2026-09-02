@@ -13,6 +13,7 @@ class TestWalletNativeTransfer(unittest.TestCase):
             chain_id=4663,
             gas_limit_multiplier=1.05,
             gas_price_multiplier=1.10,
+            gas_price_freshness_multiplier=1.0,
         )
         wallet.w3 = SimpleNamespace(eth=Mock())
         wallet.w3.eth.get_transaction_count.return_value = 7
