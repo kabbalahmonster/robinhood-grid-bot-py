@@ -832,9 +832,12 @@ cannot open another one.
 Add `--restart` with `--apply` to restart the configured fleet after all
 changes succeed. Removal is refused if the resulting capacity would be below
 the bot's currently filled-position count. The command changes only
-`MAX_ACTIVE_POSITIONS` (or the legacy `MAX_POSITIONS` fallback); it never
-creates, deletes, or rewrites filled position records. Timestamped `.env`
-backups are created before applying changes.
+`MAX_ACTIVE_POSITIONS`; when a legacy bot has only `MAX_POSITIONS`, that value
+is used as its current capacity and a modern `MAX_ACTIVE_POSITIONS` override is
+appended. The legacy value remains untouched. This also lets an empty legacy
+bot freeze safely at zero without violating the positive `MAX_POSITIONS` grid
+validation. The command never creates, deletes, or rewrites filled position
+records. Timestamped `.env` backups are created before applying changes.
 
 `update-variable` previews or updates variables in every configured checkout's
 `.env`. It requires an existing variable by default, refuses duplicate

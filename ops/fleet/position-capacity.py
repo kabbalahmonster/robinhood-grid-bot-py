@@ -61,12 +61,15 @@ def main():
     variable = "MAX_ACTIVE_POSITIONS"
     current = dotenv_integer(env_path, variable)
     if current is None:
-        variable = "MAX_POSITIONS"
-        current = dotenv_integer(env_path, variable)
+        # MAX_POSITIONS is the legacy capacity setting. Read it as the
+        # effective current value, but always write MAX_ACTIVE_POSITIONS so an
+        # empty legacy bot can safely be frozen at zero without invalidating
+        # MAX_POSITIONS (which must remain positive for grid configuration).
+        current = dotenv_integer(env_path, "MAX_POSITIONS")
     if current is None:
         raise ValueError(f"{env_path}: MAX_ACTIVE_POSITIONS or MAX_POSITIONS is required")
-    if current < 1:
-        raise ValueError(f"{env_path}: current position capacity must be at least 1")
+    if current < 0:
+        raise ValueError(f"{env_path}: current position capacity must not be negative")
 
     filled = filled_positions(args.bot_dir)
     updated = filled if args.set_to_filled else current + args.delta

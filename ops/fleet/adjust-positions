@@ -168,7 +168,7 @@ for bot_dir in "${FLEET_BOT_DIRS[@]}"; do
 done
 for bot_dir in "${FLEET_BOT_DIRS[@]}"; do
   python3 "$SCRIPT_DIR/update-env-file.py" --apply --file "$bot_dir/.env" \
-    "${variables[$bot_dir]}=${updated_values[$bot_dir]}"
+    --allow-add "${variables[$bot_dir]}=${updated_values[$bot_dir]}"
 done
 
 trap - EXIT

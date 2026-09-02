@@ -108,6 +108,54 @@ class AdjustPositionsTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual((bots["earn"] / ".env").read_text(), "MAX_ACTIVE_POSITIONS=0\n")
 
+    def test_legacy_max_positions_is_preserved_and_modern_override_is_added(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bots, config = self.fixture(directory)
+            (bots["earn"] / ".env").write_text("MAX_POSITIONS=7\n")
+            result = self.run_script(
+                directory, config, "--set-to-filled", "--apply", "earn"
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("MAX_ACTIVE_POSITIONS: 7 -> 2", result.stdout)
+            self.assertEqual(
+                (bots["earn"] / ".env").read_text(),
+                "MAX_POSITIONS=7\nMAX_ACTIVE_POSITIONS=2\n",
+            )
+
+    def test_empty_legacy_bot_freezes_without_setting_max_positions_to_zero(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bots, config = self.fixture(directory)
+            (bots["earn"] / ".env").write_text("MAX_POSITIONS=7\n")
+            (bots["earn"] / "data" / "fleet_status.json").write_text(
+                json.dumps({"filled_positions": 0})
+            )
+            result = self.run_script(
+                directory, config, "--set-to-filled", "--apply", "earn"
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                (bots["earn"] / ".env").read_text(),
+                "MAX_POSITIONS=7\nMAX_ACTIVE_POSITIONS=0\n",
+            )
+
+    def test_already_frozen_empty_bot_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bots, config = self.fixture(directory)
+            (bots["earn"] / ".env").write_text(
+                "MAX_POSITIONS=7\nMAX_ACTIVE_POSITIONS=0\n"
+            )
+            (bots["earn"] / "data" / "fleet_status.json").write_text(
+                json.dumps({"filled_positions": 0})
+            )
+            result = self.run_script(
+                directory, config, "--set-to-filled", "--apply", "earn"
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                (bots["earn"] / ".env").read_text(),
+                "MAX_POSITIONS=7\nMAX_ACTIVE_POSITIONS=0\n",
+            )
+
     def test_all_is_only_valid_with_set_to_filled(self):
         with tempfile.TemporaryDirectory() as directory:
             _, config = self.fixture(directory)
