@@ -1,3 +1,6 @@
+import json
+import os
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -80,6 +83,23 @@ class GasAwareProfitTests(unittest.TestCase):
         bot.config.max_swap_gas_eth = 0.00004
 
         self.assertFalse(bot._gas_within_hard_cap(200_000, 400_000_000, "buy"))
+
+    def test_dashboard_trade_persists_confirmed_gas_fee(self):
+        bot = self.make_bot()
+        bot.dashboard_trades = []
+        bot.wallet.address = "0xwallet"
+        bot.config.token_symbol = "GME"
+        bot.config.max_active_positions = 7
+        with tempfile.TemporaryDirectory() as directory:
+            bot.dashboard_trades_file = os.path.join(directory, "trades.json")
+            bot._record_dashboard_trade(
+                "sell", 0.002, 10, 0.0002, "0xtx",
+                profit_eth=0.0001, gas_fee_eth=0.00001234,
+            )
+            with open(bot.dashboard_trades_file) as handle:
+                trades = json.load(handle)
+
+        self.assertEqual(trades[0]["gas_fee_eth"], 0.00001234)
 
 
 if __name__ == "__main__":

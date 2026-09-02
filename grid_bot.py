@@ -994,7 +994,10 @@ class GridBot:
             except OSError:
                 pass
 
-    def _record_dashboard_trade(self, side, eth_amount, token_amount, price, tx_hash, profit_eth=None):
+    def _record_dashboard_trade(
+        self, side, eth_amount, token_amount, price, tx_hash,
+        profit_eth=None, gas_fee_eth=None,
+    ):
         trade = {
             "timestamp": datetime.now().astimezone().isoformat(),
             "side": side,
@@ -1005,6 +1008,8 @@ class GridBot:
         }
         if profit_eth is not None:
             trade["profit_eth"] = float(profit_eth)
+        if gas_fee_eth is not None:
+            trade["gas_fee_eth"] = float(gas_fee_eth)
         self.dashboard_trades = (self.dashboard_trades + [trade])[-50:]
         try:
             os.makedirs(os.path.dirname(self.dashboard_trades_file), exist_ok=True)
@@ -1403,7 +1408,10 @@ class GridBot:
             buy_price = economic_cost_eth / tokens if tokens > 0 else 0
             self.session_buys += 1
             self.last_buy_time = time.time()  # Update cooldown timer
-            self._record_dashboard_trade("buy", economic_cost_eth, tokens, buy_price, result.tx_hash)
+            self._record_dashboard_trade(
+                "buy", economic_cost_eth, tokens, buy_price, result.tx_hash,
+                gas_fee_eth=buy_gas_wei / 10**18,
+            )
             
             logger.info(f"✅ Gridless buy successful! Position #{pos_id}")
             logger.info(f"   Tokens: {tokens:.6f} {self.config.token_symbol}")
@@ -1831,7 +1839,11 @@ class GridBot:
                 logger.info(f"   Moonbag: {moonbag_tokens/self.token_unit:.4f} tokens to wallet")
             
             profit_pct = (actual_profit / sold_cost_eth * 100) if sold_cost_eth > 0 else 0
-            self._record_dashboard_trade("sell", eth_received, sell_tokens, price, result.tx_hash, actual_profit)
+            total_sell_gas_wei = sell_setup_gas_wei + self._receipt_gas_cost_wei(result)
+            self._record_dashboard_trade(
+                "sell", eth_received, sell_tokens, price, result.tx_hash,
+                actual_profit, gas_fee_eth=total_sell_gas_wei / 10**18,
+            )
             logger.info(f"✅ Gridless sell successful! Profit: {actual_profit:.6f} {self.trade_token_name} ({profit_pct:+.2f}%)")
 
             self._charge_profit_fee(profit_wei, result.tx_hash)
@@ -1994,7 +2006,10 @@ class GridBot:
             
             # Track session stats
             self.session_buys += 1
-            self._record_dashboard_trade("buy", economic_cost_eth, tokens, buy_price, result.tx_hash)
+            self._record_dashboard_trade(
+                "buy", economic_cost_eth, tokens, buy_price, result.tx_hash,
+                gas_fee_eth=buy_gas_wei / 10**18,
+            )
             
             logger.info(f"✅ Buy successful!")
             logger.info(f"   Position: #{pos_id}")
@@ -2208,7 +2223,11 @@ class GridBot:
                 self.profit_tracker.record_sale(profit_wei, result.tx_hash)
             except (OSError, ValueError) as exc:
                 logger.error(f"Could not persist realized profit: {exc}")
-            self._record_dashboard_trade("sell", eth_received, sell_tokens, price, result.tx_hash, actual_profit_eth)
+            total_sell_gas_wei = sell_setup_gas_wei + self._receipt_gas_cost_wei(result)
+            self._record_dashboard_trade(
+                "sell", eth_received, sell_tokens, price, result.tx_hash,
+                actual_profit_eth, gas_fee_eth=total_sell_gas_wei / 10**18,
+            )
             
             # Position is always cleared to 0 after sell
             # Moonbag tokens go to wallet balance (not tracked in position)
