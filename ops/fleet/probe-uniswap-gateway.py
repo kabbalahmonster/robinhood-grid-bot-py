@@ -17,6 +17,7 @@ URL = "https://trade-api.gateway.uniswap.org/v1/quote"
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--env", default=".env")
+    parser.add_argument("--boundary", action="store_true")
     args = parser.parse_args()
     values = {**dotenv_values(args.env), **os.environ}
     api_key = values.get("UNISWAP_API_KEY", "")
@@ -52,9 +53,18 @@ def main():
             "x-permit2-disabled": "true",
         }),
     ]
+    if args.boundary:
+        variants = [
+            (f"body-boundary-{digits}", {}, "1" + "0" * (digits - 1))
+            for digits in (8, 9, 10, 11, 16)
+        ]
+    else:
+        variants = [(name, headers, body["amount"]) for name, headers in variants]
     encoded = json.dumps(body, separators=(",", ":"), sort_keys=True).encode()
-    print(f"Read-only /quote probe: body_bytes={len(encoded)} variants={len(variants)}")
-    for name, optional in variants:
+    print(f"Read-only /quote probe: variants={len(variants)}")
+    for name, optional, amount in variants:
+        request_body = {**body, "amount": amount}
+        encoded = json.dumps(request_body, separators=(",", ":"), sort_keys=True).encode()
         headers = {
             "x-api-key": api_key,
             "Content-Type": "application/json",
@@ -76,6 +86,7 @@ def main():
                     detail = response.text[:160]
             print(json.dumps({
                 "variant": name,
+                "body_bytes": len(encoded),
                 "status": response.status_code,
                 "elapsed_ms": elapsed,
                 "request_id": request_id,
