@@ -115,6 +115,20 @@ def test_nonretryable_primary_failure_does_not_activate_fallback():
     assert provider.name == "uniswap"
 
 
+def test_direct_transaction_call_never_activates_fallback():
+    primary_result = Result(False, "Uniswap API returned status 429")
+    primary = SwapProvider("uniswap", Client([primary_result]), PROVIDERS["uniswap"].capabilities)
+    fallback = SwapProvider("sushiswap", Client([Result(True)]), PROVIDERS["sushiswap"].capabilities)
+    provider = FallbackSwapProvider(primary, fallback)
+
+    result = provider.build_swap_transaction()
+
+    assert result is primary_result
+    assert result.success is False
+    assert "retry immediately" not in result.error
+    assert provider.name == "uniswap"
+
+
 def test_retryable_refreshed_quote_restarts_without_mixing_providers():
     class RefreshClient:
         def __init__(self, quote, refresh):

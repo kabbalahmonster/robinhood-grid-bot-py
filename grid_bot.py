@@ -23,11 +23,16 @@ from token_tax_detector import TokenTaxDetector
 
 
 def _with_swap_provider_fallback(method):
-    """Retry a complete pre-broadcast operation with its fallback provider."""
+    """Use fallback only for read-only price discovery by default.
+
+    A cheaper price source is interchangeable; an executable route is not.
+    Transaction operations therefore fail closed on their configured primary
+    provider instead of silently changing gas economics.
+    """
     @wraps(method)
     def wrapped(self, *args, **kwargs):
         runner = getattr(self.provider, "run_with_fallback", None)
-        if runner is None:
+        if runner is None or method.__name__ != "get_token_price":
             return method(self, *args, **kwargs)
         return runner(
             lambda: method(self, *args, **kwargs),
@@ -2023,6 +2028,21 @@ class GridBot:
             logger.error(f"Quote failed: {quote.error}")
             self._observe_token_tax_failure(quote, direction="sell", position_id=pos_id)
             return
+
+        # No approval may be broadcast until the quoted sale can repay its
+        # economic cost, projected swap gas, and configured minimum profit.
+        # This first guard deliberately runs before allowance inspection.
+        min_profit_percent = getattr(self.config, 'min_profit_percent', 2.0)
+        preapproval_return_wei = self._taxed_quote_return_wei(quote)
+        preapproval_minimum_wei = self._minimum_gas_aware_return_wei(
+            int(round(sold_cost_eth * 10**18)), quote, min_profit_percent
+        )
+        if preapproval_return_wei < preapproval_minimum_wei:
+            logger.warning(
+                "❌ Sell ABORTED before approval: return %.8f ETH < gas-aware minimum %.8f ETH",
+                preapproval_return_wei / 10**18, preapproval_minimum_wei / 10**18,
+            )
+            return
         
         # Determine approval spender - use quote's allowance_target if available (LI.FI)
         # otherwise fall back to zero_x_proxy (0x Protocol)
@@ -2061,7 +2081,6 @@ class GridBot:
                     return
         
         # Validate quote meets minimum profit requirement after projected gas.
-        min_profit_percent = getattr(self.config, 'min_profit_percent', 2.0)
         min_profit_eth = sold_cost_eth * (min_profit_percent / 100)
         min_return_eth = self._minimum_gas_aware_return_wei(
             int(round(sold_cost_eth * 10**18)), quote, min_profit_percent

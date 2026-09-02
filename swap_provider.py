@@ -124,7 +124,11 @@ class FallbackSwapProvider:
 
         def guarded_call(*args, **kwargs):
             result = method(*args, **kwargs)
-            self._request_retry_after_failure(method_name, result)
+            # A retry can only be requested while a complete operation is
+            # explicitly running under run_with_fallback. Direct transaction
+            # calls must fail closed on the primary provider.
+            if self._operation_retries:
+                self._request_retry_after_failure(method_name, result)
             return result
 
         return guarded_call
