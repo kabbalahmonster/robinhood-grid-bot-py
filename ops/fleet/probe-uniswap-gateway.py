@@ -20,6 +20,7 @@ def main():
     parser.add_argument("--boundary", action="store_true")
     parser.add_argument("--structure", action="store_true")
     parser.add_argument("--auth", action="store_true")
+    parser.add_argument("--isolate", action="store_true")
     args = parser.parse_args()
     values = {**dotenv_values(args.env), **os.environ}
     api_key = values.get("UNISWAP_API_KEY", "")
@@ -55,7 +56,32 @@ def main():
             "x-permit2-disabled": "true",
         }),
     ]
-    if args.auth:
+    if args.isolate:
+        control_token = "0x18E674231A58c239Dc7DaeDcffE15Ec3A24cff5c"
+        control_swapper = "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045"
+        bot_swapper = body["swapper"]
+        common_headers = {
+            "x-universal-router-version": "2.1.1",
+            "x-erc20eth-enabled": "true",
+            "x-permit2-disabled": "true",
+        }
+        variants = []
+        for token_name, token_address in (("control-token", control_token), ("bot-token", token)):
+            for swapper_name, swapper_address in (("control-swapper", control_swapper), ("bot-swapper", bot_swapper)):
+                isolate_body = {
+                    **body,
+                    "amount": "1000000000",
+                    "tokenOut": token_address,
+                    "swapper": swapper_address,
+                    "slippageTolerance": 0.5,
+                }
+                variants.append((
+                    f"isolate-{token_name}-{swapper_name}",
+                    common_headers,
+                    "",
+                    isolate_body,
+                ))
+    elif args.auth:
         mutated_key = api_key[:-1] + ("0" if api_key[-1] != "0" else "1")
         variants = [
             ("auth-real", {"x-api-key": api_key}, "", {}),
