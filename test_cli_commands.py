@@ -16,6 +16,7 @@ from grid_bot import (
     run_native_treasury_transfer,
     run_treasury_transfer,
 )
+from wallet import TransactionResult
 
 
 class TestCliCommands(unittest.TestCase):
@@ -271,6 +272,55 @@ class TestCliCommands(unittest.TestCase):
         )
         wallet.transfer_eth.assert_not_called()
         append_receipt.assert_not_called()
+
+    @patch("grid_bot._append_treasury_receipt")
+    @patch("grid_bot.Wallet")
+    @patch("grid_bot.load_config")
+    def test_native_eth_available_rebuilds_stale_gas_and_preserves_reserve(
+        self, load_config, wallet_class, append_receipt
+    ):
+        load_config.return_value = SimpleNamespace(
+            treasury_allowed_recipients=["0x0000000000000000000000000000000000000004"],
+            eth_gas_reserve=0.0006,
+            chain_id=4663,
+        )
+        wallet = wallet_class.return_value
+        wallet.address = "0x0000000000000000000000000000000000000002"
+        wallet.get_eth_balance_wei.return_value = 2_000_000_000_000_000
+        wallet.address_has_code.return_value = False
+        wallet.build_eth_transfer_transaction.side_effect = [
+            {"gas": 21_000, "gasPrice": 1_000_000_000, "value": 1},
+            {"gas": 21_000, "gasPrice": 2_000_000_000, "value": 1},
+        ]
+        wallet.transfer_eth.side_effect = [
+            TransactionResult(
+                success=False,
+                error="max fee per gas less than block base fee",
+            ),
+            TransactionResult(success=True, tx_hash="0xconfirmed"),
+        ]
+        wallet.is_base_fee_too_low_error.return_value = True
+        args = SimpleNamespace(
+            recipient="0x0000000000000000000000000000000000000004",
+            amount="available",
+            confirm_recipient=None,
+            confirm_liquidate=False,
+            execute=True,
+            confirm_bot_stopped=True,
+        )
+
+        self.assertEqual(run_native_treasury_transfer(args), 0)
+        self.assertEqual(wallet.transfer_eth.call_count, 2)
+        retry_tx = wallet.transfer_eth.call_args_list[1].args[0]
+        self.assertEqual(retry_tx["value"], 1_358_000_000_000_000)
+        self.assertEqual(
+            retry_tx["value"] + retry_tx["gas"] * retry_tx["gasPrice"]
+            + 600_000_000_000_000,
+            2_000_000_000_000_000,
+        )
+        receipt = append_receipt.call_args.args[0]
+        self.assertEqual(receipt["amount"], "0.001358")
+        self.assertEqual(receipt["estimated_max_gas_eth"], "0.000042")
 
     @patch("grid_bot.Wallet")
     @patch("grid_bot.load_config")

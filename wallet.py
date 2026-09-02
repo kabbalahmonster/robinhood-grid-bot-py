@@ -183,7 +183,23 @@ class Wallet:
         """Return dynamic Normal gas with a minimal anti-staleness margin."""
         multiplier = max(float(getattr(self.config, "gas_price_multiplier", 1.0)), 1.0)
         freshness = max(float(getattr(self.config, "gas_price_freshness_multiplier", 1.01)), 1.0)
-        return int(int(self.w3.eth.gas_price) * multiplier * freshness)
+        rpc_gas_price = int(self.w3.eth.gas_price)
+        try:
+            latest_block = self.w3.eth.get_block("latest")
+            base_fee = int(latest_block.get("baseFeePerGas") or 0)
+        except Exception as exc:
+            self.logger.warning("Could not refresh latest block base fee: %s", exc)
+            base_fee = 0
+        return int(max(rpc_gas_price, base_fee) * multiplier * freshness)
+
+    @staticmethod
+    def is_base_fee_too_low_error(error: Optional[str]) -> bool:
+        """Identify an RPC pre-broadcast rejection caused by stale fee data."""
+        message = str(error or "").lower()
+        return (
+            "max fee per gas less than block base fee" in message
+            or "fee cap less than block base fee" in message
+        )
         
     @property
     def checksum_address(self) -> ChecksumAddress:
@@ -304,19 +320,32 @@ class Wallet:
             address=Web3.to_checksum_address(token_address),
             abi=ERC20_ABI,
         )
-        gas_price = self.normal_gas_price()
-        tx = token.functions.transfer(
-            Web3.to_checksum_address(recipient),
-            amount,
-        ).build_transaction({
-            "from": self.address,
-            "nonce": self.w3.eth.get_transaction_count(self.address),
-            # ERC-20 transfers generally consume far less; this leaves room
-            # for non-standard but compatible token implementations.
-            "gas": 100000,
-            "gasPrice": gas_price,
-        })
-        return self._send_transaction(tx, wait_for_receipt)
+        for attempt in range(2):
+            tx = token.functions.transfer(
+                Web3.to_checksum_address(recipient),
+                amount,
+            ).build_transaction({
+                "from": self.address,
+                "nonce": self.w3.eth.get_transaction_count(self.address, "pending"),
+                # ERC-20 transfers generally consume far less; this leaves room
+                # for non-standard but compatible token implementations.
+                "gas": 100000,
+                "gasPrice": self.normal_gas_price(),
+            })
+            result = self._send_transaction(tx, wait_for_receipt)
+            if (
+                attempt == 0
+                and not result.success
+                and not result.tx_hash
+                and self.is_base_fee_too_low_error(result.error)
+            ):
+                self.logger.warning(
+                    "ERC-20 transfer rejected before broadcast because gas became stale; "
+                    "rebuilding once with current base fee"
+                )
+                continue
+            return result
+        raise AssertionError("unreachable")
 
     def build_eth_transfer_transaction(self, recipient: str, amount_wei: int) -> TxParams:
         """Build an exact native-ETH transfer with buffered current gas values.

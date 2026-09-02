@@ -1156,6 +1156,12 @@ exact amount, cover the estimated maximum transaction fee, and still retain
 `ETH_GAS_RESERVE`. Successful and failed broadcasts use the same local
 `data/treasury_transfers.json` audit trail as ERC-20 transfers.
 
+Maintenance transfers floor gas against the latest block base fee. A specific
+pre-broadcast `max fee per gas less than block base fee` rejection rebuilds and
+retries once with a pending nonce and fresh gas. Native calculated transfers
+also recalculate their value and recheck the reserve; no transfer is retried
+after the RPC has returned a transaction hash.
+
 Native `--amount all` is an explicit liquidation mode. It requires
 `--confirm-liquidate` even for planning, bypasses `ETH_GAS_RESERVE`, and sends
 the current balance minus the buffered maximum fee calculated for the

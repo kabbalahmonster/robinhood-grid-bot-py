@@ -220,7 +220,6 @@ def run_native_treasury_transfer(args):
         wallet = Wallet(config)
         recipient, recipient_is_allowed = _validated_treasury_recipient(config, wallet, args)
 
-        balance_wei = wallet.get_eth_balance_wei()
         liquidate = args.amount == "all"
         sweep_available = args.amount == "available"
         if liquidate and not args.confirm_liquidate:
@@ -233,46 +232,56 @@ def run_native_treasury_transfer(args):
                     "Calculated native ETH transfer to a contract is forbidden because its "
                     "receive-gas requirement may differ from the estimate"
                 )
-            # A one-wei EOA transfer provides the gas estimate without first
-            # constructing an unaffordable balance-sized transaction.
-            tx = wallet.build_eth_transfer_transaction(recipient, 1)
+            requested_amount_wei = None
         else:
             if args.confirm_liquidate:
                 raise ValueError("--confirm-liquidate is valid only with --amount all")
             requested = Decimal(args.amount)
             if not requested.is_finite() or requested <= 0:
                 raise ValueError("--amount must be a positive decimal ETH amount or 'all'")
-            amount_wei = int(requested * Decimal(10**18))
-            if amount_wei <= 0:
+            requested_amount_wei = int(requested * Decimal(10**18))
+            if requested_amount_wei <= 0:
                 raise ValueError("--amount is below one wei")
-            tx = wallet.build_eth_transfer_transaction(recipient, amount_wei)
 
-        fee_wei = int(tx["gas"]) * int(tx["gasPrice"])
-        if liquidate:
-            amount_wei = balance_wei - fee_wei
-            if amount_wei <= 0:
-                raise ValueError("ETH balance does not cover the estimated maximum transfer fee")
-            tx["value"] = amount_wei
-            reserve_wei = 0
-        elif sweep_available:
-            reserve_wei = int(Decimal(str(config.eth_gas_reserve)) * Decimal(10**18))
-            amount_wei = balance_wei - fee_wei - reserve_wei
-            if amount_wei <= 0:
-                print(
-                    "NATIVE ETH TREASURY TRANSFER SKIPPED: balance does not exceed "
-                    "the estimated maximum transfer fee plus "
-                    f"ETH_GAS_RESERVE={config.eth_gas_reserve}"
-                )
-                return 0
-            tx["value"] = amount_wei
-        else:
-            reserve_wei = int(Decimal(str(config.eth_gas_reserve)) * Decimal(10**18))
-        required_wei = amount_wei + fee_wei + reserve_wei
-        if required_wei > balance_wei:
-            raise ValueError(
-                "Insufficient ETH to send the requested amount while paying the "
-                f"estimated maximum fee and retaining ETH_GAS_RESERVE={config.eth_gas_reserve}"
+        def build_plan():
+            balance_wei = wallet.get_eth_balance_wei()
+            # A one-wei EOA transfer provides the gas estimate without first
+            # constructing an unaffordable balance-sized transaction.
+            initial_value = 1 if liquidate or sweep_available else requested_amount_wei
+            tx = wallet.build_eth_transfer_transaction(recipient, initial_value)
+            fee_wei = int(tx["gas"]) * int(tx["gasPrice"])
+            reserve_wei = (
+                0 if liquidate
+                else int(Decimal(str(config.eth_gas_reserve)) * Decimal(10**18))
             )
+            if liquidate:
+                amount_wei = balance_wei - fee_wei
+                if amount_wei <= 0:
+                    raise ValueError("ETH balance does not cover the estimated maximum transfer fee")
+                tx["value"] = amount_wei
+            elif sweep_available:
+                amount_wei = balance_wei - fee_wei - reserve_wei
+                if amount_wei <= 0:
+                    return None
+                tx["value"] = amount_wei
+            else:
+                amount_wei = requested_amount_wei
+            if amount_wei + fee_wei + reserve_wei > balance_wei:
+                raise ValueError(
+                    "Insufficient ETH to send the requested amount while paying the "
+                    f"estimated maximum fee and retaining ETH_GAS_RESERVE={config.eth_gas_reserve}"
+                )
+            return tx, balance_wei, amount_wei, fee_wei, reserve_wei
+
+        plan = build_plan()
+        if plan is None:
+            print(
+                "NATIVE ETH TREASURY TRANSFER SKIPPED: balance does not exceed "
+                "the estimated maximum transfer fee plus "
+                f"ETH_GAS_RESERVE={config.eth_gas_reserve}"
+            )
+            return 0
+        tx, balance_wei, amount_wei, fee_wei, reserve_wei = plan
 
         amount = Decimal(amount_wei) / Decimal(10**18)
         balance = Decimal(balance_wei) / Decimal(10**18)
@@ -299,6 +308,26 @@ def run_native_treasury_transfer(args):
             )
 
         result = wallet.transfer_eth(tx, wait_for_receipt=True)
+        if (
+            not result.success
+            and not result.tx_hash
+            and wallet.is_base_fee_too_low_error(result.error)
+        ):
+            print(
+                "Transfer gas became stale before broadcast; rebuilding once with "
+                "the current base fee and rechecking the reserve."
+            )
+            plan = build_plan()
+            if plan is None:
+                print(
+                    "NATIVE ETH TREASURY TRANSFER SKIPPED: refreshed gas leaves no "
+                    "surplus above ETH_GAS_RESERVE"
+                )
+                return 0
+            tx, balance_wei, amount_wei, fee_wei, reserve_wei = plan
+            amount = Decimal(amount_wei) / Decimal(10**18)
+            fee = Decimal(fee_wei) / Decimal(10**18)
+            result = wallet.transfer_eth(tx, wait_for_receipt=True)
         record = {
             "timestamp": datetime.now().astimezone().isoformat(),
             "wallet": wallet.address,
