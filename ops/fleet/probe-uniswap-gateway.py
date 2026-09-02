@@ -21,6 +21,8 @@ def main():
     parser.add_argument("--structure", action="store_true")
     parser.add_argument("--auth", action="store_true")
     parser.add_argument("--isolate", action="store_true")
+    parser.add_argument("--transport", action="store_true")
+    parser.add_argument("--rounds", type=int, default=3)
     args = parser.parse_args()
     values = {**dotenv_values(args.env), **os.environ}
     api_key = values.get("UNISWAP_API_KEY", "")
@@ -56,7 +58,53 @@ def main():
             "x-permit2-disabled": "true",
         }),
     ]
-    if args.isolate:
+    if args.rounds < 1:
+        parser.error("--rounds must be at least 1")
+
+    if args.transport:
+        integration_headers = {
+            "x-universal-router-version": "2.1.1",
+            "x-erc20eth-enabled": "true",
+            "x-permit2-disabled": "true",
+        }
+        safe_transport = {
+            "User-Agent": "curl/8.0",
+            "Accept-Encoding": "identity",
+            "Accept": "*/*",
+            "Connection": "close",
+        }
+        transport_variants = [
+            ("transport-safe", safe_transport),
+            ("transport-python-user-agent", {
+                **safe_transport,
+                "User-Agent": "python-requests/2.31.0",
+            }),
+            ("transport-zstd-encoding", {
+                **safe_transport,
+                "Accept-Encoding": "gzip, deflate, zstd",
+            }),
+            ("transport-keep-alive", {
+                **safe_transport,
+                "Connection": "keep-alive",
+            }),
+            ("transport-requests-wire", {
+                **safe_transport,
+                "User-Agent": "python-requests/2.31.0",
+                "Accept-Encoding": "gzip, deflate, zstd",
+                "Connection": "keep-alive",
+            }),
+        ]
+        variants = [
+            (
+                f"{name}-round-{round_number}",
+                {**integration_headers, **transport_headers},
+                body["amount"],
+                None,
+            )
+            for round_number in range(1, args.rounds + 1)
+            for name, transport_headers in transport_variants
+        ]
+    elif args.isolate:
         control_token = "0x18E674231A58c239Dc7DaeDcffE15Ec3A24cff5c"
         control_swapper = "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045"
         bot_swapper = body["swapper"]
