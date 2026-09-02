@@ -18,6 +18,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--env", default=".env")
     parser.add_argument("--boundary", action="store_true")
+    parser.add_argument("--structure", action="store_true")
     args = parser.parse_args()
     values = {**dotenv_values(args.env), **os.environ}
     api_key = values.get("UNISWAP_API_KEY", "")
@@ -53,17 +54,32 @@ def main():
             "x-permit2-disabled": "true",
         }),
     ]
-    if args.boundary:
+    if args.structure:
+        ordered = [
+            ("type", body["type"]),
+            ("amount", body["amount"]),
+            ("tokenInChainId", body["tokenInChainId"]),
+            ("tokenOutChainId", body["tokenOutChainId"]),
+            ("tokenIn", body["tokenIn"]),
+            ("tokenOut", body["tokenOut"]),
+            ("swapper", body["swapper"]),
+        ]
+        partial = {}
+        variants = [("structure-empty", {}, "", {})]
+        for key, value in ordered:
+            partial[key] = value
+            variants.append((f"structure-through-{key}", {}, "", dict(partial)))
+    elif args.boundary:
         variants = [
-            (f"body-boundary-{digits}", {}, "1" + "0" * (digits - 1))
+            (f"body-boundary-{digits}", {}, "1" + "0" * (digits - 1), None)
             for digits in (8, 9, 10, 11, 16)
         ]
     else:
-        variants = [(name, headers, body["amount"]) for name, headers in variants]
+        variants = [(name, headers, body["amount"], None) for name, headers in variants]
     encoded = json.dumps(body, separators=(",", ":"), sort_keys=True).encode()
     print(f"Read-only /quote probe: variants={len(variants)}")
-    for name, optional, amount in variants:
-        request_body = {**body, "amount": amount}
+    for name, optional, amount, explicit_body in variants:
+        request_body = explicit_body if explicit_body is not None else {**body, "amount": amount}
         encoded = json.dumps(request_body, separators=(",", ":"), sort_keys=True).encode()
         headers = {
             "x-api-key": api_key,
