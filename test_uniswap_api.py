@@ -134,6 +134,8 @@ class TestUniswapAPIClient(unittest.TestCase):
 
         self.assertTrue(result.success)
         self.assertEqual(post.call_count, 2)
+        self.assertEqual(post.call_args_list[0].kwargs["headers"]["User-Agent"], "curl/8.0")
+        self.assertEqual(post.call_args_list[1].kwargs["headers"]["User-Agent"], "curl/8.0")
         self.assertEqual(post.call_args_list[0].kwargs["headers"]["Connection"], "close")
         self.assertEqual(post.call_args_list[1].kwargs["headers"]["Connection"], "close")
 

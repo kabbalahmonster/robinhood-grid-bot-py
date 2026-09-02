@@ -94,6 +94,13 @@ class UniswapAPIClient:
     def _get_headers(self) -> dict:
         """Return a fresh copy of the request headers."""
         headers = self.headers.copy()
+        # Cloudflare's Uniswap gateway intermittently rejects otherwise
+        # identical requests carrying Requests' default Python user agent with
+        # a bogus 409 ("client packet length exceeds 255 buffer").  A curl
+        # user agent was verified against the same payload and transport
+        # headers, while zstd encoding and keep-alive were independently
+        # cleared by the diagnostic matrix.
+        headers["User-Agent"] = "curl/8.0"
         # Be explicit: the gateway packet 409 is a transport/proxy failure and
         # must never be coupled to a potentially stale pooled connection.
         headers["Connection"] = "close"
