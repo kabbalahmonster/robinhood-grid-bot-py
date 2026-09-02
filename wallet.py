@@ -7,6 +7,7 @@ including approvals via Permit2.
 
 import time
 import logging
+import re
 from typing import Optional, Any
 from dataclasses import dataclass
 from eth_account import Account
@@ -179,18 +180,22 @@ class Wallet:
         # Initialize token contracts
         self._token_info_cache: dict[str, TokenInfo] = {}
 
-    def normal_gas_price(self) -> int:
+    def normal_gas_price(self, minimum_base_fee: int = 0) -> int:
         """Return dynamic Normal gas with a minimal anti-staleness margin."""
         multiplier = max(float(getattr(self.config, "gas_price_multiplier", 1.0)), 1.0)
         freshness = max(float(getattr(self.config, "gas_price_freshness_multiplier", 1.01)), 1.0)
         rpc_gas_price = int(self.w3.eth.gas_price)
         try:
             latest_block = self.w3.eth.get_block("latest")
-            base_fee = int(latest_block.get("baseFeePerGas") or 0)
+            pending_block = self.w3.eth.get_block("pending")
+            base_fee = max(
+                int(latest_block.get("baseFeePerGas") or 0),
+                int(pending_block.get("baseFeePerGas") or 0),
+            )
         except Exception as exc:
             self.logger.warning("Could not refresh latest block base fee: %s", exc)
             base_fee = 0
-        return int(max(rpc_gas_price, base_fee) * multiplier * freshness)
+        return int(max(rpc_gas_price, base_fee, int(minimum_base_fee)) * multiplier * freshness)
 
     @staticmethod
     def is_base_fee_too_low_error(error: Optional[str]) -> bool:
@@ -200,6 +205,12 @@ class Wallet:
             "max fee per gas less than block base fee" in message
             or "fee cap less than block base fee" in message
         )
+
+    @staticmethod
+    def base_fee_from_error(error: Optional[str]) -> int:
+        """Extract the node's current base fee from an underpriced rejection."""
+        matches = re.findall(r"basefee\s*:\s*(\d+)", str(error or ""), flags=re.IGNORECASE)
+        return int(matches[-1]) if matches else 0
         
     @property
     def checksum_address(self) -> ChecksumAddress:
@@ -320,6 +331,7 @@ class Wallet:
             address=Web3.to_checksum_address(token_address),
             abi=ERC20_ABI,
         )
+        rejected_base_fee = 0
         for attempt in range(2):
             tx = token.functions.transfer(
                 Web3.to_checksum_address(recipient),
@@ -330,7 +342,7 @@ class Wallet:
                 # ERC-20 transfers generally consume far less; this leaves room
                 # for non-standard but compatible token implementations.
                 "gas": 100000,
-                "gasPrice": self.normal_gas_price(),
+                "gasPrice": self.normal_gas_price(rejected_base_fee),
             })
             result = self._send_transaction(tx, wait_for_receipt)
             if (
@@ -343,11 +355,20 @@ class Wallet:
                     "ERC-20 transfer rejected before broadcast because gas became stale; "
                     "rebuilding once with current base fee"
                 )
+                # The rejecting node is the most authoritative observation.
+                # Give its reported base fee a 2% surge margin on the rebuild.
+                reported_base_fee = self.base_fee_from_error(result.error)
+                rejected_base_fee = (reported_base_fee * 102 + 99) // 100
                 continue
             return result
         raise AssertionError("unreachable")
 
-    def build_eth_transfer_transaction(self, recipient: str, amount_wei: int) -> TxParams:
+    def build_eth_transfer_transaction(
+        self,
+        recipient: str,
+        amount_wei: int,
+        minimum_base_fee: int = 0,
+    ) -> TxParams:
         """Build an exact native-ETH transfer with buffered current gas values.
 
         Policy checks such as recipient allowlists, stopped-bot confirmation,
@@ -373,7 +394,7 @@ class Wallet:
         estimated_gas = int(self.w3.eth.estimate_gas(tx))
         gas_multiplier = max(float(self.config.gas_limit_multiplier), 1.0)
         tx["gas"] = max(estimated_gas, int(estimated_gas * gas_multiplier))
-        tx["gasPrice"] = self.normal_gas_price()
+        tx["gasPrice"] = self.normal_gas_price(minimum_base_fee)
         return tx
 
     def transfer_eth(self, tx: TxParams, wait_for_receipt: bool = True) -> TransactionResult:

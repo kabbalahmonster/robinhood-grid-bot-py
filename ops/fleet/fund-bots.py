@@ -4,6 +4,7 @@
 import argparse
 import json
 import os
+import re
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -40,11 +41,15 @@ def load_env(path):
     return values
 
 
-def current_gas_price(w3, freshness=Decimal("1.01")):
+def current_gas_price(w3, freshness=Decimal("1.01"), minimum_base_fee=0):
     rpc_price = int(w3.eth.gas_price)
-    block = w3.eth.get_block("latest")
-    base_fee = int(block.get("baseFeePerGas") or 0)
-    return int(Decimal(max(rpc_price, base_fee)) * freshness)
+    latest = w3.eth.get_block("latest")
+    pending = w3.eth.get_block("pending")
+    base_fee = max(
+        int(latest.get("baseFeePerGas") or 0),
+        int(pending.get("baseFeePerGas") or 0),
+    )
+    return int(Decimal(max(rpc_price, base_fee, int(minimum_base_fee))) * freshness)
 
 
 def stale_base_fee_error(exc):
@@ -53,6 +58,11 @@ def stale_base_fee_error(exc):
         "max fee per gas less than block base fee" in message
         or "fee cap less than block base fee" in message
     )
+
+
+def base_fee_from_error(exc):
+    matches = re.findall(r"basefee\s*:\s*(\d+)", str(exc), flags=re.IGNORECASE)
+    return int(matches[-1]) if matches else 0
 
 
 def destination_from_env(path):
@@ -80,8 +90,9 @@ def append_receipt(record, path="data/fleet_funding.json"):
 
 def send_top_up(w3, account, recipient, amount_wei, chain_id, reserve_wei):
     """Send once, rebuilding exactly once after a pre-broadcast stale-fee rejection."""
+    rejected_base_fee = 0
     for attempt in range(2):
-        gas_price = current_gas_price(w3)
+        gas_price = current_gas_price(w3, minimum_base_fee=rejected_base_fee)
         gas = 21_000
         if amount_wei + gas * gas_price + reserve_wei > int(w3.eth.get_balance(account.address)):
             raise ValueError("Treasury balance no longer covers transfer gas and reserve")
@@ -100,6 +111,8 @@ def send_top_up(w3, account, recipient, amount_wei, chain_id, reserve_wei):
             tx_hash = w3.eth.send_raw_transaction(raw)
         except Exception as exc:
             if attempt == 0 and stale_base_fee_error(exc):
+                reported_base_fee = base_fee_from_error(exc)
+                rejected_base_fee = (reported_base_fee * 102 + 99) // 100
                 print("  Gas became stale before broadcast; rebuilding once.")
                 continue
             raise

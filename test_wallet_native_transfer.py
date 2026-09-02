@@ -60,7 +60,7 @@ class TestWalletNativeTransfer(unittest.TestCase):
         wallet._send_transaction = Mock(side_effect=[
             TransactionResult(
                 success=False,
-                error="max fee per gas less than block base fee",
+                error="max fee per gas less than block base fee: baseFee: 4322480000",
             ),
             TransactionResult(success=True, tx_hash="0xabc"),
         ])
@@ -74,6 +74,7 @@ class TestWalletNativeTransfer(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertEqual(transfer.build_transaction.call_count, 2)
         self.assertEqual(wallet._send_transaction.call_count, 2)
+        self.assertEqual(wallet.normal_gas_price.call_args_list[1].args, (4_408_929_600,))
         self.assertEqual(
             wallet._send_transaction.call_args_list[1].args[0]["gasPrice"],
             386_024_020,

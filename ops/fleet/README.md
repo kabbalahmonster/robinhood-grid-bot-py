@@ -692,10 +692,11 @@ transfer fee`. This calculated mode is restricted to an externally owned
 recipient. After reviewing the complete fleet plan, stop the fleet and repeat
 with `--execute --confirm-fleet-stopped`.
 
-Gas is floored against the latest block base fee. If the RPC still rejects an
+Gas is floored against the latest and pending block base fees. If the RPC still rejects an
 ERC-20 or native transfer before broadcast because the block base fee overtook
-the prepared fee, the command refreshes the nonce and gas and retries exactly
-once. Native `available` and `all` modes also recalculate the send amount and
+the prepared fee, the command uses the rejection's reported base fee plus a
+surge margin, refreshes the nonce, and retries exactly once. Native `available`
+and `all` modes also recalculate the send amount and
 revalidate the reserve. A transaction that received a hash is never retried.
 
 For another ERC-20, use its contract address and either an exact token amount

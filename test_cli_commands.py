@@ -295,11 +295,12 @@ class TestCliCommands(unittest.TestCase):
         wallet.transfer_eth.side_effect = [
             TransactionResult(
                 success=False,
-                error="max fee per gas less than block base fee",
+                error="max fee per gas less than block base fee: baseFee: 4322480000",
             ),
             TransactionResult(success=True, tx_hash="0xconfirmed"),
         ]
         wallet.is_base_fee_too_low_error.return_value = True
+        wallet.base_fee_from_error.return_value = 4_322_480_000
         args = SimpleNamespace(
             recipient="0x0000000000000000000000000000000000000004",
             amount="available",
@@ -311,6 +312,10 @@ class TestCliCommands(unittest.TestCase):
 
         self.assertEqual(run_native_treasury_transfer(args), 0)
         self.assertEqual(wallet.transfer_eth.call_count, 2)
+        self.assertEqual(
+            wallet.build_eth_transfer_transaction.call_args_list[1].kwargs,
+            {"minimum_base_fee": 4_408_929_600},
+        )
         retry_tx = wallet.transfer_eth.call_args_list[1].args[0]
         self.assertEqual(retry_tx["value"], 1_358_000_000_000_000)
         self.assertEqual(

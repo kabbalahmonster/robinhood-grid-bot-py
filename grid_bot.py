@@ -243,12 +243,14 @@ def run_native_treasury_transfer(args):
             if requested_amount_wei <= 0:
                 raise ValueError("--amount is below one wei")
 
-        def build_plan():
+        def build_plan(minimum_base_fee=0):
             balance_wei = wallet.get_eth_balance_wei()
             # A one-wei EOA transfer provides the gas estimate without first
             # constructing an unaffordable balance-sized transaction.
             initial_value = 1 if liquidate or sweep_available else requested_amount_wei
-            tx = wallet.build_eth_transfer_transaction(recipient, initial_value)
+            tx = wallet.build_eth_transfer_transaction(
+                recipient, initial_value, minimum_base_fee=minimum_base_fee
+            )
             fee_wei = int(tx["gas"]) * int(tx["gasPrice"])
             reserve_wei = (
                 0 if liquidate
@@ -317,7 +319,9 @@ def run_native_treasury_transfer(args):
                 "Transfer gas became stale before broadcast; rebuilding once with "
                 "the current base fee and rechecking the reserve."
             )
-            plan = build_plan()
+            rejected_base_fee = wallet.base_fee_from_error(result.error)
+            retry_floor = (rejected_base_fee * 102 + 99) // 100
+            plan = build_plan(retry_floor)
             if plan is None:
                 print(
                     "NATIVE ETH TREASURY TRANSFER SKIPPED: refreshed gas leaves no "

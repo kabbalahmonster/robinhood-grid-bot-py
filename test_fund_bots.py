@@ -41,7 +41,7 @@ class TestFundBots(unittest.TestCase):
         tx_hash = Mock()
         tx_hash.hex.return_value = "0xconfirmed"
         w3.eth.send_raw_transaction.side_effect = [
-            ValueError("max fee per gas less than block base fee"),
+            ValueError("max fee per gas less than block base fee: baseFee: 4322480000"),
             tx_hash,
         ]
         w3.eth.wait_for_transaction_receipt.return_value = {"status": 1}
@@ -60,6 +60,7 @@ class TestFundBots(unittest.TestCase):
 
         self.assertEqual(result, "0xconfirmed")
         self.assertEqual(tx["nonce"], 9)
+        self.assertGreaterEqual(tx["gasPrice"], 4_408_929_600)
         self.assertEqual(w3.eth.send_raw_transaction.call_count, 2)
 
     def test_send_top_up_rechecks_reserve_before_signing(self):
