@@ -71,7 +71,7 @@ class TestUniswapAPIClient(unittest.TestCase):
             self.assertIn("cooldown active", second.error)
             self.assertEqual(post.call_count, 1)
 
-    def test_gateway_packet_409_retries_fresh_without_shared_cooldown(self):
+    def test_gateway_packet_409_retries_then_starts_shared_cooldown(self):
         with tempfile.TemporaryDirectory() as directory:
             config = SimpleNamespace(
                 uniswap_api_key="test-key",
@@ -99,9 +99,8 @@ class TestUniswapAPIClient(unittest.TestCase):
                 )
 
             self.assertIn("status 409", first.error)
-            self.assertIn("status 409", second.error)
-            self.assertNotIn("cooldown active", second.error)
-            self.assertEqual(post.call_count, 4)
+            self.assertIn("cooldown active", second.error)
+            self.assertEqual(post.call_count, 2)
 
     def test_gateway_packet_409_succeeds_on_one_fresh_retry(self):
         config = SimpleNamespace(

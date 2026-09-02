@@ -125,8 +125,8 @@ class SharedRateLimiter:
             except (TypeError, ValueError, OverflowError):
                 return None
 
-    def record_rate_limit(self, retry_after: str = "") -> int:
-        """Publish a 429 cooldown for every process using this credential."""
+    def record_provider_failure(self, retry_after: str = "") -> int:
+        """Publish an exponential provider cooldown across all processes."""
         with self._open_locked() as handle:
             state = self._read(handle)
             now = self.clock()
@@ -145,6 +145,10 @@ class SharedRateLimiter:
             self._write(handle, state)
             self._owns_probe_lease = False
             return max(1, int(cooldown_until - now + 0.999))
+
+    def record_rate_limit(self, retry_after: str = "") -> int:
+        """Publish a 429 cooldown for every process using this credential."""
+        return self.record_provider_failure(retry_after)
 
     def record_success(self) -> None:
         """Clear exponential strikes after a request succeeds."""

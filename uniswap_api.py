@@ -10,6 +10,7 @@ Docs: https://developers.uniswap.org/docs/api-reference
 import json
 import hashlib
 import logging
+import shlex
 import time
 from typing import Optional, Any
 from dataclasses import dataclass
@@ -148,7 +149,29 @@ class UniswapAPIClient:
                 or getattr(response, "headers", {}).get("request-id") or "",
                 safe_headers,
             )
-            if not self._is_gateway_packet_failure(response) or attempt == 2:
+            if not self._is_gateway_packet_failure(response):
+                return response
+            if attempt == 2:
+                replay_headers = " ".join(
+                    f"--header {shlex.quote(f'{key}: {value}')}"
+                    for key, value in self._get_headers().items()
+                    if key.lower() != "x-api-key"
+                )
+                replay_headers += ' --header "x-api-key: ${UNISWAP_API_KEY}"'
+                self.logger.error(
+                    "Exact failed Uniswap request (API key omitted): "
+                    "UNISWAP_API_KEY=<load-from-env> curl --request POST --url %s "
+                    "%s --data-binary %s",
+                    url,
+                    replay_headers,
+                    shlex.quote(encoded.decode("utf-8")),
+                )
+                wait_seconds = self.rate_limiter.record_provider_failure()
+                self.logger.warning(
+                    "Uniswap Robinhood gateway packet failure confirmed twice; "
+                    "quarantining primary fleet-wide for %ss before one recovery probe",
+                    wait_seconds,
+                )
                 return response
             self.logger.warning(
                 "Uniswap transient gateway packet 409; retrying once on a fresh "
