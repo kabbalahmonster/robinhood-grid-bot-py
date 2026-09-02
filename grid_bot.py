@@ -541,6 +541,10 @@ class GridBot:
         self.last_buy_time = 0
         self.gridless_buy_cooldown = getattr(self.config, 'gridless_buy_cooldown_seconds', 300)  # Default 5 min
         self.last_taxed_token_failure_time = 0
+        # Funding warnings are discovered after the dashboard report and then
+        # carried into the following cycle. Initialize the first-cycle value so
+        # a fresh bot can report before any buy check has created a warning.
+        self._funding_warning = None
         
         # Trading token setup (WETH or native ETH)
         if getattr(self.config, 'use_eth_trading', False):
