@@ -729,23 +729,59 @@ class GridBot:
 
     def _projected_gas_cost_wei(self, quote, default_gas=300000):
         """Conservative native-ETH cost of broadcasting a prepared swap."""
-        gas_limit_mult = getattr(self.config, 'gas_limit_multiplier', 1.05)
-        gas_price_mult = getattr(self.config, 'gas_price_multiplier', 1.05)
-        gas_limit = int((quote.gas or default_gas) * gas_limit_mult)
-        if quote.gas_price and quote.gas_price > 0:
-            gas_price = int(quote.gas_price * gas_price_mult)
-        else:
-            gas_price = int(self.wallet.w3.eth.gas_price * gas_price_mult)
+        gas_limit, gas_price = self._swap_gas_fields(quote, default_gas)
         return gas_limit * gas_price
 
-    def _net_sale_profit_wei(self, received_wei, sold_cost_wei, result):
-        """Economic profit after position cost basis and confirmed sell gas."""
-        return int(received_wei) - int(sold_cost_wei) - self._receipt_gas_cost_wei(result)
+    def _swap_gas_fields(self, quote, default_gas=300000):
+        """Return the exact gas limit/price used for economics and broadcast.
 
-    def _minimum_gas_aware_return_wei(self, sold_cost_wei, quote, min_profit_percent):
+        Robinhood Chain's sequencer is first-come-first-served, so paying a
+        provider's "fast" recommendation does not buy useful priority. The RPC
+        ``eth_gasPrice`` value is the dynamic normal/network price. A configured
+        multiplier remains available for operators, but defaults to no premium.
+        """
+        gas_limit_mult = getattr(self.config, 'gas_limit_multiplier', 1.05)
+        gas_limit = int((quote.gas or default_gas) * gas_limit_mult)
+        normal_gas_price = int(self.wallet.w3.eth.gas_price)
+        gas_price_mult = getattr(self.config, 'gas_price_multiplier', 1.0)
+        gas_price = int(normal_gas_price * max(float(gas_price_mult), 1.0))
+        provider_gas_price = int(quote.gas_price or 0)
+        logger.info(
+            "Gas plan: strategy=normal gas_limit=%s gas_limit_multiplier=%.3f "
+            "normal_gas_price=%s provider_gas_price=%s gas_price_multiplier=%.3f "
+            "projected_fee_wei=%s",
+            gas_limit, gas_limit_mult, normal_gas_price, provider_gas_price,
+            gas_price_mult, gas_limit * gas_price,
+        )
+        return gas_limit, gas_price
+
+    def _gas_within_hard_cap(self, gas_limit, gas_price, operation):
+        cap_eth = float(getattr(self.config, "max_swap_gas_eth", 0.00004))
+        projected_wei = int(gas_limit) * int(gas_price)
+        if cap_eth <= 0 or projected_wei <= int(cap_eth * 10**18):
+            return True
+        logger.warning(
+            "❌ %s blocked by gas cap: projected_fee=%.8f ETH cap=%.8f ETH",
+            operation, projected_wei / 10**18, cap_eth,
+        )
+        return False
+
+    def _net_sale_profit_wei(self, received_wei, sold_cost_wei, result, setup_gas_wei=0):
+        """Economic profit after position cost basis and confirmed sell gas."""
+        return (
+            int(received_wei) - int(sold_cost_wei)
+            - int(setup_gas_wei) - self._receipt_gas_cost_wei(result)
+        )
+
+    def _minimum_gas_aware_return_wei(
+        self, sold_cost_wei, quote, min_profit_percent, setup_gas_wei=0
+    ):
         """Return required to preserve principal, pay sell gas, and earn target profit."""
         minimum_profit_wei = int(int(sold_cost_wei) * (float(min_profit_percent) / 100.0))
-        return int(sold_cost_wei) + minimum_profit_wei + self._projected_gas_cost_wei(quote)
+        return (
+            int(sold_cost_wei) + minimum_profit_wei + int(setup_gas_wei)
+            + self._projected_gas_cost_wei(quote)
+        )
 
     def _receipt_trade_received_wei(self, result):
         """Recover trade-token output from receipt logs when an RPC balance is stale."""
@@ -1280,12 +1316,16 @@ class GridBot:
                     logger.info(f"⏸️ Buy aborted: Quote P&L ({pnl_at_quote:.1f}%) recovered past {execution_margin_pct}% margin (block above {block_threshold:.1f}%)")
                     logger.info(f"   Price moved from trigger. Buy price: {quote_buy_price:.10f}, Top position buy: {get_buy_price(top[1], self.token_decimals):.10f}")
                     return
+
+        initial_gas_limit, initial_gas_price = self._swap_gas_fields(quote, 350000)
+        if not self._gas_within_hard_cap(initial_gas_limit, initial_gas_price, "buy"):
+            return
         
+        buy_setup_gas_wei = 0
         # Determine approval spender
         spender = quote.allowance_target or self.config.zero_x_proxy
         
         # Check/approve WETH
-        allowance = self.wallet.check_allowance(self.config.weth_address, spender, use_permit2=False)
         # Check/approve WETH (skip for native ETH - it doesn't need approval)
         if not getattr(self.config, 'use_eth_trading', False):
             allowance = self.wallet.check_allowance(self.config.weth_address, spender, use_permit2=False)
@@ -1295,6 +1335,7 @@ class GridBot:
                 if not result.success:
                     logger.error(f"Approval failed: {result.error}")
                     return
+                buy_setup_gas_wei += self._receipt_gas_cost_wei(result)
                 # Refresh quote after approval for LI.FI
                 if self.provider.capabilities.refresh_after_approval:
                     quote = self.api_client.refresh_quote(
@@ -1318,13 +1359,9 @@ class GridBot:
         
         # Execute swap with configurable gas multipliers
         # Use API's gas price estimate if available (more accurate than network average)
-        gas_limit_mult = getattr(self.config, 'gas_limit_multiplier', 1.05)
-        gas_price_mult = getattr(self.config, 'gas_price_multiplier', 1.05)
-        gas_limit = int(quote.gas * gas_limit_mult) if quote.gas else 350000
-        if quote.gas_price and quote.gas_price > 0:
-            gas_price = int(quote.gas_price * gas_price_mult)
-        else:
-            gas_price = int(self.wallet.w3.eth.gas_price * gas_price_mult)
+        gas_limit, gas_price = self._swap_gas_fields(quote, 350000)
+        if not self._gas_within_hard_cap(gas_limit, gas_price, "buy"):
+            return
         
         from web3 import Web3
         tx_params = {
@@ -1350,7 +1387,7 @@ class GridBot:
                 return
             # Use the actual sell amount from the quote in wei for precision
             principal_cost_wei = quote.sell_amount if quote.sell_amount else buy_amount_wei
-            buy_gas_wei = self._receipt_gas_cost_wei(result)
+            buy_gas_wei = buy_setup_gas_wei + self._receipt_gas_cost_wei(result)
             cost_wei = principal_cost_wei + buy_gas_wei
             
             logger.debug(
@@ -1559,7 +1596,12 @@ class GridBot:
         if not is_stoploss and quote_return_eth < min_return_eth:
             logger.warning(f"❌ Sell aborted: Quote ({quote_return_eth:.6f}) < min ({min_return_eth:.6f})")
             return
+
+        initial_gas_limit, initial_gas_price = self._swap_gas_fields(quote, 300000)
+        if not self._gas_within_hard_cap(initial_gas_limit, initial_gas_price, "sell"):
+            return
         
+        sell_setup_gas_wei = 0
         # Providers with API-managed approvals return the required approval txs.
         if self.provider.capabilities.api_managed_approval:
                 # Step 1: Check approval via Uniswap API
@@ -1627,6 +1669,7 @@ class GridBot:
                     if not result.success:
                         logger.error(f"Cancel transaction failed: {result.error}")
                         return
+                    sell_setup_gas_wei += self._receipt_gas_cost_wei(result)
                     logger.info(f"Cancel transaction confirmed: {result.tx_hash}")
                     # Wait for confirmation
                     import time
@@ -1640,6 +1683,7 @@ class GridBot:
                     if not result.success:
                         logger.error(f"Approval transaction failed: {result.error}")
                         return
+                    sell_setup_gas_wei += self._receipt_gas_cost_wei(result)
                     logger.info(f"Approval transaction confirmed: {result.tx_hash}")
                     # Wait for confirmation
                     import time
@@ -1711,6 +1755,7 @@ class GridBot:
                 if not result.success:
                     logger.error(f"Approval failed: {result.error}")
                     return
+                sell_setup_gas_wei += self._receipt_gas_cost_wei(result)
             
                 # Refresh provider routes after approval when required.
                 if self.provider.capabilities.refresh_after_approval:
@@ -1731,7 +1776,8 @@ class GridBot:
         if not is_stoploss:
             final_return_wei = self._taxed_quote_return_wei(quote)
             final_minimum_wei = self._minimum_gas_aware_return_wei(
-                int(round(sold_cost_eth * 10**18)), quote, min_profit
+                int(round(sold_cost_eth * 10**18)), quote, min_profit,
+                setup_gas_wei=sell_setup_gas_wei,
             )
             if final_return_wei < final_minimum_wei:
                 logger.warning(
@@ -1742,13 +1788,9 @@ class GridBot:
         
         # Execute swap with configurable gas multipliers
         # Use API's gas price estimate if available (more accurate than network average)
-        gas_limit_mult = getattr(self.config, 'gas_limit_multiplier', 1.05)
-        gas_price_mult = getattr(self.config, 'gas_price_multiplier', 1.05)
-        gas_limit = int(quote.gas * gas_limit_mult) if quote.gas else 300000
-        if quote.gas_price and quote.gas_price > 0:
-            gas_price = int(quote.gas_price * gas_price_mult)
-        else:
-            gas_price = int(self.wallet.w3.eth.gas_price * gas_price_mult)
+        gas_limit, gas_price = self._swap_gas_fields(quote, 300000)
+        if not self._gas_within_hard_cap(gas_limit, gas_price, "sell"):
+            return
 
         from web3 import Web3
         trade_balance_before = self._raw_trade_balance()
@@ -1770,7 +1812,9 @@ class GridBot:
             logger.info("Measured trade-token receipt: %s wei", received_wei)
             eth_received = received_wei / 10**18
             sold_cost_wei = int(round(sold_cost_eth * 10**18))
-            profit_wei = self._net_sale_profit_wei(received_wei, sold_cost_wei, result)
+            profit_wei = self._net_sale_profit_wei(
+                received_wei, sold_cost_wei, result, setup_gas_wei=sell_setup_gas_wei
+            )
             actual_profit = profit_wei / 10**18
             
             self.session_sells += 1
@@ -1848,7 +1892,12 @@ class GridBot:
             logger.error(f"Quote failed: {quote.error}")
             self._observe_token_tax_failure(quote, direction="buy")
             return
+
+        initial_gas_limit, initial_gas_price = self._swap_gas_fields(quote, 350000)
+        if not self._gas_within_hard_cap(initial_gas_limit, initial_gas_price, "buy"):
+            return
         
+        buy_setup_gas_wei = 0
         # Determine approval spender - use quote's allowance_target if available (LI.FI)
         spender = quote.allowance_target or self.config.zero_x_proxy
         
@@ -1870,6 +1919,7 @@ class GridBot:
                 if not result.success:
                     logger.error(f"Approval failed: {result.error}")
                     return
+                buy_setup_gas_wei += self._receipt_gas_cost_wei(result)
                 
                 # Refresh provider routes after approval when required.
                 if self.provider.capabilities.refresh_after_approval:
@@ -1900,13 +1950,9 @@ class GridBot:
 
         # Execute swap with checksummed addresses and configurable gas multipliers
         # Use API's gas price estimate if available (more accurate than network average)
-        gas_limit_mult = getattr(self.config, 'gas_limit_multiplier', 1.05)
-        gas_price_mult = getattr(self.config, 'gas_price_multiplier', 1.05)
-        gas_limit = int(quote.gas * gas_limit_mult) if quote.gas else 350000
-        if quote.gas_price and quote.gas_price > 0:
-            gas_price = int(quote.gas_price * gas_price_mult)
-        else:
-            gas_price = int(self.wallet.w3.eth.gas_price * gas_price_mult)
+        gas_limit, gas_price = self._swap_gas_fields(quote, 350000)
+        if not self._gas_within_hard_cap(gas_limit, gas_price, "buy"):
+            return
         
         from web3 import Web3
         tx_params = {
@@ -1935,7 +1981,7 @@ class GridBot:
             self.positions[pos_id]['balance'] = tokens_received
             # Cost = actual WETH spent for profit calculation (in wei for precision)
             principal_cost_wei = quote.sell_amount if quote.sell_amount else buy_amount_wei
-            buy_gas_wei = self._receipt_gas_cost_wei(result)
+            buy_gas_wei = buy_setup_gas_wei + self._receipt_gas_cost_wei(result)
             cost_wei = principal_cost_wei + buy_gas_wei
             self.positions[pos_id]['cost_wei'] = cost_wei
             # Keep legacy 'cost' field for backward compatibility
@@ -2043,11 +2089,16 @@ class GridBot:
                 preapproval_return_wei / 10**18, preapproval_minimum_wei / 10**18,
             )
             return
+
+        initial_gas_limit, initial_gas_price = self._swap_gas_fields(quote, 300000)
+        if not self._gas_within_hard_cap(initial_gas_limit, initial_gas_price, "sell"):
+            return
         
         # Determine approval spender - use quote's allowance_target if available (LI.FI)
         # otherwise fall back to zero_x_proxy (0x Protocol)
         spender = quote.allowance_target or self.config.zero_x_proxy
         
+        sell_setup_gas_wei = 0
         # Check/approve token for selling
         token_allowance = self.wallet.check_allowance(
             self.config.token_address,
@@ -2064,6 +2115,7 @@ class GridBot:
             if not result.success:
                 logger.error(f"Token approval failed: {result.error}")
                 return
+            sell_setup_gas_wei += self._receipt_gas_cost_wei(result)
             
             # Refresh provider routes after approval when required.
             # Gas prices, calldata, and routes may have changed
@@ -2083,7 +2135,8 @@ class GridBot:
         # Validate quote meets minimum profit requirement after projected gas.
         min_profit_eth = sold_cost_eth * (min_profit_percent / 100)
         min_return_eth = self._minimum_gas_aware_return_wei(
-            int(round(sold_cost_eth * 10**18)), quote, min_profit_percent
+            int(round(sold_cost_eth * 10**18)), quote, min_profit_percent,
+            setup_gas_wei=sell_setup_gas_wei,
         ) / 10**18
         
         # quote.buy_amount is in wei
@@ -2106,7 +2159,8 @@ class GridBot:
 
         final_return_wei = self._taxed_quote_return_wei(quote)
         final_minimum_wei = self._minimum_gas_aware_return_wei(
-            int(round(sold_cost_eth * 10**18)), quote, min_profit_percent
+            int(round(sold_cost_eth * 10**18)), quote, min_profit_percent,
+            setup_gas_wei=sell_setup_gas_wei,
         )
         if final_return_wei < final_minimum_wei:
             logger.warning(
@@ -2118,13 +2172,9 @@ class GridBot:
         
         # Execute swap with checksummed addresses and configurable gas multipliers
         # Use API's gas price estimate if available (more accurate than network average)
-        gas_limit_mult = getattr(self.config, 'gas_limit_multiplier', 1.05)
-        gas_price_mult = getattr(self.config, 'gas_price_multiplier', 1.05)
-        gas_limit = int(quote.gas * gas_limit_mult) if quote.gas else 300000
-        if quote.gas_price and quote.gas_price > 0:
-            gas_price = int(quote.gas_price * gas_price_mult)
-        else:
-            gas_price = int(self.wallet.w3.eth.gas_price * gas_price_mult)
+        gas_limit, gas_price = self._swap_gas_fields(quote, 300000)
+        if not self._gas_within_hard_cap(gas_limit, gas_price, "sell"):
+            return
         
         trade_balance_before = self._raw_trade_balance()
         result = self.wallet._send_transaction({
@@ -2146,7 +2196,9 @@ class GridBot:
             logger.info("Measured trade-token receipt: %s wei", received_wei)
             eth_received = received_wei / 10**18
             sold_cost_wei = int(round(sold_cost_eth * 10**18))
-            profit_wei = self._net_sale_profit_wei(received_wei, sold_cost_wei, result)
+            profit_wei = self._net_sale_profit_wei(
+                received_wei, sold_cost_wei, result, setup_gas_wei=sell_setup_gas_wei
+            )
             actual_profit_eth = profit_wei / 10**18
             
             # Track session stats
@@ -2215,6 +2267,10 @@ class GridBot:
         if expected_usdg < bank_min_usdg:
             logger.info(f"🏦 Banking skipped: {expected_usdg:.2f} USDG below minimum {bank_min_usdg} USDG")
             return
+
+        initial_gas_limit, initial_gas_price = self._swap_gas_fields(quote, 300000)
+        if not self._gas_within_hard_cap(initial_gas_limit, initial_gas_price, "banking"):
+            return
         
         logger.info(f"🏦 Banking {eth_amount:.6f} {self.trade_token_name} → ~{expected_usdg:.2f} USDG...")
         
@@ -2258,13 +2314,9 @@ class GridBot:
         
         # Execute banking swap with configurable gas multipliers
         # Use API's gas price estimate if available (more accurate than network average)
-        gas_limit_mult = getattr(self.config, 'gas_limit_multiplier', 1.05)
-        gas_price_mult = getattr(self.config, 'gas_price_multiplier', 1.05)
-        gas_limit = int(quote.gas * gas_limit_mult) if quote.gas else 300000
-        if quote.gas_price and quote.gas_price > 0:
-            gas_price = int(quote.gas_price * gas_price_mult)
-        else:
-            gas_price = int(self.wallet.w3.eth.gas_price * gas_price_mult)
+        gas_limit, gas_price = self._swap_gas_fields(quote, 300000)
+        if not self._gas_within_hard_cap(gas_limit, gas_price, "banking"):
+            return
 
         # Banking is profit extraction, so its principal plus gas must fit
         # entirely inside the confirmed net-profit budget from the sale.

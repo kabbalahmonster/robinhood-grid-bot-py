@@ -14,6 +14,7 @@ class BankingGasReserveTests(unittest.TestCase):
             bank_min_amount=0.5,
             gas_limit_multiplier=1.0,
             gas_price_multiplier=1.0,
+            max_swap_gas_eth=0,
             eth_gas_reserve=0.0002,
             chain_id=4663,
         )
@@ -22,6 +23,7 @@ class BankingGasReserveTests(unittest.TestCase):
         bot.wallet = Mock()
         bot.wallet.address = "0x2222222222222222222222222222222222222222"
         bot.wallet.get_eth_balance_wei.return_value = balance_wei
+        bot.wallet.w3.eth.gas_price = 1_000_000_000
         bot.wallet.w3.eth.get_transaction_count.return_value = 1
         bot.provider = Mock()
         bot.provider.capabilities.quote_requires_preparation = False

@@ -8,7 +8,9 @@ Docs: https://developers.uniswap.org/docs/api-reference
 """
 
 import json
+import hashlib
 import logging
+import time
 from typing import Optional, Any
 from dataclasses import dataclass
 import requests
@@ -90,7 +92,69 @@ class UniswapAPIClient:
     
     def _get_headers(self) -> dict:
         """Return a fresh copy of the request headers."""
-        return self.headers.copy()
+        headers = self.headers.copy()
+        # Be explicit: the gateway packet 409 is a transport/proxy failure and
+        # must never be coupled to a potentially stale pooled connection.
+        headers["Connection"] = "close"
+        headers["Accept"] = "application/json"
+        return headers
+
+    @staticmethod
+    def _is_gateway_packet_failure(response) -> bool:
+        error_text = response.text[:500].lower() if response.status_code != 200 else ""
+        return (
+            response.status_code == 409
+            and "packet length exceeds" in error_text
+            and "buffer" in error_text
+        )
+
+    def _post_json(self, endpoint: str, payload: dict):
+        """POST once, retrying only the known transient gateway packet 409.
+
+        ``requests.post`` already creates a short-lived Session, so there was
+        no persistent client pool to reset. ``Connection: close`` plus a second
+        one-shot request nevertheless guarantees a fresh TCP/TLS connection.
+        A packet 409 is not recorded as a rate limit and therefore cannot open
+        the fleet-wide cooldown; a second failure is returned to the provider
+        adapter, which may safely restart the complete operation on Sushi.
+        """
+        url = f"{self.BASE_URL}/{endpoint}"
+        encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
+        payload_id = hashlib.sha256(encoded).hexdigest()[:12]
+        safe_headers = {
+            key: value for key, value in self._get_headers().items()
+            if key.lower() not in {"x-api-key", "authorization"}
+        }
+
+        for attempt in (1, 2):
+            started = time.monotonic()
+            response = requests.post(
+                url,
+                headers=self._get_headers(),
+                data=encoded,
+                timeout=30,
+            )
+            elapsed_ms = round((time.monotonic() - started) * 1000, 1)
+            self.logger.info(
+                "Uniswap HTTP endpoint=%s status=%s attempt=%s payload_bytes=%s "
+                "payload_id=%s elapsed_ms=%s request_id=%s headers=%s",
+                endpoint,
+                response.status_code,
+                attempt,
+                len(encoded),
+                payload_id,
+                elapsed_ms,
+                getattr(response, "headers", {}).get("x-request-id")
+                or getattr(response, "headers", {}).get("request-id") or "",
+                safe_headers,
+            )
+            if not self._is_gateway_packet_failure(response) or attempt == 2:
+                return response
+            self.logger.warning(
+                "Uniswap transient gateway packet 409; retrying once on a fresh "
+                "connection endpoint=%s payload_bytes=%s payload_id=%s",
+                endpoint, len(encoded), payload_id,
+            )
 
     def _cooldown_error(self) -> Optional[str]:
         # Jitter before reserving the shared slot. Applying it afterward can
@@ -106,26 +170,14 @@ class UniswapAPIClient:
         return f"Uniswap shared provider cooldown active; retry in {cooldown}s"
 
     def _record_response_limit(self, response) -> None:
-        error_text = response.text[:500].lower() if response.status_code != 200 else ""
-        gateway_packet_failure = (
-            response.status_code == 409
-            and "packet length exceeds" in error_text
-            and "buffer" in error_text
-        )
-        if response.status_code == 429 or gateway_packet_failure:
+        if response.status_code == 429:
             wait_seconds = self.rate_limiter.record_rate_limit(
                 response.headers.get("Retry-After", "")
             )
-            if gateway_packet_failure:
-                self.logger.warning(
-                    "Uniswap gateway packet failure; pausing shared provider for %ss",
-                    wait_seconds,
-                )
-            else:
-                self.logger.warning(
-                    "Uniswap rate limited; pausing shared API key for %ss",
-                    wait_seconds,
-                )
+            self.logger.warning(
+                "Uniswap rate limited; pausing shared API key for %ss",
+                wait_seconds,
+            )
         elif response.status_code == 200:
             self.rate_limiter.record_success()
     
@@ -208,12 +260,7 @@ class UniswapAPIClient:
             
             self.logger.debug(f"Fetching Uniswap quote: {payload}")
             
-            response = requests.post(
-                url,
-                headers=self._get_headers(),
-                json=payload,
-                timeout=30,
-            )
+            response = self._post_json("quote", payload)
             
             self.logger.debug(f"Uniswap API response status: {response.status_code}")
             
@@ -398,12 +445,7 @@ class UniswapAPIClient:
             
             self.logger.debug(f"Checking Uniswap approval: token={token}, amount={amount}, wallet={wallet}")
             
-            response = requests.post(
-                url,
-                headers=self._get_headers(),
-                json=payload,
-                timeout=30,
-            )
+            response = self._post_json("check_approval", payload)
             
             self.logger.debug(f"Uniswap check_approval response status: {response.status_code}")
             
@@ -481,12 +523,7 @@ class UniswapAPIClient:
                 nested_quote = quote_data.get('quote', {})
                 self.logger.debug(f"Nested quote keys: {list(nested_quote.keys()) if isinstance(nested_quote, dict) else 'not dict'}")
             
-            response = requests.post(
-                url,
-                headers=self._get_headers(),
-                json=payload,
-                timeout=30,
-            )
+            response = self._post_json("swap", payload)
             
             self.logger.debug(f"Uniswap swap API response status: {response.status_code}")
             

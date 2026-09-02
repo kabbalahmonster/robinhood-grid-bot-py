@@ -178,6 +178,11 @@ class Wallet:
         
         # Initialize token contracts
         self._token_info_cache: dict[str, TokenInfo] = {}
+
+    def normal_gas_price(self) -> int:
+        """Return Robinhood Chain's dynamic normal price with no fast premium."""
+        multiplier = max(float(getattr(self.config, "gas_price_multiplier", 1.0)), 1.0)
+        return int(int(self.w3.eth.gas_price) * multiplier)
         
     @property
     def checksum_address(self) -> ChecksumAddress:
@@ -298,7 +303,7 @@ class Wallet:
             address=Web3.to_checksum_address(token_address),
             abi=ERC20_ABI,
         )
-        gas_price = int(self.w3.eth.gas_price * 1.2)
+        gas_price = self.normal_gas_price()
         tx = token.functions.transfer(
             Web3.to_checksum_address(recipient),
             amount,
@@ -337,9 +342,8 @@ class Wallet:
         }
         estimated_gas = int(self.w3.eth.estimate_gas(tx))
         gas_multiplier = max(float(self.config.gas_limit_multiplier), 1.0)
-        price_multiplier = max(float(self.config.gas_price_multiplier), 1.0)
         tx["gas"] = max(estimated_gas, int(estimated_gas * gas_multiplier))
-        tx["gasPrice"] = int(self.w3.eth.gas_price * price_multiplier)
+        tx["gasPrice"] = self.normal_gas_price()
         return tx
 
     def transfer_eth(self, tx: TxParams, wait_for_receipt: bool = True) -> TransactionResult:
@@ -354,7 +358,7 @@ class Wallet:
             address=Web3.to_checksum_address(weth_address),
             abi=WETH_ABI,
         )
-        gas_price = int(self.w3.eth.gas_price * max(float(self.config.gas_price_multiplier), 1.0))
+        gas_price = self.normal_gas_price()
         tx = weth.functions.withdraw(amount_wei).build_transaction({
             "from": self.address,
             "nonce": self.w3.eth.get_transaction_count(self.address),
@@ -392,10 +396,8 @@ class Wallet:
             abi=ERC20_ABI,
         )
         
-        # Use legacy gas pricing for Robinhood Chain to avoid base fee volatility
-        gas_price = self.w3.eth.gas_price
-        # Add 20% buffer
-        gas_price = int(gas_price * 1.2)
+        # Robinhood's sequencer is FCFS; use dynamic normal rather than a fast premium.
+        gas_price = self.normal_gas_price()
         gas_price_params = {
             "gasPrice": gas_price,
         }
@@ -441,10 +443,7 @@ class Wallet:
 
         expiration = int(time.time()) + expiration_seconds
 
-        # Use legacy gas pricing for Robinhood Chain to avoid base fee volatility
-        gas_price = self.w3.eth.gas_price
-        # Add 20% buffer
-        gas_price = int(gas_price * 1.2)
+        gas_price = self.normal_gas_price()
         gas_price_params = {
             "gasPrice": gas_price,
         }
@@ -577,12 +576,24 @@ class Wallet:
             receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
 
             if receipt["status"] == 1:
+                gas_used = int(receipt.get("gasUsed") or 0)
+                effective_gas_price = int(receipt.get("effectiveGasPrice") or 0)
+                self.logger.info(
+                    "Transaction fee confirmed: tx=%s gas_limit=%s gas_used=%s "
+                    "submitted_gas_price=%s effective_gas_price=%s fee_wei=%s",
+                    tx_hash_hex,
+                    tx.get("gas", 0),
+                    gas_used,
+                    tx.get("gasPrice", tx.get("maxFeePerGas", 0)),
+                    effective_gas_price,
+                    gas_used * effective_gas_price,
+                )
                 return TransactionResult(
                     success=True,
                     tx_hash=tx_hash_hex,
                     receipt=receipt,
-                    gas_used=receipt.get("gasUsed"),
-                    effective_gas_price=receipt.get("effectiveGasPrice"),
+                    gas_used=gas_used,
+                    effective_gas_price=effective_gas_price,
                 )
             else:
                 # Try to get revert reason

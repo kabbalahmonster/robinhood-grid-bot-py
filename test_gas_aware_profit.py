@@ -49,6 +49,38 @@ class GasAwareProfitTests(unittest.TestCase):
 
         self.assertEqual(bot._projected_gas_cost_wei(quote), 88_200_000_000_000)
 
+    def test_normal_rpc_price_overrides_provider_fast_price(self):
+        bot = self.make_bot()
+        quote = SimpleNamespace(gas=200_000, gas_price=2_000_000_000)
+
+        gas_limit, gas_price = bot._swap_gas_fields(quote)
+
+        self.assertEqual(gas_limit, 200_000)
+        self.assertEqual(gas_price, 400_000_000)
+
+    def test_setup_and_swap_gas_are_both_deducted_from_sale_profit(self):
+        bot = self.make_bot()
+        result = SimpleNamespace(
+            receipt={"gasUsed": 200_000, "effectiveGasPrice": 400_000_000},
+            gas_used=None,
+            effective_gas_price=None,
+        )
+
+        profit = bot._net_sale_profit_wei(
+            1_150_000_000_000_000,
+            1_000_000_000_000_000,
+            result,
+            setup_gas_wei=20_000_000_000_000,
+        )
+
+        self.assertEqual(profit, 50_000_000_000_000)
+
+    def test_hard_gas_cap_blocks_expensive_swap(self):
+        bot = self.make_bot()
+        bot.config.max_swap_gas_eth = 0.00004
+
+        self.assertFalse(bot._gas_within_hard_cap(200_000, 400_000_000, "buy"))
+
 
 if __name__ == "__main__":
     unittest.main()
