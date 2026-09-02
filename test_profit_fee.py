@@ -14,6 +14,7 @@ class ProfitFeeTests(unittest.TestCase):
         bot.config = SimpleNamespace(
             profit_fee_percent=percent,
             profit_fee_wallet="0x1111111111111111111111111111111111111111",
+            min_profit_fee_transfer_eth=0,
             use_eth_trading=native,
             weth_address="0x2222222222222222222222222222222222222222",
             eth_gas_reserve=0.001,
@@ -24,7 +25,41 @@ class ProfitFeeTests(unittest.TestCase):
         bot.wallet.address = "0x3333333333333333333333333333333333333333"
         bot.wallet.normal_gas_price.return_value = 1
         bot._record_profit_fee = Mock()
+        bot._load_profit_fee_accrual = Mock(return_value={"pending_wei": 0, "sale_tx_hashes": []})
+        bot._save_profit_fee_accrual = Mock()
         return bot
+
+    def test_fee_below_minimum_is_durably_deferred(self):
+        bot = self.make_bot(percent=10)
+        bot.config.min_profit_fee_transfer_eth = 0.0001
+        bot._load_profit_fee_accrual = Mock(return_value={"pending_wei": 0, "sale_tx_hashes": []})
+        bot._save_profit_fee_accrual = Mock()
+
+        entry = bot._charge_profit_fee(0.0005 * 10**18, "0xsale1")
+
+        self.assertEqual(entry["status"], "deferred")
+        self.assertEqual(entry["fee_wei"], int(0.00005 * 10**18))
+        bot.wallet.transfer_erc20.assert_not_called()
+        bot._save_profit_fee_accrual.assert_called_once()
+
+    def test_accrued_fee_flushes_when_new_sale_reaches_minimum(self):
+        bot = self.make_bot(percent=10)
+        bot.config.min_profit_fee_transfer_eth = 0.0001
+        bot._load_profit_fee_accrual = Mock(return_value={
+            "pending_wei": int(0.00006 * 10**18), "sale_tx_hashes": ["0xsale1"],
+        })
+        bot._save_profit_fee_accrual = Mock()
+        bot.wallet.transfer_erc20.return_value = TransactionResult(success=True, tx_hash="0xfee")
+
+        entry = bot._charge_profit_fee(0.0005 * 10**18, "0xsale2")
+
+        self.assertEqual(entry["status"], "success")
+        self.assertEqual(entry["fee_wei"], int(0.00011 * 10**18))
+        bot.wallet.transfer_erc20.assert_called_once_with(
+            bot.config.weth_address, bot.config.profit_fee_wallet,
+            int(0.00011 * 10**18), wait_for_receipt=True,
+        )
+        self.assertEqual(bot._save_profit_fee_accrual.call_count, 2)
 
     def test_weth_fee_is_percentage_of_positive_profit(self):
         bot = self.make_bot(percent=12.5)

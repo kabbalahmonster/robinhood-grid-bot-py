@@ -934,20 +934,58 @@ class GridBot:
             os.fsync(handle.fileno())
         os.replace(temp_path, path)
 
+    def _load_profit_fee_accrual(self):
+        """Load durable unpaid fee accrual, tolerating legacy/missing state."""
+        path = "data/profit_fee_accrual.json"
+        try:
+            with open(path, "r") as handle:
+                state = json.load(handle)
+            pending_wei = max(0, int(state.get("pending_wei", 0)))
+            sale_tx_hashes = [str(value) for value in state.get("sale_tx_hashes", []) if value]
+            return {"pending_wei": pending_wei, "sale_tx_hashes": sale_tx_hashes[-1000:]}
+        except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError, ValueError):
+            return {"pending_wei": 0, "sale_tx_hashes": []}
+
+    def _save_profit_fee_accrual(self, state):
+        """Atomically persist unpaid fee accrual before/after transfer attempts."""
+        path = "data/profit_fee_accrual.json"
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        payload = {
+            "pending_wei": max(0, int(state.get("pending_wei", 0))),
+            "sale_tx_hashes": [str(value) for value in state.get("sale_tx_hashes", []) if value][-1000:],
+            "updated_at": datetime.now().astimezone().isoformat(),
+        }
+        temp_path = f"{path}.tmp"
+        with open(temp_path, "w") as handle:
+            json.dump(payload, handle, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+
     def _charge_profit_fee(self, profit_wei, sale_tx_hash):
         """Send the configured share of positive realized profit."""
         fee_percent = getattr(self.config, "profit_fee_percent", 0)
         if fee_percent <= 0 or profit_wei <= 0:
             return None
 
-        fee_wei = int(Decimal(int(profit_wei)) * Decimal(str(fee_percent)) / Decimal(100))
-        if fee_wei <= 0:
+        sale_fee_wei = int(Decimal(int(profit_wei)) * Decimal(str(fee_percent)) / Decimal(100))
+        if sale_fee_wei <= 0:
             return None
 
         recipient = self.config.profit_fee_wallet
         if recipient.lower() == self.wallet.address.lower():
             logger.error("Profit fee refused: PROFIT_FEE_WALLET is the bot's own wallet")
             return None
+        accrual = self._load_profit_fee_accrual()
+        sale_hashes = set(accrual["sale_tx_hashes"])
+        if sale_tx_hash not in sale_hashes:
+            accrual["pending_wei"] += sale_fee_wei
+            accrual["sale_tx_hashes"].append(sale_tx_hash)
+            self._save_profit_fee_accrual(accrual)
+        fee_wei = int(accrual["pending_wei"])
+        minimum_wei = int(Decimal(str(getattr(
+            self.config, "min_profit_fee_transfer_eth", 0.0001
+        ))) * Decimal(10**18))
         entry = {
             "timestamp": datetime.now().astimezone().isoformat(),
             "sale_tx_hash": sale_tx_hash,
@@ -956,8 +994,21 @@ class GridBot:
             "profit_wei": int(profit_wei),
             "fee_percent": float(fee_percent),
             "fee_wei": fee_wei,
+            "sale_fee_wei": sale_fee_wei,
+            "minimum_transfer_wei": minimum_wei,
+            "accrued_sale_count": len(accrual["sale_tx_hashes"]),
             "status": "failed",
         }
+        if fee_wei < minimum_wei:
+            entry["status"] = "deferred"
+            self._record_profit_fee(entry)
+            logger.info(
+                "💰 Profit fee accrued: %.8f %s pending; minimum transfer is %.8f",
+                fee_wei / 10**18,
+                self.trade_token_name,
+                minimum_wei / 10**18,
+            )
+            return entry
         try:
             if getattr(self.config, "use_eth_trading", False):
                 tx = self.wallet.build_eth_transfer_transaction(recipient, fee_wei)
@@ -991,6 +1042,9 @@ class GridBot:
         except Exception as exc:
             entry["error"] = str(exc)
             result = None
+
+        if entry["status"] == "success":
+            self._save_profit_fee_accrual({"pending_wei": 0, "sale_tx_hashes": []})
 
         try:
             self._record_profit_fee(entry)

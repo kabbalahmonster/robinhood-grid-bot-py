@@ -129,6 +129,7 @@ python grid_bot.py
 | `BANK_PERCENTAGE` | No | 20 | % of profit to swap to stablecoin (0 to disable) |
 | `PROFIT_FEE_PERCENT` | No | 0 | % of positive realized profit sent automatically after each sell; 0 disables fees |
 | `PROFIT_FEE_WALLET` | With profit fee | empty | EVM address receiving the fee in the bot's settlement asset (ETH or WETH) |
+| `MIN_PROFIT_FEE_TRANSFER_ETH` | No | 0.0001 | Accumulate profit fees until at least this much ETH/WETH is ready to transfer |
 | `MOONBAG_PERCENTAGE` | No | 1 | % of tokens to keep after sell (0 to disable) |
 | `BANK_MIN_AMOUNT` | No | 0.2 | Minimum stablecoin output required before banking |
 | `FAST_PROFIT` | No | true | Sell above minimum profit without waiting for the classic sell range |
@@ -696,7 +697,9 @@ python migrate_grid_mode.py to-grid
 - Set `PROFIT_FEE_PERCENT` and `PROFIT_FEE_WALLET` to send a share of each
   positive realized sell profit to a fee wallet. Losses and break-even sells
   pay no fee. Native-ETH transfers preserve `ETH_GAS_RESERVE`; WETH-mode bots
-  transfer WETH. Every attempt is recorded in `data/profit_fees.json`. The fee
+  transfer WETH. Fees accrue durably in `data/profit_fee_accrual.json` until
+  `MIN_PROFIT_FEE_TRANSFER_ETH` is reached, reducing small-transfer gas waste.
+  Every deferral and transfer attempt is recorded in `data/profit_fees.json`. The fee
   and banking percentages may total at most 100%.
 - Happens immediately after successful sell
 - Protects gains in volatile markets

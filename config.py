@@ -100,6 +100,7 @@ class BotConfig:
     bank_min_amount: float
     profit_fee_percent: float
     profit_fee_wallet: str
+    min_profit_fee_transfer_eth: float
     fast_profit: bool
     tradeable_balance_percent: float
     taxed_token: bool
@@ -250,6 +251,9 @@ class BotConfig:
         if not 0 <= self.profit_fee_percent <= 100:
             raise ValueError("PROFIT_FEE_PERCENT must be between 0 and 100")
 
+        if self.min_profit_fee_transfer_eth < 0:
+            raise ValueError("MIN_PROFIT_FEE_TRANSFER_ETH must not be negative")
+
         if self.profit_fee_percent > 0:
             if not re.fullmatch(r"0x[0-9a-fA-F]{40}", self.profit_fee_wallet or ""):
                 raise ValueError(
@@ -382,6 +386,7 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
         bank_min_amount=float(os.getenv("BANK_MIN_AMOUNT", "0.2")),
         profit_fee_percent=float(os.getenv("PROFIT_FEE_PERCENT", "0")),
         profit_fee_wallet=os.getenv("PROFIT_FEE_WALLET", "").strip(),
+        min_profit_fee_transfer_eth=float(os.getenv("MIN_PROFIT_FEE_TRANSFER_ETH", "0.0001")),
         fast_profit=os.getenv("FAST_PROFIT", "true").lower() == "true",
         tradeable_balance_percent=float(os.getenv("TRADEABLE_BALANCE_PERCENT", "100")),
         taxed_token=os.getenv("TAXED_TOKEN", "false").lower() == "true",
