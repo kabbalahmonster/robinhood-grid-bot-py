@@ -152,6 +152,9 @@ class BotConfig:
     gas_price_multiplier: float  # Multiplier for dynamic normal gas price (default: 1.0)
     gas_price_freshness_multiplier: float  # Minimal margin against a rising base fee
     max_swap_gas_eth: float  # Hard maximum projected fee per swap; 0 disables
+    max_buy_gas_eth: float  # Buy override; inherits MAX_SWAP_GAS_ETH when unset
+    max_sell_gas_eth: float  # Sell override; inherits MAX_SWAP_GAS_ETH when unset
+    max_fee_transfer_gas_eth: float  # Profit-fee override; inherits legacy cap
     
     # Gridless Cooldown
     gridless_buy_cooldown_seconds: int  # Seconds between gridless buys (default: 300)
@@ -292,13 +295,25 @@ class BotConfig:
             raise ValueError("UNISWAP_COOLDOWN_BASE_SECONDS must be at least 1")
         if self.uniswap_cooldown_max_seconds < self.uniswap_cooldown_base_seconds:
             raise ValueError("UNISWAP_COOLDOWN_MAX_SECONDS must be at least the base cooldown")
-        if self.max_swap_gas_eth < 0:
-            raise ValueError("MAX_SWAP_GAS_ETH must be non-negative")
+        for name, value in (
+            ("MAX_SWAP_GAS_ETH", self.max_swap_gas_eth),
+            ("MAX_BUY_GAS_ETH", self.max_buy_gas_eth),
+            ("MAX_SELL_GAS_ETH", self.max_sell_gas_eth),
+            ("MAX_FEE_TRANSFER_GAS_ETH", self.max_fee_transfer_gas_eth),
+        ):
+            if value < 0:
+                raise ValueError(f"{name} must be non-negative")
         if not 1 <= self.gas_price_freshness_multiplier <= 1.10:
             raise ValueError("GAS_PRICE_FRESHNESS_MULTIPLIER must be between 1.0 and 1.10")
 
         if not 0 <= self.gridless_buy_execution_margin <= 100:
             raise ValueError("GRIDLESS_BUY_EXECUTION_MARGIN must be between 0 and 100")
+
+
+def _gas_cap_env(name: str, legacy_value: str) -> float:
+    """Load an optional per-operation cap, inheriting the legacy cap when blank."""
+    value = os.getenv(name, "").strip()
+    return float(value if value else legacy_value)
 
 
 def load_config(env_file: Optional[str] = None) -> BotConfig:
@@ -423,6 +438,15 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
         gas_price_multiplier=float(os.getenv("GAS_PRICE_MULTIPLIER", "1.0")),
         gas_price_freshness_multiplier=float(os.getenv("GAS_PRICE_FRESHNESS_MULTIPLIER", "1.01")),
         max_swap_gas_eth=float(os.getenv("MAX_SWAP_GAS_ETH", "0.00004")),
+        max_buy_gas_eth=_gas_cap_env(
+            "MAX_BUY_GAS_ETH", os.getenv("MAX_SWAP_GAS_ETH", "0.00004")
+        ),
+        max_sell_gas_eth=_gas_cap_env(
+            "MAX_SELL_GAS_ETH", os.getenv("MAX_SWAP_GAS_ETH", "0.00004")
+        ),
+        max_fee_transfer_gas_eth=_gas_cap_env(
+            "MAX_FEE_TRANSFER_GAS_ETH", os.getenv("MAX_SWAP_GAS_ETH", "0.00004")
+        ),
         
         # Gridless Cooldown
         gridless_buy_cooldown_seconds=int(os.getenv("GRIDLESS_BUY_COOLDOWN_SECONDS", "0")),

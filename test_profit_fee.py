@@ -17,10 +17,12 @@ class ProfitFeeTests(unittest.TestCase):
             use_eth_trading=native,
             weth_address="0x2222222222222222222222222222222222222222",
             eth_gas_reserve=0.001,
+            max_swap_gas_eth=0,
         )
         bot.trade_token_name = "ETH" if native else "WETH"
         bot.wallet = Mock()
         bot.wallet.address = "0x3333333333333333333333333333333333333333"
+        bot.wallet.normal_gas_price.return_value = 1
         bot._record_profit_fee = Mock()
         return bot
 
@@ -59,6 +61,20 @@ class ProfitFeeTests(unittest.TestCase):
 
         self.assertEqual(entry["fee_wei"], 10**16)
         bot.wallet.transfer_eth.assert_called_once()
+
+    def test_native_fee_transfer_obeys_separate_gas_cap(self):
+        bot = self.make_bot(native=True, percent=10)
+        bot.config.max_fee_transfer_gas_eth = 0.00001
+        bot.wallet.build_eth_transfer_transaction.return_value = {
+            "gas": 21_000,
+            "gasPrice": 1_000_000_000,
+        }
+
+        entry = bot._charge_profit_fee(10**17, "0xsale")
+
+        self.assertEqual(entry["status"], "failed")
+        self.assertIn("blocked by gas cap", entry["error"])
+        bot.wallet.transfer_eth.assert_not_called()
 
     def test_failed_fee_is_audited_without_raising(self):
         bot = self.make_bot()

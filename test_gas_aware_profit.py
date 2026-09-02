@@ -110,6 +110,21 @@ class GasAwareProfitTests(unittest.TestCase):
 
         self.assertFalse(bot._gas_within_hard_cap(200_000, 400_000_000, "buy"))
 
+    def test_operation_caps_override_legacy_cap_independently(self):
+        bot = self.make_bot()
+        bot.config.max_swap_gas_eth = 0.00008
+        bot.config.max_buy_gas_eth = 0.00008
+        bot.config.max_sell_gas_eth = 0.00015
+
+        self.assertFalse(bot._gas_within_hard_cap(300_000, 400_000_000, "buy"))
+        self.assertTrue(bot._gas_within_hard_cap(300_000, 400_000_000, "sell"))
+
+    def test_missing_operation_cap_inherits_legacy_cap(self):
+        bot = self.make_bot()
+        bot.config.max_swap_gas_eth = 0.00008
+
+        self.assertFalse(bot._gas_within_hard_cap(300_000, 400_000_000, "sell"))
+
     def test_dashboard_trade_persists_confirmed_gas_fee(self):
         bot = self.make_bot()
         bot.dashboard_trades = []

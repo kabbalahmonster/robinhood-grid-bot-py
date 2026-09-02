@@ -757,7 +757,13 @@ class GridBot:
         return gas_limit, gas_price
 
     def _gas_within_hard_cap(self, gas_limit, gas_price, operation):
-        cap_eth = float(getattr(self.config, "max_swap_gas_eth", 0.00004))
+        legacy_cap = float(getattr(self.config, "max_swap_gas_eth", 0.00004))
+        cap_attribute = {
+            "buy": "max_buy_gas_eth",
+            "sell": "max_sell_gas_eth",
+            "fee": "max_fee_transfer_gas_eth",
+        }.get(operation)
+        cap_eth = float(getattr(self.config, cap_attribute, legacy_cap)) if cap_attribute else legacy_cap
         projected_wei = int(gas_limit) * int(gas_price)
         if cap_eth <= 0 or projected_wei <= int(cap_eth * 10**18):
             return True
@@ -906,12 +912,23 @@ class GridBot:
         try:
             if getattr(self.config, "use_eth_trading", False):
                 tx = self.wallet.build_eth_transfer_transaction(recipient, fee_wei)
-                max_cost = fee_wei + int(tx.get("gas", 0)) * int(tx.get("gasPrice", 0))
+                fee_gas = int(tx.get("gas", 0)) * int(tx.get("gasPrice", 0))
+                if not self._gas_within_hard_cap(
+                    tx.get("gas", 0), tx.get("gasPrice", 0), "fee"
+                ):
+                    raise ValueError("profit-fee transfer blocked by gas cap")
+                max_cost = fee_wei + fee_gas
                 reserve_wei = int(self.config.eth_gas_reserve * 10**18)
                 if self.wallet.get_eth_balance_wei() - max_cost < reserve_wei:
                     raise ValueError("profit-fee transfer would breach ETH_GAS_RESERVE")
                 result = self.wallet.transfer_eth(tx, wait_for_receipt=True)
             else:
+                fee_gas_limit = 100000
+                fee_gas_price = self.wallet.normal_gas_price()
+                if not self._gas_within_hard_cap(
+                    fee_gas_limit, fee_gas_price, "fee"
+                ):
+                    raise ValueError("profit-fee transfer blocked by gas cap")
                 result = self.wallet.transfer_erc20(
                     self.config.weth_address,
                     recipient,
