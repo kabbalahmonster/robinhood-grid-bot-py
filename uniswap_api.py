@@ -160,7 +160,7 @@ class UniswapAPIClient:
                 replay_headers += ' --header "x-api-key: ${UNISWAP_API_KEY}"'
                 self.logger.error(
                     "Exact failed Uniswap request (API key omitted): "
-                    "UNISWAP_API_KEY=<load-from-env> curl --request POST --url %s "
+                    "curl --request POST --url %s "
                     "%s --data-binary %s",
                     url,
                     replay_headers,
