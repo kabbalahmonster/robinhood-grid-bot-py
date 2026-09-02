@@ -19,6 +19,7 @@ def main():
     parser.add_argument("--env", default=".env")
     parser.add_argument("--boundary", action="store_true")
     parser.add_argument("--structure", action="store_true")
+    parser.add_argument("--auth", action="store_true")
     args = parser.parse_args()
     values = {**dotenv_values(args.env), **os.environ}
     api_key = values.get("UNISWAP_API_KEY", "")
@@ -54,7 +55,14 @@ def main():
             "x-permit2-disabled": "true",
         }),
     ]
-    if args.structure:
+    if args.auth:
+        mutated_key = api_key[:-1] + ("0" if api_key[-1] != "0" else "1")
+        variants = [
+            ("auth-real", {"x-api-key": api_key}, "", {}),
+            ("auth-mutated", {"x-api-key": mutated_key}, "", {}),
+            ("auth-missing", {"x-api-key": None}, "", {}),
+        ]
+    elif args.structure:
         ordered = [
             ("type", body["type"]),
             ("amount", body["amount"]),
@@ -88,6 +96,7 @@ def main():
             "Connection": "close",
             **optional,
         }
+        headers = {key: value for key, value in headers.items() if value is not None}
         started = time.monotonic()
         try:
             response = requests.post(URL, headers=headers, data=encoded, timeout=20)
