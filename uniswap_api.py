@@ -173,11 +173,9 @@ class UniswapAPIClient:
                     replay_headers,
                     shlex.quote(encoded.decode("utf-8")),
                 )
-                wait_seconds = self.rate_limiter.record_provider_failure()
                 self.logger.warning(
                     "Uniswap Robinhood gateway packet failure confirmed twice; "
-                    "quarantining primary fleet-wide for %ss before one recovery probe",
-                    wait_seconds,
+                    "returning the failure without opening the fleet-wide rate-limit cooldown",
                 )
                 return response
             self.logger.warning(
