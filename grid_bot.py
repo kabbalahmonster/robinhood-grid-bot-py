@@ -2217,7 +2217,6 @@ class GridBot:
         # Ephemeral by design: a sell attempt must be re-established by this
         # round's quote check or it disappears from the next dashboard report.
         self._sell_attempt = None
-        self._funding_warning = None
         elapsed = time.time() - self.start_time
         
         # Get balances
@@ -2527,6 +2526,13 @@ class GridBot:
             except Exception as e:
                 logger.warning(f"Dashboard report failed: {e}")
         
+        # Funding blocks are discovered during the buy check, which runs after
+        # this round's status report. Preserve the prior round's finding long
+        # enough to report it above, then reset it immediately before the next
+        # check. Clearing it at cycle start made the warning exist only between
+        # reports, so DoomDash could never receive it.
+        self._funding_warning = None
+
         # Then check buys
         self.check_buys(price)
     
