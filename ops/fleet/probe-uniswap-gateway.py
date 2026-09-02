@@ -22,6 +22,7 @@ def main():
     parser.add_argument("--auth", action="store_true")
     parser.add_argument("--isolate", action="store_true")
     parser.add_argument("--transport", action="store_true")
+    parser.add_argument("--production", action="store_true")
     parser.add_argument("--rounds", type=int, default=3)
     args = parser.parse_args()
     values = {**dotenv_values(args.env), **os.environ}
@@ -61,7 +62,29 @@ def main():
     if args.rounds < 1:
         parser.error("--rounds must be at least 1")
 
-    if args.transport:
+    if args.production:
+        production_body = {
+            **body,
+            "tokenIn": "0x0000000000000000000000000000000000000000",
+        }
+        production_headers = {
+            "x-universal-router-version": "2.1.1",
+            "x-erc20eth-enabled": "true",
+            "x-permit2-disabled": "true",
+            "User-Agent": "curl/8.0",
+            "Accept": "application/json",
+            "Connection": "close",
+        }
+        variants = [
+            (
+                f"production-fixed-user-agent-round-{round_number}",
+                production_headers,
+                production_body["amount"],
+                production_body,
+            )
+            for round_number in range(1, args.rounds + 1)
+        ]
+    elif args.transport:
         integration_headers = {
             "x-universal-router-version": "2.1.1",
             "x-erc20eth-enabled": "true",
@@ -160,6 +183,7 @@ def main():
         variants = [(name, headers, body["amount"], None) for name, headers in variants]
     encoded = json.dumps(body, separators=(",", ":"), sort_keys=True).encode()
     print(f"Read-only /quote probe: variants={len(variants)}")
+    statuses = []
     for name, optional, amount, explicit_body in variants:
         request_body = explicit_body if explicit_body is not None else {**body, "amount": amount}
         encoded = json.dumps(request_body, separators=(",", ":"), sort_keys=True).encode()
@@ -174,6 +198,7 @@ def main():
         started = time.monotonic()
         try:
             response = requests.post(URL, headers=headers, data=encoded, timeout=20)
+            statuses.append(response.status_code)
             elapsed = round((time.monotonic() - started) * 1000, 1)
             request_id = response.headers.get("x-request-id") or response.headers.get("request-id") or ""
             detail = ""
@@ -194,6 +219,11 @@ def main():
         except requests.RequestException as exc:
             print(json.dumps({"variant": name, "transport_error": str(exc)}))
         time.sleep(1.1)
+    if args.production:
+        passed = sum(status == 200 for status in statuses)
+        print(f"Production fixed-header result: {passed}/{len(variants)} returned 200")
+        if passed != len(variants):
+            raise SystemExit(1)
 
 
 if __name__ == "__main__":
