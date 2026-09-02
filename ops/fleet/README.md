@@ -5,6 +5,9 @@ fleet. Each bot gets its own pane, working directory, `.env`, virtual
 environment, and persistent `data/` directory. The same local fleet
 configuration also drives guarded whole-fleet USDG sweeps.
 
+For the concise production sequence—update, freeze, consolidate, redistribute,
+restore capacity, and restart—see [`OPERATOR_RUNBOOK.md`](OPERATOR_RUNBOOK.md).
+
 `start-fleet` creates panes alphabetically by bot name regardless of membership
 order in `fleet.conf`, so next/previous navigation stays predictable as the
 fleet grows.
