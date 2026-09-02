@@ -635,8 +635,9 @@ acknowledgement because the command performs and verifies the stop itself.
 
 `treasury-transfer` is the general guarded batch command. Its `--asset` may be
 `ETH`, `USDG`, or an ERC-20 contract address. Exact native transfers preserve
-the gas reserve. Native `all` is a separate, explicitly confirmed liquidation
-mode.
+the gas reserve. Native `available` sends all ETH above the configured reserve
+and the estimated maximum transfer fee. Native `all` is a separate, explicitly
+confirmed liquidation mode.
 
 When `FLEET_TREASURY_RECIPIENT` is configured, the same default applies here:
 
@@ -675,6 +676,20 @@ ops/fleet/treasury-transfer \
   --execute \
   --confirm-fleet-stopped
 ```
+
+To consolidate every wallet's currently unreserved native ETH, preview first:
+
+```bash
+ops/fleet/treasury-transfer \
+  --asset ETH \
+  --amount available \
+  --recipient "$TREASURY"
+```
+
+Each wallet independently sends `balance - ETH_GAS_RESERVE - estimated maximum
+transfer fee`. This calculated mode is restricted to an externally owned
+recipient. After reviewing the complete fleet plan, stop the fleet and repeat
+with `--execute --confirm-fleet-stopped`.
 
 For another ERC-20, use its contract address and either an exact token amount
 or `all`. USDG is accepted as a named asset. All recipient allowlist,
@@ -799,6 +814,20 @@ adjust-positions --apply earn=+2 scopl=-1 hookr=+3
 
 Assignment deltas must be nonzero integers. Do not combine assignment form
 with `--remove`; use a negative delta for each bot being reduced.
+
+To freeze selected bots at their current filled-position count without
+deleting any position, use `--set-to-filled`. `--all` explicitly selects the
+entire configured fleet:
+
+```bash
+adjust-positions --set-to-filled --all
+adjust-positions --set-to-filled --all --apply --restart
+adjust-positions --set-to-filled earn,scopl --apply
+```
+
+An empty bot is set to capacity zero, which prevents its initial entry. A bot
+with filled positions retains exactly enough capacity for those positions and
+cannot open another one.
 
 Add `--restart` with `--apply` to restart the configured fleet after all
 changes succeed. Removal is refused if the resulting capacity would be below

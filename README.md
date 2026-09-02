@@ -318,7 +318,7 @@ option and safety invariant.
 | `reconcile-position-balances` | Preview/apply an audited proportional haircut when tracked tokens exceed wallet reality | Yes |
 | `fleet-audit` | Reconcile local treasury/liquidation receipts | No |
 | `update-variable` | Preview/atomically change selected `.env` variables | Config only; `--apply` required |
-| `adjust-positions` | Preview/add/remove relative position capacity for selected bots | Config only; `--apply` required |
+| `adjust-positions` | Preview/add/remove capacity, or freeze selected/all bots at their filled count | Config only; `--apply` required |
 | `backup-private-keys` | Validate every configured bot and write one sensitive key backup | Sensitive file output |
 | `usdg-sweep` | Plan or execute fleet USDG transfers | Broadcast only with all guards |
 | `treasury-transfer` | Plan or execute native/ERC-20 transfers | Broadcast only with all guards |

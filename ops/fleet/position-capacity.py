@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate a relative position-capacity change for one bot checkout."""
+"""Validate a position-capacity change for one bot checkout."""
 
 import argparse
 import json
@@ -48,7 +48,9 @@ def filled_positions(bot_dir):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--bot-dir", required=True, type=Path)
-    parser.add_argument("--delta", required=True, type=int)
+    change = parser.add_mutually_exclusive_group(required=True)
+    change.add_argument("--delta", type=int)
+    change.add_argument("--set-to-filled", action="store_true")
     args = parser.parse_args()
     env_path = args.bot_dir / ".env"
     if not env_path.is_file():
@@ -67,8 +69,8 @@ def main():
         raise ValueError(f"{env_path}: current position capacity must be at least 1")
 
     filled = filled_positions(args.bot_dir)
-    updated = current + args.delta
-    if updated < 1:
+    updated = filled if args.set_to_filled else current + args.delta
+    if updated < 0 or (updated < 1 and not args.set_to_filled):
         raise ValueError(f"refusing capacity {updated}; at least 1 position is required")
     if updated < filled:
         raise ValueError(

@@ -222,13 +222,16 @@ def run_native_treasury_transfer(args):
 
         balance_wei = wallet.get_eth_balance_wei()
         liquidate = args.amount == "all"
-        if liquidate:
-            if not args.confirm_liquidate:
-                raise ValueError("Native ETH 'all' requires --confirm-liquidate")
+        sweep_available = args.amount == "available"
+        if liquidate and not args.confirm_liquidate:
+            raise ValueError("Native ETH 'all' requires --confirm-liquidate")
+        if sweep_available and args.confirm_liquidate:
+            raise ValueError("--confirm-liquidate is valid only with --amount all")
+        if liquidate or sweep_available:
             if wallet.address_has_code(recipient):
                 raise ValueError(
-                    "Native ETH liquidation to a contract is forbidden because its "
-                    "receive-gas requirement may differ from the liquidation estimate"
+                    "Calculated native ETH transfer to a contract is forbidden because its "
+                    "receive-gas requirement may differ from the estimate"
                 )
             # A one-wei EOA transfer provides the gas estimate without first
             # constructing an unaffordable balance-sized transaction.
@@ -251,6 +254,17 @@ def run_native_treasury_transfer(args):
                 raise ValueError("ETH balance does not cover the estimated maximum transfer fee")
             tx["value"] = amount_wei
             reserve_wei = 0
+        elif sweep_available:
+            reserve_wei = int(Decimal(str(config.eth_gas_reserve)) * Decimal(10**18))
+            amount_wei = balance_wei - fee_wei - reserve_wei
+            if amount_wei <= 0:
+                print(
+                    "NATIVE ETH TREASURY TRANSFER SKIPPED: balance does not exceed "
+                    "the estimated maximum transfer fee plus "
+                    f"ETH_GAS_RESERVE={config.eth_gas_reserve}"
+                )
+                return 0
+            tx["value"] = amount_wei
         else:
             reserve_wei = int(Decimal(str(config.eth_gas_reserve)) * Decimal(10**18))
         required_wei = amount_wei + fee_wei + reserve_wei
@@ -272,6 +286,7 @@ def run_native_treasury_transfer(args):
         print(f"Reserve:      {config.eth_gas_reserve if not liquidate else 0} ETH")
         print(f"Min remaining after gas: {remaining} ETH")
         print(f"Liquidation:  {'YES — configured reserve intentionally bypassed' if liquidate else 'no'}")
+        print(f"Sweep mode:   {'all unreserved ETH' if sweep_available else 'no'}")
         print(f"Recipient:    {recipient} ({'allowlisted' if recipient_is_allowed else 'one-time confirmed'})")
 
         if not args.execute:
@@ -294,6 +309,7 @@ def run_native_treasury_transfer(args):
             "estimated_max_gas_eth": str(fee),
             "gas_reserve_eth": str(config.eth_gas_reserve if not liquidate else 0),
             "liquidation": liquidate,
+            "sweep_available": sweep_available,
             "success": result.success,
             "tx_hash": result.tx_hash,
             "error": result.error,
@@ -2796,7 +2812,7 @@ if __name__ == "__main__":
     parser.add_argument("--transfer-token", metavar="USDG_OR_ADDRESS", help="ERC-20 token to transfer")
     parser.add_argument("--transfer-eth", action="store_true", help="Transfer an exact native ETH amount")
     parser.add_argument("--recipient", help="Recipient for --transfer-token or --transfer-eth")
-    parser.add_argument("--amount", default="all", help="Token amount or 'all' (default: all)")
+    parser.add_argument("--amount", default="all", help="Token amount, 'all', or native-ETH 'available' (default: all)")
     parser.add_argument("--confirm-recipient", help="Required exact recipient for a non-allowlisted address")
     parser.add_argument("--confirm-liquidate", action="store_true", help="Required to send all native ETH minus its maximum fee")
     parser.add_argument("--liquidate-assets", action="store_true", help="Convert all configured bot-managed tokens to native ETH")

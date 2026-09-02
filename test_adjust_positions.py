@@ -79,6 +79,42 @@ class AdjustPositionsTests(unittest.TestCase):
             self.assertNotEqual(duplicate.returncode, 0)
             self.assertIn("Duplicate bot assignment", duplicate.stderr)
 
+    def test_set_to_filled_all_previews_then_applies_each_current_count(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bots, config = self.fixture(directory)
+            preview = self.run_script(directory, config, "--set-to-filled", "--all")
+            self.assertEqual(preview.returncode, 0, preview.stderr)
+            self.assertIn("earn             SET-FILLED", preview.stdout)
+            self.assertIn("MAX_ACTIVE_POSITIONS: 7 -> 2", preview.stdout)
+            self.assertIn("MAX_ACTIVE_POSITIONS: 5 -> 4", preview.stdout)
+            self.assertEqual((bots["earn"] / ".env").read_text(), "MAX_ACTIVE_POSITIONS=7\n")
+
+            applied = self.run_script(
+                directory, config, "--set-to-filled", "--all", "--apply"
+            )
+            self.assertEqual(applied.returncode, 0, applied.stderr)
+            self.assertEqual((bots["earn"] / ".env").read_text(), "MAX_ACTIVE_POSITIONS=2\n")
+            self.assertEqual((bots["scopl"] / ".env").read_text(), "MAX_ACTIVE_POSITIONS=4\n")
+
+    def test_set_to_filled_supports_zero_to_freeze_empty_bot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bots, config = self.fixture(directory)
+            (bots["earn"] / "data" / "fleet_status.json").write_text(
+                json.dumps({"filled_positions": 0})
+            )
+            result = self.run_script(
+                directory, config, "--set-to-filled", "--apply", "earn"
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual((bots["earn"] / ".env").read_text(), "MAX_ACTIVE_POSITIONS=0\n")
+
+    def test_all_is_only_valid_with_set_to_filled(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _, config = self.fixture(directory)
+            result = self.run_script(directory, config, "--all")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("--all requires --set-to-filled", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

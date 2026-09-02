@@ -236,6 +236,72 @@ class TestCliCommands(unittest.TestCase):
         wallet.transfer_eth.assert_not_called()
         append_receipt.assert_not_called()
 
+    @patch("grid_bot._append_treasury_receipt")
+    @patch("grid_bot.Wallet")
+    @patch("grid_bot.load_config")
+    def test_native_eth_available_sends_balance_minus_fee_and_reserve(
+        self, load_config, wallet_class, append_receipt
+    ):
+        load_config.return_value = SimpleNamespace(
+            treasury_allowed_recipients=["0x0000000000000000000000000000000000000004"],
+            eth_gas_reserve=0.0006,
+        )
+        wallet = wallet_class.return_value
+        wallet.address = "0x0000000000000000000000000000000000000002"
+        wallet.get_eth_balance_wei.return_value = 2_000_000_000_000_000
+        wallet.address_has_code.return_value = False
+        wallet.build_eth_transfer_transaction.return_value = {
+            "gas": 21_000,
+            "gasPrice": 1_000_000_000,
+            "value": 1,
+        }
+        args = SimpleNamespace(
+            recipient="0x0000000000000000000000000000000000000004",
+            amount="available",
+            confirm_recipient=None,
+            confirm_liquidate=False,
+            execute=False,
+            confirm_bot_stopped=False,
+        )
+
+        self.assertEqual(run_native_treasury_transfer(args), 0)
+        self.assertEqual(
+            wallet.build_eth_transfer_transaction.return_value["value"],
+            1_379_000_000_000_000,
+        )
+        wallet.transfer_eth.assert_not_called()
+        append_receipt.assert_not_called()
+
+    @patch("grid_bot.Wallet")
+    @patch("grid_bot.load_config")
+    def test_native_eth_available_treats_no_surplus_as_a_safe_skip(
+        self, load_config, wallet_class
+    ):
+        load_config.return_value = SimpleNamespace(
+            treasury_allowed_recipients=["0x0000000000000000000000000000000000000004"],
+            eth_gas_reserve=0.0006,
+        )
+        wallet = wallet_class.return_value
+        wallet.address = "0x0000000000000000000000000000000000000002"
+        wallet.get_eth_balance_wei.return_value = 600_000_000_000_000
+        wallet.address_has_code.return_value = False
+        wallet.build_eth_transfer_transaction.return_value = {
+            "gas": 21_000,
+            "gasPrice": 1_000_000_000,
+            "value": 1,
+        }
+        args = SimpleNamespace(
+            recipient="0x0000000000000000000000000000000000000004",
+            amount="available",
+            confirm_recipient=None,
+            confirm_liquidate=False,
+            execute=True,
+            confirm_bot_stopped=True,
+        )
+
+        self.assertEqual(run_native_treasury_transfer(args), 0)
+        wallet.transfer_eth.assert_not_called()
+
     @patch("grid_bot.Wallet")
     @patch("grid_bot.load_config")
     def test_native_eth_liquidation_requires_confirmation_and_eoa_recipient(

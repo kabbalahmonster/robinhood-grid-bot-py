@@ -11,11 +11,16 @@ usage() {
 Usage:
   adjust-positions [--remove] [--apply] [--restart] [--config PATH] NAMES [COUNT]
   adjust-positions [--apply] [--restart] [--config PATH] NAME=DELTA [NAME=DELTA ...]
+  adjust-positions --set-to-filled (--all | NAMES) [--apply] [--restart] [--config PATH]
 
 Preview or change MAX_ACTIVE_POSITIONS relatively for one or more fleet bots.
 NAMES is one name or a comma-separated list. COUNT defaults to 1. --remove
 subtracts instead of adding. This changes capacity only; it never creates,
 deletes, or rewrites filled position records.
+
+--set-to-filled sets capacity equal to each selected bot's current filled
+position count, preventing new entries without touching existing positions.
+Use --all to select every bot in the configured fleet explicitly.
 
 Assignment form applies an individual signed DELTA to each bot. Positive
 values add capacity and negative values remove it.
@@ -28,6 +33,8 @@ Examples:
   adjust-positions --apply earn=+2 scopl=-1 hookr=+3
   adjust-positions --apply earn,scopl 2
   adjust-positions --apply --restart earn
+  adjust-positions --set-to-filled --all
+  adjust-positions --set-to-filled --all --apply --restart
 EOF
 }
 
@@ -35,6 +42,8 @@ config_path=""
 apply=0
 restart=0
 remove=0
+set_to_filled=0
+all_bots=0
 positional=()
 while (($#)); do
   case "$1" in
@@ -42,14 +51,26 @@ while (($#)); do
     --apply) apply=1; shift ;;
     --restart) restart=1; shift ;;
     --remove) remove=1; shift ;;
+    --set-to-filled) set_to_filled=1; shift ;;
+    --all) all_bots=1; shift ;;
     -h|--help) usage; exit 0 ;;
     --*) fleet_die "Unknown option: $1" ;;
     *) positional+=("$1"); shift ;;
   esac
 done
 
-((${#positional[@]} >= 1)) || fleet_die "Provide NAMES and optional COUNT, or NAME=DELTA assignments"
 ((restart == 0 || apply == 1)) || fleet_die "--restart requires --apply"
+if ((set_to_filled)); then
+  ((remove == 0)) || fleet_die "--set-to-filled cannot be combined with --remove"
+  if ((all_bots)); then
+    ((${#positional[@]} == 0)) || fleet_die "--all cannot be combined with bot names"
+  else
+    ((${#positional[@]} == 1)) || fleet_die "--set-to-filled requires --all or one NAMES list"
+  fi
+else
+  ((all_bots == 0)) || fleet_die "--all requires --set-to-filled"
+  ((${#positional[@]} >= 1)) || fleet_die "Provide NAMES and optional COUNT, or NAME=DELTA assignments"
+fi
 
 declare -A requested_deltas=()
 assignment_mode=0
@@ -57,7 +78,10 @@ for item in "${positional[@]}"; do
   [[ "$item" != *=* ]] || assignment_mode=1
 done
 
-if ((assignment_mode)); then
+if ((set_to_filled)); then
+  assignment_mode=0
+  names="${positional[0]:-}"
+elif ((assignment_mode)); then
   ((remove == 0)) || fleet_die "--remove cannot be combined with NAME=DELTA assignments; use a negative DELTA"
   names_list=()
   for assignment in "${positional[@]}"; do
@@ -90,19 +114,29 @@ printf 'Fleet position capacity: %s (%d selected)\n\n' \
   "$([[ $apply == 1 ]] && printf APPLY || printf PREVIEW)" "${#FLEET_BOT_DIRS[@]}"
 for bot_dir in "${FLEET_BOT_DIRS[@]}"; do
   name="$(fleet_bot_name "$bot_dir")"
-  bot_delta="${requested_deltas[$name]:-$delta}"
-  if ! result="$(python3 "$SCRIPT_DIR/position-capacity.py" --bot-dir "$bot_dir" --delta "$bot_delta")"; then
+  if ((set_to_filled)); then
+    capacity_args=(--set-to-filled)
+  else
+    bot_delta="${requested_deltas[$name]:-$delta}"
+    capacity_args=(--delta "$bot_delta")
+  fi
+  if ! result="$(python3 "$SCRIPT_DIR/position-capacity.py" --bot-dir "$bot_dir" "${capacity_args[@]}")"; then
     fleet_die "Position-capacity validation failed for $name"
   fi
   IFS=$'\t' read -r variable current filled updated <<< "$result"
   variables["$bot_dir"]="$variable"
   updated_values["$bot_dir"]="$updated"
-  operation="ADD"
-  ((bot_delta > 0)) || operation="REMOVE"
-  magnitude="${bot_delta#-}"
-  magnitude="${magnitude#+}"
-  printf '%-16s %-6s %d  %s: %d -> %d (%d currently filled)\n' \
-    "$name" "$operation" "$magnitude" "$variable" "$current" "$updated" "$filled"
+  if ((set_to_filled)); then
+    printf '%-16s %-10s %s: %d -> %d (%d currently filled)\n' \
+      "$name" "SET-FILLED" "$variable" "$current" "$updated" "$filled"
+  else
+    operation="ADD"
+    ((bot_delta > 0)) || operation="REMOVE"
+    magnitude="${bot_delta#-}"
+    magnitude="${magnitude#+}"
+    printf '%-16s %-6s %d  %s: %d -> %d (%d currently filled)\n' \
+      "$name" "$operation" "$magnitude" "$variable" "$current" "$updated" "$filled"
+  fi
 done
 
 if ((apply == 0)); then
