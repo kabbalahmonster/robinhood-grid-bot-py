@@ -52,6 +52,15 @@ def current_gas_price(w3, freshness=Decimal("1.01"), minimum_base_fee=0):
     return int(Decimal(max(rpc_price, base_fee, int(minimum_base_fee))) * freshness)
 
 
+def buffered_gas_limit(w3, source, recipient, amount_wei, multiplier=Decimal("1.05")):
+    estimate = int(w3.eth.estimate_gas({
+        "from": source,
+        "to": Web3.to_checksum_address(recipient),
+        "value": amount_wei,
+    }))
+    return max(estimate, int(Decimal(estimate) * multiplier))
+
+
 def stale_base_fee_error(exc):
     message = str(exc).lower()
     return (
@@ -88,12 +97,22 @@ def append_receipt(record, path="data/fleet_funding.json"):
     os.replace(temporary, target)
 
 
-def send_top_up(w3, account, recipient, amount_wei, chain_id, reserve_wei):
+def send_top_up(
+    w3,
+    account,
+    recipient,
+    amount_wei,
+    chain_id,
+    reserve_wei,
+    gas_limit_multiplier=Decimal("1.05"),
+):
     """Send once, rebuilding exactly once after a pre-broadcast stale-fee rejection."""
     rejected_base_fee = 0
     for attempt in range(2):
         gas_price = current_gas_price(w3, minimum_base_fee=rejected_base_fee)
-        gas = 21_000
+        gas = buffered_gas_limit(
+            w3, account.address, recipient, amount_wei, gas_limit_multiplier
+        )
         if amount_wei + gas * gas_price + reserve_wei > int(w3.eth.get_balance(account.address)):
             raise ValueError("Treasury balance no longer covers transfer gas and reserve")
         tx = {
@@ -145,6 +164,12 @@ def main(argv=None):
         raise ValueError("Set ETH_GAS_RESERVE in treasury env or pass --treasury-reserve")
     reserve_wei = positive_eth(reserve_text, "treasury reserve")
     target_wei = positive_eth(args.target_balance, "target balance")
+    try:
+        gas_limit_multiplier = Decimal(values.get("GAS_LIMIT_MULTIPLIER", "1.05"))
+    except InvalidOperation as exc:
+        raise ValueError("GAS_LIMIT_MULTIPLIER must be decimal") from exc
+    if not gas_limit_multiplier.is_finite() or gas_limit_multiplier < 1:
+        raise ValueError("GAS_LIMIT_MULTIPLIER must be at least 1")
 
     w3 = Web3(Web3.HTTPProvider(values["RPC_URL"], request_kwargs={"timeout": 30}))
     if not w3.is_connected():
@@ -166,15 +191,17 @@ def main(argv=None):
         seen.add(recipient.lower())
         balance = int(w3.eth.get_balance(recipient))
         amount = max(0, target_wei - balance)
-        destinations.append((name, recipient, balance, amount))
+        gas_limit = (
+            buffered_gas_limit(w3, source, recipient, amount, gas_limit_multiplier)
+            if amount else 0
+        )
+        destinations.append((name, recipient, balance, amount, gas_limit))
     if not destinations:
         raise ValueError("At least one --bot is required")
 
     gas_price = current_gas_price(w3)
-    fee_each = 21_000 * gas_price
     total_send = sum(item[3] for item in destinations)
-    funded_count = sum(item[3] > 0 for item in destinations)
-    maximum_fees = fee_each * funded_count
+    maximum_fees = sum(item[4] * gas_price for item in destinations)
     source_balance = int(w3.eth.get_balance(source))
     required = total_send + maximum_fees + reserve_wei
 
@@ -183,10 +210,10 @@ def main(argv=None):
     print(f"Source balance: {Decimal(source_balance) / WEI} ETH")
     print(f"Target balance per bot: {Decimal(target_wei) / WEI} ETH")
     print(f"Treasury reserve: {Decimal(reserve_wei) / WEI} ETH")
-    for name, recipient, balance, amount in destinations:
+    for name, recipient, balance, amount, gas_limit in destinations:
         print(
             f"- {name}: {recipient} balance={Decimal(balance) / WEI} "
-            f"top_up={Decimal(amount) / WEI} ETH"
+            f"top_up={Decimal(amount) / WEI} ETH gas_limit={gas_limit}"
         )
     print(f"Total top-ups: {Decimal(total_send) / WEI} ETH")
     print(f"Maximum planned gas: {Decimal(maximum_fees) / WEI} ETH")
@@ -198,13 +225,16 @@ def main(argv=None):
         return 0
 
     completed = 0
-    for name, recipient, _balance, _planned_amount in destinations:
+    for name, recipient, _balance, _planned_amount, _planned_gas in destinations:
         current_balance = int(w3.eth.get_balance(recipient))
         amount = max(0, target_wei - current_balance)
         if amount == 0:
             print(f"SKIP {name}: already at or above target")
             continue
-        refreshed_fee = 21_000 * current_gas_price(w3)
+        refreshed_gas = buffered_gas_limit(
+            w3, source, recipient, amount, gas_limit_multiplier
+        )
+        refreshed_fee = refreshed_gas * current_gas_price(w3)
         current_source_balance = int(w3.eth.get_balance(source))
         if amount + refreshed_fee + reserve_wei > current_source_balance:
             raise RuntimeError(
@@ -214,7 +244,13 @@ def main(argv=None):
         print(f"FUND {name}: {Decimal(amount) / WEI} ETH -> {recipient}")
         try:
             tx_hash, tx = send_top_up(
-                w3, account, recipient, amount, chain_id, reserve_wei
+                w3,
+                account,
+                recipient,
+                amount,
+                chain_id,
+                reserve_wei,
+                gas_limit_multiplier,
             )
         except Exception as exc:
             append_receipt({

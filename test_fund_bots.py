@@ -32,12 +32,24 @@ class TestFundBots(unittest.TestCase):
         w3.eth.get_block.return_value = {"baseFeePerGas": 382_202_000}
         self.assertEqual(fund_bots.current_gas_price(w3), 386_024_020)
 
+    def test_buffered_gas_limit_uses_live_chain_estimate(self):
+        w3 = SimpleNamespace(eth=Mock())
+        w3.eth.estimate_gas.return_value = 22_000
+        gas = fund_bots.buffered_gas_limit(
+            w3,
+            "0x0000000000000000000000000000000000000001",
+            "0x0000000000000000000000000000000000000002",
+            1000,
+        )
+        self.assertEqual(gas, 23_100)
+
     def test_send_top_up_retries_stale_fee_before_hash_only(self):
         w3 = SimpleNamespace(eth=Mock())
         w3.eth.gas_price = 378_657_080
         w3.eth.get_block.return_value = {"baseFeePerGas": 382_202_000}
         w3.eth.get_transaction_count.return_value = 9
         w3.eth.get_balance.return_value = 10**18
+        w3.eth.estimate_gas.return_value = 22_000
         tx_hash = Mock()
         tx_hash.hex.return_value = "0xconfirmed"
         w3.eth.send_raw_transaction.side_effect = [
@@ -60,6 +72,7 @@ class TestFundBots(unittest.TestCase):
 
         self.assertEqual(result, "0xconfirmed")
         self.assertEqual(tx["nonce"], 9)
+        self.assertEqual(tx["gas"], 23_100)
         self.assertGreaterEqual(tx["gasPrice"], 4_408_929_600)
         self.assertEqual(w3.eth.send_raw_transaction.call_count, 2)
 
@@ -68,6 +81,7 @@ class TestFundBots(unittest.TestCase):
         w3.eth.gas_price = 1_000_000_000
         w3.eth.get_block.return_value = {"baseFeePerGas": 1_000_000_000}
         w3.eth.get_balance.return_value = 21_000_000_001_499
+        w3.eth.estimate_gas.return_value = 22_000
         account = Mock()
         account.address = "0x0000000000000000000000000000000000000001"
 

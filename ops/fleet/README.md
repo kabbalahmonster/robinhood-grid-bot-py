@@ -751,8 +751,9 @@ ops/fleet/fund-bots \
 ```
 
 The plan prints the derived treasury address, current destination balances,
-individual top-ups, total value, maximum planned transfer gas, and treasury
-reserve. A bot already at or above the target receives nothing. After stopping
+individual top-ups, live RPC-estimated and buffered gas limits, total value,
+maximum planned transfer gas, and treasury reserve. A bot already at or above
+the target receives nothing. After stopping
 the fleet, repeat the command with the exact source address printed by preview:
 
 ```bash
@@ -767,7 +768,9 @@ ops/fleet/fund-bots \
 ```
 
 Immediately before each transfer, the command refreshes the destination and
-treasury balances, gas, pending nonce, and reserve check. A stale-base-fee RPC
+treasury balances, RPC gas-limit estimate, gas price, pending nonce, and reserve
+check. It does not assume Ethereum's 21,000 intrinsic gas minimum is sufficient
+for another EVM chain. A stale-base-fee RPC
 rejection before any hash is assigned rebuilds once. Confirmed and failed
 attempts are recorded in `data/fleet_funding.json`; execution stops at the first
 failure because a multi-wallet funding batch is not atomic.
