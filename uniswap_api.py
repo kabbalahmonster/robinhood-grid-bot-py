@@ -573,7 +573,7 @@ class UniswapAPIClient:
             
             # Get quote data for amounts from swap response
             quote_info = data.get("quote", {})
-            self.logger.info(f"Swap response has quote: {bool(quote_info)}, has swap: {bool(swap_data)}")
+            self.logger.debug(f"Swap response has quote: {bool(quote_info)}, has swap: {bool(swap_data)}")
             
             if not quote_info:
                 self.logger.warning("Uniswap swap response contained no quote")
@@ -583,8 +583,8 @@ class UniswapAPIClient:
             output_info = quote_info.get("output", {}) if isinstance(quote_info, dict) else {}
             input_info = quote_info.get("input", {}) if isinstance(quote_info, dict) else {}
             
-            self.logger.info(f"Output amount from swap: {output_info.get('amount')}")
-            self.logger.info(f"Input amount from swap: {input_info.get('amount')}")
+            self.logger.debug(f"Output amount from swap: {output_info.get('amount')}")
+            self.logger.debug(f"Input amount from swap: {input_info.get('amount')}")
             
             buy_amount = int(output_info.get("amount", 0)) if output_info else 0
             sell_amount = int(input_info.get("amount", 0)) if input_info else 0

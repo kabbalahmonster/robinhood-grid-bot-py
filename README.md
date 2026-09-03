@@ -144,9 +144,9 @@ python grid_bot.py
 | `POLL_INTERVAL_SECONDS` | No | 6 | Price check interval in seconds |
 | `STARTUP_JITTER_SECONDS` | No | 20 | Random delay before the first provider request so fleet restarts do not stampede |
 | `ANTI_MEV_JITTER` | No | true | Enable anti-MEV timing jitter |
-| `LOG_LEVEL` | No | INFO | Logging level (DEBUG/INFO/WARNING/ERROR) |
+| `LOG_LEVEL` | No | INFO | INFO shows operational events only; DEBUG adds full per-round and quote telemetry |
 | `STATE_FILE` | No | ./data/positions.json | Position state file path |
-| `COMPACT_MODE` | No | false | Compact single-line output for tmux |
+| `COMPACT_MODE` | No | false | Print a compact status block every round for tmux; overrides quiet INFO rounds |
 | `MINIMAL_LOGS` | No | false | Remove timestamps from console output |
 | `MERCURY_EVOCATION` | No | true | Print the Mercury trading evocation once after successful startup |
 | **Dashboard Reporting** ||||
@@ -536,6 +536,12 @@ MINIMAL_LOGS=true
 | `MINIMAL_LOGS=true` | Remove timestamps from console output |
 
 File logs always retain full timestamps for debugging.
+
+With the default `LOG_LEVEL=INFO` and `COMPACT_MODE=false`, routine polling is
+silent. Startup state, trade decisions, successful transactions, safety blocks,
+warnings, and errors remain visible. Temporarily set `LOG_LEVEL=DEBUG` when full
+round-by-round balances, positions, targets, prices, and quote diagnostics are
+needed.
 
 For fleets too large to display as readable tmux tiles—especially from a phone—
 use `ops/fleet/fleet-watch`. It renders one adaptive row per bot, sorts problems

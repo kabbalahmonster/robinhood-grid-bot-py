@@ -670,7 +670,7 @@ class GridBot:
         
         # Dashboard reporter (None when DASHBOARD_URL is not configured)
         self._reporter: Optional[DashboardReporter] = create_reporter_from_config(self.config)
-        logger.info(f"DEBUG: dashboard_url={self.config.dashboard_url!r}, reporter={self._reporter}")
+        logger.debug(f"dashboard_url={self.config.dashboard_url!r}, reporter={self._reporter}")
         if self._reporter:
             logger.info(f"Dashboard reporting enabled (bot_id={self._reporter.bot_id})")
 
@@ -1792,7 +1792,7 @@ class GridBot:
         if projected_net_profit_eth < min_profit_eth:
             buy_price = get_buy_price(pos, self.token_decimals)
             pnl_at_check = calculate_pnl(pos, price, self.token_decimals)
-            logger.info(
+            logger.debug(
                 "⏸️  Position #%s at %.1f%% P&L but projected net profit "
                 "(%.6f after %.6f gas) < min (%.6f) - skipping",
                 pos_id, pnl_at_check, projected_net_profit_eth, projected_gas_eth, min_profit_eth,
@@ -2755,8 +2755,10 @@ class GridBot:
             logger.warning("Could not get price")
             return
         
-        # Check for compact mode (tmux-friendly output)
-        compact_mode = getattr(self.config, 'compact_mode', False)
+        # Check for compact/debug round telemetry. Normal INFO operation is
+        # deliberately silent between actionable events.
+        summary_mode = self._round_summary_mode()
+        compact_mode = summary_mode == "compact"
         
         if compact_mode:
             # Compact output for tmux multi-pane view
@@ -2813,8 +2815,10 @@ class GridBot:
             logger.info(f"B:{self.session_buys} S:{self.session_sells} P:{self.session_profit_weth:.6f}")
 
             logger.info(f"------ {self.config.token_symbol}")
-        else:
-            # Verbose round summary (original format)
+        elif summary_mode == "debug":
+            # Full round-by-round telemetry is intentionally debug-only. The
+            # normal INFO console remains focused on decisions, transactions,
+            # safety blocks, and actionable failures.
             balance_label = "ETH" if getattr(self.config, 'use_eth_trading', False) else "WETH"
             logger.info("=" * 70)
             logger.info(f"ROUND #{self.round_count} | {self.config.token_symbol} | Elapsed: {elapsed:.0f}s")
@@ -3034,6 +3038,14 @@ class GridBot:
 
         # Then check buys
         self.check_buys(price)
+
+    def _round_summary_mode(self):
+        """Choose compact, verbose-debug, or quiet per-round console output."""
+        if getattr(self.config, "compact_mode", False):
+            return "compact"
+        if logger.isEnabledFor(logging.DEBUG):
+            return "debug"
+        return "quiet"
     
     def run(self):
         """Main bot loop."""
