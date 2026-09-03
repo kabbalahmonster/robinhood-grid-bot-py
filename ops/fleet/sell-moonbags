@@ -19,6 +19,8 @@ Dry run is the default.
 
   --execute                  Broadcast after reviewing a dry run
   --confirm-fleet-stopped    Required with --execute
+  --send-to-treasury        Forward each sale's actual net ETH proceeds to
+                            FLEET_TREASURY_RECIPIENT
   --config PATH              Use an alternate fleet configuration
   -h, --help                 Show this help
 
@@ -27,19 +29,23 @@ Examples:
   sell-moonbags CHUMP WTH Index
   sell-moonbags CHUMP,WTH
   sell-moonbags all
+  sell-moonbags --send-to-treasury CHUMP
   sell-moonbags --execute --confirm-fleet-stopped CHUMP
+  sell-moonbags --send-to-treasury --execute --confirm-fleet-stopped CHUMP
 EOF
 }
 
 config_path=""
 execute=0
 fleet_stopped=0
+send_to_treasury=0
 selectors=()
 while (($#)); do
   case "$1" in
     --config) (($# >= 2)) || fleet_die "--config requires a path"; config_path="$2"; shift 2 ;;
     --execute) execute=1; shift ;;
     --confirm-fleet-stopped) fleet_stopped=1; shift ;;
+    --send-to-treasury) send_to_treasury=1; shift ;;
     -h|--help) usage; exit 0 ;;
     --*) fleet_die "Unknown option: $1" ;;
     *)
@@ -56,6 +62,9 @@ if ((execute && !fleet_stopped)); then
 fi
 
 fleet_load_config "$config_path"
+if ((send_to_treasury)); then
+  [[ -n "$FLEET_TREASURY_RECIPIENT" ]] || fleet_die "--send-to-treasury requires FLEET_TREASURY_RECIPIENT in fleet.conf"
+fi
 fleet_sort_targets_by_name
 fleet_validate_bots
 
@@ -114,7 +123,11 @@ for bot_dir in "${FLEET_BOT_DIRS[@]}"; do
   printf '%s\n%s (%s)\n' '------------------------------------------------------------' \
     "$(fleet_bot_name "$bot_dir")" "${selected_dirs[$bot_dir]}"
   command_args=("$python_bin" "$FLEET_ENTRYPOINT" --sell-moonbag)
+  if ((send_to_treasury)); then
+    command_args+=(--send-to-treasury --recipient "$FLEET_TREASURY_RECIPIENT" --confirm-recipient "$FLEET_TREASURY_RECIPIENT")
+  fi
   ((execute == 0)) || command_args+=(--execute --confirm-sell-moonbag --confirm-bot-stopped)
+  ((execute == 0 || send_to_treasury == 0)) || command_args+=(--confirm-send-to-treasury)
   if (cd "$bot_dir" && "${command_args[@]}"); then
     successes=$((successes + 1))
   else

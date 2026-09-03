@@ -25,8 +25,16 @@ def config(gridless=True):
     )
 
 
-def args(execute=False, confirmed=False, stopped=False):
-    return SimpleNamespace(execute=execute, confirm_sell_moonbag=confirmed, confirm_bot_stopped=stopped)
+def args(execute=False, confirmed=False, stopped=False, send_to_treasury=False):
+    return SimpleNamespace(
+        execute=execute,
+        confirm_sell_moonbag=confirmed,
+        confirm_bot_stopped=stopped,
+        send_to_treasury=send_to_treasury,
+        confirm_send_to_treasury=send_to_treasury,
+        recipient="0x0000000000000000000000000000000000000004" if send_to_treasury else None,
+        confirm_recipient="0x0000000000000000000000000000000000000004" if send_to_treasury else None,
+    )
 
 
 class TestMoonbagSeller(unittest.TestCase):
@@ -45,6 +53,26 @@ class TestMoonbagSeller(unittest.TestCase):
                 json.dump({"1": {"balance": "100"}}, handle)
             with self.assertRaisesRegex(ValueError, "invalid raw balance"):
                 moonbag_seller._allocated_position_balance(moonbag_seller.Path(path))
+
+    def test_treasury_forward_sends_only_net_new_eth_and_preserves_starting_balance(self):
+        wallet = Mock()
+        wallet.get_eth_balance_wei.return_value = 10**18 + 900_000
+        wallet.build_eth_transfer_transaction.return_value = {
+            "gas": 21_000, "gasPrice": 10, "value": 1,
+        }
+        wallet.transfer_eth.return_value = SimpleNamespace(success=True, tx_hash="0xtreasury")
+
+        result, amount = moonbag_seller._forward_actual_proceeds(
+            wallet, config(), "0x0000000000000000000000000000000000000004",
+            eth_before_sale=10**18, weth_before_sale=None,
+        )
+
+        self.assertEqual(amount, 690_000)
+        self.assertEqual(result.tx_hash, "0xtreasury")
+        self.assertEqual(wallet.build_eth_transfer_transaction.return_value["value"], 690_000)
+        wallet.transfer_eth.assert_called_once_with(
+            wallet.build_eth_transfer_transaction.return_value, wait_for_receipt=True
+        )
 
     @patch("moonbag_seller.create_swap_provider")
     @patch("moonbag_seller.Wallet")

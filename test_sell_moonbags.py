@@ -24,6 +24,7 @@ class TestSellMoonbagsFleetCommand(unittest.TestCase):
             f'FLEET_BOT_ROOT="{root}"\n'
             'FLEET_BOT_NAMES=(alpha beta gamma)\n'
             'FLEET_CHECKOUT_DIRNAME="robinhood-grid-bot-py"\n'
+            'FLEET_TREASURY_RECIPIENT="0x0000000000000000000000000000000000000004"\n'
         )
         return config
 
@@ -58,6 +59,18 @@ class TestSellMoonbagsFleetCommand(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("Unknown coin or bot name", result.stderr)
             self.assertNotIn("CALLED", result.stdout)
+
+    def test_send_to_treasury_passes_guarded_recipient(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = self._fleet(Path(directory))
+            result = subprocess.run(
+                [str(SCRIPT), "--config", str(config), "--send-to-treasury", "CHUMP"],
+                text=True, capture_output=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("--send-to-treasury", result.stdout)
+            self.assertIn("--recipient 0x0000000000000000000000000000000000000004", result.stdout)
+            self.assertIn("--confirm-recipient 0x0000000000000000000000000000000000000004", result.stdout)
 
 
 if __name__ == "__main__":

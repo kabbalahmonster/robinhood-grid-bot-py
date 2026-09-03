@@ -811,6 +811,21 @@ its wallet balance, the sell gas cap, the native gas reserve, or a quote whose
 output cannot cover projected transaction gas. Position files are never
 changed by this command.
 
+Add `--send-to-treasury` to both the dry run and execution commands to forward
+only the sale's actual net proceeds to `FLEET_TREASURY_RECIPIENT`. WETH
+settlement is unwrapped first. The workflow subtracts approval, swap, unwrap,
+and treasury-transfer gas while preserving the wallet's pre-sale native ETH
+and `ETH_GAS_RESERVE`; it never invokes the broader `--amount available` sweep.
+
+```bash
+ops/fleet/sell-moonbags --send-to-treasury CHUMP WTH
+ops/fleet/sell-moonbags \
+  --send-to-treasury \
+  --execute \
+  --confirm-fleet-stopped \
+  CHUMP WTH
+```
+
 ## Liquidating bot-managed assets to native ETH
 
 `liquidate-assets` converts all configured bot-managed ERC-20 balances in each

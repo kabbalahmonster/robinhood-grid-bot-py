@@ -2932,26 +2932,36 @@ if __name__ == "__main__":
     parser.add_argument("--keep-usdg", action="store_true", help="Exclude configured USDG from --liquidate-assets")
     parser.add_argument("--sell-moonbag", action="store_true", help="Sell only token balance not allocated to positions")
     parser.add_argument("--confirm-sell-moonbag", action="store_true", help="Required acknowledgement to execute --sell-moonbag")
+    parser.add_argument("--send-to-treasury", action="store_true", help="Forward only actual net moonbag-sale proceeds to --recipient")
+    parser.add_argument("--confirm-send-to-treasury", action="store_true", help="Required acknowledgement to execute moonbag treasury forwarding")
     parser.add_argument("--confirm-bot-stopped", action="store_true", help="Acknowledge the bot sharing this wallet is stopped")
     parser.add_argument("--execute", action="store_true", help="Broadcast the planned transfer")
     args = parser.parse_args()
     if args.check_config:
         if any([args.sweep_usdg, args.transfer_token, args.transfer_eth, args.recipient, args.confirm_liquidate,
                 args.liquidate_assets, args.confirm_liquidate_assets, args.keep_usdg,
-                args.sell_moonbag, args.confirm_sell_moonbag,
+                args.sell_moonbag, args.confirm_sell_moonbag, args.send_to_treasury,
+                args.confirm_send_to_treasury,
                 args.confirm_bot_stopped, args.execute]):
             parser.error("--check-config cannot be combined with a maintenance command")
         raise SystemExit(check_config())
     if args.liquidate_assets:
         if any([args.sweep_usdg, args.transfer_token, args.transfer_eth, args.recipient, args.confirm_liquidate,
-                args.confirm_recipient, args.amount != "all", args.sell_moonbag, args.confirm_sell_moonbag]):
+                args.confirm_recipient, args.amount != "all", args.sell_moonbag, args.confirm_sell_moonbag,
+                args.send_to_treasury, args.confirm_send_to_treasury]):
             parser.error("--liquidate-assets cannot be combined with treasury transfer commands")
         from asset_liquidator import run_asset_liquidation
         raise SystemExit(run_asset_liquidation(args))
     if args.sell_moonbag:
-        if any([args.sweep_usdg, args.transfer_token, args.transfer_eth, args.recipient, args.confirm_liquidate,
-                args.confirm_recipient, args.amount != "all", args.confirm_liquidate_assets, args.keep_usdg]):
+        if any([args.sweep_usdg, args.transfer_token, args.transfer_eth, args.confirm_liquidate,
+                args.amount != "all", args.confirm_liquidate_assets, args.keep_usdg]):
             parser.error("--sell-moonbag cannot be combined with another maintenance command")
+        if args.send_to_treasury != bool(args.recipient):
+            parser.error("--send-to-treasury and --recipient must be supplied together for --sell-moonbag")
+        if args.confirm_send_to_treasury and not args.send_to_treasury:
+            parser.error("--confirm-send-to-treasury requires --send-to-treasury")
+        if args.confirm_recipient and not args.send_to_treasury:
+            parser.error("--confirm-recipient requires --send-to-treasury for --sell-moonbag")
         from moonbag_seller import run_moonbag_sale
         raise SystemExit(run_moonbag_sale(args))
     if args.keep_usdg:
@@ -2970,7 +2980,8 @@ if __name__ == "__main__":
             parser.error("--transfer-token and --recipient must be supplied together")
         raise SystemExit(run_treasury_transfer(args))
     if any([args.amount != "all", args.confirm_recipient, args.confirm_liquidate, args.confirm_liquidate_assets,
-            args.keep_usdg, args.confirm_sell_moonbag, args.confirm_bot_stopped, args.execute]):
+            args.keep_usdg, args.confirm_sell_moonbag, args.send_to_treasury,
+            args.confirm_send_to_treasury, args.confirm_bot_stopped, args.execute]):
         parser.error("transfer options require --sweep-usdg, --transfer-token, or --transfer-eth with --recipient")
     bot = GridBot()
     bot.run()

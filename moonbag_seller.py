@@ -148,6 +148,65 @@ def _send_quote(wallet: Wallet, config: Any, quote: Any, gas_limit: int, gas_pri
     })
 
 
+def _treasury_recipient(wallet: Wallet, config: Any, args: Any) -> str:
+    recipient_text = getattr(args, "recipient", None)
+    if not recipient_text or not Web3.is_address(recipient_text):
+        raise ValueError("--send-to-treasury requires a valid --recipient")
+    recipient = Web3.to_checksum_address(recipient_text)
+    if recipient.lower() == wallet.address.lower():
+        raise ValueError("treasury recipient cannot be the bot wallet")
+    allowed = {str(address).lower() for address in getattr(config, "treasury_allowed_recipients", [])}
+    if recipient.lower() not in allowed and str(getattr(args, "confirm_recipient", "") or "").lower() != recipient.lower():
+        raise ValueError(
+            "treasury recipient is not allowlisted; repeat it exactly with --confirm-recipient"
+        )
+    if wallet.address_has_code(recipient):
+        raise ValueError("treasury forwarding requires an externally owned recipient")
+    return recipient
+
+
+def _forward_actual_proceeds(
+    wallet: Wallet,
+    config: Any,
+    recipient: str,
+    eth_before_sale: int,
+    weth_before_sale: int | None,
+) -> tuple[Any, int]:
+    """Forward only net ETH created by this sale, preserving prior wallet ETH."""
+    if weth_before_sale is not None:
+        _, weth_after_sale = wallet.get_token_balance(config.weth_address)
+        received_weth = int(weth_after_sale) - int(weth_before_sale)
+        if received_weth <= 0:
+            raise ValueError("sale produced no measurable WETH to unwrap")
+        unwrap_tx = wallet.build_weth_withdraw_transaction(config.weth_address, received_weth)
+        reserve_wei = int(float(getattr(config, "eth_gas_reserve", 0.0005)) * 10**18)
+        unwrap_max_fee = int(unwrap_tx["gas"]) * int(unwrap_tx["gasPrice"])
+        if wallet.get_eth_balance_wei() - unwrap_max_fee < reserve_wei:
+            raise ValueError("WETH unwrap gas would breach ETH_GAS_RESERVE")
+        unwrap_result = wallet.unwrap_weth(unwrap_tx, wait_for_receipt=True)
+        if not unwrap_result.success:
+            raise ValueError(f"WETH unwrap failed: {unwrap_result.error}")
+
+    eth_after_settlement = int(wallet.get_eth_balance_wei())
+    net_sale_proceeds = eth_after_settlement - int(eth_before_sale)
+    if net_sale_proceeds <= 0:
+        raise ValueError("sale produced no net native ETH after execution gas")
+
+    transfer_tx = wallet.build_eth_transfer_transaction(recipient, 1)
+    transfer_max_fee = int(transfer_tx["gas"]) * int(transfer_tx["gasPrice"])
+    amount_wei = net_sale_proceeds - transfer_max_fee
+    if amount_wei <= 0:
+        raise ValueError("net moonbag proceeds do not cover treasury transfer gas")
+    reserve_wei = int(float(getattr(config, "eth_gas_reserve", 0.0005)) * 10**18)
+    if eth_after_settlement - amount_wei - transfer_max_fee < reserve_wei:
+        raise ValueError("treasury forwarding would breach ETH_GAS_RESERVE")
+    transfer_tx["value"] = amount_wei
+    result = wallet.transfer_eth(transfer_tx, wait_for_receipt=True)
+    if not result.success:
+        raise ValueError(f"treasury transfer failed: {result.error}")
+    return result, amount_wei
+
+
 def _build_api_transaction(wallet: Wallet, config: Any, api_tx: dict[str, Any]) -> dict[str, Any]:
     """Build an API-supplied approval/reset with fresh EIP-1559 fees."""
     latest_block = wallet.w3.eth.get_block("latest")
@@ -267,9 +326,13 @@ def run_moonbag_sale(args: Any) -> int:
             raise ValueError("--execute requires --confirm-sell-moonbag")
         if args.execute and not args.confirm_bot_stopped:
             raise ValueError("--execute requires --confirm-bot-stopped")
+        send_to_treasury = bool(getattr(args, "send_to_treasury", False))
+        if args.execute and send_to_treasury and not getattr(args, "confirm_send_to_treasury", False):
+            raise ValueError("--send-to-treasury execution requires --confirm-send-to-treasury")
 
         config = load_config()
         wallet = Wallet(config)
+        recipient = _treasury_recipient(wallet, config, args) if send_to_treasury else None
         provider = create_swap_provider(config)
         token_info = wallet.get_token_info(config.token_address)
         _, wallet_raw = wallet.get_token_balance(config.token_address)
@@ -294,10 +357,16 @@ def run_moonbag_sale(args: Any) -> int:
         print(f"Quoted:     {output_wei / 1e18:.12f} {settlement}")
         print(f"Swap gas:   {gas_wei / 1e18:.12f} ETH projected")
         print(f"Net est.:   {(output_wei - gas_wei) / 1e18:.12f} {settlement} after swap gas")
+        if send_to_treasury:
+            print(f"Treasury:   {recipient} (forward actual net proceeds only)")
         if not args.execute:
-            print("DRY RUN: no approval or swap was broadcast.")
+            print("DRY RUN: no approval, swap, unwrap, or treasury transfer was broadcast.")
             return 0
 
+        eth_before_sale = int(wallet.get_eth_balance_wei()) if send_to_treasury else None
+        weth_before_sale = None
+        if send_to_treasury and not getattr(config, "use_eth_trading", False):
+            _, weth_before_sale = wallet.get_token_balance(config.weth_address)
         result = _execute_quote(selected_provider, wallet, config, allocation.moonbag_raw, quote)
         if not result.success:
             raise ValueError(result.error or "moonbag swap failed")
@@ -306,6 +375,15 @@ def run_moonbag_sale(args: Any) -> int:
             raise ValueError("post-sale wallet balance fell below the amount allocated to positions")
         print(f"CONFIRMED: {result.tx_hash}")
         print(f"Protected position allocation: {allocation.allocated_raw / unit:.{min(token_info.decimals, 12)}f}")
+        if send_to_treasury:
+            try:
+                treasury_result, amount_wei = _forward_actual_proceeds(
+                    wallet, config, recipient, int(eth_before_sale), weth_before_sale
+                )
+            except Exception as exc:
+                raise ValueError(f"sale confirmed but treasury forwarding failed: {exc}") from exc
+            print(f"TREASURY CONFIRMED: {treasury_result.tx_hash}")
+            print(f"Treasury net: {amount_wei / 1e18:.12f} ETH")
         return 0
     except Exception as exc:
         print(f"MOONBAG SALE REFUSED: {exc}")
