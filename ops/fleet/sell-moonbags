@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+SCRIPT_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)"
+# shellcheck source=fleet-common.sh
+source "$SCRIPT_DIR/fleet-common.sh"
+
+usage() {
+  cat <<'EOF'
+Usage: sell-moonbags [options] COIN [COIN ...]
+       sell-moonbags [options] all
+
+Sell each selected bot's configured token balance above the amount allocated
+to its open positions. Coin selectors match bot names or TOKEN_SYMBOL values,
+case-insensitively. Comma-separated selectors are also accepted.
+
+Dry run is the default.
+
+  --execute                  Broadcast after reviewing a dry run
+  --confirm-fleet-stopped    Required with --execute
+  --config PATH              Use an alternate fleet configuration
+  -h, --help                 Show this help
+
+Examples:
+  sell-moonbags CHUMP
+  sell-moonbags CHUMP WTH Index
+  sell-moonbags CHUMP,WTH
+  sell-moonbags all
+  sell-moonbags --execute --confirm-fleet-stopped CHUMP
+EOF
+}
+
+config_path=""
+execute=0
+fleet_stopped=0
+selectors=()
+while (($#)); do
+  case "$1" in
+    --config) (($# >= 2)) || fleet_die "--config requires a path"; config_path="$2"; shift 2 ;;
+    --execute) execute=1; shift ;;
+    --confirm-fleet-stopped) fleet_stopped=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    --*) fleet_die "Unknown option: $1" ;;
+    *)
+      IFS=',' read -r -a split_selectors <<< "$1"
+      selectors+=("${split_selectors[@]}")
+      shift
+      ;;
+  esac
+done
+
+((${#selectors[@]} > 0)) || fleet_die "Specify one or more coins, or 'all'"
+if ((execute && !fleet_stopped)); then
+  fleet_die "--execute requires --confirm-fleet-stopped"
+fi
+
+fleet_load_config "$config_path"
+fleet_sort_targets_by_name
+fleet_validate_bots
+
+if ((execute)); then
+  fleet_require_tmux
+  if fleet_session_exists; then
+    fleet_die "Refusing to sell moonbags while tmux session '$FLEET_SESSION' is running. Stop the fleet first."
+  fi
+fi
+
+all_requested=0
+if [[ "${selectors[0],,}" == "all" ]]; then
+  ((${#selectors[@]} == 1)) || fleet_die "'all' cannot be combined with individual coins"
+  all_requested=1
+fi
+
+declare -A requested=() matched=() selected_dirs=()
+if ((all_requested == 0)); then
+  for selector in "${selectors[@]}"; do
+    selector="${selector#"${selector%%[![:space:]]*}"}"
+    selector="${selector%"${selector##*[![:space:]]}"}"
+    [[ -n "$selector" ]] || fleet_die "Coin selection contains an empty value"
+    requested["${selector,,}"]=1
+  done
+fi
+
+for bot_dir in "${FLEET_BOT_DIRS[@]}"; do
+  bot_name="$(fleet_bot_name "$bot_dir")"
+  python_bin="$(fleet_python_for "$bot_dir")"
+  token_symbol="$(cd "$bot_dir" && "$python_bin" -c 'from config import load_config; print(load_config().token_symbol)')" \
+    || fleet_die "Could not read TOKEN_SYMBOL for $bot_name"
+  bot_key="${bot_name,,}"
+  symbol_key="${token_symbol,,}"
+  if ((all_requested)) || [[ -n "${requested[$bot_key]+x}" || -n "${requested[$symbol_key]+x}" ]]; then
+    selected_dirs["$bot_dir"]="$token_symbol"
+    [[ -z "${requested[$bot_key]+x}" ]] || matched["$bot_key"]=1
+    [[ -z "${requested[$symbol_key]+x}" ]] || matched["$symbol_key"]=1
+  fi
+done
+
+if ((all_requested == 0)); then
+  for selector in "${!requested[@]}"; do
+    [[ -n "${matched[$selector]+x}" ]] || fleet_die "Unknown coin or bot name: $selector"
+  done
+fi
+((${#selected_dirs[@]} > 0)) || fleet_die "Coin selection resolved to zero bots"
+
+printf 'Fleet moonbag sale: %s\nSelected bots: %d\n\n' \
+  "$([[ $execute == 1 ]] && printf EXECUTE || printf 'DRY RUN')" "${#selected_dirs[@]}"
+
+successes=0
+failures=0
+for bot_dir in "${FLEET_BOT_DIRS[@]}"; do
+  [[ -n "${selected_dirs[$bot_dir]+x}" ]] || continue
+  python_bin="$(fleet_python_for "$bot_dir")"
+  printf '%s\n%s (%s)\n' '------------------------------------------------------------' \
+    "$(fleet_bot_name "$bot_dir")" "${selected_dirs[$bot_dir]}"
+  command_args=("$python_bin" "$FLEET_ENTRYPOINT" --sell-moonbag)
+  ((execute == 0)) || command_args+=(--execute --confirm-sell-moonbag --confirm-bot-stopped)
+  if (cd "$bot_dir" && "${command_args[@]}"); then
+    successes=$((successes + 1))
+  else
+    printf 'FAILED: %s\n' "$bot_dir" >&2
+    failures=$((failures + 1))
+  fi
+done
+
+printf '\nFleet moonbag sale complete: %d succeeded, %d failed.\n' "$successes" "$failures"
+((failures == 0))

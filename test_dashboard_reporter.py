@@ -18,6 +18,8 @@ class TestDashboardReporter(unittest.TestCase):
             sell_point_percent=10.0,
             poll_interval_seconds=30,
             token_symbol="TENDIES",
+            moonbag_balance=42.0,
+            estimated_moonbag_value_eth=0.00123,
         )
 
         self.assertEqual(len(reporter._queue), 1)
@@ -27,6 +29,8 @@ class TestDashboardReporter(unittest.TestCase):
         self.assertEqual(reporter._queue[0]["buy_point_percent"], -14.0)
         self.assertEqual(reporter._queue[0]["sell_point_percent"], 10.0)
         self.assertEqual(reporter._queue[0]["token_symbol"], "TENDIES")
+        self.assertEqual(reporter._queue[0]["moonbag_balance"], 42.0)
+        self.assertEqual(reporter._queue[0]["estimated_moonbag_value_eth"], 0.00123)
         self.assertEqual(reporter._queue[0]["sigil"], reporter._sigil)
 
     @patch("dashboard_reporter.threading.Thread.start")

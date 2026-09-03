@@ -83,7 +83,7 @@ sudo apt install tmux git python3 python3-venv
      ops/fleet/adjust-positions ops/fleet/fleet-membership \
      ops/fleet/position-capacity.py \
      ops/fleet/backup-private-keys ops/fleet/fleet-discover \
-     ops/fleet/liquidate-assets ops/fleet/fleet-doctor \
+     ops/fleet/liquidate-assets ops/fleet/sell-moonbags ops/fleet/fleet-doctor \
      ops/fleet/fleet-inventory ops/fleet/fleet-audit \
      ops/fleet/dashboard-remove ops/fleet/initialize-bots \
      ops/fleet/reconcile-position-balances ops/fleet/reconcile-position-balances.py \
@@ -118,6 +118,7 @@ sudo apt install tmux git python3 python3-venv
    ln -sf "$PWD/ops/fleet/backup-private-keys" "$HOME/bin/backup-private-keys"
    ln -sf "$PWD/ops/fleet/fleet-discover" "$HOME/bin/fleet-discover"
    ln -sf "$PWD/ops/fleet/liquidate-assets" "$HOME/bin/liquidate-assets"
+   ln -sf "$PWD/ops/fleet/sell-moonbags" "$HOME/bin/sell-moonbags"
    ln -sf "$PWD/ops/fleet/fleet-doctor" "$HOME/bin/fleet-doctor"
    ln -sf "$PWD/ops/fleet/fleet-inventory" "$HOME/bin/fleet-inventory"
    ln -sf "$PWD/ops/fleet/fleet-audit" "$HOME/bin/fleet-audit"
@@ -777,6 +778,38 @@ for another EVM chain. A stale-base-fee RPC
 rejection before any hash is assigned rebuilds once. Confirmed and failed
 attempts are recorded in `data/fleet_funding.json`; execution stops at the first
 failure because a multi-wallet funding batch is not atomic.
+
+## Selling unallocated moonbags
+
+`sell-moonbags` sells only the configured trading-token balance above the raw
+amount allocated to positions. It accepts one coin, multiple space- or
+comma-separated coins, or `all`; selectors match bot names and `TOKEN_SYMBOL`
+case-insensitively:
+
+```bash
+ops/fleet/sell-moonbags CHUMP
+ops/fleet/sell-moonbags CHUMP WTH Index
+ops/fleet/sell-moonbags all
+```
+
+These are dry runs: each selected wallet prints its total balance, protected
+position allocation, exact moonbag sale amount, provider, quote, projected
+swap gas, and estimated proceeds after swap gas. To execute the same reviewed
+selection:
+
+```bash
+ops/fleet/stop-fleet
+ops/fleet/sell-moonbags \
+  --execute \
+  --confirm-fleet-stopped \
+  CHUMP WTH Index
+```
+
+Execution refuses while the fleet tmux session exists. Every bot independently
+fails closed on missing/malformed position state, an allocation greater than
+its wallet balance, the sell gas cap, the native gas reserve, or a quote whose
+output cannot cover projected transaction gas. Position files are never
+changed by this command.
 
 ## Liquidating bot-managed assets to native ETH
 

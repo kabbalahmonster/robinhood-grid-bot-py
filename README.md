@@ -11,6 +11,7 @@ A production-grade grid trading bot for Robinhood Chain and other EVM networks, 
 - **Cost Basis Tracking**: Each position tracks actual WETH spent for accurate P&L
 - **Dynamic Token Decimals**: Reads and caches each configured ERC-20's on-chain `decimals()` value; non-18-decimal assets use correct prices, balances, P&L, moonbags, and dashboard valuation
 - **Moonbag Support**: Retain a percentage of tokens after each sell
+- **Guarded Moonbag Sales**: Dry-run or sell only wallet tokens not allocated to positions, for one coin, several coins, or the fleet
 - **Profit Banking**: Automatically banks profits to USDG/USDC stablecoin
 - **Session Statistics**: Track total buys, sells, and accumulated profit
 - **Persistent Realized Profit**: Confirmed sell profit/loss survives restarts with transaction-hash deduplication and non-destructive baseline resets
@@ -323,6 +324,7 @@ option and safety invariant.
 | `backup-private-keys` | Validate every configured bot and write one sensitive key backup | Sensitive file output |
 | `usdg-sweep` | Plan or execute fleet USDG transfers | Broadcast only with all guards |
 | `treasury-transfer` | Plan or execute native/ERC-20 transfers | Broadcast only with all guards |
+| `sell-moonbags` | Plan or sell only unallocated trading-token balances for selected coins/all | Broadcast only with all guards |
 | `liquidate-assets` | Plan or sell verified bot-managed assets and clear matching positions | Broadcast only with all guards |
 | `dashboard-remove` | Preview/remove permanently retired DoomDash cards/history | Network mutation only with both confirmations |
 
@@ -1194,6 +1196,22 @@ Liquidation can leave the wallet with no usable ETH. A failed transaction may
 still consume gas, and changing gas conditions can make a precomputed
 whole-balance transaction fail. Review the freshly printed execution plan and
 receipt; never retry a fleet liquidation blindly.
+
+To sell only this bot's unallocated trading-token balance while preserving
+every raw token unit assigned to positions:
+
+```bash
+# Read-only quote
+python grid_bot.py --sell-moonbag
+
+# Broadcast only after stopping this bot
+python grid_bot.py --sell-moonbag --execute \
+  --confirm-sell-moonbag --confirm-bot-stopped
+```
+
+The command fails closed if the active position store is missing or malformed,
+or if its allocated total exceeds the wallet balance. It also enforces the
+sell gas cap and native gas reserve before any approval or swap.
 
 To convert this bot's configured trading-token, USDG, and WETH balances into
 native ETH in the same wallet, use the separate managed-asset command. It does

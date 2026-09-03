@@ -2574,14 +2574,16 @@ class GridBot:
             gridless_positions = load_positions()
             active = len(gridless_positions)
             empty = 0  # Gridless doesn't have empty slots
-            position_balance_total = sum(p.get('balance', 0) for p in gridless_positions.values()) / self.token_unit
+            position_balance_raw = sum(p.get('balance', 0) for p in gridless_positions.values())
+            position_balance_total = position_balance_raw / self.token_unit
         else:
             active = sum(1 for p in self.positions.values() if p['balance'] > 0)
             empty = sum(1 for p in self.positions.values() if p['balance'] == 0)
-            position_balance_total = sum(p['balance'] for p in self.positions.values()) / self.token_unit
+            position_balance_raw = sum(p['balance'] for p in self.positions.values())
+            position_balance_total = position_balance_raw / self.token_unit
         
         # Calculate moonbag (tokens in wallet not in positions)
-        moonbag_balance = token_bal - position_balance_total
+        moonbag_balance = (int(token_raw) - int(position_balance_raw)) / self.token_unit
         
         # Get price
         price = self.get_token_price()
@@ -2814,6 +2816,8 @@ class GridBot:
                     usdg_balance=usdg_bal,
                     treasury_sent_usdg=_total_successful_treasury_sent_usdg(self.config.usdg_address),
                     token_balance=token_bal,
+                    moonbag_balance=moonbag_balance,
+                    estimated_moonbag_value_eth=max(0.0, moonbag_balance) * price,
                     positions=positions_data,
                     profit_percent=round(profit_percent, 2),
                     session_profit_eth=self.session_profit_weth,
@@ -2905,21 +2909,30 @@ if __name__ == "__main__":
     parser.add_argument("--liquidate-assets", action="store_true", help="Convert all configured bot-managed tokens to native ETH")
     parser.add_argument("--confirm-liquidate-assets", action="store_true", help="Required acknowledgement for --liquidate-assets")
     parser.add_argument("--keep-usdg", action="store_true", help="Exclude configured USDG from --liquidate-assets")
+    parser.add_argument("--sell-moonbag", action="store_true", help="Sell only token balance not allocated to positions")
+    parser.add_argument("--confirm-sell-moonbag", action="store_true", help="Required acknowledgement to execute --sell-moonbag")
     parser.add_argument("--confirm-bot-stopped", action="store_true", help="Acknowledge the bot sharing this wallet is stopped")
     parser.add_argument("--execute", action="store_true", help="Broadcast the planned transfer")
     args = parser.parse_args()
     if args.check_config:
         if any([args.sweep_usdg, args.transfer_token, args.transfer_eth, args.recipient, args.confirm_liquidate,
                 args.liquidate_assets, args.confirm_liquidate_assets, args.keep_usdg,
+                args.sell_moonbag, args.confirm_sell_moonbag,
                 args.confirm_bot_stopped, args.execute]):
             parser.error("--check-config cannot be combined with a maintenance command")
         raise SystemExit(check_config())
     if args.liquidate_assets:
         if any([args.sweep_usdg, args.transfer_token, args.transfer_eth, args.recipient, args.confirm_liquidate,
-                args.confirm_recipient, args.amount != "all"]):
+                args.confirm_recipient, args.amount != "all", args.sell_moonbag, args.confirm_sell_moonbag]):
             parser.error("--liquidate-assets cannot be combined with treasury transfer commands")
         from asset_liquidator import run_asset_liquidation
         raise SystemExit(run_asset_liquidation(args))
+    if args.sell_moonbag:
+        if any([args.sweep_usdg, args.transfer_token, args.transfer_eth, args.recipient, args.confirm_liquidate,
+                args.confirm_recipient, args.amount != "all", args.confirm_liquidate_assets, args.keep_usdg]):
+            parser.error("--sell-moonbag cannot be combined with another maintenance command")
+        from moonbag_seller import run_moonbag_sale
+        raise SystemExit(run_moonbag_sale(args))
     if args.keep_usdg:
         parser.error("--keep-usdg requires --liquidate-assets")
     if args.sweep_usdg:
@@ -2936,7 +2949,7 @@ if __name__ == "__main__":
             parser.error("--transfer-token and --recipient must be supplied together")
         raise SystemExit(run_treasury_transfer(args))
     if any([args.amount != "all", args.confirm_recipient, args.confirm_liquidate, args.confirm_liquidate_assets,
-            args.keep_usdg, args.confirm_bot_stopped, args.execute]):
+            args.keep_usdg, args.confirm_sell_moonbag, args.confirm_bot_stopped, args.execute]):
         parser.error("transfer options require --sweep-usdg, --transfer-token, or --transfer-eth with --recipient")
     bot = GridBot()
     bot.run()
