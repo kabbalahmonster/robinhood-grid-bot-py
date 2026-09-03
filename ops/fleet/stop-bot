@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+SCRIPT_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)"
+# shellcheck source=fleet-common.sh
+source "$SCRIPT_DIR/fleet-common.sh"
+
+usage() {
+  cat <<'EOF'
+Usage: stop-bot NAME [--config PATH]
+
+Stop one bot inside the running fleet tmux session. The pane is replaced with
+a clean shell, which terminates both the active bot and any suspended jobs.
+EOF
+}
+
+name=""; config_path=""
+while (($#)); do
+  case "$1" in
+    --config) (($# >= 2)) || fleet_die "--config requires a path"; config_path="$2"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    -*) fleet_die "Unknown option: $1" ;;
+    *) [[ -z "$name" ]] || fleet_die "Provide exactly one bot name"; name="$1"; shift ;;
+  esac
+done
+[[ -n "$name" ]] || fleet_die "A bot name is required"
+
+fleet_load_config "$config_path"
+fleet_apply_selection "$name" ""
+((${#FLEET_BOT_DIRS[@]} == 1)) || fleet_die "Selection must resolve to one bot"
+fleet_require_tmux
+fleet_session_exists || fleet_die "tmux session is not running: $FLEET_SESSION"
+bot_dir="${FLEET_BOT_DIRS[0]}"
+pane_id="$(fleet_pane_for_bot_dir "$bot_dir")" || fleet_die "No fleet pane found for: $name"
+tmux respawn-pane -k -t "$pane_id" -c "$bot_dir"
+tmux select-pane -t "$pane_id" -T "$(fleet_bot_name "$bot_dir")"
+printf 'Stopped %s in pane %s; the pane is now a clean shell.\n' "$(fleet_bot_name "$bot_dir")" "$pane_id"

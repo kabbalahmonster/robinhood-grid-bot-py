@@ -247,6 +247,7 @@ unless their section explicitly says otherwise.
 | `fleet-watch` | Phone-friendly live view from local status snapshots | No |
 | `fleet-audit` | Reconcile local treasury/liquidation audit records | No |
 | `start-fleet` / `stop-fleet` / `restart-fleet` | Manage the configured tmux fleet | Processes only |
+| `stop-bot NAME` / `restart-bot NAME` | Stop or cleanly restart one bot pane and its complete old process tree | Processes only |
 | `update-this-checkout` | Fast-forward the dedicated operations clone | Yes, Git |
 | `update-fleet` / `update-all` | Fast-forward bot clones; full wrapper can restart | Yes, Git/processes |
 | `initialize-bots` | Create bot clones, wallets, configs, and optional membership | `--apply` only |
@@ -272,6 +273,25 @@ Start and attach:
 ```bash
 ops/fleet/start-fleet
 ```
+
+Restart one bot without touching the rest of the fleet:
+
+```bash
+ops/fleet/restart-bot hookr
+```
+
+Stop one bot and leave its pane at a clean shell prompt:
+
+```bash
+ops/fleet/stop-bot hookr
+```
+
+Do not use `Ctrl+Z` followed by Up-arrow to restart a bot. `Ctrl+Z` suspends
+the Python process instead of terminating it; launching the command again then
+stacks another bot process in the same pane. Repeating this consumes memory and
+can freeze the host. Both per-bot commands use `tmux respawn-pane -k`, which
+terminates the pane's entire prior process tree—including suspended jobs—before
+stopping or launching exactly one bot. Bot selectors are case-insensitive.
 
 Start without attaching:
 

@@ -147,14 +147,15 @@ fleet_sort_targets_by_name() {
 
 fleet_apply_selection() {
   local only_csv="${1:-}" exclude_csv="${2:-}"
-  local bot_dir name token match
+  local bot_dir name normalized token match
   local -a selected=() tokens=()
   local -A known=() included=() excluded=()
 
   for bot_dir in "${FLEET_BOT_DIRS[@]}"; do
     name="$(fleet_bot_name "$bot_dir")"
-    [[ -z "${known[$name]+x}" ]] || fleet_die "Duplicate fleet bot name '$name'; use unique checkout parent names"
-    known["$name"]="$bot_dir"
+    normalized="${name,,}"
+    [[ -z "${known[$normalized]+x}" ]] || fleet_die "Duplicate fleet bot name '$name' (case-insensitive); use unique checkout parent names"
+    known["$normalized"]="$bot_dir"
   done
 
   if [[ -n "$only_csv" ]]; then
@@ -163,8 +164,9 @@ fleet_apply_selection() {
       token="${token#"${token%%[![:space:]]*}"}"
       token="${token%"${token##*[![:space:]]}"}"
       [[ -n "$token" ]] || fleet_die "--only contains an empty bot name"
-      [[ -n "${known[$token]+x}" ]] || fleet_die "Unknown bot in --only: $token"
-      included["$token"]=1
+      normalized="${token,,}"
+      [[ -n "${known[$normalized]+x}" ]] || fleet_die "Unknown bot in --only: $token"
+      included["$normalized"]=1
     done
   fi
 
@@ -175,17 +177,19 @@ fleet_apply_selection() {
       token="${token#"${token%%[![:space:]]*}"}"
       token="${token%"${token##*[![:space:]]}"}"
       [[ -n "$token" ]] || fleet_die "--exclude contains an empty bot name"
-      [[ -n "${known[$token]+x}" ]] || fleet_die "Unknown bot in --exclude: $token"
-      excluded["$token"]=1
+      normalized="${token,,}"
+      [[ -n "${known[$normalized]+x}" ]] || fleet_die "Unknown bot in --exclude: $token"
+      excluded["$normalized"]=1
     done
   fi
 
   FLEET_SELECTED_NAMES=()
   for bot_dir in "${FLEET_BOT_DIRS[@]}"; do
     name="$(fleet_bot_name "$bot_dir")"
+    normalized="${name,,}"
     match=1
-    [[ -z "$only_csv" || -n "${included[$name]+x}" ]] || match=0
-    [[ -z "${excluded[$name]+x}" ]] || match=0
+    [[ -z "$only_csv" || -n "${included[$normalized]+x}" ]] || match=0
+    [[ -z "${excluded[$normalized]+x}" ]] || match=0
     if ((match)); then
       selected+=("$bot_dir")
       FLEET_SELECTED_NAMES+=("$name")
@@ -194,6 +198,19 @@ fleet_apply_selection() {
   ((${#selected[@]} > 0)) || fleet_die "Fleet selection resolved to zero bots"
   FLEET_BOT_DIRS=("${selected[@]}")
   FLEET_SELECTION_DESCRIPTION="${FLEET_SELECTED_NAMES[*]}"
+}
+
+fleet_pane_for_bot_dir() {
+  local wanted_dir="$1" pane_id pane_path resolved
+  wanted_dir="$(readlink -f -- "$wanted_dir")"
+  while IFS=$'\t' read -r pane_id pane_path; do
+    resolved="$(readlink -f -- "$pane_path" 2>/dev/null || true)"
+    if [[ "$resolved" == "$wanted_dir" ]]; then
+      printf '%s\n' "$pane_id"
+      return 0
+    fi
+  done < <(tmux list-panes -t "=$FLEET_SESSION:$FLEET_WINDOW" -F $'#{pane_id}\t#{pane_current_path}')
+  return 1
 }
 
 fleet_validate_bots() {
@@ -229,9 +246,9 @@ fleet_bot_command() {
 
 fleet_send_command() {
   local pane_target="$1" command_text="$2"
-  # Sending literal text into an already-running interactive shell is
-  # intentional. It preserves Bash job control and command history, including
-  # the established Ctrl+Z -> prompt -> Up-arrow workflow.
+  # Sending literal text into an interactive shell preserves readable tmux
+  # panes. Operators should use restart-bot rather than Ctrl+Z/Up-arrow: the
+  # latter leaves the old Python process suspended and can exhaust the host.
   tmux send-keys -t "$pane_target" -l "$command_text"
   tmux send-keys -t "$pane_target" C-m
 }

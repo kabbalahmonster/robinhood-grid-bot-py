@@ -119,6 +119,23 @@ class TestFleetConfig(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout.splitlines(), ["alpha"])
 
+    def test_selectors_are_case_insensitive(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "bots"
+            checkout = root / "hookr" / "robinhood-grid-bot-py"
+            checkout.mkdir(parents=True)
+            (checkout / "grid_bot.py").touch()
+            config = Path(directory) / "fleet.conf"
+            config.write_text(f'FLEET_BOT_ROOT="{root}"\nFLEET_BOT_NAMES=(hookr)\n')
+            command = (
+                f'source "{COMMON}"; fleet_load_config "{config}"; '
+                'fleet_apply_selection "HOOKR" ""; printf \'%s\\n\' "${FLEET_SELECTED_NAMES[@]}"'
+            )
+            result = subprocess.run(["bash", "-c", command], text=True, capture_output=True,
+                                    env={**os.environ, "HOME": directory})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.splitlines(), ["hookr"])
+
     def test_selector_rejects_unknown_name(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "bots"
