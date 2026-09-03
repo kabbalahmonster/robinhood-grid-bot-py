@@ -156,6 +156,13 @@ class GasAwareProfitTests(unittest.TestCase):
         self.assertEqual(bot._buy_attempt["buy_amount_eth"], 0.003)
         self.assertEqual(bot._buy_attempt["phase"], "prepared_quote")
 
+    def test_gridless_available_slots_can_be_recomputed_inside_execution(self):
+        bot = self.make_bot()
+        bot.config.max_active_positions = 4
+
+        self.assertEqual(bot._available_gridless_slots({"0": {}, "1": {}}), 2)
+        self.assertEqual(bot._available_gridless_slots({str(i): {} for i in range(5)}), 0)
+
     def test_operation_caps_override_legacy_cap_independently(self):
         bot = self.make_bot()
         bot.config.max_swap_gas_eth = 0.00008

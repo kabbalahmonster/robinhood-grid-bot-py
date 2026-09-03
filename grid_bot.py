@@ -1443,6 +1443,10 @@ class GridBot:
                     logger.info(f"Sell blocked: Position {pos_id} at {price:.10f} - profit {current_profit:.2f}% < required {effective_min_profit}% (buffer for slippage)")
                     return  # Blocked - do not sell
     
+    def _available_gridless_slots(self, positions):
+        """Return non-negative capacity from the current gridless state."""
+        return max(0, self.config.max_active_positions - len(positions))
+
     def _check_buys_gridless(self, price):
         """Gridless buy logic - buy when no positions or top position P&L <= threshold."""
         from gridless import should_buy, load_positions, add_position
@@ -1487,14 +1491,14 @@ class GridBot:
                 "asset": self.trade_token_name,
                 "trade_balance": trade_balance,
                 "minimum_trade_balance": 0.001,
-                "available_slots": max(0, self.config.max_active_positions - len(gridless_positions)),
+                "available_slots": self._available_gridless_slots(gridless_positions),
                 "reason": reason,
             }
             return
         
         # Calculate buy amount
         active_count = len(gridless_positions)
-        available_slots = self.config.max_active_positions - active_count
+        available_slots = self._available_gridless_slots(gridless_positions)
         if available_slots <= 0:
             logger.debug(f"Gridless: Max positions reached ({active_count}/{self.config.max_active_positions})")
             return
@@ -1534,6 +1538,11 @@ class GridBot:
         # Load positions for execution margin check
         from gridless import load_positions as reload_positions
         gridless_positions = reload_positions()
+        # Recompute here because this method is deliberately isolated behind the
+        # provider-fallback decorator and does not inherit _check_buys_gridless's
+        # local variables.  It also makes the dashboard attempt reflect the
+        # latest position count if state changed while the quote was prepared.
+        available_slots = self._available_gridless_slots(gridless_positions)
         
         # Validate execution price is still within buy threshold margin
         # Skip for leading edge buys (buying into strength with single position)
