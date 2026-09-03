@@ -147,6 +147,7 @@ class BotConfig:
     # ETH Trading Mode
     use_eth_trading: bool  # If True, trade native ETH instead of WETH
     eth_gas_reserve: float  # ETH amount to reserve for gas (default: 0.0005)
+    treasury_position_reserve_eth: float  # ETH retained per open position by treasury available sweeps
     
     # Gas Settings
     gas_limit_multiplier: float  # Multiplier for gas limit (default: 1.05)
@@ -253,6 +254,9 @@ class BotConfig:
 
         if self.min_profit_fee_transfer_eth < 0:
             raise ValueError("MIN_PROFIT_FEE_TRANSFER_ETH must not be negative")
+
+        if self.treasury_position_reserve_eth < 0:
+            raise ValueError("TREASURY_POSITION_RESERVE_ETH must not be negative")
 
         if self.profit_fee_percent > 0:
             if not re.fullmatch(r"0x[0-9a-fA-F]{40}", self.profit_fee_wallet or ""):
@@ -437,6 +441,7 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
         # ETH Trading Mode
         use_eth_trading=os.getenv("USE_ETH_TRADING", "false").lower() == "true",
         eth_gas_reserve=float(os.getenv("ETH_GAS_RESERVE", "0.0005")),
+        treasury_position_reserve_eth=float(os.getenv("TREASURY_POSITION_RESERVE_ETH", "0")),
         
         # Gas Settings
         gas_limit_multiplier=float(os.getenv("GAS_LIMIT_MULTIPLIER", "1.05")),

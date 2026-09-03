@@ -51,7 +51,9 @@ ops/fleet/treasury-transfer --asset ETH --amount available \
 ```
 
 The freeze preserves filled positions while preventing new buys. The sweep
-retains each bot's configured reserve and live estimated transfer gas.
+retains each bot's `ETH_GAS_RESERVE`, live estimated transfer gas, and
+`TREASURY_POSITION_RESERVE_ETH` multiplied by its open-position count. Use
+`--position-reserve-eth ETH` to override the per-position reserve for one run.
 
 Top up selected wallets to a target total balance; existing ETH is credited:
 

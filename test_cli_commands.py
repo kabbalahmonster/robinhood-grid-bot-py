@@ -5,7 +5,7 @@ import unittest
 from contextlib import redirect_stdout
 from io import StringIO
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, mock_open, patch
 
 from grid_bot import (
     _dashboard_root_url,
@@ -272,6 +272,75 @@ class TestCliCommands(unittest.TestCase):
         )
         wallet.transfer_eth.assert_not_called()
         append_receipt.assert_not_called()
+
+    @patch("grid_bot._append_treasury_receipt")
+    @patch("grid_bot.Wallet")
+    @patch("grid_bot.load_config")
+    def test_native_eth_available_retains_configured_reserve_per_open_position(
+        self, load_config, wallet_class, append_receipt
+    ):
+        load_config.return_value = SimpleNamespace(
+            treasury_allowed_recipients=["0x0000000000000000000000000000000000000004"],
+            eth_gas_reserve=0.0006,
+            treasury_position_reserve_eth=0.0003,
+            use_gridless=True,
+        )
+        wallet = wallet_class.return_value
+        wallet.address = "0x0000000000000000000000000000000000000002"
+        wallet.get_eth_balance_wei.return_value = 2_000_000_000_000_000
+        wallet.address_has_code.return_value = False
+        wallet.build_eth_transfer_transaction.return_value = {
+            "gas": 21_000, "gasPrice": 1_000_000_000, "value": 1,
+        }
+        args = SimpleNamespace(
+            recipient="0x0000000000000000000000000000000000000004",
+            amount="available", position_reserve_eth=None,
+            confirm_recipient=None, confirm_liquidate=False,
+            execute=False, confirm_bot_stopped=False,
+        )
+
+        with patch("builtins.open", mock_open(read_data='{"0": {"balance": 1}, "1": {"balance": 2}, "2": {"balance": 0}}')):
+            self.assertEqual(run_native_treasury_transfer(args), 0)
+
+        self.assertEqual(
+            wallet.build_eth_transfer_transaction.return_value["value"],
+            779_000_000_000_000,
+        )
+        wallet.transfer_eth.assert_not_called()
+        append_receipt.assert_not_called()
+
+    @patch("grid_bot.Wallet")
+    @patch("grid_bot.load_config")
+    def test_native_eth_available_cli_position_reserve_overrides_env(
+        self, load_config, wallet_class
+    ):
+        load_config.return_value = SimpleNamespace(
+            treasury_allowed_recipients=["0x0000000000000000000000000000000000000004"],
+            eth_gas_reserve=0.0005,
+            treasury_position_reserve_eth=0.0001,
+            use_gridless=True,
+        )
+        wallet = wallet_class.return_value
+        wallet.address = "0x0000000000000000000000000000000000000002"
+        wallet.get_eth_balance_wei.return_value = 3_000_000_000_000_000
+        wallet.address_has_code.return_value = False
+        wallet.build_eth_transfer_transaction.return_value = {
+            "gas": 21_000, "gasPrice": 1_000_000_000, "value": 1,
+        }
+        args = SimpleNamespace(
+            recipient="0x0000000000000000000000000000000000000004",
+            amount="available", position_reserve_eth="0.0004",
+            confirm_recipient=None, confirm_liquidate=False,
+            execute=False, confirm_bot_stopped=False,
+        )
+
+        with patch("builtins.open", mock_open(read_data='{"0": {"balance": 1}, "1": {"balance": 2}, "2": {"balance": 3}}')):
+            self.assertEqual(run_native_treasury_transfer(args), 0)
+
+        self.assertEqual(
+            wallet.build_eth_transfer_transaction.return_value["value"],
+            1_279_000_000_000_000,
+        )
 
     @patch("grid_bot._append_treasury_receipt")
     @patch("grid_bot.Wallet")

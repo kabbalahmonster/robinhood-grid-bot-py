@@ -21,6 +21,8 @@ Required:
 
 Destination:
   --recipient ADDRESS         Override FLEET_TREASURY_RECIPIENT for this run
+  --position-reserve-eth ETH  Override each bot's TREASURY_POSITION_RESERVE_ETH
+                              for this native ETH "available" execution
 
 Guards:
   --confirm-recipient ADDRESS Exact repeat for a non-allowlisted recipient
@@ -33,9 +35,10 @@ Guards:
   -h, --help                  Show this help
 
 Execution is refused while the configured tmux fleet session exists. Native
-Exact and ETH "available" transfers retain each bot's ETH_GAS_RESERVE after
-amount and maximum fee. ETH "all" intentionally bypasses it and requires
---confirm-liquidate.
+Exact transfers retain each bot's ETH_GAS_RESERVE. ETH "available" additionally
+retains TREASURY_POSITION_RESERVE_ETH for every open position, after the maximum
+transfer fee; --position-reserve-eth overrides that setting for one run. ETH
+"all" intentionally bypasses both reserves and requires --confirm-liquidate.
 When --recipient is omitted, FLEET_TREASURY_RECIPIENT from fleet.conf is used.
 EOF
 }
@@ -50,6 +53,7 @@ fleet_stopped=0
 confirm_liquidate=0
 only=""
 exclude=""
+position_reserve_eth=""
 
 while (($#)); do
   case "$1" in
@@ -63,6 +67,7 @@ while (($#)); do
     --confirm-fleet-stopped) fleet_stopped=1; shift ;;
     --only) (($# >= 2)) || fleet_die "--only requires comma-separated names"; only="$2"; shift 2 ;;
     --exclude) (($# >= 2)) || fleet_die "--exclude requires comma-separated names"; exclude="$2"; shift 2 ;;
+    --position-reserve-eth) (($# >= 2)) || fleet_die "--position-reserve-eth requires an ETH amount"; position_reserve_eth="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) fleet_die "Unknown option: $1" ;;
   esac
@@ -102,6 +107,10 @@ case "$asset_upper" in
     ((confirm_liquidate == 0)) || fleet_die "--confirm-liquidate is valid only with native ETH --amount all"
     ;;
 esac
+if [[ -n "$position_reserve_eth" ]]; then
+  [[ "$asset_upper" == "ETH" && "$amount" == "available" ]] || fleet_die "--position-reserve-eth is valid only with --asset ETH --amount available"
+  [[ "$position_reserve_eth" =~ ^[0-9]+([.][0-9]+)?$ ]] || fleet_die "--position-reserve-eth must be a non-negative decimal ETH amount"
+fi
 
 fleet_validate_bots
 if ((execute)); then
@@ -124,6 +133,7 @@ for bot_dir in "${FLEET_BOT_DIRS[@]}"; do
 
   if [[ "$asset_upper" == "ETH" ]]; then
     command_args=("$python_bin" "$FLEET_ENTRYPOINT" --transfer-eth --recipient "$recipient" --amount "$amount")
+    [[ -z "$position_reserve_eth" ]] || command_args+=(--position-reserve-eth "$position_reserve_eth")
     ((confirm_liquidate == 0)) || command_args+=(--confirm-liquidate)
   elif [[ "$asset_upper" == "USDG" ]]; then
     command_args=("$python_bin" "$FLEET_ENTRYPOINT" --sweep-usdg "$recipient" --amount "$amount")

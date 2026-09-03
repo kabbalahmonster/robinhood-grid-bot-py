@@ -691,10 +691,41 @@ ops/fleet/treasury-transfer \
   --recipient "$TREASURY"
 ```
 
-Each wallet independently sends `balance - ETH_GAS_RESERVE - estimated maximum
-transfer fee`. This calculated mode is restricted to an externally owned
-recipient. After reviewing the complete fleet plan, stop the fleet and repeat
-with `--execute --confirm-fleet-stopped`.
+Each wallet independently sends:
+
+```text
+balance
+− ETH_GAS_RESERVE
+− (open position count × TREASURY_POSITION_RESERVE_ETH)
+− estimated maximum transfer fee
+```
+
+`TREASURY_POSITION_RESERVE_ETH` defaults to `0`, so existing bots retain their
+previous behavior until it is set in that bot's `.env`. The command counts the
+active position store selected by `USE_GRIDLESS`: `data/gridless_positions.json`
+in gridless mode or `data/positions.json` in classic mode. When a positive
+per-position reserve applies, missing, malformed, or structurally invalid
+position state or an invalid position balance refuses that bot's transfer
+rather than risking an undersized reserve. Only records with `balance > 0`
+count as open; unfilled classic-grid slots do not consume a reserve.
+
+Override the per-position amount for this run only (the `.env` is not changed):
+
+```bash
+ops/fleet/treasury-transfer \
+  --asset ETH \
+  --amount available \
+  --position-reserve-eth 0.003 \
+  --recipient "$TREASURY"
+```
+
+The dry run prints the open-position count, reserve per position, total position
+reserve, estimated maximum gas, and final send amount for every wallet. This
+calculated mode is restricted to an externally owned recipient. After reviewing
+the complete fleet plan, stop the fleet and repeat with
+`--execute --confirm-fleet-stopped`. The override is valid only with native ETH
+`available`; it does not affect exact transfers or the explicit `all` liquidation
+mode.
 
 Gas is floored against the latest and pending block base fees. If the RPC still rejects an
 ERC-20 or native transfer before broadcast because the block base fee overtook
