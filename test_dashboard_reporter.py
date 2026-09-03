@@ -72,6 +72,21 @@ class TestDashboardReporter(unittest.TestCase):
         self.assertIsNone(reporter._queue[1]["sell_attempt"])
 
     @patch("dashboard_reporter.threading.Thread.start")
+    def test_buy_attempt_is_round_scoped_payload_field(self, _start):
+        reporter = DashboardReporter("https://doomdash.ca/api/status")
+        attempt = {
+            "status": "projected_gas_above_cap",
+            "quote_provider": "sushiswap",
+            "projected_gas_eth": 0.00008,
+            "maximum_gas_eth": 0.00004,
+        }
+        reporter.report(buy_attempt=attempt)
+        reporter.report()
+
+        self.assertEqual(reporter._queue[0]["buy_attempt"], attempt)
+        self.assertIsNone(reporter._queue[1]["buy_attempt"])
+
+    @patch("dashboard_reporter.threading.Thread.start")
     def test_taxed_token_execution_metadata_is_reported(self, _start):
         reporter = DashboardReporter("https://doomdash.ca/api/status")
         reporter.report(

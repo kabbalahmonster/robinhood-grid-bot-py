@@ -640,6 +640,9 @@ class GridBot:
         # carried into the following cycle. Initialize the first-cycle value so
         # a fresh bot can report before any buy check has created a warning.
         self._funding_warning = None
+        # Buy checks happen after the dashboard report. Preserve a blocked
+        # attempt until the following report, then clear it before rechecking.
+        self._buy_attempt = None
         
         # Trading token setup (WETH or native ETH)
         if getattr(self.config, 'use_eth_trading', False):
@@ -908,7 +911,7 @@ class GridBot:
         )
         return gas_limit, gas_price
 
-    def _gas_within_hard_cap(self, gas_limit, gas_price, operation):
+    def _gas_within_hard_cap(self, gas_limit, gas_price, operation, attempt_context=None):
         legacy_cap = float(getattr(self.config, "max_swap_gas_eth", 0.00004))
         cap_attribute = {
             "buy": "max_buy_gas_eth",
@@ -923,6 +926,16 @@ class GridBot:
             "❌ %s blocked by gas cap: projected_fee=%.8f ETH cap=%.8f ETH",
             operation, projected_wei / 10**18, cap_eth,
         )
+        if operation == "buy":
+            self._buy_attempt = {
+                "status": "projected_gas_above_cap",
+                "quote_provider": str(getattr(self.provider, "name", "unknown")),
+                "projected_gas_eth": round(projected_wei / 10**18, 8),
+                "maximum_gas_eth": round(cap_eth, 8),
+                "gas_limit": int(gas_limit),
+                "gas_price_wei": int(gas_price),
+                **(attempt_context or {}),
+            }
         return False
 
     def _seal_provider_fallback(self):
@@ -1558,7 +1571,14 @@ class GridBot:
                     return
 
         initial_gas_limit, initial_gas_price = self._swap_gas_fields(quote, 350000)
-        if not self._gas_within_hard_cap(initial_gas_limit, initial_gas_price, "buy"):
+        buy_attempt_context = {
+            "buy_amount_eth": round(buy_amount_eth, 8),
+            "available_slots": available_slots,
+            "phase": "initial_quote",
+        }
+        if not self._gas_within_hard_cap(
+            initial_gas_limit, initial_gas_price, "buy", buy_attempt_context,
+        ):
             return
         
         buy_setup_gas_wei = 0
@@ -1601,7 +1621,10 @@ class GridBot:
         # Execute swap with configurable gas multipliers
         # Use API's gas price estimate if available (more accurate than network average)
         gas_limit, gas_price = self._swap_gas_fields(quote, 350000)
-        if not self._gas_within_hard_cap(gas_limit, gas_price, "buy"):
+        buy_attempt_context["phase"] = "prepared_quote"
+        if not self._gas_within_hard_cap(
+            gas_limit, gas_price, "buy", buy_attempt_context,
+        ):
             return
         
         from web3 import Web3
@@ -2166,7 +2189,15 @@ class GridBot:
             return
 
         initial_gas_limit, initial_gas_price = self._swap_gas_fields(quote, 350000)
-        if not self._gas_within_hard_cap(initial_gas_limit, initial_gas_price, "buy"):
+        buy_attempt_context = {
+            "position_id": str(pos_id),
+            "buy_amount_eth": round(buy_amount_eth, 8),
+            "available_slots": available_slots,
+            "phase": "initial_quote",
+        }
+        if not self._gas_within_hard_cap(
+            initial_gas_limit, initial_gas_price, "buy", buy_attempt_context,
+        ):
             return
         
         buy_setup_gas_wei = 0
@@ -2224,7 +2255,10 @@ class GridBot:
         # Execute swap with checksummed addresses and configurable gas multipliers
         # Use API's gas price estimate if available (more accurate than network average)
         gas_limit, gas_price = self._swap_gas_fields(quote, 350000)
-        if not self._gas_within_hard_cap(gas_limit, gas_price, "buy"):
+        buy_attempt_context["phase"] = "prepared_quote"
+        if not self._gas_within_hard_cap(
+            gas_limit, gas_price, "buy", buy_attempt_context,
+        ):
             return
         
         from web3 import Web3
@@ -2953,6 +2987,7 @@ class GridBot:
                     capacity_warning=capacity_warning,
                     needs_gas=needs_gas,
                     funding_warning=self._funding_warning,
+                    buy_attempt=self._buy_attempt,
                     sell_attempt=self._sell_attempt,
                     chain_id=self.config.chain_id,
                     swap_provider=self.provider.name,
@@ -2986,6 +3021,7 @@ class GridBot:
         # check. Clearing it at cycle start made the warning exist only between
         # reports, so DoomDash could never receive it.
         self._funding_warning = None
+        self._buy_attempt = None
 
         # Then check buys
         self.check_buys(price)

@@ -19,6 +19,8 @@ class GasAwareProfitTests(unittest.TestCase):
         bot.wallet = Mock()
         bot.wallet.w3.eth.gas_price = 400_000_000
         bot.wallet.w3.eth.estimate_gas.side_effect = RuntimeError("simulation unavailable")
+        bot.provider = SimpleNamespace(name="sushiswap")
+        bot._buy_attempt = None
         return bot
 
     def test_projected_sell_return_includes_gas_and_profit_target(self):
@@ -134,6 +136,25 @@ class GasAwareProfitTests(unittest.TestCase):
         bot.config.max_swap_gas_eth = 0.00004
 
         self.assertFalse(bot._gas_within_hard_cap(200_000, 400_000_000, "buy"))
+        self.assertEqual(bot._buy_attempt["status"], "projected_gas_above_cap")
+        self.assertEqual(bot._buy_attempt["quote_provider"], "sushiswap")
+        self.assertEqual(bot._buy_attempt["projected_gas_eth"], 0.00008)
+        self.assertEqual(bot._buy_attempt["maximum_gas_eth"], 0.00004)
+
+    def test_buy_gas_block_includes_attempt_context(self):
+        bot = self.make_bot()
+        bot.config.max_buy_gas_eth = 0.00004
+
+        self.assertFalse(bot._gas_within_hard_cap(
+            200_000,
+            400_000_000,
+            "buy",
+            {"position_id": "4", "buy_amount_eth": 0.003, "phase": "prepared_quote"},
+        ))
+
+        self.assertEqual(bot._buy_attempt["position_id"], "4")
+        self.assertEqual(bot._buy_attempt["buy_amount_eth"], 0.003)
+        self.assertEqual(bot._buy_attempt["phase"], "prepared_quote")
 
     def test_operation_caps_override_legacy_cap_independently(self):
         bot = self.make_bot()

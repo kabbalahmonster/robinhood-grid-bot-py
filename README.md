@@ -976,7 +976,7 @@ DASHBOARD_GROUP=Robinhood Farm
 
 Restart the bot after changing `.env`. Reporting runs in a daemon thread with a bounded queue and a five-second HTTP timeout, so dashboard downtime does not block trading. Successful requests are logged only at `DEBUG`; failures remain warnings.
 
-Each status payload includes schema version, chain/token/public-wallet metadata, ETH, USDG, and trading-token balances, positions, AVG P&L, session and persistent realized profit, buy/sell counts, capacity, the current round's optional `sell_attempt`, and up to 50 trades. Taxed-token bots additionally report the effective fee and tolerance through `taxed_token`, `token_transfer_fee_percent`, and `swap_slippage_percent`. `token_tax_detection_source` distinguishes `manual`, `auto-detected`, and `none`; `token_tax_detection_observations` reports the bounded supporting observation count. It also includes `treasury_sent_usdg`: the all-time total of successful USDG sweep receipts in `data/treasury_transfers.json`. Dry runs, refused commands, failed broadcasts, and sweeps of other ERC-20s are excluded. Sell checks run before the status report so a blocked attempt is visible in the same round rather than one report late. The USDG balance is a read-only ERC-20 call made once per cycle when `USDG_ADDRESS` is configured; a failed read is omitted and never interrupts trading. Only the public wallet address is sent—never the private key.
+Each status payload includes schema version, chain/token/public-wallet metadata, ETH, USDG, and trading-token balances, positions, AVG P&L, session and persistent realized profit, buy/sell counts, capacity, optional transient `buy_attempt` and `sell_attempt` state, and up to 50 trades. Taxed-token bots additionally report the effective fee and tolerance through `taxed_token`, `token_transfer_fee_percent`, and `swap_slippage_percent`. `token_tax_detection_source` distinguishes `manual`, `auto-detected`, and `none`; `token_tax_detection_observations` reports the bounded supporting observation count. It also includes `treasury_sent_usdg`: the all-time total of successful USDG sweep receipts in `data/treasury_transfers.json`. Dry runs, refused commands, failed broadcasts, and sweeps of other ERC-20s are excluded. Sell checks run before the status report so a blocked attempt is visible in the same round rather than one report late. Buy checks run afterward, so a gas-blocked buy is carried into the following report and cleared immediately before the next buy check. The USDG balance is a read-only ERC-20 call made once per cycle when `USDG_ADDRESS` is configured; a failed read is omitted and never interrupts trading. Only the public wallet address is sent—never the private key.
 
 Experimental builds also include a versioned `sigil` descriptor created once per process incarnation. One of exactly 23 curated positive, present-tense intentions in `sigil_intentions.json` is selected from cryptographic startup entropy, reduced to unique consonants, and bound with the bot ID and incarnation nonce into a SHA-256 visual seed. Only `{version, method, key, seed}` is reported; the readable intention and nonce are discarded. The dashboard can therefore render the symbol deterministically without an image service, while every restart produces a new working. A missing or malformed grimoire falls back to one built-in intention because dashboard ornamentation must never prevent trading from starting.
 
@@ -995,6 +995,14 @@ as `quote_provider_changed`. A second consecutive executable quote from the same
 provider confirms the handoff. This adds no quote requests, prevents an alternating
 fallback stream from triggering a sale, and makes provider-driven preview jumps
 explicit on DoomDash.
+
+When a valid buy reaches an executable quote but its projected fee exceeds
+`MAX_BUY_GAS_ETH` (or inherited `MAX_SWAP_GAS_ETH`), the bot does not broadcast.
+It reports `buy_attempt.status: "projected_gas_above_cap"` with the actual quote
+provider, projected fee, cap, gas limit/price, intended buy amount, available
+slots, optional classic-grid position ID, and whether the initial or prepared
+quote was blocked. This state is transient and disappears after a later buy
+check does not reproduce the block.
 
 Confirmed sells update `data/profit_totals.json` atomically. Profit is stored as integer wei, includes both realized gains and realized stop-losses, and is deduplicated by transaction hash. It intentionally excludes unrealized P&L, gas, and trades completed before tracking began. Session profit still resets on restart; realized profit survives restarts. To begin a new displayed accounting period without deleting the all-time ledger, stop the bot and run `python grid_bot.py --reset-profit-baseline` once.
 
