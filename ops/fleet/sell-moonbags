@@ -30,8 +30,10 @@ Examples:
   sell-moonbags CHUMP,WTH
   sell-moonbags all
   sell-moonbags --send-to-treasury CHUMP
+  sell-moonbags --send-to-treasury all
   sell-moonbags --execute --confirm-fleet-stopped CHUMP
   sell-moonbags --send-to-treasury --execute --confirm-fleet-stopped CHUMP
+  sell-moonbags --send-to-treasury --execute --confirm-fleet-stopped all
 EOF
 }
 

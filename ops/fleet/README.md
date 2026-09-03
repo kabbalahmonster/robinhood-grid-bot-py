@@ -824,6 +824,14 @@ ops/fleet/sell-moonbags \
   --execute \
   --confirm-fleet-stopped \
   CHUMP WTH
+
+# Or process every configured bot:
+ops/fleet/sell-moonbags --send-to-treasury all
+ops/fleet/sell-moonbags \
+  --send-to-treasury \
+  --execute \
+  --confirm-fleet-stopped \
+  all
 ```
 
 ## Liquidating bot-managed assets to native ETH
