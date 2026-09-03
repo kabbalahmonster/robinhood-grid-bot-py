@@ -985,6 +985,16 @@ Operational Events are retained locally in `data/dashboard_events.json` and incl
 
 A sell target whose quoted profit is below the ETH minimum derived from the position cost and `MIN_PROFIT_PERCENT` is deliberately **not** stored as an Event. During that round, the bot reports `sell_attempt.status: "quote_below_minimum"` with the position ID, P&L, quoted profit, and minimum profit. `_sell_attempt` is cleared at the beginning of every cycle and must be re-established by that cycle's sell check, so the dashboard indication disappears on the next report where the condition no longer occurs. This is live attempt state, not historical warning state.
 
+Executable sell quotes also report `quote_provider`, which identifies the provider
+that produced that exact quote rather than the configured primary. When a position's
+provider changes within two minutes, the first quote from the new provider is held
+for one polling cycle and cannot authorize a sale. A cross-provider output difference
+above 8% is reported as `quote_provider_disagreement`; smaller changes are reported
+as `quote_provider_changed`. A second consecutive executable quote from the same
+provider confirms the handoff. This adds no quote requests, prevents an alternating
+fallback stream from triggering a sale, and makes provider-driven preview jumps
+explicit on DoomDash.
+
 Confirmed sells update `data/profit_totals.json` atomically. Profit is stored as integer wei, includes both realized gains and realized stop-losses, and is deduplicated by transaction hash. It intentionally excludes unrealized P&L, gas, and trades completed before tracking began. Session profit still resets on restart; realized profit survives restarts. To begin a new displayed accounting period without deleting the all-time ledger, stop the bot and run `python grid_bot.py --reset-profit-baseline` once.
 
 Common failures:

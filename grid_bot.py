@@ -581,6 +581,10 @@ class GridBot:
         self.session_buys = 0
         self.session_sells = 0
         self.session_profit_weth = 0.0
+        # Remember the last executable sell quote per position. A provider
+        # handoff must be observed for one full poll before it may authorize a
+        # sale; materially divergent providers remain visibly blocked.
+        self._last_sell_quotes = {}
         self.profit_tracker = ProfitTracker()
         self.dashboard_trades_file = "data/dashboard_trades.json"
         self.dashboard_trades = self._load_dashboard_trades()
@@ -721,6 +725,42 @@ class GridBot:
             deficit,
         )
         return False
+
+    def _sell_quote_consistency_guard(self, position_id, provider, return_wei, now=None):
+        """Require one confirmation after an executable quote provider changes."""
+        now = time.time() if now is None else float(now)
+        position_id = str(position_id)
+        provider = str(provider or "unknown")
+        return_wei = int(return_wei)
+        cache = getattr(self, "_last_sell_quotes", None)
+        if cache is None:
+            cache = self._last_sell_quotes = {}
+        previous = cache.get(position_id)
+        cache[position_id] = {
+            "provider": provider,
+            "return_wei": return_wei,
+            "timestamp": now,
+        }
+        if not previous or now - previous["timestamp"] > 120:
+            return None
+        if previous["provider"] == provider:
+            return None
+
+        larger = max(previous["return_wei"], return_wei, 1)
+        divergence_percent = abs(previous["return_wei"] - return_wei) * 100 / larger
+        return {
+            "status": (
+                "quote_provider_disagreement"
+                if divergence_percent > 8.0
+                else "quote_provider_changed"
+            ),
+            "position_id": position_id,
+            "quote_provider": provider,
+            "previous_quote_provider": previous["provider"],
+            "quoted_return_eth": round(return_wei / 10**18, 8),
+            "previous_quoted_return_eth": round(previous["return_wei"] / 10**18, 8),
+            "quote_divergence_percent": round(divergence_percent, 2),
+        }
 
     def _raw_trade_balance(self):
         if getattr(self.config, 'use_eth_trading', False):
@@ -1642,6 +1682,23 @@ class GridBot:
                 position_id=pos_id,
             )
             return
+
+        quote_provider = self.api_client.name
+        quote_return_wei = self._taxed_quote_return_wei(quote)
+        consistency_block = self._sell_quote_consistency_guard(
+            pos_id, quote_provider, quote_return_wei,
+        )
+        if consistency_block:
+            self._sell_attempt = consistency_block
+            logger.warning(
+                "Sell quote provider changed for position #%s (%s -> %s, %.2f%% divergence); "
+                "blocking this poll pending a consistent executable quote",
+                pos_id,
+                consistency_block["previous_quote_provider"],
+                quote_provider,
+                consistency_block["quote_divergence_percent"],
+            )
+            return
         
         # Check min profit requirement against individual position quote
         # Support both cost_wei (new) and cost (legacy nano-ETH)
@@ -1653,7 +1710,7 @@ class GridBot:
         cost_eth = cost_wei / 1e18
         min_profit = getattr(self.config, 'min_profit_percent', 1.5)
         min_profit_eth = cost_eth * (min_profit / 100)
-        quote_return_eth = self._taxed_quote_return_wei(quote) / 10**18
+        quote_return_eth = quote_return_wei / 10**18
         quote_profit_eth = quote_return_eth - cost_eth
         projected_gas_eth = self._projected_gas_cost_wei(quote) / 10**18
         projected_net_profit_eth = quote_profit_eth - projected_gas_eth
@@ -1669,6 +1726,7 @@ class GridBot:
             self._sell_attempt = {
                 "status": "quote_below_minimum",
                 "position_id": str(pos_id),
+                "quote_provider": quote_provider,
                 "pnl_percent": round(pnl_at_check, 2),
                 "quoted_profit_eth": round(quote_profit_eth, 8),
                 "projected_gas_eth": round(projected_gas_eth, 8),
