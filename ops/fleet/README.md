@@ -232,6 +232,41 @@ use the explicit array whenever that is not desirable.
 
 ## Commands
 
+### Operator command index
+
+All commands below are shell entrypoints in `ops/fleet/`. Run them from the
+operations checkout; pass `--config PATH` where supported to select a nondefault
+fleet configuration. Financial and configuration mutations preview by default
+unless their section explicitly says otherwise.
+
+| Command | Purpose | Changes state? |
+| --- | --- | --- |
+| `fleet-discover` | Generate a guarded fleet config from checkout discovery | Prints only |
+| `fleet-doctor` | Validate Git, config, RPC, contracts, providers, and dashboard | No |
+| `fleet-inventory` | Read balances, positions, reserves, Git, and audit timestamps | No |
+| `fleet-watch` | Phone-friendly live view from local status snapshots | No |
+| `fleet-audit` | Reconcile local treasury/liquidation audit records | No |
+| `start-fleet` / `stop-fleet` / `restart-fleet` | Manage the configured tmux fleet | Processes only |
+| `update-this-checkout` | Fast-forward the dedicated operations clone | Yes, Git |
+| `update-fleet` / `update-all` | Fast-forward bot clones; full wrapper can restart | Yes, Git/processes |
+| `initialize-bots` | Create bot clones, wallets, configs, and optional membership | `--apply` only |
+| `fleet-membership` | Add/remove explicit configured bot names | `--apply` only |
+| `update-variable` | Safely update selected bot `.env` values | `--apply` only |
+| `adjust-positions` | Change capacity without rewriting filled positions | `--apply` only |
+| `reconcile-position-balances` | Haircut overstated tracked balances to wallet reality | `--apply` only |
+| `fund-bots` | Top selected wallets up from a separate treasury signer | `--execute` only |
+| `usdg-sweep` | Sweep USDG to treasury | `--execute` only |
+| `treasury-transfer` | Transfer native ETH, USDG, or an ERC-20 | `--execute` only |
+| `sell-moonbags` | Sell unallocated managed tokens; optionally forward proceeds | `--execute` only |
+| `liquidate-assets` | Convert all managed assets and conditionally clear positions | `--execute` only |
+| `backup-private-keys` | Produce an owner-only plaintext recovery file | Always writes output |
+| `dashboard-remove` | Remove permanently retired DoomDash bot records | `--execute` only |
+| `probe-uniswap-gateway.py` | Read-only targeted Uniswap transport diagnostic | No |
+
+Files ending in `.py` other than `probe-uniswap-gateway.py` are implementation
+helpers called by these shell entrypoints. Prefer the shell command: it owns
+fleet selection, stopped-process checks, previews, and batch summaries.
+
 Start and attach:
 
 ```bash
@@ -1122,9 +1157,11 @@ target fails.
   each checkout's existing `.env`. A public default recipient may live in
   `fleet.conf`; private keys and API credentials never should.
 - `treasury-transfer` applies the same batch guards to native ETH, USDG, and
-  arbitrary ERC-20 contracts. Native transfers also enforce the configured gas
-  reserve after an exact amount and estimated maximum fee. Native liquidation
-  bypasses the reserve only with `--amount all --confirm-liquidate`.
+  arbitrary ERC-20 contracts. Exact native transfers preserve the gas reserve.
+  Native `available` also preserves `TREASURY_POSITION_RESERVE_ETH` for every
+  open position after live maximum transfer gas; `--position-reserve-eth`
+  overrides it for one run. Native liquidation bypasses both reserves only with
+  `--amount all --confirm-liquidate`.
 - `update-variable` is preview-only without `--apply`; backups are intentionally
   retained for operator recovery and gitignored.
 

@@ -312,17 +312,20 @@ option and safety invariant.
 |---|---|---|
 | `start-fleet` / `stop-fleet` / `restart-fleet` | Tmux lifecycle for the configured fleet | Processes only |
 | `update-fleet` | Preflight and fast-forward checkouts without tracked changes; optional restart | Git/processes |
+| `update-all` | Update the operations clone, update all bots, then restart after complete success | Git/processes |
 | `update-this-checkout` | Fast-forward only the clone containing the script; ignores fleet membership | Git only |
 | `initialize-bots` | Preview/stage independent clones, wallets, and protected `.env` files for multiple symbols | Files/Git; `--apply` required |
 | `fleet-membership` | Preview/add/remove names in `FLEET_BOT_NAMES` without touching bot folders | Config only; `--apply` required |
 | `fleet-discover` | Print deterministic membership for review | No |
 | `fleet-doctor` | Check config, Git, RPC, contracts, provider route, and dashboard | No |
 | `fleet-inventory` | Read addresses, reserves, managed balances, positions, and audit ages | No |
+| `fleet-watch` | Phone-friendly live view using local bot status snapshots | No |
 | `reconcile-position-balances` | Preview/apply an audited proportional haircut when tracked tokens exceed wallet reality | Yes |
 | `fleet-audit` | Reconcile local treasury/liquidation receipts | No |
 | `update-variable` | Preview/atomically change selected `.env` variables | Config only; `--apply` required |
 | `adjust-positions` | Preview/add/remove capacity, or freeze selected/all bots at their filled count | Config only; `--apply` required |
 | `backup-private-keys` | Validate every configured bot and write one sensitive key backup | Sensitive file output |
+| `fund-bots` | Top selected wallets up to a target ETH balance from a separate treasury signer | Broadcast only with all guards |
 | `usdg-sweep` | Plan or execute fleet USDG transfers | Broadcast only with all guards |
 | `treasury-transfer` | Plan or execute native/ERC-20 transfers | Broadcast only with all guards |
 | `sell-moonbags` | Plan or sell only unallocated trading-token balances for selected coins/all | Broadcast only with all guards |
@@ -330,8 +333,11 @@ option and safety invariant.
 | `dashboard-remove` | Preview/remove permanently retired DoomDash cards/history | Network mutation only with both confirmations |
 
 Common `--only name1,name2` and `--exclude name3` selectors are supported by
-start, update, variable update, treasury/liquidation, doctor, inventory, and
-audit operations. `stop-fleet` and `restart-fleet` remain whole-session actions.
+start, `update-fleet`, watch, variable update, reconciliation, funding,
+treasury/liquidation, doctor, inventory, and audit operations. `adjust-positions`
+and `sell-moonbags` instead take explicit positional bot/coin selectors (or
+their documented all-fleet form). `stop-fleet` and `restart-fleet` remain
+whole-session actions.
 
 ### Production architecture and repository boundaries
 

@@ -15,6 +15,7 @@ GRIDLESS_BUY_THRESHOLD=-15
 GRIDLESS_SELL_THRESHOLD=10
 MIN_PROFIT_PERCENT=5
 ETH_GAS_RESERVE=0.0006
+TREASURY_POSITION_RESERVE_ETH=0.003
 MAX_SWAP_GAS_ETH=0.00015
 MAX_BUY_GAS_ETH=0.00015
 MAX_SELL_GAS_ETH=0.00015
@@ -77,6 +78,9 @@ tmux attach-session -t bot_farm
 ```
 
 Expected safeguards include gas-cap rejections, gas-aware sell-profit checks,
-one retry for Uniswap's packet 409 followed by Sushi fallback, and a shared
-cooldown only for genuine 429 rate limits. Once a hash exists, never manually
-repeat a transaction without checking its receipt and local audit history.
+one retry for Uniswap's packet 409 followed by Sushi fallback, quote-provider
+handoff confirmation and disagreement blocking, and a shared cooldown only for
+genuine 429 rate limits. DoomDash exposes both active sell checks and buys
+blocked by projected gas, including the actual quote source. Once a hash exists,
+never manually repeat a transaction without checking its receipt and local
+audit history.
