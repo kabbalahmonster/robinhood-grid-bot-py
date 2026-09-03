@@ -18,6 +18,7 @@ class GasAwareProfitTests(unittest.TestCase):
         )
         bot.wallet = Mock()
         bot.wallet.w3.eth.gas_price = 400_000_000
+        bot.wallet.w3.eth.estimate_gas.side_effect = RuntimeError("simulation unavailable")
         return bot
 
     def test_projected_sell_return_includes_gas_and_profit_target(self):
@@ -73,6 +74,30 @@ class GasAwareProfitTests(unittest.TestCase):
         _, gas_price = bot._swap_gas_fields(quote)
 
         self.assertEqual(gas_price, 404_000_000)
+
+    def test_executable_quote_uses_rpc_simulation_instead_of_provider_gas(self):
+        bot = self.make_bot()
+        bot.wallet.address = "0x0000000000000000000000000000000000000001"
+        bot.wallet.w3.eth.estimate_gas.side_effect = None
+        bot.wallet.w3.eth.estimate_gas.return_value = 120_000
+        quote = SimpleNamespace(
+            gas=600_000,
+            gas_price=2_000_000_000,
+            to="0x0000000000000000000000000000000000000002",
+            data="0x1234",
+            value=0,
+        )
+
+        gas_limit, gas_price = bot._swap_gas_fields(quote)
+
+        self.assertEqual(gas_limit, 120_000)
+        self.assertEqual(gas_price, 400_000_000)
+        bot.wallet.w3.eth.estimate_gas.assert_called_once_with({
+            "from": "0x0000000000000000000000000000000000000001",
+            "to": "0x0000000000000000000000000000000000000002",
+            "data": "0x1234",
+            "value": 0,
+        })
 
     def test_final_profit_guard_can_use_exact_broadcast_gas_plan(self):
         bot = self.make_bot()

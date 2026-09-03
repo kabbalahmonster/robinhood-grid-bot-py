@@ -785,7 +785,26 @@ class GridBot:
         multiplier remains available for operators, but defaults to no premium.
         """
         gas_limit_mult = getattr(self.config, 'gas_limit_multiplier', 1.05)
-        gas_limit = int((quote.gas or default_gas) * gas_limit_mult)
+        provider_gas = int(quote.gas or default_gas)
+        estimated_gas = None
+        if getattr(quote, "to", None) and getattr(quote, "data", None):
+            try:
+                # Simulate the exact executable transaction returned by the quote.
+                # Route-level provider estimates can include chain-inappropriate
+                # padding and have historically overstated Robinhood Chain sells.
+                estimated_gas = int(self.wallet.w3.eth.estimate_gas({
+                    "from": Web3.to_checksum_address(self.wallet.address),
+                    "to": Web3.to_checksum_address(quote.to),
+                    "data": quote.data,
+                    "value": int(quote.value or 0),
+                }))
+            except Exception as exc:
+                logger.warning(
+                    "Executable quote gas simulation failed; using provider estimate: %s",
+                    exc,
+                )
+        gas_source = "rpc_execution" if estimated_gas is not None else "provider"
+        gas_limit = int((estimated_gas if estimated_gas is not None else provider_gas) * gas_limit_mult)
         normal_gas_price = int(self.wallet.w3.eth.gas_price)
         gas_price_mult = getattr(self.config, 'gas_price_multiplier', 1.0)
         freshness_mult = max(
@@ -796,11 +815,13 @@ class GridBot:
         )
         provider_gas_price = int(quote.gas_price or 0)
         logger.info(
-            "Gas plan: strategy=normal gas_limit=%s gas_limit_multiplier=%.3f "
+            "Gas plan: strategy=normal source=%s simulated_gas=%s provider_gas=%s "
+            "gas_limit=%s gas_limit_multiplier=%.3f "
             "normal_gas_price=%s provider_gas_price=%s gas_price_multiplier=%.3f "
             "freshness_multiplier=%.3f "
             "projected_fee_wei=%s",
-            gas_limit, gas_limit_mult, normal_gas_price, provider_gas_price,
+            gas_source, estimated_gas, provider_gas, gas_limit, gas_limit_mult,
+            normal_gas_price, provider_gas_price,
             gas_price_mult, freshness_mult, gas_limit * gas_price,
         )
         return gas_limit, gas_price
