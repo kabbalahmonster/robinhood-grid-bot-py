@@ -8,7 +8,17 @@ from datetime import datetime, timedelta, timezone
 MAX_RECENT_TX_HASHES = 5000
 MAX_PROFIT_HISTORY = 10000
 PROFIT_HISTORY_RETENTION_DAYS = 32
-PERIOD_HOURS = {"month": 24 * 30, "week": 24 * 7, "24h": 24, "6h": 6, "1h": 1}
+PERIOD_HOURS = {
+    "month": 24 * 30,
+    "week": 24 * 7,
+    "3d": 24 * 3,
+    "24h": 24,
+    "12h": 12,
+    "6h": 6,
+    "4h": 4,
+    "2h": 2,
+    "1h": 1,
+}
 
 
 def _now():
