@@ -109,6 +109,48 @@ class SellQuoteConsistencyTests(unittest.TestCase):
         self.assertIs(quote, current_quote)
         self.assertEqual(detail["quote_provider"], "uniswap")
 
+    def test_gas_cap_probe_uses_cap_compliant_alternate_for_buy_and_sell(self):
+        class Provider:
+            def __init__(self, name, quote):
+                self.name = name
+                self.quote = quote
+                self.calls = []
+
+            def build_swap_transaction(self, **kwargs):
+                self.calls.append(kwargs)
+                return self.quote
+
+        for operation in ("buy", "sell"):
+            with self.subTest(operation=operation):
+                bot = self.bot()
+                current_quote = SimpleNamespace(success=True, gas=300)
+                alternate_quote = SimpleNamespace(success=True, gas=100)
+                primary = Provider("uniswap", current_quote)
+                fallback = Provider("sushiswap", alternate_quote)
+                bot.provider = SimpleNamespace(primary=primary, fallback=fallback)
+                bot.config = SimpleNamespace(
+                    max_swap_gas_eth=150 / 10**18,
+                    max_buy_gas_eth=150 / 10**18,
+                    max_sell_gas_eth=150 / 10**18,
+                )
+                bot.wallet = SimpleNamespace(address="0xwallet")
+                bot._swap_slippage_fraction = lambda: 0.02
+                bot._swap_gas_fields = lambda quote, _default: (quote.gas, 1)
+
+                provider, quote, detail = bot._alternate_route_for_gas_cap(
+                    primary, current_quote,
+                    sell_token="0xsell",
+                    buy_token="0xbuy",
+                    sell_amount=123,
+                    operation=operation,
+                    default_gas=300000,
+                )
+
+                self.assertIs(provider, fallback)
+                self.assertIs(quote, alternate_quote)
+                self.assertEqual(detail["status"], "alternate_route_selected_after_gas_cap")
+                self.assertEqual(fallback.calls[0]["sell_amount"], 123)
+
 
 if __name__ == "__main__":
     unittest.main()

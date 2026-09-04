@@ -870,6 +870,67 @@ class GridBot:
         )
         return selected_provider, selected_quote, detail
 
+    def _alternate_route_for_gas_cap(
+        self, current_provider, current_quote, *, sell_token, buy_token,
+        sell_amount, operation, default_gas,
+    ):
+        """Probe the paired provider once when an otherwise valid route exceeds its cap.
+
+        This is deliberately a cap-block recovery, not normal quote shopping:
+        the active route has already been simulated and failed its hard cap.
+        The alternate route must have executable calldata and independently
+        pass the same operation-specific cap before it may replace the route.
+        Subsequent buy/sell guards still validate all economics and approvals.
+        """
+        router = self.provider
+        primary = getattr(router, "primary", None)
+        fallback = getattr(router, "fallback", None)
+        if primary is None or fallback is None:
+            return current_provider, current_quote, None
+
+        alternate = fallback if current_provider is primary else primary
+        try:
+            alternate_quote = alternate.build_swap_transaction(
+                sell_token=sell_token,
+                buy_token=buy_token,
+                sell_amount=sell_amount,
+                taker_address=self.wallet.address,
+                slippage_percentage=self._swap_slippage_fraction(),
+            )
+        except Exception as exc:
+            logger.warning("Alternate %s route probe from %s failed: %s", operation, alternate.name, exc)
+            return current_provider, current_quote, None
+        if not alternate_quote.success:
+            logger.warning(
+                "Alternate %s route probe from %s failed: %s",
+                operation, alternate.name, alternate_quote.error,
+            )
+            return current_provider, current_quote, None
+
+        gas_limit, gas_price = self._swap_gas_fields(alternate_quote, default_gas)
+        legacy_cap = float(getattr(self.config, "max_swap_gas_eth", 0.00004))
+        cap_attribute = "max_buy_gas_eth" if operation == "buy" else "max_sell_gas_eth"
+        cap_eth = float(getattr(self.config, cap_attribute, legacy_cap))
+        gas_wei = gas_limit * gas_price
+        if cap_eth > 0 and gas_wei > int(cap_eth * 10**18):
+            logger.warning(
+                "Alternate %s route from %s is also above gas cap: %.8f ETH > %.8f ETH",
+                operation, alternate.name, gas_wei / 10**18, cap_eth,
+            )
+            return current_provider, current_quote, None
+
+        detail = {
+            "status": "alternate_route_selected_after_gas_cap",
+            "quote_provider": alternate.name,
+            "projected_gas_eth": round(gas_wei / 10**18, 8),
+            "maximum_gas_eth": round(cap_eth, 8),
+        }
+        logger.warning(
+            "Replacing gas-capped %s route with cap-compliant fresh %s route",
+            operation, alternate.name,
+        )
+        return alternate, alternate_quote, detail
+
     def _raw_trade_balance(self):
         if getattr(self.config, 'use_eth_trading', False):
             return int(self.wallet.get_eth_balance_wei())
@@ -1651,7 +1712,20 @@ class GridBot:
         if not self._gas_within_hard_cap(
             initial_gas_limit, initial_gas_price, "buy", buy_attempt_context,
         ):
-            return
+            selected_provider, selected_quote, selection = self._alternate_route_for_gas_cap(
+                self.provider.active, quote,
+                sell_token=self.trade_token_address,
+                buy_token=self.config.token_address,
+                sell_amount=buy_amount_wei,
+                operation="buy",
+                default_gas=350000,
+            )
+            if not selection:
+                return
+            self.provider.active = selected_provider
+            self.api_client = self.provider
+            quote = selected_quote
+            self._buy_attempt = {**buy_attempt_context, **selection}
         
         buy_setup_gas_wei = 0
         # Determine approval spender
@@ -1879,10 +1953,15 @@ class GridBot:
             getattr(self.config, "max_swap_gas_eth", 0.00004),
         )) * 10**18)
         if sell_cap_wei > 0 and probe_gas_limit * probe_gas_price > sell_cap_wei:
-            selected_provider, selected_quote, selection = self._best_fresh_sell_route(
-                self.provider.active, quote, balance,
+            selected_provider, selected_quote, selection = self._alternate_route_for_gas_cap(
+                self.provider.active, quote,
+                sell_token=self.config.token_address,
+                buy_token=self.trade_token_address,
+                sell_amount=balance,
+                operation="sell",
+                default_gas=300000,
             )
-            if selection and selected_provider is not self.provider.active:
+            if selection:
                 self.provider.active = selected_provider
                 self.api_client = self.provider
                 quote = selected_quote
@@ -1893,6 +1972,8 @@ class GridBot:
                     consistency_block["quote_provider"] if consistency_block else "current",
                     quote_provider, pos_id,
                 )
+
+        quote_return_wei = self._taxed_quote_return_wei(quote)
         
         # Check min profit requirement against individual position quote
         # Support both cost_wei (new) and cost (legacy nano-ETH)
@@ -2013,7 +2094,28 @@ class GridBot:
 
         initial_gas_limit, initial_gas_price = self._swap_gas_fields(quote, 300000)
         if not self._gas_within_hard_cap(initial_gas_limit, initial_gas_price, "sell"):
-            return
+            selected_provider, selected_quote, selection = self._alternate_route_for_gas_cap(
+                self.provider.active, quote,
+                sell_token=self.config.token_address,
+                buy_token=self.trade_token_address,
+                sell_amount=sell_amount,
+                operation="sell",
+                default_gas=300000,
+            )
+            if not selection:
+                return
+            self.provider.active = selected_provider
+            self.api_client = self.provider
+            quote = selected_quote
+            # The replacement route is freshly quoted, so it must independently
+            # satisfy the pre-approval gas-aware profit floor.
+            preapproval_return_wei = self._taxed_quote_return_wei(quote)
+            preapproval_minimum_wei = self._minimum_gas_aware_return_wei(
+                int(round(sold_cost_eth * 10**18)), quote, min_profit_percent
+            )
+            if preapproval_return_wei < preapproval_minimum_wei:
+                logger.warning("❌ Alternate sell route failed gas-aware profit floor")
+                return
         
         sell_setup_gas_wei = 0
         # Providers with API-managed approvals return the required approval txs.
@@ -2327,7 +2429,20 @@ class GridBot:
         if not self._gas_within_hard_cap(
             initial_gas_limit, initial_gas_price, "buy", buy_attempt_context,
         ):
-            return
+            selected_provider, selected_quote, selection = self._alternate_route_for_gas_cap(
+                self.provider.active, quote,
+                sell_token=self.trade_token_address,
+                buy_token=self.config.token_address,
+                sell_amount=buy_amount_wei,
+                operation="buy",
+                default_gas=350000,
+            )
+            if not selection:
+                return
+            self.provider.active = selected_provider
+            self.api_client = self.provider
+            quote = selected_quote
+            self._buy_attempt = {**buy_attempt_context, **selection}
         
         buy_setup_gas_wei = 0
         # Determine approval spender - use quote's allowance_target if available (LI.FI)
@@ -2531,7 +2646,26 @@ class GridBot:
 
         initial_gas_limit, initial_gas_price = self._swap_gas_fields(quote, 300000)
         if not self._gas_within_hard_cap(initial_gas_limit, initial_gas_price, "sell"):
-            return
+            selected_provider, selected_quote, selection = self._alternate_route_for_gas_cap(
+                self.provider.active, quote,
+                sell_token=self.config.token_address,
+                buy_token=self.trade_token_address,
+                sell_amount=sell_amount,
+                operation="sell",
+                default_gas=300000,
+            )
+            if not selection:
+                return
+            self.provider.active = selected_provider
+            self.api_client = self.provider
+            quote = selected_quote
+            preapproval_return_wei = self._taxed_quote_return_wei(quote)
+            preapproval_minimum_wei = self._minimum_gas_aware_return_wei(
+                int(round(sold_cost_eth * 10**18)), quote, min_profit_percent
+            )
+            if preapproval_return_wei < preapproval_minimum_wei:
+                logger.warning("❌ Alternate sell route failed gas-aware profit floor")
+                return
         
         # Determine approval spender - use quote's allowance_target if available (LI.FI)
         # otherwise fall back to zero_x_proxy (0x Protocol)
