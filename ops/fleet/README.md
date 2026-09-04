@@ -38,6 +38,32 @@ copies of the same bot checkout simultaneously.
 - One complete bot checkout per fleet member
 - A working `.venv`, `venv`, or system `python3` for every checkout
 
+## Keep the fleet alive after crashes or reboot
+
+Tmux's per-pane loop relaunches a Python process that exits, but it cannot
+recover a hung process or restart the fleet after the host reboots. Install the
+included **systemd user service** once on the bot host:
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp ops/fleet/rh-grid-fleet.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now rh-grid-fleet.service
+loginctl enable-linger "$USER"
+```
+
+The service runs `fleet-supervisor`, which starts the detached tmux fleet on
+boot and then runs `fleet-guardian`. The guardian watches each bot's local
+`data/fleet_status.json`; only after a
+snapshot is stale for three consecutive checks (default: about 4 minutes) does
+it run `restart-bot` for that one pane. It does not cycle healthy bots or
+restart the whole fleet because one bot is grumpy.
+
+For intentional full downtime, stop the service first so it does not restore
+the fleet, then run `stop-fleet`: `systemctl --user stop rh-grid-fleet.service
+&& stop-fleet`. Check recovery logs with `journalctl --user -u
+rh-grid-fleet.service -f`.
+
 On Debian or Ubuntu:
 
 ```bash

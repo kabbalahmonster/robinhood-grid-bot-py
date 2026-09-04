@@ -1,0 +1,16 @@
+[Unit]
+Description=Robinhood grid-bot fleet supervisor
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=10min
+StartLimitBurst=6
+
+[Service]
+Type=simple
+WorkingDirectory=%h/bot-farm/fleet-command/robinhood-grid-bot-py
+ExecStart=/usr/bin/env bash -lc 'exec ops/fleet/fleet-supervisor'
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=default.target

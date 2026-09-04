@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+SCRIPT_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)"
+source "$SCRIPT_DIR/fleet-common.sh"
+
+config_path=""
+while (($#)); do
+  case "$1" in
+    --config) (($# >= 2)) || fleet_die "--config requires a path"; config_path="$2"; shift 2 ;;
+    *) fleet_die "Unknown option: $1" ;;
+  esac
+done
+
+fleet_load_config "$config_path"
+if ! fleet_session_exists; then
+  "$SCRIPT_DIR/start-fleet" --detach --config "$FLEET_CONFIG_PATH"
+fi
+exec "$SCRIPT_DIR/fleet-guardian" --config "$FLEET_CONFIG_PATH"

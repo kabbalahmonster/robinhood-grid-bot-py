@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+SCRIPT_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)"
+source "$SCRIPT_DIR/fleet-common.sh"
+
+usage() {
+  cat <<'EOF'
+Usage: fleet-guardian [--once] [--interval SECONDS] [--config PATH]
+
+Watch local fleet status snapshots and restart only bots that have remained
+stale for the configured number of consecutive checks. Intended to run under
+the rh-grid-fleet systemd user service.
+EOF
+}
+
+config_path=""; once=0; interval=""
+while (($#)); do
+  case "$1" in
+    --once) once=1; shift ;;
+    --interval) (($# >= 2)) || fleet_die "--interval requires seconds"; interval="$2"; shift 2 ;;
+    --config) (($# >= 2)) || fleet_die "--config requires a path"; config_path="$2"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) fleet_die "Unknown option: $1" ;;
+  esac
+done
+
+fleet_load_config "$config_path"
+fleet_validate_bots
+interval="${interval:-${FLEET_GUARDIAN_INTERVAL:-30}}"
+: "${FLEET_GUARDIAN_STALE_SECONDS:=180}"
+: "${FLEET_GUARDIAN_CONFIRMATIONS:=3}"
+[[ "$interval" =~ ^[0-9]+([.][0-9]+)?$ ]] || fleet_die "guardian interval must be a positive number"
+[[ "$FLEET_GUARDIAN_STALE_SECONDS" =~ ^[0-9]+$ ]] || fleet_die "FLEET_GUARDIAN_STALE_SECONDS must be an integer"
+[[ "$FLEET_GUARDIAN_CONFIRMATIONS" =~ ^[1-9][0-9]*$ ]] || fleet_die "FLEET_GUARDIAN_CONFIRMATIONS must be a positive integer"
+
+state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/rh-grid-bot/fleet-guardian"
+mkdir -p "$state_dir"
+
+check_fleet() {
+  local now bot_dir name snapshot age failures_file failures=0
+  fleet_session_exists || fleet_die "tmux fleet session is missing: $FLEET_SESSION"
+  now="$(date +%s)"
+  for bot_dir in "${FLEET_BOT_DIRS[@]}"; do
+    name="$(fleet_bot_name "$bot_dir")"
+    snapshot="$bot_dir/data/fleet_status.json"
+    failures_file="$state_dir/$name.failures"
+    if [[ -f "$snapshot" ]]; then
+      age=$((now - $(stat -c %Y -- "$snapshot")))
+    else
+      age=$((FLEET_GUARDIAN_STALE_SECONDS + 1))
+    fi
+    if ((age <= FLEET_GUARDIAN_STALE_SECONDS)); then
+      rm -f -- "$failures_file"
+      continue
+    fi
+    [[ -f "$failures_file" ]] && read -r failures < "$failures_file" || true
+    failures=$((failures + 1))
+    printf '%s\n' "$failures" > "$failures_file"
+    if ((failures >= FLEET_GUARDIAN_CONFIRMATIONS)); then
+      printf 'Guardian restarting %s: local status stale for %ss across %s checks\n' "$name" "$age" "$failures" >&2
+      "$SCRIPT_DIR/restart-bot" "$name" --config "$FLEET_CONFIG_PATH"
+      rm -f -- "$failures_file"
+    fi
+  done
+}
+
+while true; do
+  check_fleet
+  ((once)) && exit 0
+  sleep "$interval"
+done

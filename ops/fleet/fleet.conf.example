@@ -6,6 +6,11 @@ FLEET_WINDOW="fleet"
 FLEET_ENTRYPOINT="grid_bot.py"
 FLEET_RESTART_DELAY=5
 FLEET_START_STAGGER=1
+# The guardian is deliberately conservative: snapshots must stay stale across
+# three checks before it restarts one bot.  It never restarts the whole fleet.
+FLEET_GUARDIAN_INTERVAL=30
+FLEET_GUARDIAN_STALE_SECONDS=180
+FLEET_GUARDIAN_CONFIRMATIONS=3
 
 # Default dotenv template for initialize-bots. A command-line --template PATH
 # overrides this for one run.
