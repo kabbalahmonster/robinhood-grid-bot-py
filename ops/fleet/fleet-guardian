@@ -9,7 +9,8 @@ usage() {
   cat <<'EOF'
 Usage: fleet-guardian [--once] [--interval SECONDS] [--config PATH]
 
-Watch local fleet status snapshots and restart only bots that have remained
+Keep the tmux session aligned with the operator's durable desired state, then
+watch local fleet status snapshots and restart only bots that have remained
 stale for the configured number of consecutive checks. Intended to run under
 the rh-grid-fleet systemd user service.
 EOF
@@ -27,7 +28,6 @@ while (($#)); do
 done
 
 fleet_load_config "$config_path"
-fleet_validate_bots
 interval="${interval:-${FLEET_GUARDIAN_INTERVAL:-30}}"
 : "${FLEET_GUARDIAN_STALE_SECONDS:=180}"
 : "${FLEET_GUARDIAN_CONFIRMATIONS:=3}"
@@ -35,12 +35,23 @@ interval="${interval:-${FLEET_GUARDIAN_INTERVAL:-30}}"
 [[ "$FLEET_GUARDIAN_STALE_SECONDS" =~ ^[0-9]+$ ]] || fleet_die "FLEET_GUARDIAN_STALE_SECONDS must be an integer"
 [[ "$FLEET_GUARDIAN_CONFIRMATIONS" =~ ^[1-9][0-9]*$ ]] || fleet_die "FLEET_GUARDIAN_CONFIRMATIONS must be a positive integer"
 
-state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/rh-grid-bot/fleet-guardian"
+# Keep health counters scoped with the same config/session identity as desired
+# state; bot names may legitimately overlap across independently managed fleets.
+state_dir="$(fleet_desired_state_file).guardian"
 mkdir -p "$state_dir"
 
 check_fleet() {
   local now bot_dir name snapshot age failures_file failures=0
-  fleet_session_exists || fleet_die "tmux fleet session is missing: $FLEET_SESSION"
+  if ! fleet_should_run; then
+    # Intentionally stopped is healthy service state. Staying alive avoids a
+    # noisy systemd restart loop and lets this process notice a later start.
+    find "$state_dir" -maxdepth 1 -type f -name '*.failures' -delete 2>/dev/null || true
+    return 0
+  fi
+  if ! fleet_session_exists; then
+    printf 'Guardian restoring missing desired-running fleet: %s\n' "$FLEET_SESSION" >&2
+    "$SCRIPT_DIR/start-fleet" --detach --config "$FLEET_CONFIG_PATH"
+  fi
   now="$(date +%s)"
   for bot_dir in "${FLEET_BOT_DIRS[@]}"; do
     name="$(fleet_bot_name "$bot_dir")"

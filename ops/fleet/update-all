@@ -9,6 +9,49 @@ die() {
   exit 1
 }
 
+usage() {
+  cat <<'EOF'
+Usage: update-all [--leave-stopped] [update-fleet options]
+
+Update the operations checkout and configured bot checkouts. By default the
+fleet is restarted after complete success. --leave-stopped records intentional
+downtime before updating and does not restart, even after successful updates.
+EOF
+}
+
+leave_stopped=0
+config_path=""
+forward_args=()
+while (($#)); do
+  case "$1" in
+    --leave-stopped) leave_stopped=1; shift ;;
+    --config)
+      (($# >= 2)) || die "--config requires a path"
+      config_path="$2"
+      forward_args+=("$1" "$2")
+      shift 2
+      ;;
+    --detach)
+      ((leave_stopped == 0)) || die "--detach cannot be combined with --leave-stopped"
+      forward_args+=("$1")
+      shift
+      ;;
+    --restart)
+      ((leave_stopped == 0)) || die "--restart cannot be combined with --leave-stopped"
+      forward_args+=("$1")
+      shift
+      ;;
+    -h|--help) usage; exit 0 ;;
+    *) forward_args+=("$1"); shift ;;
+  esac
+done
+if ((leave_stopped)); then
+  for arg in "${forward_args[@]}"; do
+    [[ "$arg" != "--detach" ]] || die "--detach cannot be combined with --leave-stopped"
+    [[ "$arg" != "--restart" ]] || die "--restart cannot be combined with --leave-stopped"
+  done
+fi
+
 [[ -d "$FLEET_COMMAND_CHECKOUT" ]] || \
   die "Fleet command checkout not found: $FLEET_COMMAND_CHECKOUT"
 
@@ -17,8 +60,22 @@ update_fleet="$FLEET_COMMAND_CHECKOUT/ops/fleet/update-fleet"
 [[ -x "$update_self" ]] || die "Missing executable: $update_self"
 [[ -x "$update_fleet" ]] || die "Missing executable: $update_fleet"
 
+if ((leave_stopped)); then
+  stop_fleet="$FLEET_COMMAND_CHECKOUT/ops/fleet/stop-fleet"
+  [[ -x "$stop_fleet" ]] || die "Missing executable: $stop_fleet"
+  stop_args=(--if-running)
+  [[ -z "$config_path" ]] || stop_args+=(--config "$config_path")
+  printf 'Stopping fleet intentionally before all updates...\n'
+  "$stop_fleet" "${stop_args[@]}"
+fi
+
 printf 'Updating fleet command checkout: %s\n' "$FLEET_COMMAND_CHECKOUT"
 "$update_self"
 
+if ((leave_stopped)); then
+  printf '\nUpdating configured bots; fleet will remain stopped...\n'
+  exec "$update_fleet" "${forward_args[@]}"
+fi
+
 printf '\nUpdating configured bots and restarting the fleet...\n'
-exec "$update_fleet" --restart "$@"
+exec "$update_fleet" --restart "${forward_args[@]}"

@@ -14,7 +14,4 @@ while (($#)); do
 done
 
 fleet_load_config "$config_path"
-if ! fleet_session_exists; then
-  "$SCRIPT_DIR/start-fleet" --detach --config "$FLEET_CONFIG_PATH"
-fi
 exec "$SCRIPT_DIR/fleet-guardian" --config "$FLEET_CONFIG_PATH"

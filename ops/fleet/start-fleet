@@ -36,15 +36,20 @@ while (($#)); do
 done
 
 fleet_load_config "$config_path"
-fleet_apply_selection "$only" "$exclude"
 fleet_require_tmux
-fleet_validate_bots
-fleet_sort_targets_by_name
 
 if fleet_session_exists; then
+  fleet_record_running
   fleet_die "tmux session already exists: $FLEET_SESSION
 Attach with: tmux attach-session -t '$FLEET_SESSION'"
 fi
+
+# Startup is a transaction: suppress guardian resurrection until every pane is
+# created, then commit running intent only after the complete session exists.
+fleet_record_stopped
+fleet_apply_selection "$only" "$exclude"
+fleet_validate_bots
+fleet_sort_targets_by_name
 
 created=0
 cleanup_partial_session() {
@@ -81,6 +86,9 @@ done
 
 tmux select-layout -t "$FLEET_SESSION:$FLEET_WINDOW" tiled >/dev/null
 trap - EXIT
+# Running intent is committed only after the complete session exists. A failed
+# validation or partial launch therefore preserves an earlier stopped intent.
+fleet_record_running
 printf 'Started %d bots in tmux session %s.\n' "${#FLEET_BOT_DIRS[@]}" "$FLEET_SESSION"
 
 if ((detach)); then

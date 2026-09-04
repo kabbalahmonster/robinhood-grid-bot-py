@@ -108,6 +108,40 @@ fleet_session_exists() {
   tmux has-session -t "=$FLEET_SESSION" 2>/dev/null
 }
 
+# A marker is used instead of the service state because the systemd unit may
+# remain active while operators deliberately leave the tmux fleet stopped.
+# Scope it to both config and session so multiple fleets owned by one user do
+# not accidentally control one another.
+fleet_desired_state_file() {
+  local identity digest state_root
+  identity="$(readlink -f -- "$FLEET_CONFIG_PATH")"$'\n'"$FLEET_SESSION"
+  if command -v sha256sum >/dev/null 2>&1; then
+    digest="$(printf '%s' "$identity" | sha256sum | awk '{print $1}')"
+  else
+    digest="$(printf '%s' "$identity" | cksum | awk '{print $1}')"
+  fi
+  state_root="${FLEET_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/rh-grid-bot/fleet}"
+  printf '%s/%s.desired-stopped\n' "$state_root" "$digest"
+}
+
+fleet_should_run() {
+  [[ ! -e "$(fleet_desired_state_file)" ]]
+}
+
+fleet_record_stopped() {
+  local marker marker_dir temporary
+  marker="$(fleet_desired_state_file)"
+  marker_dir="$(dirname -- "$marker")"
+  mkdir -p -- "$marker_dir"
+  temporary="$(mktemp "$marker_dir/.desired-stopped.XXXXXX")"
+  printf 'config=%s\nsession=%s\n' "$FLEET_CONFIG_PATH" "$FLEET_SESSION" > "$temporary"
+  mv -f -- "$temporary" "$marker"
+}
+
+fleet_record_running() {
+  rm -f -- "$(fleet_desired_state_file)"
+}
+
 fleet_python_for() {
   local bot_dir="$1"
   if [[ -x "$bot_dir/.venv/bin/python" ]]; then

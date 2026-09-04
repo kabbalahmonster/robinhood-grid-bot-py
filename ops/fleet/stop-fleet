@@ -33,6 +33,10 @@ done
 fleet_load_config "$config_path"
 fleet_require_tmux
 
+# Record intent first. If tmux termination fails, the guardian still fails
+# closed and will not resurrect the session behind the operator's back.
+fleet_record_stopped
+
 if ! fleet_session_exists; then
   if ((if_running)); then
     printf 'Fleet is already stopped: %s\n' "$FLEET_SESSION"

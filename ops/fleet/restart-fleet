@@ -9,6 +9,8 @@ usage() {
 Usage: restart-fleet [--detach] [--config PATH]
 
 Stop the configured fleet if it is running, then start it from current files.
+If startup fails, desired state remains stopped and the guardian will not
+resurrect a partial or invalid fleet.
 EOF
 }
 

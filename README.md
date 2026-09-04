@@ -310,10 +310,10 @@ option and safety invariant.
 
 | Command | Purpose | Mutates/broadcasts? |
 |---|---|---|
-| `start-fleet` / `stop-fleet` / `restart-fleet` | Tmux lifecycle for the configured fleet | Processes only |
+| `start-fleet` / `stop-fleet` / `restart-fleet` | Tmux lifecycle plus durable guardian intent | Processes/state marker |
 | `stop-bot NAME` / `restart-bot NAME` | Safely stop or cleanly restart one tmux bot without disturbing the fleet | Processes only |
 | `update-fleet` | Preflight and fast-forward checkouts without tracked changes; optional restart | Git/processes |
-| `update-all` | Update the operations clone, update all bots, then restart after complete success | Git/processes |
+| `update-all` | Update operations and bots, then restart; `--leave-stopped` preserves downtime | Git/processes/state marker |
 | `update-this-checkout` | Fast-forward only the clone containing the script; ignores fleet membership | Git only |
 | `initialize-bots` | Preview/stage independent clones, wallets, and protected `.env` files for multiple symbols | Files/Git; `--apply` required |
 | `fleet-membership` | Preview/add/remove names in `FLEET_BOT_NAMES` without touching bot folders | Config only; `--apply` required |

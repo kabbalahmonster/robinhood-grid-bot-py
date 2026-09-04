@@ -51,6 +51,11 @@ ops/fleet/treasury-transfer --asset ETH --amount available \
   --execute --confirm-fleet-stopped
 ```
 
+`stop-fleet` records durable stopped intent before terminating tmux, so the
+guardian service can remain enabled during maintenance without resurrecting
+the fleet. `start-fleet --detach` or `restart-fleet --detach` records running
+intent only after the complete session starts successfully.
+
 The freeze preserves filled positions while preventing new buys. The sweep
 retains each bot's `ETH_GAS_RESERVE`, live estimated transfer gas, and
 `TREASURY_POSITION_RESERVE_ETH` multiplied by its open-position count. Use

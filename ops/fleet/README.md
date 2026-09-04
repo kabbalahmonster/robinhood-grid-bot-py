@@ -52,16 +52,19 @@ systemctl --user enable --now rh-grid-fleet.service
 loginctl enable-linger "$USER"
 ```
 
-The service runs `fleet-supervisor`, which starts the detached tmux fleet on
-boot and then runs `fleet-guardian`. The guardian watches each bot's local
+The service runs `fleet-supervisor`, which runs `fleet-guardian`. The guardian
+keeps the tmux session aligned with durable operator intent: it restores a
+missing session when the fleet should be running, but remains quietly alive
+without resurrecting a fleet intentionally stopped by `stop-fleet`. It also
+watches each bot's local
 `data/fleet_status.json`; only after a
 snapshot is stale for three consecutive checks (default: about 4 minutes) does
 it run `restart-bot` for that one pane. It does not cycle healthy bots or
 restart the whole fleet because one bot is grumpy.
 
-For intentional full downtime, stop the service first so it does not restore
-the fleet, then run `stop-fleet`: `systemctl --user stop rh-grid-fleet.service
-&& stop-fleet`. Check recovery logs with `journalctl --user -u
+For intentional full downtime, run `stop-fleet`; no separate service stop is
+needed. `start-fleet` or `restart-fleet` commits running intent after a complete
+successful launch. Check recovery logs with `journalctl --user -u
 rh-grid-fleet.service -f`.
 
 On Debian or Ubuntu:
@@ -345,6 +348,11 @@ Restart from the files currently on disk:
 ops/fleet/restart-fleet
 ```
 
+`stop-fleet` durably records that the session should remain absent before it
+terminates tmux. The guardian therefore respects `--if-running` as well. A
+successful start/restart clears that state only after the full session exists;
+a failed start remains safely stopped.
+
 Update every clean checkout using `git pull --ff-only`:
 
 ```bash
@@ -382,6 +390,16 @@ configured bot, then restart only after all updates succeed—install and run:
 ln -sf "$PWD/ops/fleet/update-all" "$HOME/bin/update-all"
 update-all
 ```
+
+To update both the operations checkout and configured bots while deliberately
+leaving the fleet stopped, even if an update later fails, run:
+
+```bash
+update-all --leave-stopped
+```
+
+`--leave-stopped` cannot be combined with `--detach` or `--restart`. Without
+it, `update-all` keeps its existing update-then-restart behavior.
 
 The operations path defaults to
 `$HOME/bot-farm/fleet-command/robinhood-grid-bot-py`.
@@ -1184,8 +1202,10 @@ target fails.
   session.
 - Python selection is per checkout: `.venv/bin/python`, then
   `venv/bin/python`, then `python3` from `PATH`.
-- `stop-fleet` terminates the tmux session and therefore every bot process in
-  it. It does not delete files or persistent bot state.
+- `stop-fleet` records durable stopped intent, then terminates the tmux session
+  and therefore every bot process in it. It does not delete bot data. The
+  marker is scoped to the resolved config path and session name under
+  `${XDG_STATE_HOME:-$HOME/.local/state}/rh-grid-bot/fleet`.
 - `update-fleet` preflights all repositories before changing any of them and
   reports every blocker in one pass. It refuses tracked modifications,
   detached HEADs, and branches without upstreams, and only permits
@@ -1221,7 +1241,9 @@ target fails.
 - `Ctrl+C`: restart one bot through its loop.
 - `Ctrl+Z`: suspend one bot loop and return to its shell.
 - `tmux list-sessions`: list running sessions.
-- `tmux kill-session -t bot_farm`: emergency equivalent of `stop-fleet`.
+- `tmux kill-session -t bot_farm`: emergency process stop only. It does not
+  record stopped intent, so the guardian restores a desired-running fleet; use
+  `stop-fleet` for intentional downtime.
 
 If an older launcher installed a global no-prefix `Ctrl+Z` tmux binding, remove
 that one-time override before using this interactive design:
