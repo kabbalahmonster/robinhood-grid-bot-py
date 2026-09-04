@@ -931,6 +931,66 @@ class GridBot:
         )
         return alternate, alternate_quote, detail
 
+    def _alternate_sell_route_for_profit_floor(
+        self, current_provider, *, sell_amount, sold_cost_wei,
+        min_profit_percent,
+    ):
+        """Probe the paired route when a valid sell quote misses its floor.
+
+        This is only safe before allowance inspection. The alternate must
+        independently pass both the sell-gas cap and gas-aware profit floor.
+        """
+        primary = getattr(self.provider, "primary", None)
+        fallback = getattr(self.provider, "fallback", None)
+        if primary is None or fallback is None:
+            return None, None
+
+        alternate = fallback if current_provider is primary else primary
+        try:
+            quote = alternate.build_swap_transaction(
+                sell_token=self.config.token_address,
+                buy_token=self.trade_token_address,
+                sell_amount=sell_amount,
+                taker_address=self.wallet.address,
+                slippage_percentage=self._swap_slippage_fraction(),
+            )
+        except Exception as exc:
+            logger.warning(
+                "Alternate sell route from %s failed during profit-floor comparison: %s",
+                alternate.name, exc,
+            )
+            return None, None
+        if not quote.success:
+            logger.warning(
+                "Alternate sell route from %s failed during profit-floor comparison: %s",
+                alternate.name, quote.error,
+            )
+            return None, None
+
+        gas_limit, gas_price = self._swap_gas_fields(quote, 300000)
+        gas_wei = gas_limit * gas_price
+        legacy_cap = float(getattr(self.config, "max_swap_gas_eth", 0.00004))
+        cap_eth = float(getattr(self.config, "max_sell_gas_eth", legacy_cap))
+        if cap_eth > 0 and gas_wei > int(cap_eth * 10**18):
+            logger.warning(
+                "Alternate sell route from %s exceeds gas cap: %.8f ETH > %.8f ETH",
+                alternate.name, gas_wei / 10**18, cap_eth,
+            )
+            return None, None
+
+        return_wei = self._taxed_quote_return_wei(quote)
+        minimum_wei = self._minimum_gas_aware_return_wei(
+            sold_cost_wei, quote, min_profit_percent,
+            projected_gas_cost_wei=gas_wei,
+        )
+        if return_wei < minimum_wei:
+            logger.warning(
+                "Alternate sell route from %s also misses profit floor: %.8f ETH < %.8f ETH",
+                alternate.name, return_wei / 10**18, minimum_wei / 10**18,
+            )
+            return None, None
+        return alternate, quote
+
     def _raw_trade_balance(self):
         if getattr(self.config, 'use_eth_trading', False):
             return int(self.wallet.get_eth_balance_wei())
@@ -2631,11 +2691,23 @@ class GridBot:
             int(round(sold_cost_eth * 10**18)), quote, min_profit_percent
         )
         if preapproval_return_wei < preapproval_minimum_wei:
-            logger.warning(
-                "❌ Sell ABORTED before approval: return %.8f ETH < gas-aware minimum %.8f ETH",
-                preapproval_return_wei / 10**18, preapproval_minimum_wei / 10**18,
+            logger.warning("Primary sell route misses profit floor; checking configured alternate")
+            alternate, alternate_quote = self._alternate_sell_route_for_profit_floor(
+                self.provider.active,
+                sell_amount=sell_amount,
+                sold_cost_wei=int(round(sold_cost_eth * 10**18)),
+                min_profit_percent=min_profit_percent,
             )
-            return
+            if alternate is None:
+                logger.warning(
+                    "❌ Sell ABORTED before approval: return %.8f ETH < gas-aware minimum %.8f ETH",
+                    preapproval_return_wei / 10**18, preapproval_minimum_wei / 10**18,
+                )
+                return
+            self.provider.active = alternate
+            self.api_client = self.provider
+            quote = alternate_quote
+            logger.info("✅ Alternate %s route clears gas-aware profit floor", alternate.name)
 
         initial_gas_limit, initial_gas_price = self._swap_gas_fields(quote, 300000)
         if not self._gas_within_hard_cap(initial_gas_limit, initial_gas_price, "sell"):

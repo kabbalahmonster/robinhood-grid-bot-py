@@ -143,6 +143,68 @@ class SellQuoteConsistencyTests(unittest.TestCase):
         self.assertIs(quote, current_quote)
         self.assertEqual(detail["quote_provider"], "uniswap")
 
+    def test_profit_floor_probe_selects_only_a_passing_alternate(self):
+        current = SimpleNamespace(name="uniswap")
+        quote = SimpleNamespace(success=True, buy_amount=1_200, gas=100)
+        alternate = SimpleNamespace(name="sushiswap", build_swap_transaction=lambda **_kwargs: quote)
+        bot = self.bot()
+        bot.provider = SimpleNamespace(primary=current, fallback=alternate)
+        bot.config = SimpleNamespace(
+            token_address="0xtoken", max_sell_gas_eth=1_000 / 10**18,
+            max_swap_gas_eth=1_000 / 10**18,
+        )
+        bot.trade_token_address = "0xtrade"
+        bot.wallet = SimpleNamespace(address="0xwallet")
+        bot._swap_slippage_fraction = lambda: 0.02
+        bot._taxed_token_active = lambda: False
+        bot._swap_gas_fields = lambda _quote, _default: (100, 1)
+        bot._minimum_gas_aware_return_wei = lambda *_args, **_kwargs: 1_100
+
+        provider, selected = bot._alternate_sell_route_for_profit_floor(
+            current, sell_amount=123, sold_cost_wei=1_000, min_profit_percent=2,
+        )
+        self.assertIs(provider, alternate)
+        self.assertIs(selected, quote)
+
+        quote.buy_amount = 1_050
+        self.assertEqual(
+            bot._alternate_sell_route_for_profit_floor(
+                current, sell_amount=123, sold_cost_wei=1_000, min_profit_percent=2,
+            ),
+            (None, None),
+        )
+
+    def test_profit_floor_probe_rejects_provider_error_and_gas_cap(self):
+        current = SimpleNamespace(name="uniswap")
+        bot = self.bot()
+        bot.config = SimpleNamespace(
+            token_address="0xtoken", max_sell_gas_eth=150 / 10**18,
+            max_swap_gas_eth=150 / 10**18,
+        )
+        bot.trade_token_address = "0xtrade"
+        bot.wallet = SimpleNamespace(address="0xwallet")
+        bot._swap_slippage_fraction = lambda: 0.02
+        bot._taxed_token_active = lambda: False
+        bot._minimum_gas_aware_return_wei = lambda *_args, **_kwargs: 1_100
+
+        for quote in (
+            SimpleNamespace(success=False, error="no route", gas=0),
+            SimpleNamespace(success=True, buy_amount=9_999, gas=200),
+        ):
+            with self.subTest(quote=quote):
+                alternate = SimpleNamespace(
+                    name="sushiswap", build_swap_transaction=lambda **_kwargs: quote,
+                )
+                bot.provider = SimpleNamespace(primary=current, fallback=alternate)
+                bot._swap_gas_fields = lambda item, _default: (item.gas, 1)
+                self.assertEqual(
+                    bot._alternate_sell_route_for_profit_floor(
+                        current, sell_amount=123, sold_cost_wei=1_000,
+                        min_profit_percent=2,
+                    ),
+                    (None, None),
+                )
+
     def test_gas_cap_probe_uses_cap_compliant_alternate_for_buy_and_sell(self):
         class Provider:
             def __init__(self, name, quote):
