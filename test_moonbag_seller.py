@@ -278,6 +278,76 @@ class TestMoonbagSeller(unittest.TestCase):
         provider.prepare_swap.assert_called_once_with(refreshed)
         wallet._send_transaction.assert_called_once()
 
+    def test_api_quote_refresh_failure_is_retryable_before_any_broadcast(self):
+        cfg = config()
+        wallet = Mock()
+        wallet.address = "0x0000000000000000000000000000000000000003"
+        wallet.normal_gas_price.return_value = 100_000_000
+        wallet.get_eth_balance_wei.return_value = 10**18
+        provider = Mock()
+        provider.capabilities = SimpleNamespace(
+            api_managed_approval=True, refresh_after_approval=False, quote_requires_preparation=True
+        )
+        provider.check_approval.return_value = {"cancel": None, "approval": None}
+        provider.get_quote.return_value = SimpleNamespace(
+            success=False, error="Uniswap API returned status 404: No quotes available"
+        )
+        initial = SimpleNamespace(success=True, buy_amount=10**15, gas=100_000, gas_price=0)
+
+        with self.assertRaisesRegex(moonbag_seller.PreBroadcastRouteFailure, "status 404"):
+            moonbag_seller._execute_quote(provider, wallet, cfg, 250, initial)
+
+        wallet._send_transaction.assert_not_called()
+
+    @patch("moonbag_seller._execute_quote")
+    def test_execution_retries_fallback_after_prebroadcast_primary_failure(self, execute):
+        cfg = config()
+        wallet = Mock()
+        wallet.address = "0x0000000000000000000000000000000000000003"
+        wallet.normal_gas_price.return_value = 100_000_000
+        wallet.get_eth_balance_wei.return_value = 10**18
+        primary = Mock()
+        primary.name = "uniswap"
+        fallback = Mock()
+        fallback.name = "sushiswap"
+        fallback_quote = SimpleNamespace(
+            success=True, error=None, buy_amount=10**15, gas=100_000, gas_price=0
+        )
+        fallback.build_swap_transaction.return_value = fallback_quote
+        provider = FallbackSwapProvider(primary, fallback)
+        initial = SimpleNamespace(success=True, buy_amount=10**15, gas=100_000, gas_price=0)
+        success = SimpleNamespace(success=True, tx_hash="0xfallback")
+        execute.side_effect = [
+            moonbag_seller.PreBroadcastRouteFailure("Uniswap refresh returned 404"),
+            success,
+        ]
+
+        selected, quote, result, error = moonbag_seller._execute_with_route_fallback(
+            provider, primary, wallet, cfg, 250, initial
+        )
+
+        self.assertIs(selected, fallback)
+        self.assertIs(quote, fallback_quote)
+        self.assertIs(result, success)
+        self.assertIn("404", error)
+        self.assertEqual(execute.call_count, 2)
+
+    @patch("moonbag_seller._execute_quote")
+    def test_execution_does_not_change_routes_after_broadcast_risk(self, execute):
+        primary = Mock()
+        primary.name = "uniswap"
+        fallback = Mock()
+        fallback.name = "sushiswap"
+        provider = FallbackSwapProvider(primary, fallback)
+        execute.side_effect = ValueError("approval transaction failed")
+
+        with self.assertRaisesRegex(ValueError, "approval transaction failed"):
+            moonbag_seller._execute_with_route_fallback(
+                provider, primary, Mock(), config(), 250, SimpleNamespace()
+            )
+
+        fallback.build_swap_transaction.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

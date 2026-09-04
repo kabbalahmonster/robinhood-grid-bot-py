@@ -23,6 +23,10 @@ class MoonbagAllocation:
     moonbag_raw: int
 
 
+class PreBroadcastRouteFailure(ValueError):
+    """A provider route failed while it is still safe to try another route."""
+
+
 def _position_path(config: Any) -> Path:
     return Path("data/gridless_positions.json" if getattr(config, "use_gridless", False) else "data/positions.json")
 
@@ -253,31 +257,42 @@ def _receipt_gas_wei(result: Any, fallback: int) -> int:
 
 
 def _execute_quote(provider: Any, wallet: Wallet, config: Any, amount: int, quote: Any):
-    _validate_economics(wallet, config, quote)
+    try:
+        _validate_economics(wallet, config, quote)
+    except Exception as exc:
+        raise PreBroadcastRouteFailure(str(exc)) from exc
     buy_token = UNISWAP_ETH_ADDRESS if getattr(config, "use_eth_trading", False) else config.weth_address
+    broadcast_attempted = False
 
     if provider.capabilities.api_managed_approval:
-        approval_plan = provider.check_approval(
-            token=config.token_address, amount=amount, wallet=wallet.address
-        )
+        try:
+            approval_plan = provider.check_approval(
+                token=config.token_address, amount=amount, wallet=wallet.address
+            )
+        except Exception as exc:
+            raise PreBroadcastRouteFailure(f"approval check failed: {exc}") from exc
         if "error" in approval_plan:
-            raise ValueError(f"approval check failed: {approval_plan['error']}")
+            raise PreBroadcastRouteFailure(f"approval check failed: {approval_plan['error']}")
         projected_setup_gas = 0
         prepared_approvals = []
-        for label in ("cancel", "approval"):
-            if approval_plan.get(label) is None:
-                continue
-            tx = _build_api_transaction(wallet, config, approval_plan[label])
-            projected_setup_gas += int(tx["gas"]) * int(tx["maxFeePerGas"])
-            prepared_approvals.append((label, tx))
-        _, _, swap_gas = _validate_economics(wallet, config, quote)
-        if _effective_quote_output(config, quote) <= projected_setup_gas + swap_gas:
-            raise ValueError("quoted output does not exceed projected approval and swap gas")
-        reserve_wei = int(float(getattr(config, "eth_gas_reserve", 0.0005)) * 10**18)
-        if wallet.get_eth_balance_wei() - projected_setup_gas - swap_gas < reserve_wei:
-            raise ValueError("approval and sale would breach ETH_GAS_RESERVE")
+        try:
+            for label in ("cancel", "approval"):
+                if approval_plan.get(label) is None:
+                    continue
+                tx = _build_api_transaction(wallet, config, approval_plan[label])
+                projected_setup_gas += int(tx["gas"]) * int(tx["maxFeePerGas"])
+                prepared_approvals.append((label, tx))
+            _, _, swap_gas = _validate_economics(wallet, config, quote)
+            if _effective_quote_output(config, quote) <= projected_setup_gas + swap_gas:
+                raise ValueError("quoted output does not exceed projected approval and swap gas")
+            reserve_wei = int(float(getattr(config, "eth_gas_reserve", 0.0005)) * 10**18)
+            if wallet.get_eth_balance_wei() - projected_setup_gas - swap_gas < reserve_wei:
+                raise ValueError("approval and sale would breach ETH_GAS_RESERVE")
+        except Exception as exc:
+            raise PreBroadcastRouteFailure(str(exc)) from exc
         setup_gas_wei = 0
         for label, tx in prepared_approvals:
+            broadcast_attempted = True
             sent = wallet._send_transaction(tx)
             if not sent.success:
                 raise ValueError(f"{label} transaction failed: {sent.error}")
@@ -293,16 +308,28 @@ def _execute_quote(provider: Any, wallet: Wallet, config: Any, amount: int, quot
             slippage_percentage=_slippage_fraction(config),
         )
         if not quote.success:
-            raise ValueError(quote.error or "moonbag quote refresh failed")
+            error = ValueError(quote.error or "moonbag quote refresh failed")
+            if not broadcast_attempted:
+                raise PreBroadcastRouteFailure(str(error)) from error
+            raise error
         quote = provider.prepare_swap(quote)
         if not quote.success:
-            raise ValueError(quote.error or "moonbag swap preparation failed")
+            error = ValueError(quote.error or "moonbag swap preparation failed")
+            if not broadcast_attempted:
+                raise PreBroadcastRouteFailure(str(error)) from error
+            raise error
     else:
         setup_gas_wei = 0
-        spender = quote.allowance_target or config.zero_x_proxy
-        if wallet.check_allowance(config.token_address, spender, use_permit2=False) < amount:
-            approval_gas_wei = 100000 * int(wallet.normal_gas_price())
-            _validate_economics(wallet, config, quote, approval_gas_wei)
+        try:
+            spender = quote.allowance_target or config.zero_x_proxy
+            allowance = wallet.check_allowance(config.token_address, spender, use_permit2=False)
+            if allowance < amount:
+                approval_gas_wei = 100000 * int(wallet.normal_gas_price())
+                _validate_economics(wallet, config, quote, approval_gas_wei)
+        except Exception as exc:
+            raise PreBroadcastRouteFailure(str(exc)) from exc
+        if allowance < amount:
+            broadcast_attempted = True
             approval = wallet.approve_token(config.token_address, spender, 2**256 - 1)
             if not approval.success:
                 raise ValueError(f"approval failed: {approval.error}")
@@ -323,12 +350,52 @@ def _execute_quote(provider: Any, wallet: Wallet, config: Any, amount: int, quot
         if provider.capabilities.quote_requires_preparation:
             quote = provider.prepare_swap(quote)
             if not quote.success:
-                raise ValueError(quote.error or "moonbag swap preparation failed")
+                error = ValueError(quote.error or "moonbag swap preparation failed")
+                if not broadcast_attempted:
+                    raise PreBroadcastRouteFailure(str(error)) from error
+                raise error
 
-    gas_limit, gas_price, _ = _validate_economics(
-        wallet, config, quote, setup_gas_wei, reserve_setup_gas_wei=0
-    )
+    try:
+        gas_limit, gas_price, _ = _validate_economics(
+            wallet, config, quote, setup_gas_wei, reserve_setup_gas_wei=0
+        )
+    except Exception as exc:
+        if not broadcast_attempted:
+            raise PreBroadcastRouteFailure(str(exc)) from exc
+        raise
     return _send_quote(wallet, config, quote, gas_limit, gas_price)
+
+
+def _execute_with_route_fallback(
+    provider: Any,
+    selected_provider: Any,
+    wallet: Wallet,
+    config: Any,
+    amount: int,
+    quote: Any,
+) -> tuple[Any, Any, Any, str | None]:
+    """Retry the fallback route only when the primary failed before broadcast."""
+    try:
+        return selected_provider, quote, _execute_quote(selected_provider, wallet, config, amount, quote), None
+    except PreBroadcastRouteFailure as primary_error:
+        if not isinstance(provider, FallbackSwapProvider) or selected_provider is not provider.primary:
+            raise
+        fallback = provider.fallback
+        fallback_quote = _build_quote(fallback, wallet, config, amount)
+        if not fallback_quote.success:
+            raise ValueError(
+                f"{selected_provider.name} became unavailable before broadcast: {primary_error}; "
+                f"{fallback.name}: {fallback_quote.error or 'quote failed'}"
+            ) from primary_error
+        try:
+            _validate_economics(wallet, config, fallback_quote)
+            result = _execute_quote(fallback, wallet, config, amount, fallback_quote)
+        except Exception as fallback_error:
+            raise ValueError(
+                f"{selected_provider.name} became unavailable before broadcast: {primary_error}; "
+                f"{fallback.name}: {fallback_error}"
+            ) from fallback_error
+        return fallback, fallback_quote, result, str(primary_error)
 
 
 def run_moonbag_sale(args: Any) -> int:
@@ -379,7 +446,17 @@ def run_moonbag_sale(args: Any) -> int:
         weth_before_sale = None
         if send_to_treasury and not getattr(config, "use_eth_trading", False):
             _, weth_before_sale = wallet.get_token_balance(config.weth_address)
-        result = _execute_quote(selected_provider, wallet, config, allocation.moonbag_raw, quote)
+        selected_provider, quote, result, route_failure = _execute_with_route_fallback(
+            provider, selected_provider, wallet, config, allocation.moonbag_raw, quote
+        )
+        if route_failure is not None:
+            _, _, gas_wei = _validate_economics(wallet, config, quote)
+            output_wei = _effective_quote_output(config, quote)
+            print(f"ROUTE RETRY: primary failed before broadcast: {route_failure}")
+            print(f"Provider:   {selected_provider.name} (fallback)")
+            print(f"Quoted:     {output_wei / 1e18:.12f} {settlement}")
+            print(f"Swap gas:   {gas_wei / 1e18:.12f} ETH projected")
+            print(f"Net est.:   {(output_wei - gas_wei) / 1e18:.12f} {settlement} after swap gas")
         if not result.success:
             raise ValueError(result.error or "moonbag swap failed")
         _, remaining_raw = wallet.get_token_balance(config.token_address)
