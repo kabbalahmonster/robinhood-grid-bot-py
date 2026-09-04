@@ -11,6 +11,7 @@ PROFIT_HISTORY_RETENTION_DAYS = 32
 PERIOD_HOURS = {
     "month": 24 * 30,
     "week": 24 * 7,
+    "5d": 24 * 5,
     "3d": 24 * 3,
     "24h": 24,
     "12h": 12,

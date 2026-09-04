@@ -72,6 +72,7 @@ class TestProfitTracker(unittest.TestCase):
         self.assertEqual(periods["6h"], 3.0)
         self.assertEqual(periods["24h"], 3.0)
         self.assertEqual(periods["3d"], 7.0)
+        self.assertEqual(periods["5d"], 7.0)
         self.assertEqual(periods["week"], 7.0)
 
     def test_period_uses_total_when_tracking_started_inside_window(self):
