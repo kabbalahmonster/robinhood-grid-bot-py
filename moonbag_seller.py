@@ -124,14 +124,26 @@ def _build_quote(provider: Any, wallet: Wallet, config: Any, amount: int) -> Any
 
 
 def _select_provider_quote(provider: Any, wallet: Wallet, config: Any, amount: int) -> tuple[Any, Any]:
-    """Select one provider before any approval so calldata never crosses providers."""
+    """Select an executable route before approval so calldata never crosses providers.
+
+    A route returning a quote is not sufficient: its projected transaction gas
+    can still make the moonbag sale unsafe.  Try the configured fallback before
+    refusing, but never cross providers once an approval or transaction has
+    been broadcast.
+    """
     candidates = [provider.primary, provider.fallback] if isinstance(provider, FallbackSwapProvider) else [provider]
     errors = []
     for candidate in candidates:
         quote = _build_quote(candidate, wallet, config, amount)
-        if quote.success:
-            return candidate, quote
-        errors.append(f"{candidate.name}: {quote.error or 'quote failed'}")
+        if not quote.success:
+            errors.append(f"{candidate.name}: {quote.error or 'quote failed'}")
+            continue
+        try:
+            _validate_economics(wallet, config, quote)
+        except ValueError as exc:
+            errors.append(f"{candidate.name}: {exc}")
+            continue
+        return candidate, quote
     raise ValueError("; ".join(errors))
 
 

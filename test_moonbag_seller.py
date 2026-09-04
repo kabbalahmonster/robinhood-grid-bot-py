@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import moonbag_seller
+from swap_provider import FallbackSwapProvider
 
 
 TOKEN = "0x0000000000000000000000000000000000000001"
@@ -143,6 +144,52 @@ class TestMoonbagSeller(unittest.TestCase):
                 os.chdir(old_cwd)
         wallet.approve_token.assert_not_called()
         wallet._send_transaction.assert_not_called()
+
+    def test_tries_fallback_when_primary_quote_exceeds_sell_gas_cap(self):
+        cfg = config()
+        cfg.max_sell_gas_eth = 0.0002
+        wallet = Mock()
+        wallet.normal_gas_price.return_value = 1_000_000_000
+        wallet.get_eth_balance_wei.return_value = 10**18
+        primary = Mock(name="primary")
+        primary.name = "uniswap"
+        primary.build_swap_transaction.return_value = SimpleNamespace(
+            success=True, error=None, buy_amount=10**15, gas=1_000_000, gas_price=0
+        )
+        fallback = Mock(name="fallback")
+        fallback.name = "sushiswap"
+        fallback.build_swap_transaction.return_value = SimpleNamespace(
+            success=True, error=None, buy_amount=10**15, gas=100_000, gas_price=0
+        )
+        provider = FallbackSwapProvider(primary, fallback)
+
+        selected, quote = moonbag_seller._select_provider_quote(provider, wallet, cfg, 250)
+
+        self.assertIs(selected, fallback)
+        self.assertIs(quote, fallback.build_swap_transaction.return_value)
+        primary.build_swap_transaction.assert_called_once()
+        fallback.build_swap_transaction.assert_called_once()
+
+    def test_refuses_when_every_route_exceeds_sell_gas_cap(self):
+        cfg = config()
+        cfg.max_sell_gas_eth = 0.0002
+        wallet = Mock()
+        wallet.normal_gas_price.return_value = 1_000_000_000
+        wallet.get_eth_balance_wei.return_value = 10**18
+        primary = Mock(name="primary")
+        primary.name = "uniswap"
+        primary.build_swap_transaction.return_value = SimpleNamespace(
+            success=True, error=None, buy_amount=10**15, gas=1_000_000, gas_price=0
+        )
+        fallback = Mock(name="fallback")
+        fallback.name = "sushiswap"
+        fallback.build_swap_transaction.return_value = SimpleNamespace(
+            success=True, error=None, buy_amount=10**15, gas=900_000, gas_price=0
+        )
+        provider = FallbackSwapProvider(primary, fallback)
+
+        with self.assertRaisesRegex(ValueError, "uniswap: projected sell gas.*sushiswap: projected sell gas"):
+            moonbag_seller._select_provider_quote(provider, wallet, cfg, 250)
 
     @patch("moonbag_seller.create_swap_provider")
     @patch("moonbag_seller.Wallet")
