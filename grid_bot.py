@@ -1867,6 +1867,32 @@ class GridBot:
                     consistency_block["quote_divergence_percent"],
                 )
                 return
+
+        # A provider's exact calldata can be valid yet too costly for the sell
+        # cap.  Before giving up, make one fresh quote request to its paired
+        # provider and allow the route selector to retain only cap-compliant
+        # simulated transactions.  This is sell-only and event-driven, never a
+        # second quote on ordinary polling.
+        probe_gas_limit, probe_gas_price = self._swap_gas_fields(quote, 300000)
+        sell_cap_wei = int(float(getattr(
+            self.config, "max_sell_gas_eth",
+            getattr(self.config, "max_swap_gas_eth", 0.00004),
+        )) * 10**18)
+        if sell_cap_wei > 0 and probe_gas_limit * probe_gas_price > sell_cap_wei:
+            selected_provider, selected_quote, selection = self._best_fresh_sell_route(
+                self.provider.active, quote, balance,
+            )
+            if selection and selected_provider is not self.provider.active:
+                self.provider.active = selected_provider
+                self.api_client = self.provider
+                quote = selected_quote
+                quote_provider = selected_provider.name
+                self._sell_attempt = selection
+                logger.warning(
+                    "Replacing gas-capped %s sell route with fresh %s route for position #%s",
+                    consistency_block["quote_provider"] if consistency_block else "current",
+                    quote_provider, pos_id,
+                )
         
         # Check min profit requirement against individual position quote
         # Support both cost_wei (new) and cost (legacy nano-ETH)
