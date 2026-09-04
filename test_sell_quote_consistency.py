@@ -15,7 +15,7 @@ class SellQuoteConsistencyTests(unittest.TestCase):
         self.assertIsNone(bot._sell_quote_consistency_guard("6", "uniswap", 3_000, now=10))
         self.assertIsNone(bot._sell_quote_consistency_guard("6", "uniswap", 2_900, now=20))
 
-    def test_provider_change_blocks_one_poll_even_when_quotes_are_close(self):
+    def test_provider_change_is_flagged_even_when_quotes_are_close(self):
         bot = self.bot()
         bot._sell_quote_consistency_guard("6", "uniswap", 3 * 10**18, now=10)
 
@@ -26,6 +26,40 @@ class SellQuoteConsistencyTests(unittest.TestCase):
         self.assertEqual(result["previous_quote_provider"], "uniswap")
         self.assertEqual(result["quote_divergence_percent"], 1.0)
         self.assertIsNone(bot._sell_quote_consistency_guard("6", "sushiswap", 2_960_000_000_000_000_000, now=30))
+
+    def test_small_provider_change_can_be_resolved_from_fresh_routes(self):
+        class Provider:
+            def __init__(self, name, quote):
+                self.name = name
+                self.quote = quote
+
+            def build_swap_transaction(self, **_kwargs):
+                return self.quote
+
+        bot = self.bot()
+        bot._sell_quote_consistency_guard("6", "uniswap", 1_000, now=10)
+        change = bot._sell_quote_consistency_guard("6", "sushiswap", 990, now=20)
+        self.assertEqual(change["status"], "quote_provider_changed")
+
+        current_quote = SimpleNamespace(success=True, buy_amount=990, gas=0)
+        alternate_quote = SimpleNamespace(success=True, buy_amount=1_010, gas=0)
+        primary = Provider("uniswap", alternate_quote)
+        fallback = Provider("sushiswap", current_quote)
+        bot.provider = SimpleNamespace(primary=primary, fallback=fallback)
+        bot.config = SimpleNamespace(
+            token_address="0xtoken", max_sell_gas_eth=0.0002, max_swap_gas_eth=0.0002,
+        )
+        bot.trade_token_address = "0xtrade"
+        bot.wallet = SimpleNamespace(address="0xwallet")
+        bot._swap_slippage_fraction = lambda: 0.02
+        bot._taxed_token_active = lambda: False
+        bot._swap_gas_fields = lambda quote, _default: (100, 1)
+
+        provider, quote, detail = bot._best_fresh_sell_route(fallback, current_quote, 123)
+
+        self.assertIs(provider, primary)
+        self.assertIs(quote, alternate_quote)
+        self.assertEqual(detail["status"], "fresh_best_route_selected")
 
     def test_material_cross_provider_disagreement_is_identified(self):
         bot = self.bot()

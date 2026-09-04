@@ -772,7 +772,7 @@ class GridBot:
         return False
 
     def _sell_quote_consistency_guard(self, position_id, provider, return_wei, now=None):
-        """Require one confirmation after an executable quote provider changes."""
+        """Flag a provider change so the caller can compare fresh routes."""
         now = time.time() if now is None else float(now)
         position_id = str(position_id)
         provider = str(provider or "unknown")
@@ -1900,41 +1900,34 @@ class GridBot:
             pos_id, quote_provider, quote_return_wei,
         )
         if consistency_block:
-            if consistency_block["status"] == "quote_provider_disagreement":
-                selected_provider, selected_quote, selection = self._best_fresh_sell_route(
-                    self.provider.active, quote, balance,
+            # A cached quote from the other provider is only an alarm bell,
+            # never an execution input.  Compare the current executable quote
+            # with one freshly-built counterpart immediately—even for a small
+            # provider change—so a flip-flopping router cannot defer a valid
+            # exit indefinitely by forcing a "wait one poll" safety hold.
+            selected_provider, selected_quote, selection = self._best_fresh_sell_route(
+                self.provider.active, quote, balance,
+            )
+            if selection:
+                # Both candidates are fresh, exact executable calldata and
+                # have independently passed the sell gas cap.  Keep the
+                # selected provider active through approval and broadcast;
+                # the operation wrapper restores normal primary-first
+                # behavior after this sell attempt.
+                self.provider.active = selected_provider
+                self.api_client = self.provider
+                quote = selected_quote
+                quote_provider = selected_provider.name
+                self._sell_attempt = selection
+                logger.warning(
+                    "Replacing cached %s provider-change hold with fresh %s route selection for position #%s",
+                    consistency_block["status"], quote_provider, pos_id,
                 )
-                if selection:
-                    # Both candidates are fresh, exact executable calldata and
-                    # have independently passed the sell gas cap.  Keep the
-                    # selected provider active through approval and broadcast;
-                    # the operation wrapper restores normal primary-first
-                    # behavior after this sell attempt.
-                    self.provider.active = selected_provider
-                    self.api_client = self.provider
-                    quote = selected_quote
-                    quote_provider = selected_provider.name
-                    self._sell_attempt = selection
-                    logger.warning(
-                        "Replacing stale quote-disagreement hold with fresh %s route selection for position #%s",
-                        quote_provider, pos_id,
-                    )
-                else:
-                    self._sell_attempt = consistency_block
-                    logger.warning(
-                        "Sell quote provider changed for position #%s (%s -> %s, %.2f%% divergence); "
-                        "blocking this poll pending a consistent executable quote",
-                        pos_id,
-                        consistency_block["previous_quote_provider"],
-                        quote_provider,
-                        consistency_block["quote_divergence_percent"],
-                    )
-                    return
             else:
                 self._sell_attempt = consistency_block
                 logger.warning(
                     "Sell quote provider changed for position #%s (%s -> %s, %.2f%% divergence); "
-                    "blocking this poll pending a consistent executable quote",
+                    "both-route refresh yielded no cap-compliant executable route",
                     pos_id,
                     consistency_block["previous_quote_provider"],
                     quote_provider,
