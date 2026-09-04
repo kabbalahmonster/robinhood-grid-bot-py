@@ -77,6 +77,15 @@ class FleetDesiredStateTests(unittest.TestCase):
         self.assertTrue(self.session.exists())
         self.assertEqual(self.markers(), [])
 
+    def test_start_uses_headless_safe_tmux_geometry(self):
+        start = (self.scripts / "start-fleet").read_text()
+        self.assertIn('-x "$FLEET_TMUX_WIDTH" -y "$FLEET_TMUX_HEIGHT"', start)
+
+    def test_guardian_tolerates_snapshot_stat_race(self):
+        guardian = (self.scripts / "fleet-guardian").read_text()
+        self.assertIn('stat -c %Y -- "$snapshot" 2>/dev/null || true', guardian)
+        self.assertIn('[[ ! "$snapshot_mtime" =~ ^[0-9]+$ ]]', guardian)
+
     def test_failed_start_preserves_stopped_intent(self):
         self.run_command("stop-fleet", "--if-running", check=True)
         (self.bot / "grid_bot.py").unlink()

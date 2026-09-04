@@ -41,7 +41,7 @@ state_dir="$(fleet_desired_state_file).guardian"
 mkdir -p "$state_dir"
 
 check_fleet() {
-  local now bot_dir name snapshot age failures_file failures=0
+  local now bot_dir name snapshot snapshot_mtime age failures_file failures=0
   if ! fleet_should_run; then
     # Intentionally stopped is healthy service state. Staying alive avoids a
     # noisy systemd restart loop and lets this process notice a later start.
@@ -58,7 +58,13 @@ check_fleet() {
     snapshot="$bot_dir/data/fleet_status.json"
     failures_file="$state_dir/$name.failures"
     if [[ -f "$snapshot" ]]; then
-      age=$((now - $(stat -c %Y -- "$snapshot")))
+      # The bot replaces this snapshot atomically. It can disappear between the
+      # existence check and stat, which must not crash the whole guardian.
+      snapshot_mtime="$(stat -c %Y -- "$snapshot" 2>/dev/null || true)"
+      if [[ ! "$snapshot_mtime" =~ ^[0-9]+$ ]]; then
+        continue
+      fi
+      age=$((now - snapshot_mtime))
     else
       age=$((FLEET_GUARDIAN_STALE_SECONDS + 1))
     fi

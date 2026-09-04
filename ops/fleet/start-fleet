@@ -63,7 +63,14 @@ cleanup_partial_session() {
 trap cleanup_partial_session EXIT
 
 first_dir="${FLEET_BOT_DIRS[0]}"
-tmux new-session -d -s "$FLEET_SESSION" -n "$FLEET_WINDOW" -c "$first_dir"
+: "${FLEET_TMUX_WIDTH:=240}"
+: "${FLEET_TMUX_HEIGHT:=80}"
+[[ "$FLEET_TMUX_WIDTH" =~ ^[1-9][0-9]*$ ]] || fleet_die "FLEET_TMUX_WIDTH must be a positive integer"
+[[ "$FLEET_TMUX_HEIGHT" =~ ^[1-9][0-9]*$ ]] || fleet_die "FLEET_TMUX_HEIGHT must be a positive integer"
+# Headless launches inherit tmux's small default geometry. A large fleet can
+# otherwise fail partway through with "no space for new pane" under systemd.
+tmux new-session -d -x "$FLEET_TMUX_WIDTH" -y "$FLEET_TMUX_HEIGHT" \
+  -s "$FLEET_SESSION" -n "$FLEET_WINDOW" -c "$first_dir"
 created=1
 first_pane="$(tmux display-message -p -t "=$FLEET_SESSION" '#{pane_id}')"
 tmux select-pane -t "$first_pane" -T "$(basename -- "$(dirname -- "$first_dir")")"
