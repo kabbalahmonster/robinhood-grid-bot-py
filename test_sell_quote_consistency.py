@@ -1,4 +1,5 @@
 import unittest
+from types import SimpleNamespace
 
 from grid_bot import GridBot
 
@@ -41,6 +42,72 @@ class SellQuoteConsistencyTests(unittest.TestCase):
         bot = self.bot()
         bot._sell_quote_consistency_guard("6", "uniswap", 3_000, now=10)
         self.assertIsNone(bot._sell_quote_consistency_guard("6", "sushiswap", 1_000, now=131))
+
+    def test_disagreement_route_check_uses_fresh_alternate_and_net_output(self):
+        class Provider:
+            def __init__(self, name, quote):
+                self.name = name
+                self.quote = quote
+
+            def build_swap_transaction(self, **_kwargs):
+                return self.quote
+
+        bot = self.bot()
+        current_quote = SimpleNamespace(success=True, buy_amount=1_000, gas=0)
+        alternate_quote = SimpleNamespace(success=True, buy_amount=1_050, gas=0)
+        primary = Provider("uniswap", current_quote)
+        fallback = Provider("sushiswap", alternate_quote)
+        bot.provider = SimpleNamespace(primary=primary, fallback=fallback)
+        bot.config = SimpleNamespace(
+            token_address="0xtoken",
+            max_sell_gas_eth=0.0002,
+            max_swap_gas_eth=0.0002,
+        )
+        bot.trade_token_address = "0xtrade"
+        bot.wallet = SimpleNamespace(address="0xwallet")
+        bot._swap_slippage_fraction = lambda: 0.02
+        bot._taxed_token_active = lambda: False
+        # The fresher Sushi route has a slightly higher fee but still wins net.
+        bot._swap_gas_fields = lambda quote, _default: (100 if quote is current_quote else 120, 1)
+
+        provider, quote, detail = bot._best_fresh_sell_route(primary, current_quote, 123)
+
+        self.assertIs(provider, fallback)
+        self.assertIs(quote, alternate_quote)
+        self.assertEqual(detail["status"], "fresh_best_route_selected")
+        self.assertEqual(detail["quote_provider"], "sushiswap")
+
+    def test_disagreement_route_check_excludes_a_route_over_sell_cap(self):
+        class Provider:
+            def __init__(self, name, quote):
+                self.name = name
+                self.quote = quote
+
+            def build_swap_transaction(self, **_kwargs):
+                return self.quote
+
+        bot = self.bot()
+        current_quote = SimpleNamespace(success=True, buy_amount=1_000, gas=0)
+        alternate_quote = SimpleNamespace(success=True, buy_amount=9_999, gas=0)
+        primary = Provider("uniswap", current_quote)
+        fallback = Provider("sushiswap", alternate_quote)
+        bot.provider = SimpleNamespace(primary=primary, fallback=fallback)
+        bot.config = SimpleNamespace(
+            token_address="0xtoken",
+            max_sell_gas_eth=0.00000000000000015,
+            max_swap_gas_eth=0.00000000000000015,
+        )
+        bot.trade_token_address = "0xtrade"
+        bot.wallet = SimpleNamespace(address="0xwallet")
+        bot._swap_slippage_fraction = lambda: 0.02
+        bot._taxed_token_active = lambda: False
+        bot._swap_gas_fields = lambda quote, _default: (100, 1 if quote is current_quote else 2)
+
+        provider, quote, detail = bot._best_fresh_sell_route(primary, current_quote, 123)
+
+        self.assertIs(provider, primary)
+        self.assertIs(quote, current_quote)
+        self.assertEqual(detail["quote_provider"], "uniswap")
 
 
 if __name__ == "__main__":

@@ -807,6 +807,69 @@ class GridBot:
             "quote_divergence_percent": round(divergence_percent, 2),
         }
 
+    def _best_fresh_sell_route(self, current_provider, current_quote, sell_amount):
+        """Return the best executable quote from the configured provider pair.
+
+        This is deliberately used only after the passive handoff guard spots a
+        material disagreement.  Comparing an old Sushi result to a new Uniswap
+        result is not a useful execution decision; fetch one fresh counterpart,
+        simulate both exact calldata payloads, then select the higher net route.
+        """
+        router = self.provider
+        primary = getattr(router, "primary", None)
+        fallback = getattr(router, "fallback", None)
+        if primary is None or fallback is None:
+            return current_provider, current_quote, None
+
+        alternate = fallback if current_provider is primary else primary
+        alternate_quote = alternate.build_swap_transaction(
+            sell_token=self.config.token_address,
+            buy_token=self.trade_token_address,
+            sell_amount=sell_amount,
+            taker_address=self.wallet.address,
+            slippage_percentage=self._swap_slippage_fraction(),
+        )
+        if not alternate_quote.success:
+            logger.warning(
+                "Fresh alternate sell quote from %s failed during route selection: %s",
+                alternate.name, alternate_quote.error,
+            )
+            return current_provider, current_quote, None
+
+        cap_wei = int(float(getattr(
+            self.config, "max_sell_gas_eth",
+            getattr(self.config, "max_swap_gas_eth", 0.00004),
+        )) * 10**18)
+        candidates = []
+        for provider, quote in ((current_provider, current_quote), (alternate, alternate_quote)):
+            gas_limit, gas_price = self._swap_gas_fields(quote, 300000)
+            gas_wei = gas_limit * gas_price
+            if cap_wei > 0 and gas_wei > cap_wei:
+                logger.info(
+                    "Route %s excluded from fresh sell comparison: gas %.8f ETH exceeds cap %.8f ETH",
+                    provider.name, gas_wei / 10**18, cap_wei / 10**18,
+                )
+                continue
+            candidates.append((
+                self._taxed_quote_return_wei(quote) - gas_wei,
+                provider, quote, gas_wei,
+            ))
+        if not candidates:
+            return current_provider, current_quote, None
+
+        net_return, selected_provider, selected_quote, gas_wei = max(candidates, key=lambda item: item[0])
+        detail = {
+            "status": "fresh_best_route_selected",
+            "quote_provider": selected_provider.name,
+            "projected_net_return_eth": round(net_return / 10**18, 8),
+            "projected_gas_eth": round(gas_wei / 10**18, 8),
+        }
+        logger.warning(
+            "Fresh sell-route comparison selected %s (net %.8f ETH after projected gas)",
+            selected_provider.name, net_return / 10**18,
+        )
+        return selected_provider, selected_quote, detail
+
     def _raw_trade_balance(self):
         if getattr(self.config, 'use_eth_trading', False):
             return int(self.wallet.get_eth_balance_wei())
@@ -1763,16 +1826,47 @@ class GridBot:
             pos_id, quote_provider, quote_return_wei,
         )
         if consistency_block:
-            self._sell_attempt = consistency_block
-            logger.warning(
-                "Sell quote provider changed for position #%s (%s -> %s, %.2f%% divergence); "
-                "blocking this poll pending a consistent executable quote",
-                pos_id,
-                consistency_block["previous_quote_provider"],
-                quote_provider,
-                consistency_block["quote_divergence_percent"],
-            )
-            return
+            if consistency_block["status"] == "quote_provider_disagreement":
+                selected_provider, selected_quote, selection = self._best_fresh_sell_route(
+                    self.provider.active, quote, balance,
+                )
+                if selection:
+                    # Both candidates are fresh, exact executable calldata and
+                    # have independently passed the sell gas cap.  Keep the
+                    # selected provider active through approval and broadcast;
+                    # the operation wrapper restores normal primary-first
+                    # behavior after this sell attempt.
+                    self.provider.active = selected_provider
+                    self.api_client = self.provider
+                    quote = selected_quote
+                    quote_provider = selected_provider.name
+                    self._sell_attempt = selection
+                    logger.warning(
+                        "Replacing stale quote-disagreement hold with fresh %s route selection for position #%s",
+                        quote_provider, pos_id,
+                    )
+                else:
+                    self._sell_attempt = consistency_block
+                    logger.warning(
+                        "Sell quote provider changed for position #%s (%s -> %s, %.2f%% divergence); "
+                        "blocking this poll pending a consistent executable quote",
+                        pos_id,
+                        consistency_block["previous_quote_provider"],
+                        quote_provider,
+                        consistency_block["quote_divergence_percent"],
+                    )
+                    return
+            else:
+                self._sell_attempt = consistency_block
+                logger.warning(
+                    "Sell quote provider changed for position #%s (%s -> %s, %.2f%% divergence); "
+                    "blocking this poll pending a consistent executable quote",
+                    pos_id,
+                    consistency_block["previous_quote_provider"],
+                    quote_provider,
+                    consistency_block["quote_divergence_percent"],
+                )
+                return
         
         # Check min profit requirement against individual position quote
         # Support both cost_wei (new) and cost (legacy nano-ETH)
