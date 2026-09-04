@@ -41,6 +41,15 @@ class FleetDocumentationTests(unittest.TestCase):
             with self.subTest(term=required):
                 self.assertIn(required, docs)
 
+    def test_lifecycle_commands_have_home_bin_install_links(self):
+        guide = (FLEET / "README.md").read_text()
+        for command in ("start-fleet", "stop-fleet", "restart-fleet", "stop-bot", "restart-bot"):
+            with self.subTest(command=command):
+                self.assertIn(
+                    f'ln -sf "$PWD/ops/fleet/{command}" "$HOME/bin/{command}"',
+                    guide,
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

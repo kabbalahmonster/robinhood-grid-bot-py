@@ -106,6 +106,8 @@ sudo apt install tmux git python3 python3-venv
    ln -sf "$PWD/ops/fleet/start-fleet" "$HOME/bin/start-fleet"
    ln -sf "$PWD/ops/fleet/stop-fleet" "$HOME/bin/stop-fleet"
    ln -sf "$PWD/ops/fleet/restart-fleet" "$HOME/bin/restart-fleet"
+   ln -sf "$PWD/ops/fleet/stop-bot" "$HOME/bin/stop-bot"
+   ln -sf "$PWD/ops/fleet/restart-bot" "$HOME/bin/restart-bot"
    ln -sf "$PWD/ops/fleet/update-fleet" "$HOME/bin/update-fleet"
    ln -sf "$PWD/ops/fleet/update-this-checkout" "$HOME/bin/update-this-checkout"
    ln -sf "$PWD/ops/fleet/update-all" "$HOME/bin/update-all"
