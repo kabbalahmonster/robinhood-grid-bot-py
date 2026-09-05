@@ -198,6 +198,41 @@ class TestUniswapAPIClient(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertEqual(post.call_count, 1)
 
+    @patch("uniswap_api.time.sleep")
+    def test_actionable_quote_retries_upstream_routing_timeout(self, sleep):
+        config = SimpleNamespace(
+            uniswap_api_key="test-key",
+            uniswap_permit2_disabled=True,
+            chain_id=4663,
+            anti_mev_jitter=False,
+        )
+        timed_out = SimpleNamespace(
+            status_code=404,
+            text='{"errorCode":"UpstreamTimeoutError","detail":"A routing dependency timed out or failed; the request may succeed on retry."}',
+            headers={},
+        )
+        recovered = SimpleNamespace(
+            status_code=200,
+            text="",
+            headers={},
+            json=lambda: {
+                "quote": {
+                    "input": {"amount": "100"},
+                    "output": {"amount": "95"},
+                },
+                "tx": {},
+            },
+        )
+
+        with patch("uniswap_api.requests.post", side_effect=[timed_out, recovered]) as post:
+            result = UniswapAPIClient(config).build_swap_transaction(
+                "0xin", "0xout", 100, "0xtaker"
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(post.call_count, 2)
+        sleep.assert_called_once_with(0.75)
+
     def test_shared_gate_covers_approval_and_swap_endpoints(self):
         with tempfile.TemporaryDirectory() as directory:
             config = SimpleNamespace(

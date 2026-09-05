@@ -216,6 +216,16 @@ class UniswapAPIClient:
             return False
         error_text = (response.text or "")[:1000].lower()
         return "noroutefounderror" in error_text or "no route" in error_text or "no quotes available" in error_text
+
+    @classmethod
+    def _is_retryable_routing_failure(cls, response) -> bool:
+        """Failures where rerunning discovery is explicitly safe/useful."""
+        if cls._is_no_route_failure(response):
+            return True
+        if response.status_code != 404:
+            return False
+        error_text = (response.text or "")[:1000].lower()
+        return "upstreamtimeouterror" in error_text or "routing dependency timed out" in error_text
     
     def get_quote(
         self,
@@ -226,6 +236,7 @@ class UniswapAPIClient:
         taker_address: Optional[str] = None,
         slippage_percentage: Optional[float] = None,
         apply_jitter_to_price: bool = True,
+        routing_attempts: int = 1,
     ) -> QuoteResult:
         """
         Get a quote from the Uniswap API.
@@ -287,33 +298,41 @@ class UniswapAPIClient:
         try:
             url = f"{self.BASE_URL}/quote"
 
-            cooldown_error = self._cooldown_error()
-            if cooldown_error is not None:
-                return QuoteResult(
-                    success=False,
-                    error=cooldown_error,
-                )
-            
             self.logger.debug(f"Fetching Uniswap quote: {payload}")
             
-            response = self._post_json("quote", payload)
-
-            # BEST_PRICE/default routing may involve UniswapX discovery. On
-            # newer chains its index can occasionally miss an otherwise live
-            # AMM pool, especially for small-cap v4 pairs. Retry once while
-            # explicitly restricting discovery to canonical AMM liquidity
-            # before allowing the provider adapter to move on to Sushi.
-            if self._is_no_route_failure(response):
-                amm_payload = payload.copy()
-                amm_payload["protocols"] = ["V2", "V3", "V4"]
-                self.logger.warning(
-                    "Uniswap default routing found no route; retrying quote "
-                    "against explicit V2/V3/V4 AMM liquidity"
-                )
+            routing_attempts = min(3, max(1, int(routing_attempts)))
+            response = None
+            for routing_attempt in range(1, routing_attempts + 1):
                 cooldown_error = self._cooldown_error()
                 if cooldown_error is not None:
                     return QuoteResult(success=False, error=cooldown_error)
-                response = self._post_json("quote", amm_payload)
+                response = self._post_json("quote", payload)
+
+                # BEST_PRICE/default routing may involve UniswapX discovery.
+                # Retry the same attempt against canonical AMM liquidity.
+                if self._is_no_route_failure(response):
+                    amm_payload = payload.copy()
+                    amm_payload["protocols"] = ["V2", "V3", "V4"]
+                    self.logger.warning(
+                        "Uniswap default routing found no route; retrying quote "
+                        "against explicit V2/V3/V4 AMM liquidity"
+                    )
+                    cooldown_error = self._cooldown_error()
+                    if cooldown_error is not None:
+                        return QuoteResult(success=False, error=cooldown_error)
+                    response = self._post_json("quote", amm_payload)
+
+                if response.status_code == 200 or routing_attempt == routing_attempts:
+                    break
+                if not self._is_retryable_routing_failure(response):
+                    break
+                delay = 0.75 * routing_attempt
+                self.logger.warning(
+                    "Uniswap actionable routing failed transiently; retrying "
+                    "fresh discovery (%s/%s) after %.2fs",
+                    routing_attempt + 1, routing_attempts, delay,
+                )
+                time.sleep(delay)
             
             self.logger.debug(f"Uniswap API response status: {response.status_code}")
             
@@ -401,6 +420,7 @@ class UniswapAPIClient:
             taker_address=taker_address,
             slippage_percentage=slippage_percentage,
             apply_jitter_to_price=False,
+            routing_attempts=3,
         )
     
     def get_price(
@@ -460,6 +480,7 @@ class UniswapAPIClient:
             taker_address=taker_address,
             slippage_percentage=slippage_percentage,
             apply_jitter_to_price=False,
+            routing_attempts=3,
         )
     
     def check_approval(
