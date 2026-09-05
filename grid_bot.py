@@ -1034,6 +1034,9 @@ class GridBot:
         )
         if quote.success:
             uses_weth = True
+            recover = getattr(getattr(self, "provider", None), "recover_current_operation", None)
+            if recover is not None:
+                recover()
             logger.warning("ROUTE FALLBACK: using direct WETH %s settlement", direction)
         try:
             setattr(quote, "weth_fallback", uses_weth)

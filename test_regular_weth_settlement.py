@@ -54,6 +54,22 @@ def test_sell_falls_back_from_native_output_to_weth(tmp_path):
     assert bot.api_client.build_swap_transaction.call_args_list[1].kwargs["buy_token"] == bot.config.weth_address
 
 
+def test_successful_weth_route_cancels_pending_provider_replay(tmp_path):
+    bot = make_bot(tmp_path)
+    bot.provider = Mock()
+    bot.api_client.build_swap_transaction.side_effect = [quote(False, "NoRoute"), quote(True)]
+
+    result, uses_weth = bot._actionable_quote_with_weth_fallback(
+        sell_token=bot.config.token_address,
+        buy_token="0x" + "00" * 20,
+        sell_amount=1000,
+        direction="sell",
+    )
+
+    assert result.success and uses_weth
+    bot.provider.recover_current_operation.assert_called_once_with()
+
+
 def test_no_weth_fallback_in_weth_mode(tmp_path):
     bot = make_bot(tmp_path)
     bot.config.use_eth_trading = False
@@ -92,4 +108,3 @@ def test_unwrap_requires_reserve_and_returns_confirmed_gas(tmp_path):
     bot._receipt_gas_cost_wei = Mock(return_value=80_000)
     actual, gas = bot._execute_weth_unwrap(999)
     assert actual is result and gas == 80_000
-

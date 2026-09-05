@@ -125,6 +125,17 @@ class FallbackSwapProvider:
         if self._operation_sealed:
             self._operation_sealed[-1] = True
 
+    def recover_current_operation(self):
+        """Cancel a pending provider replay after same-provider recovery.
+
+        A higher-level operation may recover from a retryable native-route
+        failure by finding a direct WETH route with the same provider.  Once
+        that recovery succeeds, the earlier failure must not cause the whole
+        operation to replay with the fallback provider after settlement.
+        """
+        if self._operation_retries and not self._operation_sealed[-1]:
+            self._operation_retries[-1] = None
+
     def __getattr__(self, method_name):
         method = getattr(self.active, method_name)
         if not callable(method):

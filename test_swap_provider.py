@@ -152,6 +152,34 @@ def test_complete_operation_fails_closed_after_first_onchain_broadcast():
     assert len(fallback_client.results) == 1
 
 
+def test_same_provider_recovery_cancels_pending_fallback_replay():
+    primary = SwapProvider(
+        "uniswap",
+        Client([Result(False, "Uniswap API returned status 404"), Result(True)]),
+        PROVIDERS["uniswap"].capabilities,
+    )
+    fallback_client = Client([Result(True)])
+    fallback = SwapProvider("sushiswap", fallback_client, PROVIDERS["sushiswap"].capabilities)
+    provider = FallbackSwapProvider(primary, fallback)
+    attempts = []
+
+    def operation():
+        attempts.append(provider.name)
+        native = provider.build_swap_transaction()
+        if native.success:
+            return native
+        weth = provider.build_swap_transaction()
+        if weth.success:
+            provider.recover_current_operation()
+        return weth
+
+    result = provider.run_with_fallback(operation, "sell")
+
+    assert result.success is True
+    assert attempts == ["uniswap"]
+    assert len(fallback_client.results) == 1
+
+
 def test_retryable_refreshed_quote_restarts_without_mixing_providers():
     class RefreshClient:
         def __init__(self, quote, refresh):
