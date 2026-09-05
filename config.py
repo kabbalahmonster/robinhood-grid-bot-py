@@ -172,6 +172,7 @@ class BotConfig:
     dashboard_name: str = ""      # Optional display name
     dashboard_group: str = ""     # Optional dashboard grouping label
     mercury_evocation: bool = True  # Print the Mercury evocation once at bot startup
+    route_tournament_mode: str = "off"
     
     # Derived properties
     @property
@@ -191,6 +192,8 @@ class BotConfig:
         Raises:
             ValueError: If any required configuration is missing or invalid.
         """
+        if self.route_tournament_mode not in {"off", "shadow"}:
+            raise ValueError("ROUTE_TOURNAMENT_MODE supports off or shadow; execute is intentionally unavailable")
         # Check required fields
         if not self.private_key or self.private_key == "0x...":
             raise ValueError("PRIVATE_KEY is required and must be set")
@@ -416,6 +419,7 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
         
         # API Provider Selection
         swap_provider=os.getenv("SWAP_PROVIDER", ""),
+        route_tournament_mode=os.getenv("ROUTE_TOURNAMENT_MODE", "off").strip().lower(),
         swap_fallback_provider=os.getenv("SWAP_FALLBACK_PROVIDER", "sushiswap"),
         sushi_api_key=os.getenv("SUSHI_API_KEY", ""),
         use_li_fi=os.getenv("USE_LI_FI", "false").lower() == "true",

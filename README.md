@@ -1539,6 +1539,79 @@ quote = client.build_swap_transaction(
 - Moonbag and banking features
 - Multi-chain support (Robinhood, Base, Mainnet)
 
+## Experimental route tournament (shadow only)
+
+`ROUTE_TOURNAMENT_MODE=off` is the default and performs no tournament API or
+RPC work. Set `shadow` to observe actionable regular buys and sells in both
+gridless and legacy engines. Price polling, banking and moonbag liquidation
+do not initiate comparisons. Regular sells retaining a moonbag compare the
+actual sold amount once it is known. Provider fallback retries share one
+comparison, rather than collecting another tournament.
+
+The experiment captures the pre-operation balance, gas price and economic
+assumptions, then collects fresh quotes **after the existing execution attempt
+finishes**. It never substitutes a provider, quote, approval, calldata or
+transaction. Consequently this is a subsequent-market observation, not a
+claim that the hypothetical winner was available at the broadcast instant.
+The existing same-provider WETH recovery/replay safeguards remain in place.
+
+Each available provider (Sushi, plus Uniswap when its key is configured) gets
+one `get_quote` call per native/WETH settlement, with price jitter disabled.
+Uniswap uses one routing attempt; its internal explicit AMM fallback and known
+gateway-packet 409 retry can make up to four HTTP requests per candidate. Thus
+each actionable operation adds at most four candidate calls / ten HTTP requests
+with both providers, or two with Sushi alone. A budget snapshot also reads the
+native balance and normal gas price, plus WETH balance in WETH trading mode;
+the wallet's existing RPC failover behavior applies. Existing execution traffic
+is additional. Calls are sequential, each
+HTTP request has the existing 30-second timeout, and shared Uniswap rate-limit
+coordination can add waiting. There is no strict overall wall-clock deadline.
+`elapsed_ms` measures total collection time. Independent observer clients do
+not modify execution-client state, but traffic consumes upstream quota and
+Uniswap's shared limiter, so subsequent operation timing/fallback can still
+be affected. Shadow is observational, not zero-impact infrastructure.
+
+Dashboard `buy_attempt.route_comparison` and `sell_attempt.route_comparison`
+contain candidates, fixed rejection codes, provider, settlement, raw quoted
+output, gas components, projected score, hypothetical winner, runner-up score
+delta and elapsed time. Sell data expires next round; buy data survives until
+the following report because buys run after reporting. No raw provider response,
+exception text, address, calldata or credential is included in this payload.
+
+All successful candidates are **quote_only**, including responses containing
+transaction fields; none is `executable_simulated` or execution-eligible.
+Rejected quotes/budgets are `rejected`. No setup or preparation request is made.
+Swap gas uses the larger of the quote hint and a 350k buy / 300k sell budget;
+ERC20 inputs budget 200k for reset plus approval, and settlement conversion
+budgets 60k for wrap or unwrap. Existing allowance is deliberately not credited.
+These are conservative scenario budgets, not guaranteed upper bounds or exact
+RPC estimates. Gas/price headroom applies to every component. The higher of
+the captured normal RPC price and provider price is used. The total budget
+must pass the direction's gas cap and native reserve check. Slippage and
+declared/detected tax haircuts apply to output. Buy score is output raw units
+per ETH of principal plus gas; sell score is output floor minus all gas in
+wei and must cover sold cost basis plus `MIN_PROFIT_PERCENT`. Stoploss
+observations still apply that floor, without affecting actual stoploss behavior.
+
+`ROUTE_TOURNAMENT_MODE=execute` is **intentionally unavailable** and fails
+startup validation. Safe execution requires a shared durable settlement seal
+before the first setup broadcast, exact-amount setup, fresh post-setup calldata,
+mandatory local `eth_call` plus `eth_estimateGas`, confirmed setup-gas accounting,
+and a no-runner-up abort gate. This commit does not introduce those execution
+semantics or claim to test them.
+
+For a ROBINVAULT canary, record the current revision/config and baseline
+actionable request counts, latency, gas and route/fallback logs. Enable only
+`ROUTE_TOURNAMENT_MODE=shadow` on one existing bot during a monitored window,
+keeping its current provider, sizing, caps and reserve settings. Let normal
+buy/sell triggers occur; do not force trades for coverage. Check both dashboard
+attempt payloads, quote-only labels, setup component budgets, rejection reasons,
+elapsed times and unchanged execution-path selection logs. Watch shared quota
+and cooldowns across the fleet. Return to `off` if latency or rate limits rise,
+or after collecting representative buy/sell observations. Do not enable execute
+or interpret a quote-only winner as authorization to trade. No canary config,
+service or deployment is changed by this development commit.
+
 ## License
 
 MIT License - See LICENSE file

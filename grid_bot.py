@@ -27,6 +27,17 @@ def _with_swap_provider_fallback(method):
     @wraps(method)
     def wrapped(self, *args, **kwargs):
         runner = getattr(self.provider, "run_with_fallback", None)
+        if getattr(self.config, "route_tournament_mode", "off") == "shadow":
+            depth = getattr(self, "_route_shadow_depth", 0)
+            self._route_shadow_depth = depth + 1
+            try:
+                if runner is None:
+                    return method(self, *args, **kwargs)
+                return runner(lambda: method(self, *args, **kwargs), operation_name=method.__name__)
+            finally:
+                self._route_shadow_depth = depth
+                if depth == 0:
+                    self._finish_route_shadow()
         if runner is None:
             return method(self, *args, **kwargs)
         return runner(
@@ -1011,8 +1022,55 @@ class GridBot:
             return int(self.wallet.get_eth_balance_wei())
         return self._raw_token_balance(self.config.weth_address)
 
+    def _queue_route_shadow(self, direction, amount, sold_cost_wei=None):
+        if getattr(self.config, "route_tournament_mode", "off") != "shadow":
+            return
+        try:
+            from route_tournament import snapshot
+            pending = getattr(self, "_route_shadow_pending", {})
+            # Provider retries cannot multiply tournament requests. The actual
+            # moonbag amount replaces the full-position trigger observation.
+            previous = pending.get(direction)
+            if previous and previous["amount"] == int(amount):
+                return
+            pending[direction] = snapshot(self, direction, amount, sold_cost_wei)
+            self._route_shadow_pending = pending
+        except Exception:
+            logger.warning("Route shadow snapshot unavailable; execution unchanged")
+            pending = getattr(self, "_route_shadow_pending", {})
+            pending[direction] = {"amount": int(amount), "snapshot_failed": True}
+            self._route_shadow_pending = pending
+
+    def _finish_route_shadow(self):
+        pending = getattr(self, "_route_shadow_pending", {})
+        self._route_shadow_pending = {}
+        for direction, context in pending.items():
+            try:
+                from route_tournament import collect
+                if context.get("snapshot_failed"):
+                    raise ValueError("snapshot unavailable")
+                comparison = collect(self.config, self.wallet.address, context)
+            except Exception:
+                comparison = {"mode": "shadow", "direction": direction,
+                              "status": "observation_failed", "candidates": [],
+                              "failures": ["snapshot_failed" if context.get("snapshot_failed") else "collection_failed"],
+                              "selected_hypothetical_winner": None, "runner_up_delta": None}
+                logger.warning("Route shadow observation failed; execution unchanged")
+            comparisons = getattr(self, "_route_comparisons", {})
+            comparisons[direction] = comparison
+            self._route_comparisons = comparisons
+
+    def _attempt_with_route_comparison(self, direction):
+        attempt = getattr(self, "_" + direction + "_attempt", None)
+        if getattr(self.config, "route_tournament_mode", "off") != "shadow":
+            return attempt
+        comparison = getattr(self, "_route_comparisons", {}).get(direction)
+        return {**(attempt or {}), "route_comparison": comparison} if comparison else attempt
+
     def _actionable_quote_with_weth_fallback(self, *, sell_token, buy_token, sell_amount, direction):
         """Build the configured route, falling back to the direct WETH leg in native mode."""
+        if direction == "buy":
+            self._queue_route_shadow(direction, sell_amount)
         quote = self.api_client.build_swap_transaction(
             sell_token=sell_token, buy_token=buy_token, sell_amount=sell_amount,
             taker_address=self.wallet.address,
@@ -2119,6 +2177,7 @@ class GridBot:
             return
         if not self._wallet_can_cover_sell(balance, pos_id):
             return
+        self._queue_route_shadow("sell", balance, int(pos.get("cost_wei") or pos.get("cost", 0) * 10**9))
             
         quote, weth_fallback = self._actionable_quote_with_weth_fallback(
             sell_token=self.config.token_address, buy_token=self.trade_token_address,
@@ -2286,6 +2345,7 @@ class GridBot:
             moonbag_tokens = 0
         
         sold_cost_eth = cost_eth * (sell_tokens / tokens) if tokens > 0 else 0
+        self._queue_route_shadow("sell", sell_amount, int(round(sold_cost_eth * 10**18)))
         expected_eth = sell_tokens * price
         profit_eth = expected_eth - sold_cost_eth
         
@@ -2888,6 +2948,7 @@ class GridBot:
         expected_eth = sell_tokens * price
         # Cost basis for sold portion only
         sold_cost_eth = cost_eth * (sell_tokens / total_tokens) if total_tokens > 0 else 0
+        self._queue_route_shadow("sell", sell_amount, int(round(sold_cost_eth * 10**18)))
         profit_eth = expected_eth - sold_cost_eth
         
         logger.info(f"💰 Selling position {pos_id}:")
@@ -3298,6 +3359,8 @@ class GridBot:
         # round's quote check or it disappears from the next dashboard report.
         self._sell_attempt = None
         elapsed = time.time() - self.start_time
+        if getattr(self.config, "route_tournament_mode", "off") == "shadow":
+            getattr(self, "_route_comparisons", {}).pop("sell", None)
         
         # Get balances
         if getattr(self.config, 'use_eth_trading', False):
@@ -3595,8 +3658,8 @@ class GridBot:
                     capacity_warning=capacity_warning,
                     needs_gas=needs_gas,
                     funding_warning=self._funding_warning,
-                    buy_attempt=self._buy_attempt,
-                    sell_attempt=self._sell_attempt,
+                    buy_attempt=self._attempt_with_route_comparison("buy"),
+                    sell_attempt=self._attempt_with_route_comparison("sell"),
                     chain_id=self.config.chain_id,
                     swap_provider=self.provider.name,
                     taxed_token=self._taxed_token_active(),
@@ -3630,6 +3693,8 @@ class GridBot:
         # reports, so DoomDash could never receive it.
         self._funding_warning = None
         self._buy_attempt = None
+        if getattr(self.config, "route_tournament_mode", "off") == "shadow":
+            getattr(self, "_route_comparisons", {}).pop("buy", None)
 
         # Then check buys
         self.check_buys(price)
