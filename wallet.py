@@ -8,6 +8,8 @@ including approvals via Permit2.
 import time
 import logging
 import re
+import json
+import os
 from typing import Optional, Any
 from dataclasses import dataclass
 from eth_account import Account
@@ -145,6 +147,9 @@ class TransactionResult:
     error: Optional[str] = None
     gas_used: Optional[int] = None
     effective_gas_price: Optional[int] = None
+    # True only when a transaction was accepted for broadcast but its receipt
+    # could not be resolved.  Callers must never treat this as safe to retry.
+    outcome_unknown: bool = False
 
 
 class Wallet:
@@ -174,11 +179,61 @@ class Wallet:
         # Load account from private key
         self.account = Account.from_key(config.private_key)
         self.address = self.account.address
+
+        self.unresolved_broadcast_path = os.path.join("data", "unresolved_broadcast.json")
+        self.unresolved_broadcast = self._load_unresolved_broadcast()
+        if self.unresolved_broadcast:
+            self.logger.critical(
+                "Unresolved prior broadcast blocks trading: tx=%s",
+                self.unresolved_broadcast.get("tx_hash", "unknown"),
+            )
         
         self.logger.info(f"Wallet initialized: {self.address}")
         
         # Initialize token contracts
         self._token_info_cache: dict[str, TokenInfo] = {}
+
+    def _load_unresolved_broadcast(self) -> Optional[dict]:
+        """Load a durable post-broadcast uncertainty guard, if present."""
+        try:
+            with open(self.unresolved_broadcast_path, "r", encoding="utf-8") as handle:
+                record = json.load(handle)
+            return record if isinstance(record, dict) else None
+        except FileNotFoundError:
+            return None
+        except Exception as exc:
+            # A corrupt guard must fail closed.  Operators can inspect/repair it;
+            # trading must not silently resume after an uncertain broadcast.
+            self.logger.critical("Could not read unresolved broadcast guard: %s", exc)
+            return {"tx_hash": "unknown", "error": str(exc), "guard_corrupt": True}
+
+    def _record_unresolved_broadcast(self, tx_hash: str, tx: Optional[dict], error: str) -> None:
+        """Persist an outcome-unknown broadcast before returning to the bot loop."""
+        record = {
+            "tx_hash": tx_hash,
+            "recorded_at_unix": int(time.time()),
+            "chain_id": getattr(self.config, "chain_id", None),
+            "wallet": getattr(self, "address", None),
+            "nonce": (tx or {}).get("nonce"),
+            "to": str((tx or {}).get("to") or ""),
+            "value_wei": int((tx or {}).get("value") or 0),
+            "error": error,
+        }
+        path = getattr(
+            self, "unresolved_broadcast_path",
+            os.path.join("data", "unresolved_broadcast.json"),
+        )
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        temporary = f"{path}.tmp"
+        with open(temporary, "w", encoding="utf-8") as handle:
+            json.dump(record, handle, indent=2, sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        self.unresolved_broadcast = record
+
+    def has_unresolved_broadcast(self) -> bool:
+        return bool(getattr(self, "unresolved_broadcast", None))
 
     def normal_gas_price(self, minimum_base_fee: int = 0) -> int:
         """Return dynamic Normal gas with a minimal anti-staleness margin."""
@@ -607,6 +662,7 @@ class Wallet:
         Returns:
             TransactionResult: Transaction result.
         """
+        tx_hash_hex = None
         try:
             # Mandatory local preflight at the final broadcast boundary.  API
             # simulations are useful evidence, but the RPC that will accept the
@@ -695,7 +751,31 @@ class Wallet:
                 )
 
         except Exception as e:
-            self.logger.error(f"Transaction failed: {e}")
+            if tx_hash_hex:
+                error = (
+                    "Transaction was broadcast but confirmation failed; outcome "
+                    f"is unknown and MUST NOT be retried automatically: {e}"
+                )
+                self.logger.critical("%s tx=%s", error, tx_hash_hex)
+                try:
+                    self._record_unresolved_broadcast(tx_hash_hex, dict(tx), error)
+                except Exception as journal_exc:
+                    # Stay fail-closed in memory even if durable journaling fails.
+                    self.unresolved_broadcast = {
+                        "tx_hash": tx_hash_hex,
+                        "error": error,
+                        "journal_error": str(journal_exc),
+                    }
+                    self.logger.critical(
+                        "Could not persist unresolved broadcast guard: %s", journal_exc,
+                    )
+                return TransactionResult(
+                    success=False,
+                    tx_hash=tx_hash_hex,
+                    error=error,
+                    outcome_unknown=True,
+                )
+            self.logger.error(f"Transaction failed before broadcast: {e}")
             return TransactionResult(success=False, error=str(e))
     
     def send_raw_transaction(
@@ -713,6 +793,7 @@ class Wallet:
         Returns:
             TransactionResult: Transaction result.
         """
+        tx_hash_hex = None
         try:
             # Handle both old and new eth-account versions
             raw_tx = getattr(signed_tx, 'raw_transaction', getattr(signed_tx, 'rawTransaction', None))
@@ -743,7 +824,30 @@ class Wallet:
                 )
         
         except Exception as e:
-            self.logger.error(f"Raw transaction failed: {e}")
+            if tx_hash_hex:
+                error = (
+                    "Raw transaction was broadcast but confirmation failed; outcome "
+                    f"is unknown and MUST NOT be retried automatically: {e}"
+                )
+                self.logger.critical("%s tx=%s", error, tx_hash_hex)
+                try:
+                    self._record_unresolved_broadcast(tx_hash_hex, None, error)
+                except Exception as journal_exc:
+                    self.unresolved_broadcast = {
+                        "tx_hash": tx_hash_hex,
+                        "error": error,
+                        "journal_error": str(journal_exc),
+                    }
+                    self.logger.critical(
+                        "Could not persist unresolved broadcast guard: %s", journal_exc,
+                    )
+                return TransactionResult(
+                    success=False,
+                    tx_hash=tx_hash_hex,
+                    error=error,
+                    outcome_unknown=True,
+                )
+            self.logger.error(f"Raw transaction failed before broadcast: {e}")
             return TransactionResult(success=False, error=str(e))
     
     def get_gas_price(self) -> dict:

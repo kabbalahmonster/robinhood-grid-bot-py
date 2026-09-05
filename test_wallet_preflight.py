@@ -1,4 +1,7 @@
 import logging
+import json
+import os
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -36,6 +39,40 @@ class TestWalletPreflight(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertIn("exceeds transaction gas limit", result.error)
         wallet.account.sign_transaction.assert_not_called()
+
+    def test_receipt_failure_preserves_broadcast_hash_and_marks_unknown(self):
+        wallet = self.make_wallet()
+        wallet.w3.eth.call.return_value = b""
+        wallet.w3.eth.estimate_gas.return_value = 90000
+        signed = SimpleNamespace(raw_transaction=b"signed")
+        wallet.account.sign_transaction.return_value = signed
+        tx_hash = Mock()
+        tx_hash.hex.return_value = "0xabc123"
+        wallet.w3.eth.send_raw_transaction.return_value = tx_hash
+        wallet.w3.eth.wait_for_transaction_receipt.side_effect = ValueError(
+            {"code": -32601, "message": "Method not found"}
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            wallet.config = SimpleNamespace(chain_id=4663)
+            wallet.address = "0x1"
+            wallet.unresolved_broadcast_path = os.path.join(directory, "guard.json")
+            result = wallet._send_transaction({
+                "from": "0x1", "to": "0x2", "data": "0x1234",
+                "value": 7, "gas": 100000, "nonce": 9,
+            })
+
+            with open(wallet.unresolved_broadcast_path, encoding="utf-8") as handle:
+                guard = json.load(handle)
+
+        self.assertFalse(result.success)
+        self.assertTrue(result.outcome_unknown)
+        self.assertEqual(result.tx_hash, "0xabc123")
+        self.assertIn("MUST NOT be retried", result.error)
+        self.assertEqual(guard["tx_hash"], "0xabc123")
+        self.assertEqual(guard["nonce"], 9)
+        self.assertEqual(guard["value_wei"], 7)
+        self.assertTrue(wallet.has_unresolved_broadcast())
 
 
 if __name__ == "__main__":

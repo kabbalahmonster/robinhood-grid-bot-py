@@ -344,12 +344,27 @@ class ResilientWeb3:
                 last_error = e
                 error_str = str(e).lower()
                 
-                # Check if it's a connection/rate-limit error worth failing over on
+                # Check if it's a connection/rate-limit error worth failing over on.
+                # Some public endpoints accept transaction broadcasts but do not
+                # implement receipt polling.  A post-broadcast receipt lookup is
+                # read-only and must be allowed to continue on another endpoint;
+                # otherwise a confirmed transaction is misreported as failed and
+                # the trading loop may submit it again.
+                receipt_lookup = func_name in {
+                    "eth.wait_for_transaction_receipt",
+                    "eth.get_transaction_receipt",
+                    "eth.get_transaction",
+                }
+                capability_error = (
+                    "method not found" in error_str
+                    or "-32601" in error_str
+                    or "not supported" in error_str
+                )
                 is_retryable = any(x in error_str for x in [
                     "connection", "timeout", "429", "rate limit",
                     "too many requests", "503", "502", "500",
                     "internal error", "server error",
-                ])
+                ]) or (receipt_lookup and capability_error)
                 
                 if self._current_url:
                     self.rotator.report_failure(self._current_url, e)

@@ -3124,6 +3124,15 @@ class GridBot:
     
     def run_cycle(self):
         """Run one trading cycle."""
+        if self.wallet.has_unresolved_broadcast():
+            record = self.wallet.unresolved_broadcast
+            logger.critical(
+                "TRADING HALTED: unresolved broadcast tx=%s. Reconcile it on-chain "
+                "before clearing data/unresolved_broadcast.json.",
+                record.get("tx_hash", "unknown"),
+            )
+            self.running = False
+            return
         self.round_count += 1
         # Ephemeral by design: a sell attempt must be re-established by this
         # round's quote check or it disappears from the next dashboard report.
@@ -3337,6 +3346,14 @@ class GridBot:
         # Check sells before reporting so this round's transient attempt state
         # appears immediately rather than one poll late.
         self.check_sells(price)
+
+        # A sell may have broadcast successfully even if every receipt RPC then
+        # failed.  Never continue into dashboard-side actions or a buy in that
+        # state; the durable wallet guard also prevents a restart from replaying.
+        if self.wallet.has_unresolved_broadcast():
+            logger.critical("TRADING HALTED after unresolved sell broadcast")
+            self.running = False
+            return
 
         # Report to dashboard if configured (runs regardless of compact mode)
         if self._reporter:
