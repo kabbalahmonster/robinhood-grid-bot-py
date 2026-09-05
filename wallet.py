@@ -608,6 +608,32 @@ class Wallet:
             TransactionResult: Transaction result.
         """
         try:
+            # Mandatory local preflight at the final broadcast boundary.  API
+            # simulations are useful evidence, but the RPC that will accept the
+            # transaction is the authority.  Simulate the exact destination,
+            # sender, calldata and value immediately before signing; fail closed
+            # on either a revert or an RPC error.
+            call_tx = {
+                key: tx[key]
+                for key in ("from", "to", "data", "value")
+                if key in tx and tx[key] is not None
+            }
+            self.w3.eth.call(call_tx, "pending")
+            estimated_gas = int(self.w3.eth.estimate_gas(call_tx, "pending"))
+            configured_gas = int(tx.get("gas") or 0)
+            if configured_gas and estimated_gas > configured_gas:
+                return TransactionResult(
+                    success=False,
+                    error=(
+                        "RPC preflight rejected transaction: estimated gas "
+                        f"{estimated_gas} exceeds transaction gas limit {configured_gas}"
+                    ),
+                )
+            self.logger.debug(
+                "RPC preflight passed: to=%s estimated_gas=%s gas_limit=%s",
+                tx.get("to"), estimated_gas, configured_gas,
+            )
+
             # Sign transaction
             signed_tx = self.account.sign_transaction(tx)
             

@@ -14,6 +14,9 @@ class TestDashboardEvents(unittest.TestCase):
         self.bot.dashboard_events_file = os.path.join(self.temp_dir.name, "events.json")
         self.bot._dashboard_event_lock = __import__('threading').Lock()
         self.bot.dashboard_events = []
+        self.bot.route_incident_file = os.path.join(self.temp_dir.name, "route_incident.json")
+        self.bot.route_incident = {}
+        self.bot.config = type("Config", (), {"token_symbol": "TEST"})()
 
     def tearDown(self):
         self.temp_dir.cleanup()
@@ -83,6 +86,40 @@ class TestDashboardEvents(unittest.TestCase):
         handler.emit(record)
         self.assertEqual(self.bot.dashboard_events[0]["level"], "error")
         self.assertEqual(self.bot.dashboard_events[0]["code"], "log_error")
+
+    def test_route_incident_alerts_on_third_failure_and_persists(self):
+        for _ in range(3):
+            self.bot._record_route_failure("Sushi route status: NoWay")
+        self.assertTrue(self.bot.route_incident["active"])
+        self.assertEqual(self.bot.route_incident["attempts"], 3)
+        self.assertEqual(self.bot.dashboard_events[-1]["code"], "route_degraded")
+        with open(self.bot.route_incident_file) as handle:
+            self.assertEqual(json.load(handle)["attempts"], 3)
+
+    def test_primary_failure_recovered_by_fallback_is_not_an_incident(self):
+        self.bot.provider = type("Provider", (), {
+            "fallback": object(), "fallback_active": False,
+        })()
+        self.bot._record_route_failure("Sell candidate #4 but quote failed")
+        self.assertEqual(self.bot.route_incident, {})
+
+        self.bot.provider.fallback_active = True
+        self.bot._record_route_failure("Sell candidate #4 but quote failed")
+        self.assertEqual(self.bot.route_incident["attempts"], 1)
+
+    def test_confirmed_trade_closes_active_route_incident(self):
+        self.bot.route_incident = {
+            "active": True,
+            "started_at": "2026-09-05T00:00:00+00:00",
+            "attempts": 4,
+        }
+        self.bot.dashboard_trades = []
+        self.bot.dashboard_trades_file = os.path.join(self.temp_dir.name, "trades.json")
+        self.bot.wallet = type("Wallet", (), {"address": "0xwallet"})()
+        self.bot.config.max_active_positions = 5
+        self.bot._record_dashboard_trade("sell", 1, 2, 3, "0xtx")
+        self.assertFalse(self.bot.route_incident["active"])
+        self.assertEqual(self.bot.dashboard_events[-1]["code"], "route_recovered")
 
 
 if __name__ == "__main__":

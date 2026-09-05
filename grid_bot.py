@@ -563,16 +563,29 @@ def check_config():
 class DashboardEventHandler(logging.Handler):
     """Convert warning/error log records into structured dashboard events."""
 
-    def __init__(self, callback):
+    ROUTE_FAILURE_MARKERS = (
+        # Count terminal operation failures, not every provider's internal log
+        # line; otherwise one Uniswap->Sushi attempt looks like many incidents.
+        "quote failed", "quote after approval failed",
+        "swap preparation failed", "refreshed quote failed",
+    )
+
+    def __init__(self, callback, route_callback=None):
         super().__init__(level=logging.WARNING)
         self.callback = callback
+        self.route_callback = route_callback
 
     def emit(self, record):
         try:
+            message = record.getMessage()
+            if self.route_callback and any(
+                marker in message.lower() for marker in self.ROUTE_FAILURE_MARKERS
+            ):
+                self.route_callback(message)
             self.callback(
                 record.levelname.lower(),
                 'log_error' if record.levelno >= logging.ERROR else 'log_warning',
-                record.getMessage(),
+                message,
                 source=record.name,
             )
         except Exception:
@@ -584,6 +597,8 @@ class GridBot:
         self.dashboard_events_file = "data/dashboard_events.json"
         self._dashboard_event_lock = threading.Lock()
         self.dashboard_events = self._load_dashboard_events()
+        self.route_incident_file = "data/route_incident.json"
+        self.route_incident = self._load_route_incident()
         
         # Setup logging FIRST so we capture all initialization logs
         self._setup_logging()
@@ -1384,6 +1399,85 @@ class GridBot:
         except (FileNotFoundError, json.JSONDecodeError, OSError):
             return []
 
+    def _load_route_incident(self):
+        try:
+            with open(self.route_incident_file, "r") as handle:
+                data = json.load(handle)
+            return data if isinstance(data, dict) else {}
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return {}
+
+    def _record_route_failure(self, error):
+        # A primary-provider failure is not an incident when the operation is
+        # about to retry on its configured fallback.  The fallback attempt logs
+        # the same terminal message if it also fails; count only that final
+        # outcome so one recovered Uniswap->Sushi handoff remains healthy.
+        provider = getattr(self, "provider", None)
+        if (
+            getattr(provider, "fallback", None) is not None
+            and not getattr(provider, "fallback_active", False)
+        ):
+            return
+        now = datetime.now().astimezone()
+        incident = self.route_incident
+        if not incident.get("active"):
+            incident = {
+                "active": True,
+                "started_at": now.isoformat(),
+                "attempts": 0,
+            }
+        incident["attempts"] = int(incident.get("attempts", 0)) + 1
+        incident["last_failure_at"] = now.isoformat()
+        incident["last_error"] = _safe_event_message(error)
+        try:
+            started = datetime.fromisoformat(incident["started_at"])
+            incident["duration_seconds"] = max(0, int((now - started).total_seconds()))
+        except (KeyError, TypeError, ValueError):
+            incident["duration_seconds"] = 0
+        self.route_incident = incident
+        self._persist_route_incident()
+        attempts = incident["attempts"]
+        if attempts == 3 or attempts % 10 == 0:
+            self._record_dashboard_event(
+                "error", "route_degraded",
+                f"{self.config.token_symbol} swap routing repeatedly failed",
+                count=attempts,
+                attempts=attempts,
+                duration_seconds=incident["duration_seconds"],
+                last_error=incident["last_error"],
+            )
+
+    def _clear_route_incident(self):
+        if not getattr(self, "route_incident", {}).get("active"):
+            return
+        now = datetime.now().astimezone()
+        incident = dict(self.route_incident)
+        incident["active"] = False
+        incident["recovered_at"] = now.isoformat()
+        try:
+            started = datetime.fromisoformat(incident["started_at"])
+            incident["duration_seconds"] = max(0, int((now - started).total_seconds()))
+        except (KeyError, TypeError, ValueError):
+            pass
+        self.route_incident = incident
+        self._persist_route_incident()
+        self._record_dashboard_event(
+            "success", "route_recovered",
+            f"{self.config.token_symbol} routing recovered",
+            attempts=incident.get("attempts", 0),
+            duration_seconds=incident.get("duration_seconds", 0),
+        )
+
+    def _persist_route_incident(self):
+        try:
+            os.makedirs(os.path.dirname(self.route_incident_file), exist_ok=True)
+            temp_file = self.route_incident_file + ".tmp"
+            with open(temp_file, "w") as handle:
+                json.dump(self.route_incident, handle, indent=2)
+            os.replace(temp_file, self.route_incident_file)
+        except OSError:
+            pass
+
     def _record_dashboard_event(self, level, code, message, **context):
         now = datetime.now().astimezone().isoformat()
         event = {
@@ -1430,6 +1524,9 @@ class GridBot:
         self, side, eth_amount, token_amount, price, tx_hash,
         profit_eth=None, gas_fee_eth=None,
     ):
+        # A confirmed swap proves that executable calldata passed local RPC
+        # preflight and landed on-chain, so close any routing incident.
+        self._clear_route_incident()
         trade = {
             "timestamp": datetime.now().astimezone().isoformat(),
             "side": side,
@@ -1493,7 +1590,9 @@ class GridBot:
             ))
         logger.addHandler(console_handler)
 
-        event_handler = DashboardEventHandler(self._record_dashboard_event)
+        event_handler = DashboardEventHandler(
+            self._record_dashboard_event, self._record_route_failure,
+        )
         logger.addHandler(event_handler)
         
         logger.info(f"Logging to: {self.log_filename}")
@@ -2046,7 +2145,7 @@ class GridBot:
         if projected_net_profit_eth < min_profit_eth:
             buy_price = get_buy_price(pos, self.token_decimals)
             pnl_at_check = calculate_pnl(pos, price, self.token_decimals)
-            logger.debug(
+            logger.info(
                 "⏸️  Position #%s at %.1f%% P&L but projected net profit "
                 "(%.6f after %.6f gas) < min (%.6f) - skipping",
                 pos_id, pnl_at_check, projected_net_profit_eth, projected_gas_eth, min_profit_eth,
