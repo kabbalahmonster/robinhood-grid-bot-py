@@ -926,8 +926,8 @@ ops/fleet/sell-moonbags all
 
 These are dry runs: each selected wallet prints its total balance, protected
 position allocation, exact moonbag sale amount, provider, quote, projected
-swap gas, and estimated proceeds after swap gas. To execute the same reviewed
-selection:
+swap gas, any required unwrap/forward gas, and estimated proceeds after all
+applicable settlement gas. To execute the same reviewed selection:
 
 ```bash
 ops/fleet/stop-fleet
@@ -945,7 +945,8 @@ changed by this command.
 
 Add `--send-to-treasury` to both the dry run and execution commands to forward
 only the sale's actual net proceeds to `FLEET_TREASURY_RECIPIENT`. WETH
-settlement is unwrapped first. The workflow subtracts approval, swap, unwrap,
+settlement is used automatically when the configured native route is
+unavailable, then unwrapped locally. The workflow subtracts approval, swap, unwrap,
 and treasury-transfer gas while preserving the wallet's pre-sale native ETH
 and `ETH_GAS_RESERVE`; it never invokes the broader `--amount available` sweep.
 
@@ -1175,6 +1176,48 @@ For a single-bot rebuild, restore into the deterministic path implied by
 wallet, chain, token, provider, reserve, positions, and dashboard ID before
 starting it. If position state is missing for a funded wallet, stop and
 reconcile on-chain assets and receipts rather than generating fresh positions.
+
+### Recovering an omitted gridless buy
+
+If an older bot broadcast a buy successfully but failed before writing the
+position, stop that bot and use its checkout's receipt-verified reconciliation
+command. Multiple hashes belong in one repeatable dry-run batch:
+
+```bash
+env -C "$HOME/bot-farm/rh-bots/COIN/robinhood-grid-bot-py" \
+  python grid_bot.py \
+  --reconcile-gridless-buy 0xFirstTransactionHash \
+  --reconcile-gridless-buy 0xSecondTransactionHash
+```
+
+After reviewing position IDs, principal, confirmed gas, and raw token receipts,
+apply the exact same batch with `--apply-reconciliation
+--confirm-bot-stopped`. The command rejects wrong wallets/tokens, failed
+receipts, malformed logs, and duplicate transaction hashes. It creates a
+timestamped backup and reload-verifies the saved ledger before reporting
+success. Do not restart that bot until its wallet balance and tracked position
+allocation agree.
+
+### Unresolved broadcasts and WETH settlement
+
+Every bot preflights final calldata locally with `eth_call` and
+`eth_estimateGas`. Receipt lookup can fail over across RPCs, including when one
+returns `Method not found`. If a broadcast still has an uncertain outcome,
+`data/unresolved_broadcast.json` blocks subsequent trading across loops and
+restarts.
+
+Native-mode regular buys and sells also use this guard during direct-WETH
+fallback settlement. A confirmed wrap is guarded until its buy swap and
+position write complete. A confirmed token-to-WETH sale retains its position
+until the measured WETH receipt is unwrapped; an incomplete unwrap leaves the
+guard in place. Inspect and reconcile the recorded transaction and balances
+before clearing the file. Restarting or deleting it blindly can replay a
+live-money operation.
+
+Terminal failures after the full configured provider chain persist in each
+checkout's `data/route_incident.json`. DoomDash alerts after the third failure
+and reports recovery duration after a confirmed trade. A Uniswap failure that
+Sushi successfully rescues is not counted as a terminal incident.
 
 ## Removing permanently retired bots from DoomDash
 

@@ -8,7 +8,7 @@ A production-grade grid trading bot for Robinhood Chain and other EVM networks, 
   - **Classic Grid**: Fixed price levels with buy/sell ranges
   - **Gridless**: Dynamic position-based trading without fixed grid levels
 - **Dynamic Grid Trading**: Automatically places buy orders at decreasing price levels
-- **Cost Basis Tracking**: Each position tracks actual WETH spent for accurate P&L
+- **All-In Cost Basis Tracking**: Positions include confirmed principal, approval, wrap, and swap gas where applicable
 - **Dynamic Token Decimals**: Reads and caches each configured ERC-20's on-chain `decimals()` value; non-18-decimal assets use correct prices, balances, P&L, moonbags, and dashboard valuation
 - **Moonbag Support**: Retain a percentage of tokens after each sell
 - **Guarded Moonbag Sales**: Dry-run or sell only wallet tokens not allocated to positions, for one coin, several coins, or the fleet
@@ -16,6 +16,10 @@ A production-grade grid trading bot for Robinhood Chain and other EVM networks, 
 - **Session Statistics**: Track total buys, sells, and accumulated profit
 - **Persistent Realized Profit**: Confirmed sell profit/loss survives restarts with transaction-hash deduplication and non-destructive baseline resets
 - **Multiple Swap Providers**: SushiSwap, Uniswap API, LI.FI, or 0x selected through environment configuration
+- **Native/WETH Settlement Fallback**: Native-mode buys and sells can use a verified direct WETH route when native routing is unavailable, with exact local wrap/unwrap settlement
+- **Mandatory Broadcast Preflight**: Final transaction calldata must pass local RPC `eth_call` and `eth_estimateGas` immediately before signing
+- **Durable Partial-Settlement Guard**: Confirmed-but-incomplete broadcasts halt trading across restarts instead of being replayed
+- **Route Incident Telemetry**: Persistent outage duration and terminal fallback failures are reported to the dashboard without counting recovered provider handoffs
 - **Anti-MEV Protection**: Jitter on timing to protect against front-running
 - **Multi-Position Support**: Multiple active positions with individual tracking
 - **Persistent State**: Survives restarts with position recovery
@@ -174,6 +178,39 @@ SWAP_PROVIDER=sushiswap  # sushiswap, uniswap, lifi, or 0x
 ```
 
 Explicit `SWAP_PROVIDER` takes precedence. `sushi` is accepted as an alias for `sushiswap`. When the setting is empty, backward-compatible selection checks `USE_UNISWAP_API=true`, then `USE_LI_FI=true`, otherwise 0x. The normalized templates currently select Uniswap through the legacy flag and configure Sushi as the fallback. On a retryable primary failure (HTTP 404/408/425/429/5xx, timeout, or connection failure), the current pre-broadcast operation stops and immediately restarts from the beginning with the fallback. A valid regular-sell quote that misses the gas-aware minimum-profit floor also triggers one alternate-provider quote before allowance inspection; that route is selected only if it independently clears both the same profit floor and the sell-gas cap. The next operation gives the configured primary the first opportunity again. This avoids mixing approvals and calldata from different routers inside one transaction flow. When Sushi is primary and the default Sushi fallback value is unchanged, the bot automatically uses Uniswap as the reverse fallback if `UNISWAP_API_KEY` is configured; set `SWAP_FALLBACK_PROVIDER` empty to disable fallback. Sushi uses its v7 quote/swap API and supports an optional `SUSHI_API_KEY`; the other providers require their matching credentials. When Sushi returns HTTP 429, that bot honors `Retry-After` when supplied and otherwise enters a jittered exponential cooldown (30 seconds up to 15 minutes). Requests are skipped locally during the cooldown and a successful response resets the backoff.
+
+For actionable Uniswap operations, transient upstream timeouts and inconsistent
+no-route responses receive bounded fresh-discovery retries. Passive price
+polling remains single-attempt to avoid multiplying fleet traffic. If all
+configured providers fail for the complete operation, the bot persists
+`data/route_incident.json`. DoomDash receives `route_degraded` on the third
+terminal failure and periodically thereafter, then `route_recovered` after a
+confirmed trade. A primary-provider failure recovered by the configured
+fallback is not counted as a terminal route incident.
+
+### Native ETH and direct WETH settlement
+
+When `USE_ETH_TRADING=true`, ordinary classic-grid and gridless trades prefer
+the configured native-ETH route. If actionable native discovery is exhausted,
+the bot can use the pool's direct WETH leg without constructing router calldata
+itself:
+
+- A buy first verifies the WETH-to-token route, budgets exact wrap, approval,
+  and swap gas against `ETH_GAS_RESERVE`, wraps only the intended principal,
+  approves only when needed, and executes once. Confirmed wrap, approval, and
+  swap fees are included in the position's cost basis and dashboard gas.
+- A sell quotes token-to-WETH and includes projected unwrap gas in every
+  minimum-profit decision. After the swap confirms, the bot measures the
+  actual WETH receipt and unwraps exactly that amount. Confirmed approval,
+  swap, and unwrap fees determine realized net profit, profit-fee basis,
+  banking budget, and dashboard gas.
+- Provider fallback is sealed after any setup transaction confirms. A wrapped
+  buy cannot wrap again on a later loop, and a WETH-settled sale cannot remove
+  its position until unwrap succeeds.
+
+Every swap path runs the final `from`/`to`/`value`/`data` payload through local
+RPC `eth_call` and `eth_estimateGas` immediately before signing. A revert, RPC
+preflight failure, or estimate above the selected gas limit fails closed.
 
 #### Fee-on-transfer (taxed) tokens
 
@@ -665,14 +702,16 @@ python migrate_grid_mode.py to-grid
    - Monitors price for grid level triggers (buyMin ≤ price ≤ buyMax)
    - Calculates dynamic buy amount: `available_WETH / available_slots`
    - `available_slots = MAX_ACTIVE_POSITIONS - active_positions`
-   - Executes swap via 0x AllowanceHolder API
-   - Records position with actual WETH cost (nano-WETH)
+   - Executes through the configured provider; native mode can fall back to an exact WETH wrap and direct WETH route
+   - Records measured tokens and all-in principal + confirmed setup/swap gas cost
 
 3. **Sell Execution**:
    - Monitors positions for sell targets
    - Requires profit ≥ `MIN_PROFIT_PERCENT` + 1.5% slippage buffer
    - Applies moonbag: keeps X% of tokens, sells rest
-   - Banks profit: swaps Y% of profit to stablecoin
+   - Native mode can settle directly to WETH and locally unwrap the measured receipt
+   - Includes projected unwrap gas before selling and confirmed approval/swap/unwrap gas in realized profit
+   - Banks profit only after complete settlement, using the confirmed net-profit budget
    - Updates session statistics
 
 4. **Dynamic Sizing**:
@@ -1047,11 +1086,18 @@ Common failures:
 - Check gas prices (may be too low during congestion)
 - Verify sufficient ETH for gas
 - Check token approvals haven't expired
+- If `data/unresolved_broadcast.json` exists, stop the bot and verify its recorded transaction on-chain; never delete the guard or retry the trade blindly
 
 ### "Position cost seems wrong"
 - Check the transaction on block explorer
-- Verify the `cost` field in positions.json matches actual WETH spent
+- Verify `cost_wei` (or legacy `cost`) matches principal plus confirmed buy setup and swap gas; native-to-WETH fallback also includes wrap and approval gas
 - The buy price is calculated as: `cost / (balance / 10^18)`
+
+### "No route" while the pool is active
+- Actionable Uniswap requests retry bounded transient failures before handing the complete operation to the configured fallback provider
+- In native mode, an exhausted native route can fall back to the direct WETH leg; buys wrap exact principal and sells unwrap measured proceeds
+- Repeated terminal failures persist in `data/route_incident.json` and surface as DoomDash route-degraded events
+- Do not weaken slippage, gas, simulation, or profit guards merely to force a route
 
 ### Bot not buying/selling
 - Check `MAX_ACTIVE_POSITIONS` hasn't been reached
@@ -1332,6 +1378,51 @@ On a successful sweep, the displayed transaction hash is a terminal hyperlink
 to the configured chain's explorer (Robinhood Chain/Blockscout, BaseScan, or
 Etherscan). The URL stays hidden so fleet output displays only the hash;
 terminals without hyperlink support simply show the same readable hash.
+
+## Broadcast and settlement recovery
+
+Receipt lookup rotates across configured RPC endpoints when an endpoint lacks
+the required method or temporarily fails. Once an RPC has accepted a signed
+transaction, the bot never treats an uncertain receipt as permission to send
+the operation again. If the outcome cannot be resolved, it atomically writes
+`data/unresolved_broadcast.json`; all trading loops and later restarts then
+halt before another trade.
+
+The same durable guard protects multi-transaction WETH settlement. It is
+created after a buy wrap confirms and cleared only after the swap and position
+write complete. If a token-to-WETH sale confirms but its required unwrap does
+not, the position remains present and the guard records that settlement needs
+operator recovery. Do not delete this file merely to make the bot run: verify
+the recorded transaction and wallet balances first, reconcile the incomplete
+step, and only then clear the guard.
+
+To recover a successful gridless buy that predates these guards and was omitted
+from local state, stop that bot and pass one or more transaction hashes. The
+option is repeatable, receipt-verified, and dry-run by default:
+
+```bash
+python grid_bot.py \
+  --reconcile-gridless-buy 0xFirstTransactionHash \
+  --reconcile-gridless-buy 0xSecondTransactionHash
+```
+
+The verifier requires a successful receipt from the configured wallet, an
+exact configured-token transfer to that wallet, and recoverable principal plus
+actual gas. Review the proposed position IDs, raw token amounts, and all-in
+costs. Apply the same batch only while the bot remains stopped:
+
+```bash
+python grid_bot.py \
+  --reconcile-gridless-buy 0xFirstTransactionHash \
+  --reconcile-gridless-buy 0xSecondTransactionHash \
+  --apply-reconciliation \
+  --confirm-bot-stopped
+```
+
+Apply is duplicate-proof, writes a timestamped positions backup, atomically
+updates the gridless ledger, and reloads it to verify every imported hash.
+Run from the bot checkout so its `.env` and `data/` paths are used; from another
+directory, use `env -C /absolute/bot/checkout python grid_bot.py ...`.
 
 ## API Reference
 
