@@ -347,9 +347,17 @@ def _execute_quote(provider: Any, wallet: Wallet, config: Any, amount: int, quot
             seal = getattr(provider, "seal_current_operation", None)
             if seal is not None:
                 seal()
-        quote = _refresh_prebroadcast_quote(
-            provider, config, wallet, amount, buy_token,
-        )
+        # The selected quote is already exact-size and only seconds old. Do
+        # not discard it and ask discovery to find the same pool again unless
+        # an approval transaction actually changed on-chain state. The /swap
+        # preparation call still refreshes gas, asks Uniswap to simulate, and
+        # is followed by our mandatory local RPC preflight before broadcast.
+        if prepared_approvals:
+            quote = _refresh_prebroadcast_quote(
+                provider, config, wallet, amount, buy_token,
+            )
+        else:
+            quote = provider.prepare_swap(quote)
         if not quote.success:
             error = ValueError(quote.error or "moonbag quote refresh/preparation failed")
             if not broadcast_attempted:

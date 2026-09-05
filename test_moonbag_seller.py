@@ -248,7 +248,6 @@ class TestMoonbagSeller(unittest.TestCase):
         wallet.w3.eth.get_transaction_count.return_value = 9
         wallet._send_transaction.return_value = SimpleNamespace(success=True, error=None, tx_hash="0xsale")
         initial = SimpleNamespace(success=True, error=None, buy_amount=10**15, gas=100_000, gas_price=0)
-        refreshed = SimpleNamespace(success=True, error=None, raw_response={"quote": True})
         prepared = SimpleNamespace(
             success=True, error=None, buy_amount=10**15, gas=100_000, gas_price=0,
             to=WETH, data="0x1234", value=0,
@@ -260,7 +259,6 @@ class TestMoonbagSeller(unittest.TestCase):
         )
         provider.build_swap_transaction.return_value = initial
         provider.check_approval.return_value = {"cancel": None, "approval": None}
-        provider.get_quote.return_value = refreshed
         provider.prepare_swap.return_value = prepared
 
         with tempfile.TemporaryDirectory() as directory:
@@ -275,50 +273,36 @@ class TestMoonbagSeller(unittest.TestCase):
                 os.chdir(old_cwd)
 
         provider.check_approval.assert_called_once_with(token=TOKEN, amount=250, wallet=wallet.address)
-        provider.prepare_swap.assert_called_once_with(refreshed)
+        provider.get_quote.assert_not_called()
+        provider.prepare_swap.assert_called_once_with(initial)
         wallet._send_transaction.assert_called_once()
 
     @patch("moonbag_seller.time.sleep")
-    def test_api_quote_refresh_failure_is_retried_before_any_broadcast(self, sleep):
+    def test_post_approval_quote_refresh_failure_is_bounded(self, sleep):
         cfg = config()
         wallet = Mock()
         wallet.address = "0x0000000000000000000000000000000000000003"
-        wallet.normal_gas_price.return_value = 100_000_000
-        wallet.get_eth_balance_wei.return_value = 10**18
         provider = Mock()
-        provider.capabilities = SimpleNamespace(
-            api_managed_approval=True, refresh_after_approval=False, quote_requires_preparation=True
-        )
-        provider.check_approval.return_value = {"cancel": None, "approval": None}
+        provider.name = "uniswap"
         provider.get_quote.return_value = SimpleNamespace(
             success=False, error="Uniswap API returned status 404: No quotes available"
         )
-        initial = SimpleNamespace(success=True, buy_amount=10**15, gas=100_000, gas_price=0)
 
-        with self.assertRaisesRegex(moonbag_seller.PreBroadcastRouteFailure, "status 404"):
-            moonbag_seller._execute_quote(provider, wallet, cfg, 250, initial)
+        result = moonbag_seller._refresh_prebroadcast_quote(
+            provider, cfg, wallet, 250, WETH,
+        )
 
+        self.assertFalse(result.success)
         self.assertEqual(provider.get_quote.call_count, 3)
         self.assertEqual(sleep.call_count, 2)
-        wallet._send_transaction.assert_not_called()
 
     @patch("moonbag_seller.time.sleep")
-    def test_api_quote_refresh_recovers_on_bounded_retry(self, sleep):
+    def test_post_approval_quote_refresh_recovers_on_bounded_retry(self, sleep):
         cfg = config()
         wallet = Mock()
         wallet.address = "0x0000000000000000000000000000000000000003"
-        wallet.normal_gas_price.return_value = 100_000_000
-        wallet.get_eth_balance_wei.return_value = 10**18
-        wallet._send_transaction.return_value = SimpleNamespace(
-            success=True, error=None, tx_hash="0xsale",
-        )
         provider = Mock()
         provider.name = "uniswap"
-        provider.capabilities = SimpleNamespace(
-            api_managed_approval=True, refresh_after_approval=False,
-            quote_requires_preparation=True,
-        )
-        provider.check_approval.return_value = {"cancel": None, "approval": None}
         failed = SimpleNamespace(success=False, error="NoRouteFoundError")
         refreshed = SimpleNamespace(success=True, error=None)
         prepared = SimpleNamespace(
@@ -327,14 +311,13 @@ class TestMoonbagSeller(unittest.TestCase):
         )
         provider.get_quote.side_effect = [failed, refreshed]
         provider.prepare_swap.return_value = prepared
-        initial = SimpleNamespace(success=True, buy_amount=10**15, gas=100_000, gas_price=0)
-
-        result = moonbag_seller._execute_quote(provider, wallet, cfg, 250, initial)
+        result = moonbag_seller._refresh_prebroadcast_quote(
+            provider, cfg, wallet, 250, WETH,
+        )
 
         self.assertTrue(result.success)
         self.assertEqual(provider.get_quote.call_count, 2)
         sleep.assert_called_once_with(0.75)
-        wallet._send_transaction.assert_called_once()
 
     @patch("moonbag_seller._execute_quote")
     def test_execution_retries_fallback_after_prebroadcast_primary_failure(self, execute):
