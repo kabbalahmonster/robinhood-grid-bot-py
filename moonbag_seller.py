@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,52 @@ class MoonbagAllocation:
 
 class PreBroadcastRouteFailure(ValueError):
     """A provider route failed while it is still safe to try another route."""
+
+
+def _is_no_route_error(error: Any) -> bool:
+    text = str(error or "").lower()
+    return any(marker in text for marker in (
+        "noroutefounderror", "no route", "no quotes available", "noway",
+    ))
+
+
+def _refresh_prebroadcast_quote(
+    provider: Any, config: Any, wallet: Wallet, amount: int, buy_token: str,
+    *, attempts: int = 3,
+):
+    """Rebuild a previously valid route through a briefly inconsistent API.
+
+    Each attempt starts with a fresh exact-input quote and, when required,
+    fresh executable calldata.  Only no-route discovery failures are retried;
+    semantic/configuration failures return immediately.  Nothing here signs or
+    broadcasts a transaction.
+    """
+    last = None
+    for attempt in range(1, attempts + 1):
+        quote = provider.get_quote(
+            sell_token=config.token_address,
+            buy_token=buy_token,
+            sell_amount=amount,
+            taker_address=wallet.address,
+            slippage_percentage=_slippage_fraction(config),
+        )
+        if quote.success:
+            prepared = provider.prepare_swap(quote)
+            if prepared.success:
+                return prepared
+            last = prepared
+        else:
+            last = quote
+
+        if not _is_no_route_error(getattr(last, "error", None)) or attempt == attempts:
+            return last
+        delay = 0.75 * attempt
+        print(
+            f"{provider.name} fresh route unavailable; retrying exact quote "
+            f"({attempt + 1}/{attempts}) after {delay:.2f}s"
+        )
+        time.sleep(delay)
+    return last
 
 
 def _position_path(config: Any) -> Path:
@@ -300,21 +347,11 @@ def _execute_quote(provider: Any, wallet: Wallet, config: Any, amount: int, quot
             seal = getattr(provider, "seal_current_operation", None)
             if seal is not None:
                 seal()
-        quote = provider.get_quote(
-            sell_token=config.token_address,
-            buy_token=buy_token,
-            sell_amount=amount,
-            taker_address=wallet.address,
-            slippage_percentage=_slippage_fraction(config),
+        quote = _refresh_prebroadcast_quote(
+            provider, config, wallet, amount, buy_token,
         )
         if not quote.success:
-            error = ValueError(quote.error or "moonbag quote refresh failed")
-            if not broadcast_attempted:
-                raise PreBroadcastRouteFailure(str(error)) from error
-            raise error
-        quote = provider.prepare_swap(quote)
-        if not quote.success:
-            error = ValueError(quote.error or "moonbag swap preparation failed")
+            error = ValueError(quote.error or "moonbag quote refresh/preparation failed")
             if not broadcast_attempted:
                 raise PreBroadcastRouteFailure(str(error)) from error
             raise error
