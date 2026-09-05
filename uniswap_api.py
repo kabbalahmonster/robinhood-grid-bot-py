@@ -208,6 +208,14 @@ class UniswapAPIClient:
             )
         elif response.status_code == 200:
             self.rate_limiter.record_success()
+
+    @staticmethod
+    def _is_no_route_failure(response) -> bool:
+        """Return whether the gateway failed to discover executable liquidity."""
+        if response.status_code != 404:
+            return False
+        error_text = (response.text or "")[:1000].lower()
+        return "noroutefounderror" in error_text or "no route" in error_text or "no quotes available" in error_text
     
     def get_quote(
         self,
@@ -289,6 +297,23 @@ class UniswapAPIClient:
             self.logger.debug(f"Fetching Uniswap quote: {payload}")
             
             response = self._post_json("quote", payload)
+
+            # BEST_PRICE/default routing may involve UniswapX discovery. On
+            # newer chains its index can occasionally miss an otherwise live
+            # AMM pool, especially for small-cap v4 pairs. Retry once while
+            # explicitly restricting discovery to canonical AMM liquidity
+            # before allowing the provider adapter to move on to Sushi.
+            if self._is_no_route_failure(response):
+                amm_payload = payload.copy()
+                amm_payload["protocols"] = ["V2", "V3", "V4"]
+                self.logger.warning(
+                    "Uniswap default routing found no route; retrying quote "
+                    "against explicit V2/V3/V4 AMM liquidity"
+                )
+                cooldown_error = self._cooldown_error()
+                if cooldown_error is not None:
+                    return QuoteResult(success=False, error=cooldown_error)
+                response = self._post_json("quote", amm_payload)
             
             self.logger.debug(f"Uniswap API response status: {response.status_code}")
             

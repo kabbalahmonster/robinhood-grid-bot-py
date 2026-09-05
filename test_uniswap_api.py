@@ -140,6 +140,64 @@ class TestUniswapAPIClient(unittest.TestCase):
         self.assertEqual(post.call_args_list[0].kwargs["headers"]["Connection"], "close")
         self.assertEqual(post.call_args_list[1].kwargs["headers"]["Connection"], "close")
 
+    def test_no_route_retries_with_explicit_amm_protocols(self):
+        config = SimpleNamespace(
+            uniswap_api_key="test-key",
+            uniswap_permit2_disabled=True,
+            chain_id=4663,
+            anti_mev_jitter=False,
+        )
+        no_route = SimpleNamespace(
+            status_code=404,
+            text='{"errorCode":"NoRouteFoundError","detail":"No route with sufficient liquidity"}',
+            headers={},
+        )
+        recovered = SimpleNamespace(
+            status_code=200,
+            text="",
+            headers={},
+            json=lambda: {
+                "quote": {
+                    "input": {"amount": "100"},
+                    "output": {"amount": "95"},
+                },
+                "tx": {},
+            },
+        )
+
+        with patch("uniswap_api.requests.post", side_effect=[no_route, recovered]) as post:
+            result = UniswapAPIClient(config).get_quote(
+                "0xin", "0xout", sell_amount=100, taker_address="0xtaker"
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(post.call_count, 2)
+        first_payload = json.loads(post.call_args_list[0].kwargs["data"])
+        retry_payload = json.loads(post.call_args_list[1].kwargs["data"])
+        self.assertNotIn("protocols", first_payload)
+        self.assertEqual(retry_payload["protocols"], ["V2", "V3", "V4"])
+
+    def test_non_route_404_does_not_trigger_amm_retry(self):
+        config = SimpleNamespace(
+            uniswap_api_key="test-key",
+            uniswap_permit2_disabled=True,
+            chain_id=4663,
+            anti_mev_jitter=False,
+        )
+        response = SimpleNamespace(
+            status_code=404,
+            text='{"detail":"unknown token metadata"}',
+            headers={},
+        )
+
+        with patch("uniswap_api.requests.post", return_value=response) as post:
+            result = UniswapAPIClient(config).get_quote(
+                "0xin", "0xout", sell_amount=100, taker_address="0xtaker"
+            )
+
+        self.assertFalse(result.success)
+        self.assertEqual(post.call_count, 1)
+
     def test_shared_gate_covers_approval_and_swap_endpoints(self):
         with tempfile.TemporaryDirectory() as directory:
             config = SimpleNamespace(
