@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 import pytest
+from hexbytes import HexBytes
 
 import gridless
 import gridless_reconciler as reconciler
@@ -16,6 +17,12 @@ def test_transfer_topic_is_canonical_erc20_signature():
     assert reconciler.TRANSFER_TOPIC == (
         "0xddf252ad1be2c89b69c2b068fc378daa"
         "952ba7f163c4a11628f55a4df523b3ef"
+    )
+
+
+def test_rpc_binary_quantity_decoding():
+    assert reconciler._int(HexBytes("0x94104c61039d73e831")) == int(
+        "94104c61039d73e831", 16
     )
 
 

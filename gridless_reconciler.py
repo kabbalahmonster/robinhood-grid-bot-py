@@ -25,6 +25,8 @@ def _hex(value):
 
 
 def _int(value):
+    if isinstance(value, (bytes, bytearray)):
+        return int.from_bytes(value, byteorder="big")
     if isinstance(value, str):
         return int(value, 16) if value.startswith("0x") else int(value)
     return int(value)
