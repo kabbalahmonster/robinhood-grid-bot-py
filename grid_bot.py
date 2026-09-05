@@ -1011,6 +1011,74 @@ class GridBot:
             return int(self.wallet.get_eth_balance_wei())
         return self._raw_token_balance(self.config.weth_address)
 
+    def _actionable_quote_with_weth_fallback(self, *, sell_token, buy_token, sell_amount, direction):
+        """Build the configured route, falling back to the direct WETH leg in native mode."""
+        quote = self.api_client.build_swap_transaction(
+            sell_token=sell_token, buy_token=buy_token, sell_amount=sell_amount,
+            taker_address=self.wallet.address,
+            slippage_percentage=self._swap_slippage_fraction(),
+        )
+        uses_weth = False
+        if quote.success or not getattr(self.config, "use_eth_trading", False):
+            return quote, uses_weth
+        fallback_sell = self.config.weth_address if direction == "buy" else sell_token
+        fallback_buy = buy_token if direction == "buy" else self.config.weth_address
+        logger.warning(
+            "%s native ETH route unavailable; trying direct WETH settlement: %s",
+            direction.capitalize(), quote.error,
+        )
+        quote = self.api_client.build_swap_transaction(
+            sell_token=fallback_sell, buy_token=fallback_buy, sell_amount=sell_amount,
+            taker_address=self.wallet.address,
+            slippage_percentage=self._swap_slippage_fraction(),
+        )
+        if quote.success:
+            uses_weth = True
+            logger.warning("ROUTE FALLBACK: using direct WETH %s settlement", direction)
+        try:
+            setattr(quote, "weth_fallback", uses_weth)
+        except Exception:
+            pass
+        return quote, uses_weth
+
+    def _project_weth_operation_gas(self, direction, amount_wei):
+        """Return (transaction, conservative projected gas) for an exact wrap/unwrap."""
+        if direction == "buy":
+            tx = self.wallet.build_weth_deposit_transaction(self.config.weth_address, amount_wei)
+        else:
+            tx = self.wallet.build_weth_withdraw_transaction(self.config.weth_address, amount_wei)
+        gas_price = int(tx.get("gasPrice") or tx.get("maxFeePerGas") or 0)
+        return tx, int(tx["gas"]) * gas_price
+
+    def _execute_weth_unwrap(self, amount_wei):
+        """Unwrap an exact confirmed WETH receipt and return (result, confirmed gas)."""
+        tx, _ = self._project_weth_operation_gas("sell", amount_wei)
+        reserve = int(float(getattr(self.config, "eth_gas_reserve", 0.001)) * 10**18)
+        max_gas = int(tx["gas"]) * int(tx.get("gasPrice") or tx.get("maxFeePerGas") or 0)
+        if self.wallet.get_eth_balance_wei() - max_gas < reserve:
+            raise RuntimeError("WETH unwrap would breach ETH_GAS_RESERVE")
+        result = self.wallet.unwrap_weth(tx, wait_for_receipt=True)
+        if not result.success:
+            raise RuntimeError(f"WETH unwrap failed: {result.error}")
+        return result, self._receipt_gas_cost_wei(result)
+
+    def _guard_confirmed_wrap(self, result, amount_wei):
+        """Durably prevent another buy from wrapping again before this one settles."""
+        self.wallet._record_unresolved_broadcast(
+            result.tx_hash or "confirmed-weth-wrap",
+            {"nonce": None, "to": self.config.weth_address, "value": int(amount_wei)},
+            "confirmed WETH wrap awaiting buy swap settlement",
+        )
+
+    def _clear_settlement_guard(self):
+        """Clear a guard only after the corresponding full settlement completed."""
+        path = getattr(self.wallet, "unresolved_broadcast_path", "data/unresolved_broadcast.json")
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+        self.wallet.unresolved_broadcast = None
+
     def _receipt_token_received_raw(self, result):
         """Recover managed-token output from Transfer logs when RPC state lags."""
         receipt = getattr(result, 'receipt', None) or {}
@@ -1803,12 +1871,9 @@ class GridBot:
         from gridless import add_position
         
         # Get quote
-        quote = self.api_client.build_swap_transaction(
-            sell_token=self.trade_token_address,
-            buy_token=self.config.token_address,
-            sell_amount=buy_amount_wei,
-            taker_address=self.wallet.address,
-            slippage_percentage=self._swap_slippage_fraction(),
+        quote, weth_fallback = self._actionable_quote_with_weth_fallback(
+            sell_token=self.trade_token_address, buy_token=self.config.token_address,
+            sell_amount=buy_amount_wei, direction="buy",
         )
         
         if not quote.success:
@@ -1887,12 +1952,26 @@ class GridBot:
             self._buy_attempt = {**buy_attempt_context, **selection}
         
         buy_setup_gas_wei = 0
+        if weth_fallback:
+            wrap_tx, wrap_projected_gas = self._project_weth_operation_gas("buy", buy_amount_wei)
+            reserve = int(float(getattr(self.config, "eth_gas_reserve", 0.001)) * 10**18)
+            projected_swap_gas = self._projected_gas_cost_wei(quote, 350000)
+            if self.wallet.get_eth_balance_wei() - buy_amount_wei - wrap_projected_gas - projected_swap_gas < reserve:
+                logger.warning("WETH buy fallback refused: wrap + swap would breach ETH_GAS_RESERVE")
+                return
+            wrap_result = self.wallet.wrap_eth(wrap_tx, wait_for_receipt=True)
+            if not wrap_result.success:
+                logger.error("WETH buy fallback wrap failed: %s", wrap_result.error)
+                return
+            buy_setup_gas_wei += self._receipt_gas_cost_wei(wrap_result)
+            self._seal_provider_fallback()
+            self._guard_confirmed_wrap(wrap_result, buy_amount_wei)
         # Determine approval spender
         spender = quote.allowance_target or self.config.zero_x_proxy
         
         # Check/approve WETH
         # Check/approve WETH (skip for native ETH - it doesn't need approval)
-        if not getattr(self.config, 'use_eth_trading', False):
+        if not getattr(self.config, 'use_eth_trading', False) or weth_fallback:
             allowance = self.wallet.check_allowance(self.config.weth_address, spender, use_permit2=False)
             if allowance < buy_amount_wei:
                 logger.info(f"Approving WETH to {spender[:20]}...")
@@ -1966,6 +2045,8 @@ class GridBot:
             logger.debug(f"Quote buy_amount: {quote.buy_amount}, sell_amount: {quote.sell_amount}")
             
             pos_id = add_position(cost_wei, tokens_received)
+            if weth_fallback:
+                self._clear_settlement_guard()
             
             tokens = tokens_received / self.token_unit
             economic_cost_eth = cost_wei / 10**18
@@ -2036,12 +2117,9 @@ class GridBot:
         if not self._wallet_can_cover_sell(balance, pos_id):
             return
             
-        quote = self.api_client.build_swap_transaction(
-            sell_token=self.config.token_address,
-            buy_token=self.trade_token_address,
-            sell_amount=balance,
-            taker_address=self.wallet.address,
-            slippage_percentage=self._swap_slippage_fraction(),
+        quote, weth_fallback = self._actionable_quote_with_weth_fallback(
+            sell_token=self.config.token_address, buy_token=self.trade_token_address,
+            sell_amount=balance, direction="sell",
         )
         
         if not quote.success:
@@ -2058,7 +2136,7 @@ class GridBot:
         consistency_block = self._sell_quote_consistency_guard(
             pos_id, quote_provider, quote_return_wei,
         )
-        if consistency_block:
+        if consistency_block and not weth_fallback:
             # A cached quote from the other provider is only an alarm bell,
             # never an execution input.  Compare the current executable quote
             # with one freshly-built counterpart immediately—even for a small
@@ -2104,7 +2182,8 @@ class GridBot:
             self.config, "max_sell_gas_eth",
             getattr(self.config, "max_swap_gas_eth", 0.00004),
         )) * 10**18)
-        if sell_cap_wei > 0 and probe_gas_limit * probe_gas_price > sell_cap_wei:
+        if (not weth_fallback and sell_cap_wei > 0
+                and probe_gas_limit * probe_gas_price > sell_cap_wei):
             selected_provider, selected_quote, selection = self._alternate_route_for_gas_cap(
                 self.provider.active, quote,
                 sell_token=self.config.token_address,
@@ -2139,7 +2218,12 @@ class GridBot:
         min_profit_eth = cost_eth * (min_profit / 100)
         quote_return_eth = quote_return_wei / 10**18
         quote_profit_eth = quote_return_eth - cost_eth
-        projected_gas_eth = self._projected_gas_cost_wei(quote) / 10**18
+        unwrap_projected_wei = 0
+        if weth_fallback:
+            _, unwrap_projected_wei = self._project_weth_operation_gas(
+                "sell", self._taxed_quote_return_wei(quote)
+            )
+        projected_gas_eth = (self._projected_gas_cost_wei(quote) + unwrap_projected_wei) / 10**18
         projected_net_profit_eth = quote_profit_eth - projected_gas_eth
         
         if projected_net_profit_eth < min_profit_eth:
@@ -2212,6 +2296,7 @@ class GridBot:
         # Use pre-fetched quote if available (for moonbag, need to re-quote with different amount)
         if pre_fetched_quote and moonbag_pct == 0 and sell_amount == balance:
             quote = pre_fetched_quote
+            weth_fallback = bool(getattr(quote, "weth_fallback", False))
         else:
             # Get fresh quote (for moonbag or if no pre-fetched quote)
             quote = self.api_client.build_swap_transaction(
@@ -2221,6 +2306,7 @@ class GridBot:
                 taker_address=self.wallet.address,
                 slippage_percentage=self._swap_slippage_fraction(),
             )
+            weth_fallback = False
         
         if not quote.success:
             logger.error(f"Gridless sell quote failed: {quote.error}")
@@ -2230,8 +2316,14 @@ class GridBot:
         # Validate minimum profit
         min_profit = getattr(self.config, 'min_profit_percent', 1.5)
         min_profit_eth = sold_cost_eth * (min_profit / 100)
+        unwrap_projected_wei = 0
+        if weth_fallback:
+            _, unwrap_projected_wei = self._project_weth_operation_gas(
+                "sell", self._taxed_quote_return_wei(quote)
+            )
         min_return_eth = self._minimum_gas_aware_return_wei(
-            int(round(sold_cost_eth * 10**18)), quote, min_profit
+            int(round(sold_cost_eth * 10**18)), quote, min_profit,
+            setup_gas_wei=unwrap_projected_wei,
         ) / 10**18
         quote_return_eth = self._taxed_quote_return_wei(quote) / 10**18
         
@@ -2245,7 +2337,8 @@ class GridBot:
             return
 
         initial_gas_limit, initial_gas_price = self._swap_gas_fields(quote, 300000)
-        if not self._gas_within_hard_cap(initial_gas_limit, initial_gas_price, "sell"):
+        if (not weth_fallback
+                and not self._gas_within_hard_cap(initial_gas_limit, initial_gas_price, "sell")):
             selected_provider, selected_quote, selection = self._alternate_route_for_gas_cap(
                 self.provider.active, quote,
                 sell_token=self.config.token_address,
@@ -2269,7 +2362,9 @@ class GridBot:
                 logger.warning("❌ Alternate sell route failed gas-aware profit floor")
                 return
         
-        sell_setup_gas_wei = 0
+        # Reserve projected unwrap gas in every later profit-floor calculation.
+        # Replace it with the confirmed fee after settlement.
+        sell_setup_gas_wei = unwrap_projected_wei
         # Providers with API-managed approvals return the required approval txs.
         if self.provider.capabilities.api_managed_approval:
                 # Step 1: Check approval via Uniswap API
@@ -2400,7 +2495,7 @@ class GridBot:
                 # Step 4: Get fresh quote after approval
                 quote = self.api_client.get_quote(
                     sell_token=self.config.token_address,
-                    buy_token=self.trade_token_address,
+                    buy_token=(self.config.weth_address if weth_fallback else self.trade_token_address),
                     sell_amount=sell_amount,
                     taker_address=self.wallet.address,
                         slippage_percentage=self._swap_slippage_fraction(),
@@ -2432,7 +2527,7 @@ class GridBot:
                 if self.provider.capabilities.refresh_after_approval:
                     quote = self.api_client.refresh_quote(
                         sell_token=self.config.token_address,
-                        buy_token=self.trade_token_address,
+                        buy_token=(self.config.weth_address if weth_fallback else self.trade_token_address),
                         sell_amount=sell_amount,
                         taker_address=self.wallet.address,
                         slippage_percentage=self._swap_slippage_fraction(),
@@ -2467,7 +2562,10 @@ class GridBot:
             return
 
         from web3 import Web3
-        trade_balance_before = self._raw_trade_balance()
+        trade_balance_before = (
+            self._raw_token_balance(self.config.weth_address)
+            if weth_fallback else self._raw_trade_balance()
+        )
         result = self.wallet._send_transaction({
             "from": Web3.to_checksum_address(self.wallet.address),
             "to": Web3.to_checksum_address(quote.to),
@@ -2480,9 +2578,28 @@ class GridBot:
         })
         
         if result.success:
-            received_wei = self._measured_trade_received_wei(
-                trade_balance_before, result, self._taxed_quote_return_wei(quote)
-            )
+            if weth_fallback:
+                received_wei = max(
+                    0, self._raw_token_balance(self.config.weth_address) - trade_balance_before
+                ) or self._taxed_quote_return_wei(quote)
+                try:
+                    unwrap_result, unwrap_gas_wei = self._execute_weth_unwrap(received_wei)
+                except Exception as exc:
+                    self.wallet._record_unresolved_broadcast(
+                        result.tx_hash or "confirmed-weth-swap",
+                        {"nonce": None, "to": quote.to, "value": 0},
+                        f"confirmed WETH sell awaiting unwrap for position {pos_id}: {exc}",
+                    )
+                    logger.critical(
+                        "Sell swap confirmed as WETH but unwrap did not complete; position retained and trading halted: %s", exc
+                    )
+                    return
+                sell_setup_gas_wei += unwrap_gas_wei - unwrap_projected_wei
+                logger.info("WETH settlement unwrap confirmed: %s", unwrap_result.tx_hash)
+            else:
+                received_wei = self._measured_trade_received_wei(
+                    trade_balance_before, result, self._taxed_quote_return_wei(quote)
+                )
             logger.info("Measured trade-token receipt: %s wei", received_wei)
             eth_received = received_wei / 10**18
             sold_cost_wei = int(round(sold_cost_eth * 10**18))
@@ -2558,12 +2675,9 @@ class GridBot:
         
         # Get quote FIRST to know the approval spender
         logger.info("Getting quote...")
-        quote = self.api_client.build_swap_transaction(
-            sell_token=self.trade_token_address,
-            buy_token=self.config.token_address,
-            sell_amount=buy_amount_wei,
-            taker_address=self.wallet.address,
-            slippage_percentage=self._swap_slippage_fraction(),
+        quote, weth_fallback = self._actionable_quote_with_weth_fallback(
+            sell_token=self.trade_token_address, buy_token=self.config.token_address,
+            sell_amount=buy_amount_wei, direction="buy",
         )
         
         if not quote.success:
@@ -2597,11 +2711,24 @@ class GridBot:
             self._buy_attempt = {**buy_attempt_context, **selection}
         
         buy_setup_gas_wei = 0
+        if weth_fallback:
+            wrap_tx, wrap_projected_gas = self._project_weth_operation_gas("buy", buy_amount_wei)
+            reserve = int(float(getattr(self.config, "eth_gas_reserve", 0.001)) * 10**18)
+            if self.wallet.get_eth_balance_wei() - buy_amount_wei - wrap_projected_gas - self._projected_gas_cost_wei(quote, 350000) < reserve:
+                logger.warning("WETH buy fallback refused: wrap + swap would breach ETH_GAS_RESERVE")
+                return
+            wrap_result = self.wallet.wrap_eth(wrap_tx, wait_for_receipt=True)
+            if not wrap_result.success:
+                logger.error("WETH buy fallback wrap failed: %s", wrap_result.error)
+                return
+            buy_setup_gas_wei += self._receipt_gas_cost_wei(wrap_result)
+            self._seal_provider_fallback()
+            self._guard_confirmed_wrap(wrap_result, buy_amount_wei)
         # Determine approval spender - use quote's allowance_target if available (LI.FI)
         spender = quote.allowance_target or self.config.zero_x_proxy
         
         # Check ERC20 approval (skip for native ETH - it doesn't need approval)
-        if not getattr(self.config, 'use_eth_trading', False):
+        if not getattr(self.config, 'use_eth_trading', False) or weth_fallback:
             allowance = self.wallet.check_allowance(
                 self.config.weth_address,
                 spender,
@@ -2690,6 +2817,8 @@ class GridBot:
             # Keep legacy 'cost' field for backward compatibility
             self.positions[pos_id]['cost'] = cost_wei // 10**9
             self.save_positions()
+            if weth_fallback:
+                self._clear_settlement_guard()
             
             # Calculate buy price for logging
             economic_cost_eth = cost_wei / 10**18
@@ -2768,12 +2897,9 @@ class GridBot:
         logger.info(f"   Profit: {profit_eth:.6f} {self.trade_token_name} ({profit_percent:+.2f}%)")
         
         # Get quote
-        quote = self.provider.build_swap_transaction(
-            sell_token=self.config.token_address,
-            buy_token=self.trade_token_address,
-            sell_amount=sell_amount,
-            taker_address=self.wallet.address,
-            slippage_percentage=self._swap_slippage_fraction(),
+        quote, weth_fallback = self._actionable_quote_with_weth_fallback(
+            sell_token=self.config.token_address, buy_token=self.trade_token_address,
+            sell_amount=sell_amount, direction="sell",
         )
         
         if not quote.success:
@@ -2786,17 +2912,25 @@ class GridBot:
         # This first guard deliberately runs before allowance inspection.
         min_profit_percent = getattr(self.config, 'min_profit_percent', 2.0)
         preapproval_return_wei = self._taxed_quote_return_wei(quote)
+        unwrap_projected_wei = 0
+        if weth_fallback:
+            _, unwrap_projected_wei = self._project_weth_operation_gas(
+                "sell", self._taxed_quote_return_wei(quote)
+            )
         preapproval_minimum_wei = self._minimum_gas_aware_return_wei(
-            int(round(sold_cost_eth * 10**18)), quote, min_profit_percent
+            int(round(sold_cost_eth * 10**18)), quote, min_profit_percent,
+            setup_gas_wei=unwrap_projected_wei,
         )
         if preapproval_return_wei < preapproval_minimum_wei:
             logger.warning("Primary sell route misses profit floor; checking configured alternate")
-            alternate, alternate_quote = self._alternate_sell_route_for_profit_floor(
-                self.provider.active,
-                sell_amount=sell_amount,
-                sold_cost_wei=int(round(sold_cost_eth * 10**18)),
-                min_profit_percent=min_profit_percent,
-            )
+            alternate, alternate_quote = (None, None)
+            if not weth_fallback:
+                alternate, alternate_quote = self._alternate_sell_route_for_profit_floor(
+                    self.provider.active,
+                    sell_amount=sell_amount,
+                    sold_cost_wei=int(round(sold_cost_eth * 10**18)),
+                    min_profit_percent=min_profit_percent,
+                )
             if alternate is None:
                 logger.warning(
                     "❌ Sell ABORTED before approval: return %.8f ETH < gas-aware minimum %.8f ETH",
@@ -2809,7 +2943,8 @@ class GridBot:
             logger.info("✅ Alternate %s route clears gas-aware profit floor", alternate.name)
 
         initial_gas_limit, initial_gas_price = self._swap_gas_fields(quote, 300000)
-        if not self._gas_within_hard_cap(initial_gas_limit, initial_gas_price, "sell"):
+        if (not weth_fallback
+                and not self._gas_within_hard_cap(initial_gas_limit, initial_gas_price, "sell")):
             selected_provider, selected_quote, selection = self._alternate_route_for_gas_cap(
                 self.provider.active, quote,
                 sell_token=self.config.token_address,
@@ -2835,7 +2970,7 @@ class GridBot:
         # otherwise fall back to zero_x_proxy (0x Protocol)
         spender = quote.allowance_target or self.config.zero_x_proxy
         
-        sell_setup_gas_wei = 0
+        sell_setup_gas_wei = unwrap_projected_wei
         # Check/approve token for selling
         token_allowance = self.wallet.check_allowance(
             self.config.token_address,
@@ -2861,7 +2996,7 @@ class GridBot:
                 logger.info(f"Refreshing {self.provider.name} quote after approval...")
                 quote = self.api_client.refresh_quote(
                     sell_token=self.config.token_address,
-                    buy_token=self.trade_token_address,
+                    buy_token=(self.config.weth_address if weth_fallback else self.trade_token_address),
                     sell_amount=sell_amount,
                     taker_address=self.wallet.address,
                     slippage_percentage=self._swap_slippage_fraction(),
@@ -2917,7 +3052,10 @@ class GridBot:
         if not self._gas_within_hard_cap(gas_limit, gas_price, "sell"):
             return
         
-        trade_balance_before = self._raw_trade_balance()
+        trade_balance_before = (
+            self._raw_token_balance(self.config.weth_address)
+            if weth_fallback else self._raw_trade_balance()
+        )
         result = self.wallet._send_transaction({
             "from": Web3.to_checksum_address(self.wallet.address),
             "to": Web3.to_checksum_address(quote.to),
@@ -2931,9 +3069,28 @@ class GridBot:
         
         if result.success:
             # Get actual ETH/WETH received from transaction
-            received_wei = self._measured_trade_received_wei(
-                trade_balance_before, result, self._taxed_quote_return_wei(quote)
-            )
+            if weth_fallback:
+                received_wei = max(
+                    0, self._raw_token_balance(self.config.weth_address) - trade_balance_before
+                ) or self._taxed_quote_return_wei(quote)
+                try:
+                    unwrap_result, actual_unwrap_gas = self._execute_weth_unwrap(received_wei)
+                except Exception as exc:
+                    self.wallet._record_unresolved_broadcast(
+                        result.tx_hash or "confirmed-weth-swap",
+                        {"nonce": None, "to": quote.to, "value": 0},
+                        f"confirmed WETH sell awaiting unwrap for position {pos_id}: {exc}",
+                    )
+                    logger.critical(
+                        "Sell swap confirmed as WETH but unwrap did not complete; position retained and trading halted: %s", exc
+                    )
+                    return
+                sell_setup_gas_wei += actual_unwrap_gas - unwrap_projected_wei
+                logger.info("WETH settlement unwrap confirmed: %s", unwrap_result.tx_hash)
+            else:
+                received_wei = self._measured_trade_received_wei(
+                    trade_balance_before, result, self._taxed_quote_return_wei(quote)
+                )
             logger.info("Measured trade-token receipt: %s wei", received_wei)
             eth_received = received_wei / 10**18
             sold_cost_wei = int(round(sold_cost_eth * 10**18))

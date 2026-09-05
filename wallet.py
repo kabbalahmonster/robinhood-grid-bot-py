@@ -456,6 +456,33 @@ class Wallet:
         """Sign and send a previously reviewed native-ETH transfer."""
         return self._send_transaction(tx, wait_for_receipt)
 
+    def build_weth_deposit_transaction(self, weth_address: str, amount_wei: int) -> TxParams:
+        """Build a WETH ``deposit`` transaction for an exact native amount."""
+        if amount_wei <= 0:
+            raise ValueError("WETH deposit amount must be positive")
+        weth = self.w3.eth.contract(
+            address=Web3.to_checksum_address(weth_address),
+            abi=WETH_ABI,
+        )
+        gas_price = self.normal_gas_price()
+        tx = weth.functions.deposit().build_transaction({
+            "from": self.address,
+            "value": int(amount_wei),
+            "nonce": self.w3.eth.get_transaction_count(self.address, "pending"),
+            "gasPrice": gas_price,
+            "chainId": int(self.config.chain_id),
+        })
+        estimated = int(self.w3.eth.estimate_gas(tx))
+        tx["gas"] = max(
+            estimated,
+            int(estimated * max(float(self.config.gas_limit_multiplier), 1.0)),
+        )
+        return tx
+
+    def wrap_eth(self, tx: TxParams, wait_for_receipt: bool = True) -> TransactionResult:
+        """Sign and send a previously reviewed WETH deposit transaction."""
+        return self._send_transaction(tx, wait_for_receipt)
+
     def build_weth_withdraw_transaction(self, weth_address: str, amount_wei: int) -> TxParams:
         """Build a WETH ``withdraw`` transaction that unwraps into native ETH."""
         if amount_wei <= 0:
