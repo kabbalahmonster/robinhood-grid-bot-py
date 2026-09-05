@@ -16,6 +16,7 @@ from wallet import Wallet
 
 
 UNISWAP_ETH_ADDRESS = "0x0000000000000000000000000000000000000000"
+WETH_UNWRAP_GAS_LIMIT = 75_000
 
 @dataclass(frozen=True)
 class MoonbagAllocation:
@@ -162,8 +163,14 @@ def _validate_economics(
     return gas_limit, gas_price, gas_wei
 
 
-def _build_quote(provider: Any, wallet: Wallet, config: Any, amount: int) -> Any:
-    buy_token = UNISWAP_ETH_ADDRESS if getattr(config, "use_eth_trading", False) else config.weth_address
+def _configured_buy_token(config: Any) -> str:
+    return UNISWAP_ETH_ADDRESS if getattr(config, "use_eth_trading", False) else config.weth_address
+
+
+def _build_quote(
+    provider: Any, wallet: Wallet, config: Any, amount: int, buy_token: str | None = None,
+) -> Any:
+    buy_token = buy_token or _configured_buy_token(config)
     quote = provider.build_swap_transaction(
         sell_token=config.token_address,
         buy_token=buy_token,
@@ -174,7 +181,9 @@ def _build_quote(provider: Any, wallet: Wallet, config: Any, amount: int) -> Any
     return quote
 
 
-def _select_provider_quote(provider: Any, wallet: Wallet, config: Any, amount: int) -> tuple[Any, Any]:
+def _select_provider_quote(
+    provider: Any, wallet: Wallet, config: Any, amount: int, buy_token: str | None = None,
+) -> tuple[Any, Any]:
     """Select an executable route before approval so calldata never crosses providers.
 
     A route returning a quote is not sufficient: its projected transaction gas
@@ -185,7 +194,7 @@ def _select_provider_quote(provider: Any, wallet: Wallet, config: Any, amount: i
     candidates = [provider.primary, provider.fallback] if isinstance(provider, FallbackSwapProvider) else [provider]
     errors = []
     for candidate in candidates:
-        quote = _build_quote(candidate, wallet, config, amount)
+        quote = _build_quote(candidate, wallet, config, amount, buy_token)
         if not quote.success:
             errors.append(f"{candidate.name}: {quote.error or 'quote failed'}")
             continue
@@ -196,6 +205,72 @@ def _select_provider_quote(provider: Any, wallet: Wallet, config: Any, amount: i
             continue
         return candidate, quote
     raise ValueError("; ".join(errors))
+
+
+def _select_moonbag_route(
+    provider: Any, wallet: Wallet, config: Any, amount: int,
+) -> tuple[Any, Any, str, str | None]:
+    """Prefer configured settlement, falling back from native ETH to direct WETH."""
+    buy_token = _configured_buy_token(config)
+    try:
+        selected, quote = _select_provider_quote(provider, wallet, config, amount, buy_token)
+        return selected, quote, buy_token, None
+    except ValueError as native_error:
+        if buy_token.lower() != UNISWAP_ETH_ADDRESS.lower():
+            raise
+        selected, quote = _select_provider_quote(
+            provider, wallet, config, amount, config.weth_address,
+        )
+        return selected, quote, config.weth_address, str(native_error)
+
+
+def _project_settlement_gas(
+    wallet: Wallet,
+    config: Any,
+    *,
+    settles_to_weth: bool,
+    treasury_recipient: str | None,
+) -> tuple[int, int]:
+    """Return conservative unwrap and treasury-transfer gas projections."""
+    gas_price = int(
+        wallet.normal_gas_price()
+        * max(float(getattr(config, "gas_price_multiplier", 1.0)), 1.0)
+        * max(float(getattr(config, "gas_price_freshness_multiplier", 1.01)), 1.0)
+    )
+    unwrap_gas = WETH_UNWRAP_GAS_LIMIT * gas_price if settles_to_weth else 0
+    transfer_gas = 0
+    if treasury_recipient is not None:
+        transfer_tx = wallet.build_eth_transfer_transaction(treasury_recipient, 1)
+        transfer_gas = int(transfer_tx["gas"]) * max(int(transfer_tx["gasPrice"]), gas_price)
+    return unwrap_gas, transfer_gas
+
+
+def _validate_complete_economics(
+    wallet: Wallet,
+    config: Any,
+    quote: Any,
+    *,
+    settles_to_weth: bool,
+    treasury_recipient: str | None,
+) -> tuple[int, int, int, int, int]:
+    gas_limit, gas_price, swap_gas = _validate_economics(wallet, config, quote)
+    unwrap_gas, transfer_gas = _project_settlement_gas(
+        wallet,
+        config,
+        settles_to_weth=settles_to_weth,
+        treasury_recipient=treasury_recipient,
+    )
+    total_gas = swap_gas + unwrap_gas + transfer_gas
+    if _effective_quote_output(config, quote) <= total_gas:
+        raise ValueError("quoted output does not exceed projected swap and settlement gas")
+    reserve_wei = int(float(getattr(config, "eth_gas_reserve", 0.0005)) * 10**18)
+    # The wallet must fund swap and unwrap before proceeds become native ETH.
+    # Treasury-transfer gas is paid after settlement and is deducted from the
+    # proceeds above, so requiring it on top of the starting reserve would
+    # reject otherwise safe wallets unnecessarily.
+    if wallet.get_eth_balance_wei() - swap_gas - unwrap_gas < reserve_wei:
+        raise ValueError("sale settlement would breach ETH_GAS_RESERVE")
+    return gas_limit, gas_price, swap_gas, unwrap_gas, transfer_gas
 
 
 def _send_quote(wallet: Wallet, config: Any, quote: Any, gas_limit: int, gas_price: int):
@@ -303,12 +378,15 @@ def _receipt_gas_wei(result: Any, fallback: int) -> int:
     return int(gas_used) * int(gas_price) if gas_used is not None and gas_price is not None else int(fallback)
 
 
-def _execute_quote(provider: Any, wallet: Wallet, config: Any, amount: int, quote: Any):
+def _execute_quote(
+    provider: Any, wallet: Wallet, config: Any, amount: int, quote: Any,
+    buy_token: str | None = None,
+):
     try:
         _validate_economics(wallet, config, quote)
     except Exception as exc:
         raise PreBroadcastRouteFailure(str(exc)) from exc
-    buy_token = UNISWAP_ETH_ADDRESS if getattr(config, "use_eth_trading", False) else config.weth_address
+    buy_token = buy_token or _configured_buy_token(config)
     broadcast_attempted = False
 
     if provider.capabilities.api_managed_approval:
@@ -418,15 +496,18 @@ def _execute_with_route_fallback(
     config: Any,
     amount: int,
     quote: Any,
+    buy_token: str | None = None,
 ) -> tuple[Any, Any, Any, str | None]:
     """Retry the fallback route only when the primary failed before broadcast."""
     try:
-        return selected_provider, quote, _execute_quote(selected_provider, wallet, config, amount, quote), None
+        return selected_provider, quote, _execute_quote(
+            selected_provider, wallet, config, amount, quote, buy_token,
+        ), None
     except PreBroadcastRouteFailure as primary_error:
         if not isinstance(provider, FallbackSwapProvider) or selected_provider is not provider.primary:
             raise
         fallback = provider.fallback
-        fallback_quote = _build_quote(fallback, wallet, config, amount)
+        fallback_quote = _build_quote(fallback, wallet, config, amount, buy_token)
         if not fallback_quote.success:
             raise ValueError(
                 f"{selected_provider.name} became unavailable before broadcast: {primary_error}; "
@@ -434,7 +515,7 @@ def _execute_with_route_fallback(
             ) from primary_error
         try:
             _validate_economics(wallet, config, fallback_quote)
-            result = _execute_quote(fallback, wallet, config, amount, fallback_quote)
+            result = _execute_quote(fallback, wallet, config, amount, fallback_quote, buy_token)
         except Exception as fallback_error:
             raise ValueError(
                 f"{selected_provider.name} became unavailable before broadcast: {primary_error}; "
@@ -473,14 +554,34 @@ def run_moonbag_sale(args: Any) -> int:
             print("SKIP: no unallocated token balance to sell.")
             return 0
 
-        selected_provider, quote = _select_provider_quote(provider, wallet, config, allocation.moonbag_raw)
-        _, _, gas_wei = _validate_economics(wallet, config, quote)
-        settlement = "ETH" if getattr(config, "use_eth_trading", False) else "WETH"
+        selected_provider, quote, buy_token, native_route_failure = _select_moonbag_route(
+            provider, wallet, config, allocation.moonbag_raw
+        )
+        settles_to_weth = buy_token.lower() == config.weth_address.lower()
+        needs_unwrap = settles_to_weth and (
+            send_to_treasury or getattr(config, "use_eth_trading", False)
+        )
+        _, _, gas_wei, unwrap_gas_wei, transfer_gas_wei = _validate_complete_economics(
+            wallet,
+            config,
+            quote,
+            settles_to_weth=needs_unwrap,
+            treasury_recipient=recipient,
+        )
+        settlement = "WETH" if settles_to_weth else "ETH"
         output_wei = _effective_quote_output(config, quote)
+        if native_route_failure is not None:
+            print("ROUTE FALLBACK: native ETH route unavailable; using direct WETH settlement")
         print(f"Provider:   {selected_provider.name}")
         print(f"Quoted:     {output_wei / 1e18:.12f} {settlement}")
         print(f"Swap gas:   {gas_wei / 1e18:.12f} ETH projected")
-        print(f"Net est.:   {(output_wei - gas_wei) / 1e18:.12f} {settlement} after swap gas")
+        if unwrap_gas_wei:
+            print(f"Unwrap gas: {unwrap_gas_wei / 1e18:.12f} ETH projected")
+        if transfer_gas_wei:
+            print(f"Forward gas:{transfer_gas_wei / 1e18:13.12f} ETH projected")
+        total_gas_wei = gas_wei + unwrap_gas_wei + transfer_gas_wei
+        final_unit = "ETH" if needs_unwrap or recipient is not None else settlement
+        print(f"Net est.:   {(output_wei - total_gas_wei) / 1e18:.12f} {final_unit} after all projected gas")
         if send_to_treasury:
             print(f"Treasury:   {recipient} (forward actual net proceeds only)")
         if not args.execute:
@@ -489,19 +590,28 @@ def run_moonbag_sale(args: Any) -> int:
 
         eth_before_sale = int(wallet.get_eth_balance_wei()) if send_to_treasury else None
         weth_before_sale = None
-        if send_to_treasury and not getattr(config, "use_eth_trading", False):
+        if needs_unwrap:
             _, weth_before_sale = wallet.get_token_balance(config.weth_address)
         selected_provider, quote, result, route_failure = _execute_with_route_fallback(
-            provider, selected_provider, wallet, config, allocation.moonbag_raw, quote
+            provider, selected_provider, wallet, config, allocation.moonbag_raw, quote, buy_token
         )
         if route_failure is not None:
-            _, _, gas_wei = _validate_economics(wallet, config, quote)
+            _, _, gas_wei, unwrap_gas_wei, transfer_gas_wei = _validate_complete_economics(
+                wallet,
+                config,
+                quote,
+                settles_to_weth=needs_unwrap,
+                treasury_recipient=recipient,
+            )
             output_wei = _effective_quote_output(config, quote)
             print(f"ROUTE RETRY: primary failed before broadcast: {route_failure}")
             print(f"Provider:   {selected_provider.name} (fallback)")
             print(f"Quoted:     {output_wei / 1e18:.12f} {settlement}")
             print(f"Swap gas:   {gas_wei / 1e18:.12f} ETH projected")
-            print(f"Net est.:   {(output_wei - gas_wei) / 1e18:.12f} {settlement} after swap gas")
+            print(
+                f"Net est.:   {(output_wei - gas_wei - unwrap_gas_wei - transfer_gas_wei) / 1e18:.12f} "
+                f"{final_unit} after all projected gas"
+            )
         if not result.success:
             raise ValueError(result.error or "moonbag swap failed")
         _, remaining_raw = wallet.get_token_balance(config.token_address)
@@ -518,6 +628,16 @@ def run_moonbag_sale(args: Any) -> int:
                 raise ValueError(f"sale confirmed but treasury forwarding failed: {exc}") from exc
             print(f"TREASURY CONFIRMED: {treasury_result.tx_hash}")
             print(f"Treasury net: {amount_wei / 1e18:.12f} ETH")
+        elif needs_unwrap:
+            _, weth_after_sale = wallet.get_token_balance(config.weth_address)
+            received_weth = int(weth_after_sale) - int(weth_before_sale)
+            if received_weth <= 0:
+                raise ValueError("sale produced no measurable WETH to unwrap")
+            unwrap_tx = wallet.build_weth_withdraw_transaction(config.weth_address, received_weth)
+            unwrap_result = wallet.unwrap_weth(unwrap_tx, wait_for_receipt=True)
+            if not unwrap_result.success:
+                raise ValueError(f"sale confirmed but WETH unwrap failed: {unwrap_result.error}")
+            print(f"UNWRAP CONFIRMED: {unwrap_result.tx_hash}")
         return 0
     except Exception as exc:
         print(f"MOONBAG SALE REFUSED: {exc}")

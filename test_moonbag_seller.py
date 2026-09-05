@@ -191,6 +191,57 @@ class TestMoonbagSeller(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "uniswap: projected sell gas.*sushiswap: projected sell gas"):
             moonbag_seller._select_provider_quote(provider, wallet, cfg, 250)
 
+    def test_native_route_failure_falls_back_to_direct_weth(self):
+        cfg = config()
+        cfg.use_eth_trading = True
+        wallet = Mock()
+        wallet.address = "0x0000000000000000000000000000000000000003"
+        wallet.normal_gas_price.return_value = 100_000_000
+        wallet.get_eth_balance_wei.return_value = 10**18
+        provider = Mock()
+        provider.name = "uniswap"
+        native_failure = SimpleNamespace(success=False, error="NoRouteFoundError")
+        weth_quote = SimpleNamespace(
+            success=True, error=None, buy_amount=10**15, gas=100_000, gas_price=0,
+        )
+        provider.build_swap_transaction.side_effect = [native_failure, weth_quote]
+
+        selected, quote, buy_token, failure = moonbag_seller._select_moonbag_route(
+            provider, wallet, cfg, 250
+        )
+
+        self.assertIs(selected, provider)
+        self.assertIs(quote, weth_quote)
+        self.assertEqual(buy_token, WETH)
+        self.assertIn("NoRouteFoundError", failure)
+        self.assertEqual(
+            provider.build_swap_transaction.call_args_list[0].kwargs["buy_token"],
+            moonbag_seller.UNISWAP_ETH_ADDRESS,
+        )
+        self.assertEqual(provider.build_swap_transaction.call_args_list[1].kwargs["buy_token"], WETH)
+
+    def test_complete_economics_counts_unwrap_and_treasury_transfer(self):
+        cfg = config()
+        wallet = Mock()
+        wallet.normal_gas_price.return_value = 100_000_000
+        wallet.get_eth_balance_wei.return_value = 10**18
+        wallet.build_eth_transfer_transaction.return_value = {
+            "gas": 21_000, "gasPrice": 100_000_000, "value": 1,
+        }
+        quote = SimpleNamespace(success=True, buy_amount=10**15, gas=100_000, gas_price=0)
+
+        _, _, swap, unwrap, transfer = moonbag_seller._validate_complete_economics(
+            wallet,
+            cfg,
+            quote,
+            settles_to_weth=True,
+            treasury_recipient="0x0000000000000000000000000000000000000004",
+        )
+
+        self.assertGreater(swap, 0)
+        self.assertEqual(unwrap, moonbag_seller.WETH_UNWRAP_GAS_LIMIT * 101_000_000)
+        self.assertEqual(transfer, 21_000 * 101_000_000)
+
     @patch("moonbag_seller.create_swap_provider")
     @patch("moonbag_seller.Wallet")
     @patch("moonbag_seller.load_config")
