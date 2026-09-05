@@ -224,6 +224,13 @@ def load_positions() -> Dict[str, Dict[str, int]]:
                         'cost_wei': int(v.get('cost_wei', 0)),
                         'balance': int(v['balance'])
                     }
+                # Optional immutable provenance used by the recovery tool.
+                # Keeping it in the position itself makes replay protection
+                # survive a missing/corrupt auxiliary journal.
+                if v.get('reconciliation_tx_hash'):
+                    positions[k]['reconciliation_tx_hash'] = str(
+                        v['reconciliation_tx_hash']
+                    ).lower()
         return positions
     except (json.JSONDecodeError, IOError):
         return {}

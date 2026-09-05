@@ -3528,8 +3528,31 @@ if __name__ == "__main__":
     parser.add_argument("--send-to-treasury", action="store_true", help="Forward only actual net moonbag-sale proceeds to --recipient")
     parser.add_argument("--confirm-send-to-treasury", action="store_true", help="Required acknowledgement to execute moonbag treasury forwarding")
     parser.add_argument("--confirm-bot-stopped", action="store_true", help="Acknowledge the bot sharing this wallet is stopped")
+    parser.add_argument("--reconcile-gridless-buy", action="append", metavar="TX_HASH", help="Receipt-verify and preview an omitted gridless buy (repeatable)")
+    parser.add_argument("--apply-reconciliation", action="store_true", help="Write receipt-verified gridless reconciliation")
     parser.add_argument("--execute", action="store_true", help="Broadcast the planned transfer")
     args = parser.parse_args()
+    if args.reconcile_gridless_buy:
+        incompatible = any([
+            args.check_config, args.sweep_usdg, args.transfer_token, args.transfer_eth,
+            args.recipient, args.liquidate_assets, args.sell_moonbag, args.execute,
+            args.amount != "all", args.confirm_liquidate, args.confirm_liquidate_assets,
+            args.keep_usdg, args.confirm_sell_moonbag, args.send_to_treasury,
+            args.confirm_send_to_treasury, args.position_reserve_eth,
+        ])
+        if incompatible:
+            parser.error("--reconcile-gridless-buy cannot be combined with another maintenance command")
+        from gridless_reconciler import run_gridless_reconciliation
+        try:
+            raise SystemExit(run_gridless_reconciliation(
+                args.reconcile_gridless_buy,
+                apply=args.apply_reconciliation,
+                confirm_bot_stopped=args.confirm_bot_stopped,
+            ))
+        except ValueError as exc:
+            parser.error(str(exc))
+    if args.apply_reconciliation:
+        parser.error("--apply-reconciliation requires --reconcile-gridless-buy")
     if args.check_config:
         if any([args.sweep_usdg, args.transfer_token, args.transfer_eth, args.recipient, args.confirm_liquidate,
                 args.liquidate_assets, args.confirm_liquidate_assets, args.keep_usdg,
