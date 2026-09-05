@@ -1038,7 +1038,8 @@ class GridBot:
         except Exception:
             logger.warning("Route shadow snapshot unavailable; execution unchanged")
             pending = getattr(self, "_route_shadow_pending", {})
-            pending[direction] = {"amount": int(amount), "snapshot_failed": True}
+            pending[direction] = {"amount": int(amount), "snapshot_failed": True,
+                                  "direction": direction}
             self._route_shadow_pending = pending
 
     def _finish_route_shadow(self):
@@ -1049,7 +1050,25 @@ class GridBot:
                 from route_tournament import collect
                 if context.get("snapshot_failed"):
                     raise ValueError("snapshot unavailable")
-                comparison = collect(self.config, self.wallet.address, context)
+                # Inject context fields the new tournament needs.
+                enriched = {
+                    **context,
+                    "token_address": getattr(self.config, "token_address", ""),
+                    "trade_token_address": getattr(self, "trade_token_address", ""),
+                }
+                # Fresh gas price per provider/candidate via the wallet oracle.
+                gas_price_provider = lambda: int(self.wallet.normal_gas_price())
+                # Allowance probe: only meaningful for sells; reads via wallet.
+                def allowance_probe(token, spender):
+                    if not token or not spender or direction != "sell":
+                        return 0
+                    try:
+                        return int(self.wallet.check_allowance(token, spender))
+                    except Exception:
+                        return 0
+                comparison = collect(self.config, self.wallet.address, enriched,
+                                     gas_price_provider=gas_price_provider,
+                                     allowance_probe=allowance_probe)
             except Exception:
                 comparison = {"mode": "shadow", "direction": direction,
                               "status": "observation_failed", "candidates": [],

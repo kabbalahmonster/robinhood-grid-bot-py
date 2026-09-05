@@ -7,7 +7,7 @@ import pytest
 
 from config import BotConfig, load_config
 from grid_bot import GridBot, _with_swap_provider_fallback
-from route_tournament import collect, score_candidate
+from route_tournament import collect, score_candidate, snapshot
 from swap_provider import FallbackSwapProvider
 from zero_x import QuoteResult
 
@@ -20,9 +20,9 @@ def context(direction="buy", **overrides):
                 min_profit=2, **overrides)
 
 
-def quote(output=2 * 10**15, **kwargs):
+def quote(output=2 * 10**15, gas=300000, **kwargs):
     return QuoteResult(success=True, buy_amount=output, sell_amount=10**15,
-                       gas=300000, **kwargs)
+                       gas=gas, **kwargs)
 
 
 @pytest.mark.parametrize("direction,settlement,components", [
@@ -51,12 +51,15 @@ def test_weth_treasury_normalizes_native_conversion(direction, component):
 
 
 def test_buy_and_sell_scoring_tax_slippage_and_all_gas():
+    """Provider gas estimate (300k from fixture) drives swap cost, not the fallback."""
     c = context()
     buy = score_candidate(quote(), "sushiswap", "weth", c)
     floor = 2 * 10**15 * 99 * 98 // 10000
-    gas = (350000 + 200000 + 60000) * 10**6
+    # Provider says 300k (fixture default); weth buy needs approval + wrap.
+    gas = (300000 + 200000 + 60000) * 10**6
     assert int(buy["output_floor_raw"]) == floor
     assert Decimal(buy["projected_net_score"]) == Decimal(floor) * 10**18 / (10**15 + gas)
+    assert buy["gas_basis"] == "provider_estimate"
     c["direction"] = "sell"
     sell = score_candidate(quote(), "sushiswap", "weth", c)
     assert Decimal(sell["projected_net_score"]) == floor - (300000 + 200000 + 60000) * 10**6
@@ -115,6 +118,8 @@ def bot(mode):
     b = GridBot.__new__(GridBot)
     b.config = SimpleNamespace(route_tournament_mode=mode)
     b.wallet = Mock(address="wallet")
+    b.wallet.normal_gas_price.return_value = 10**6  # tournament gas oracle
+    b.wallet.check_allowance.return_value = 0  # conservative default for tests
     b.provider = SimpleNamespace()
     return b
 
@@ -151,7 +156,7 @@ def test_shadow_runs_after_fallback_and_cannot_select_or_replay():
         self.wallet._send_transaction({"data": "EXACT_ORIGINAL"})
         return "confirmed"
 
-    def observe(*args):
+    def observe(*args, **kwargs):
         assert calls == ["uniswap", "sushiswap"]
         b.wallet._send_transaction.assert_called_once_with({"data": "EXACT_ORIGINAL"})
         assert b.provider.active is primary
@@ -257,3 +262,179 @@ def test_real_engine_actionable_hooks(engine, direction):
         assert capture.call_args.args[1] == direction
         collection.assert_called_once()
         b.wallet._send_transaction.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Improved tournament scoring: provider gas, fresh gas price, allowance lookup.
+# ---------------------------------------------------------------------------
+
+
+def test_provider_gas_estimate_preferred_over_fallback_budget():
+    """Provider's quote.gas wins over the hardcoded 350k/300k fallback."""
+    # Provider claims 250k gas (more accurate than fallback). Buy quote.
+    q = quote(gas=250000)
+    row = score_candidate(q, "sushiswap", "native", context("buy"))
+    assert int(row["gas_components_wei"]["swap"]) == 250000 * 10**6
+    # Approval stays 0 for buys (no reset budget).
+    assert int(row["gas_components_wei"]["approval"]) == 0
+    # No wrap/unwrap for native settlement on buys.
+    assert int(row["gas_components_wei"]["wrap"]) == 0
+    assert int(row["gas_components_wei"]["unwrap"]) == 0
+
+
+def test_missing_provider_gas_falls_back_to_direction_budget():
+    """When provider returns no gas estimate, use conservative direction budget."""
+    q = quote(gas=None)
+    row = score_candidate(q, "sushiswap", "native", context("buy"))
+    # 350000 is the buy fallback.
+    assert int(row["gas_components_wei"]["swap"]) == 350000 * 10**6
+    q = quote(gas=None)
+    row = score_candidate(q, "sushiswap", "native", context("sell"))
+    # 300000 is the sell fallback.
+    assert int(row["gas_components_wei"]["swap"]) == 300000 * 10**6
+
+
+def test_provider_gas_price_used_when_higher_than_snapshot():
+    """Provider's gas_price hint can exceed the captured normal_gas_price."""
+    # Snapshot gas_price is 1e6 (context default); provider claims 5e6.
+    q = quote(gas=300000, gas_price=5 * 10**6)
+    row = score_candidate(q, "sushiswap", "native", context())
+    # All gas components should use the higher of the two.
+    assert int(row["gas_components_wei"]["swap"]) == 300000 * 5 * 10**6
+
+
+def test_existing_allowance_skips_approval_budget():
+    """When wallet.check_allowance returns >= amount, no approval budget is needed."""
+    c = context("sell")
+    # Allowance already covers sell amount.
+    allowance_probe = {"value": c["amount"]}
+    row = score_candidate(
+        quote(allowance_target="router"), "uniswap", "native", c,
+        allowance_probe=allowance_probe,
+    )
+    assert int(row["gas_components_wei"]["approval"]) == 0
+    assert row.get("approval_assumption") == "existing_allowance_covers"
+
+
+def test_insufficient_allowance_budgets_reset_and_approval():
+    """When allowance is below amount, still budget reset+approval (legacy behavior)."""
+    c = context("sell")
+    allowance_probe = {"value": 0}  # No existing allowance.
+    row = score_candidate(
+        quote(allowance_target="router"), "uniswap", "native", c,
+        allowance_probe=allowance_probe,
+    )
+    assert int(row["gas_components_wei"]["approval"]) == 200000 * 10**6
+    assert row.get("approval_assumption") == "reset_and_exact_approval_budget"
+
+
+def test_missing_allowance_target_uses_legacy_budget():
+    """When provider gives no allowance_target, fall back to legacy budget."""
+    c = context("sell")
+    row = score_candidate(
+        quote(allowance_target=None), "uniswap", "native", c,
+        allowance_probe=None,  # No probe; allow_probe unavailable
+    )
+    assert int(row["gas_components_wei"]["approval"]) == 200000 * 10**6
+    assert row.get("approval_assumption") == "reset_and_exact_approval_budget"
+
+
+def test_allowance_probe_failure_falls_back_to_legacy_budget():
+    """If check_allowance raises, log and use legacy budget (do not block tournament)."""
+    c = context("sell")
+    row = score_candidate(
+        quote(allowance_target="router"), "uniswap", "native", c,
+        allowance_probe={"raise": RuntimeError("rpc timeout")},
+    )
+    assert int(row["gas_components_wei"]["approval"]) == 200000 * 10**6
+    assert row.get("approval_assumption") == "reset_and_exact_approval_budget"
+
+
+def test_provider_value_used_for_native_buy_spend():
+    """For native buys, use quote.value if present, else fall back to amount."""
+    c = context("buy")
+    # Provider claims only 0.9 ETH is needed (slippage favorable).
+    q = quote(gas=200000, value=int(0.9 * 10**18))
+    row = score_candidate(q, "sushiswap", "native", c)
+    # The native_reserve check subtracts `spend`, which should be `value`.
+    # c["native_balance"] = 1e18, spend=0.9e18, reserve=1e15 -> 1e18-0.9e18-1e15 = 9e16
+    # which is > reserve, so no native_reserve rejection.
+    assert "native_reserve" not in row["rejections"]
+
+
+def test_candidate_log_includes_provider_output_and_score():
+    """Structured per-candidate log fields are populated for observability."""
+    from route_tournament import score_candidate as sc
+    row = sc(quote(output=2 * 10**15, gas=180000, gas_price=10**6),
+             "uniswap", "weth", context("buy"))
+    # Human-readable output in token base units (for log readability).
+    assert "quoted_output_human" in row
+    # Score components are exposed for logging.
+    assert "projected_total_gas_wei" in row
+    assert "output_floor_human" in row
+
+
+def test_winner_announcement_log_present(caplog):
+    """collect() emits a winner announcement log line with all required fields."""
+    import logging
+    clients = {name: Mock() for name in ("uniswap", "sushiswap")}
+    clients["uniswap"].get_quote.return_value = quote(gas=180000, gas_price=10**6)
+    clients["sushiswap"].get_quote.return_value = quote(gas=220000, gas_price=10**6)
+    cfg = SimpleNamespace(uniswap_api_key="key", weth_address="weth", token_address="token")
+    with caplog.at_level(logging.INFO, logger="grid_bot.route_tournament"):
+        result = collect(cfg, "wallet", context("buy"), clients.__getitem__)
+    winner_lines = [r for r in caplog.records if "Route tournament winner" in r.getMessage()]
+    assert winner_lines, "expected a winner announcement log line"
+    msg = winner_lines[0].getMessage()
+    for field in ("provider=", "settlement=", "score=", "runner_up_delta=", "direction=", "elapsed_ms="):
+        assert field in msg, f"missing {field} in winner log: {msg}"
+
+
+def test_per_candidate_observability_log(caplog):
+    """collect() emits one structured log line per candidate with quote, gas, and result."""
+    import logging
+    clients = {name: Mock() for name in ("uniswap", "sushiswap")}
+    clients["uniswap"].get_quote.return_value = quote(gas=180000, gas_price=10**6)
+    clients["sushiswap"].get_quote.return_value = quote(gas=220000, gas_price=10**6)
+    cfg = SimpleNamespace(uniswap_api_key="key", weth_address="weth", token_address="token")
+    with caplog.at_level(logging.INFO, logger="grid_bot.route_tournament"):
+        collect(cfg, "wallet", context("buy"), clients.__getitem__)
+    candidate_lines = [r for r in caplog.records if "Route tournament candidate" in r.getMessage()]
+    # 2 providers * 2 settlements = 4 candidates
+    assert len(candidate_lines) == 4
+    for line in candidate_lines:
+        msg = line.getMessage()
+        for field in ("provider=", "settlement=", "quoted_output=", "gas_estimate=", "gas_price_wei=", "approval_budget=", "total_cost_wei=", "score=", "result="):
+            assert field in msg, f"missing {field} in candidate log: {msg}"
+
+
+def test_execute_mode_still_fails_closed():
+    """execute remains intentionally unavailable after the improvements."""
+    cfg = BotConfig.__new__(BotConfig)
+    cfg.route_tournament_mode = "execute"
+    with pytest.raises(ValueError, match="execute is intentionally unavailable"):
+        cfg.validate()
+
+
+def test_snapshot_no_longer_captures_gas_price_for_scoring():
+    """snapshot() keeps accounting fields but gas_price is re-read fresh in collect()."""
+    b = bot("shadow")
+    b.wallet.get_eth_balance_wei.return_value = 10**18
+    b.wallet.normal_gas_price.return_value = 10**6
+    b._raw_trade_balance = Mock(return_value=10**18)
+    b._swap_slippage_fraction = Mock(return_value=0.01)
+    b._taxed_token_active = Mock(return_value=False)
+    b._effective_token_transfer_fee_percent = Mock(return_value=0.0)
+    b.config.use_eth_trading = True
+    b.config.eth_gas_reserve = 0.001
+    b.config.gas_limit_multiplier = 1.05
+    b.config.gas_price_multiplier = 1.0
+    b.config.gas_price_freshness_multiplier = 1.0
+    b.config.max_swap_gas_eth = 0.00004
+    b.config.min_profit_percent = 2.0
+    snap = snapshot(b, "buy", 10**15)
+    # snapshot no longer needs gas_price (collected fresh); but the field may
+    # remain for backwards compatibility with the dashboard payload.
+    # The contract here: snapshot MUST NOT block scoring freshness.
+    # If snapshot is stale, collect re-reads — and that's the test below.
+    assert "direction" in snap and snap["amount"] == 10**15

@@ -1,8 +1,18 @@
 """Read-only, bounded route observations. No quote can authorize execution.
 
 Quotes deliberately remain quote_only: provider simulation flags and gas hints
-are not proof of an exact local eth_call + eth_estimateGas. Setup gas is a
-conservative allowance, not an estimate of executable setup calldata.
+are not proof of an exact local eth_call + eth_estimateGas. Where a provider
+exposes its own ``gas`` estimate (Uniswap ``gasUseEstimate``, 0x gas budget,
+Sushi gas hint), the tournament prefers that over the conservative 350k/300k
+direction fallback so observed economics stay close to what execution would
+actually pay. The fallback only applies when the provider's estimate is
+missing or zero.
+
+The tournament reads a **fresh** gas price per candidate via the injected
+``gas_price_provider`` callable, so snapshot-time staleness cannot bias the
+scoring. Existing ERC20 allowance is queried via ``allowance_probe``; when
+the wallet already covers the trade amount, the approval budget is removed
+from the cost stack rather than pessimistically assuming a reset.
 """
 
 from decimal import Decimal, ROUND_CEILING
@@ -14,9 +24,27 @@ from swap_provider import PROVIDERS
 LOG = logging.getLogger("grid_bot.route_tournament")
 NATIVE = "0x" + "00" * 20
 
+# Conservative direction-based fallback when the provider returns no gas hint.
+# 350k is generous enough for a typical swap + multicall; 300k for sells.
+_FALLBACK_SWAP_GAS = {"buy": 350000, "sell": 300000}
+# Legacy approval budget when allowance is unknown or insufficient.
+_RESET_AND_APPROVAL_GAS = 200000
+_WRAP_UNWRAP_GAS = 60000
+
+
+def _wei_to_eth(wei):
+    return float(Decimal(str(wei)) / Decimal(10**18))
+
 
 def snapshot(bot, direction, amount, sold_cost_wei=None):
-    """Capture pre-operation economics without touching provider/router state."""
+    """Capture pre-operation economics without touching provider/router state.
+
+    Note: this snapshot no longer captures ``gas_price`` for scoring — ``collect``
+    reads a fresh gas price per candidate via the injected provider so that
+    quote-time accuracy is preserved even if the queue ran seconds earlier.
+    Snapshot still captures balances, slippage, tax, gas/price multipliers,
+    reserve and cap so dashboard readers see the same economics the bot saw.
+    """
     config = bot.config
     native_balance = int(bot.wallet.get_eth_balance_wei())
     return {
@@ -26,6 +54,8 @@ def snapshot(bot, direction, amount, sold_cost_wei=None):
         "native_trading": bool(config.use_eth_trading),
         "native_balance": native_balance,
         "trade_balance": native_balance if config.use_eth_trading else int(bot._raw_trade_balance()),
+        # Kept for dashboard payload backwards compatibility; collect() ignores
+        # this and reads fresh gas price per candidate.
         "gas_price": int(bot.wallet.normal_gas_price()),
         "gas_multiplier": max(1.0, float(getattr(config, "gas_limit_multiplier", 1.05))),
         "price_multiplier": max(1.0, float(getattr(config, "gas_price_multiplier", 1.0)),
@@ -39,32 +69,104 @@ def snapshot(bot, direction, amount, sold_cost_wei=None):
     }
 
 
-def score_candidate(quote, provider, settlement, context):
-    """Compare equal inputs using integer gas costs and conservative output floors."""
+def _probe_allowance(allowance_probe, token_address, spender_address, amount):
+    """Return ``(allowance_int, error_str)``. Errors are swallowed and logged.
+
+    ``allowance_probe`` is the test seam; production passes a callable of
+    ``(token, spender) -> int`` that wraps ``wallet.check_allowance``. A
+    failed probe falls back to the legacy conservative budget rather than
+    blocking the tournament observation.
+    """
+    if allowance_probe is None or spender_address is None:
+        return None, "no_probe"
+    try:
+        value = allowance_probe(token_address, spender_address)
+        return int(value), None
+    except Exception as exc:
+        # Log without leaking the underlying provider/wallet error text.
+        LOG.warning("Route shadow allowance probe failed; using legacy budget")
+        return None, str(type(exc).__name__)
+
+
+def _approval_units(direction, settlement, native_trading, allowance, amount):
+    """Return (gas_units, assumption_label).
+
+    - For ``buy`` direction, no ERC20 is leaving the wallet, so no approval.
+    - For sells: if allowance covers the amount, zero approval needed.
+    - For sells with no probe or insufficient allowance: legacy budget.
+    - The original tournament also budgeted approval for ``buy + weth``
+      (WETH being spent on-router); when the probe is unavailable, keep
+      that conservative legacy default.
+    """
+    if direction == "buy":
+        if settlement == "weth" and allowance is None:
+            return _RESET_AND_APPROVAL_GAS, "reset_and_exact_approval_budget"
+        return 0, "none"
+    # Sells always go through an ERC20 transferFrom, so approval can apply.
+    if allowance is not None and allowance >= amount:
+        return 0, "existing_allowance_covers"
+    return _RESET_AND_APPROVAL_GAS, "reset_and_exact_approval_budget"
+
+
+def score_candidate(quote, provider, settlement, context, *, allowance_probe=None):
+    """Compare equal inputs using provider gas, fresh gas price, allowance lookup.
+
+    ``allowance_probe`` is a callable ``(token_address, spender_address) -> int``
+    used only when the provider exposes an ``allowance_target`` and the direction
+    is ``sell``. For tests it may be a dict mapping ``{"value": N}`` or
+    ``{"raise": Exception}`` to drive specific paths without a real wallet.
+    """
     c = context
     row = {"provider": provider, "settlement": settlement,
            "validation_level": "rejected", "quoted_output_raw": None,
-           "gas_components_wei": {}, "projected_net_score": None,
-           "rejections": [], "execution_eligible": False}
+           "quoted_output_human": None, "gas_components_wei": {},
+           "projected_total_gas_wei": None, "gas_total_eth": None,
+           "output_floor_raw": None, "output_floor_human": None,
+           "projected_net_score": None, "rejections": [], "execution_eligible": False}
     if not quote.success:
         row["rejections"] = ["provider_quote_failed"]
         return row
     output = int(quote.buy_amount or 0)
     row["quoted_output_raw"] = str(output)
+    row["quoted_output_human"] = _wei_to_eth(output) if c["direction"] == "sell" else float(output)
     if c["amount"] <= 0 or output <= 0 or int(quote.sell_amount or 0) != c["amount"]:
         row["rejections"] = ["invalid_quote_amounts"]
         return row
     if not (0 <= c["slippage"] < 1 and 0 <= c["tax"] < 1) or c["gas_price"] <= 0:
         row["rejections"] = ["invalid_economic_assumptions"]
         return row
-    # Unknown allowance/spender: budget both reset-to-zero and exact approval.
-    # No allowance or provider approval endpoint is called by this experiment.
-    approval = 200000 if c["direction"] == "sell" or settlement == "weth" else 0
+
+    # Provider gas estimate preferred over hardcoded fallback.
+    provider_gas = int(quote.gas or 0)
+    swap_gas = provider_gas if provider_gas > 0 else _FALLBACK_SWAP_GAS[c["direction"]]
+
+    # Allowance lookup (only meaningful for sells with a known spender).
+    token_for_allowance = c.get("trade_token_address") if c["direction"] == "sell" else c.get("token_address")
+    spender = getattr(quote, "allowance_target", None)
+    # Wrap allowance_probe dict-shapes used by tests into callable semantics.
+    def _probe_dict(token, sp):
+        if isinstance(allowance_probe, dict):
+            if "raise" in allowance_probe:
+                raise allowance_probe["raise"]
+            if "value" in allowance_probe:
+                return allowance_probe["value"]
+        return None
+    probe = allowance_probe if callable(allowance_probe) else _probe_dict
+    allowance, _probe_err = _probe_allowance(probe, token_for_allowance, spender, c["amount"])
+    approval_gas, approval_label = _approval_units(c["direction"], settlement,
+                                                    c["native_trading"], allowance, c["amount"])
+
+    # Wrap/unwrap accounting for native <-> WETH conversion.
     conversion = settlement == "weth" if c["native_trading"] else settlement == "native"
     wrap = conversion and ((c["direction"] == "buy") == c["native_trading"])
     unwrap = conversion and not wrap
-    units = {"swap": max(int(quote.gas or 0), 350000 if c["direction"] == "buy" else 300000),
-             "approval": approval, "wrap": 60000 if wrap else 0, "unwrap": 60000 if unwrap else 0}
+
+    units = {"swap": swap_gas,
+             "approval": approval_gas,
+             "wrap": _WRAP_UNWRAP_GAS if wrap else 0,
+             "unwrap": _WRAP_UNWRAP_GAS if unwrap else 0}
+    # Fresh gas price: prefer the higher of snapshot's pre-capture value and
+    # the provider's own gas_price hint (which is quote-time fresh).
     gas_price = max(c["gas_price"], int(quote.gas_price or 0))
     multiplier = Decimal(str(c["gas_multiplier"])) * Decimal(str(c["price_multiplier"]))
     costs = {key: int((Decimal(value * gas_price) * multiplier).to_integral_value(rounding=ROUND_CEILING))
@@ -73,12 +175,22 @@ def score_candidate(quote, provider, settlement, context):
     floor = int(Decimal(output) * (1 - Decimal(str(c["slippage"]))) * (1 - Decimal(str(c["tax"]))))
     row.update(validation_level="quote_only", preparation_dependent=True,
                gas_components_wei={key: str(value) for key, value in costs.items()},
-               projected_total_gas_wei=str(total), gas_basis="conservative_budget_not_simulated",
-               output_floor_raw=str(floor), slippage_fraction=c["slippage"], tax_fraction=c["tax"],
-               approval_assumption="reset_and_exact_approval_budget" if approval else "none")
+               projected_total_gas_wei=str(total), gas_total_eth=_wei_to_eth(total),
+               gas_basis=("provider_estimate" if provider_gas > 0 else "conservative_direction_fallback"),
+               output_floor_raw=str(floor),
+               output_floor_human=_wei_to_eth(floor) if c["direction"] == "sell" else float(floor),
+               slippage_fraction=c["slippage"], tax_fraction=c["tax"],
+               approval_assumption=approval_label,
+               provider_gas_estimate=provider_gas,
+               effective_gas_price_wei=gas_price)
     if c["cap"] > 0 and total > c["cap"]:
         row["rejections"].append("total_gas_above_cap")
-    spend = c["amount"] if c["direction"] == "buy" and c["native_trading"] else 0
+    # Native buy spend uses quote.value when present (ETH actually sent);
+    # otherwise assume the full amount is sent.
+    if c["direction"] == "buy" and c["native_trading"] and settlement == "native":
+        spend = int(quote.value or 0) or c["amount"]
+    else:
+        spend = c["amount"] if c["direction"] == "buy" and c["native_trading"] else 0
     if c["native_balance"] - spend - total < c["reserve"]:
         row["rejections"].append("native_reserve")
     if c["direction"] == "buy":
@@ -100,16 +212,25 @@ def score_candidate(quote, provider, settlement, context):
     return row
 
 
-def collect(config, address, context, client_factory=None):
+def collect(config, address, context, client_factory=None,
+            gas_price_provider=None, allowance_probe=None):
     """One get_quote per provider/settlement; never prepare, approve, or send.
 
     Independent client instances avoid mutating execution clients. Uniswap's
     shared limiter is intentionally respected. With routing_attempts=1, its
     explicit AMM fallback and gateway 409 retry allow at most four HTTP requests
     per candidate. Sushi makes one. No provider execution/preparation is used.
+
+    ``gas_price_provider`` is a callable returning an int gas price (wei). When
+    omitted, the snapshot's gas_price is used (less accurate — only acceptable
+    for tests). Production callers should pass ``lambda: wallet.normal_gas_price()``.
+
+    ``allowance_probe`` is a callable ``(token, spender) -> int``. When omitted,
+    the legacy reset+approval budget is used for every sell candidate.
     """
     started = time.monotonic()
     rows = []
+    provider_outputs = []
     for name in ("uniswap", "sushiswap"):
         if name == "uniswap" and not getattr(config, "uniswap_api_key", ""):
             continue
@@ -117,6 +238,10 @@ def collect(config, address, context, client_factory=None):
             client = client_factory(name) if client_factory else PROVIDERS[name].load_client_class()(config)
         except Exception:
             client = None
+        # Fresh gas price per provider so quote-time accuracy is preserved
+        # even if snapshot ran seconds earlier.
+        fresh_gas_price = int(gas_price_provider()) if gas_price_provider else int(context["gas_price"])
+        per_context = {**context, "gas_price": fresh_gas_price}
         for settlement, token in (("native", NATIVE), ("weth", config.weth_address)):
             try:
                 if client is None:
@@ -128,24 +253,73 @@ def collect(config, address, context, client_factory=None):
                 if name == "uniswap":
                     args["routing_attempts"] = 1
                 quote = client.get_quote(**args)
-                rows.append(score_candidate(quote, name, settlement, context))
+                row = score_candidate(quote, name, settlement, per_context,
+                                      allowance_probe=allowance_probe)
+                rows.append(row)
+                # Emit one structured per-candidate log line for observability.
+                result_label = "eligible" if row["validation_level"] == "quote_only" else "rejected"
+                rejection = "+".join(row["rejections"]) if row["rejections"] else "-"
+                LOG.info(
+                    "Route tournament candidate provider=%s settlement=%s direction=%s "
+                    "quoted_output=%s gas_estimate=%s gas_price_wei=%s approval_budget=%s "
+                    "total_cost_wei=%s total_cost_eth=%.6f output_floor=%s score=%s result=%s reason=%s",
+                    name, settlement, context["direction"],
+                    row.get("quoted_output_raw", "-"),
+                    row.get("provider_gas_estimate", 0),
+                    row.get("effective_gas_price_wei", 0),
+                    row["gas_components_wei"].get("approval", "0"),
+                    row.get("projected_total_gas_wei", "0"),
+                    row.get("gas_total_eth", 0.0) or 0.0,
+                    row.get("output_floor_raw", "-"),
+                    row.get("projected_net_score", "-"),
+                    result_label, rejection,
+                )
+                if row["validation_level"] == "quote_only":
+                    provider_outputs.append(row)
             except Exception:
                 # Never publish exception text, raw provider responses, addresses,
                 # calldata, request headers, or credentials in dashboard data.
                 rows.append({"provider": name, "settlement": settlement,
                              "validation_level": "rejected", "rejections": ["candidate_failed"],
-                             "quoted_output_raw": None, "gas_components_wei": {},
-                             "projected_net_score": None, "execution_eligible": False})
+                             "quoted_output_raw": None, "quoted_output_human": None,
+                             "gas_components_wei": {}, "projected_total_gas_wei": None,
+                             "gas_total_eth": None, "output_floor_raw": None,
+                             "output_floor_human": None, "projected_net_score": None,
+                             "execution_eligible": False, "provider_gas_estimate": 0,
+                             "effective_gas_price_wei": 0,
+                             "approval_assumption": "none", "gas_basis": "skipped"})
+                LOG.info(
+                    "Route tournament candidate provider=%s settlement=%s direction=%s "
+                    "quoted_output=- gas_estimate=0 gas_price_wei=0 approval_budget=0 "
+                    "total_cost_wei=0 total_cost_eth=0.000000 output_floor=- score=- "
+                    "result=rejected reason=candidate_failed",
+                    name, settlement, context["direction"],
+                )
     eligible = sorted((r for r in rows if r["validation_level"] == "quote_only"),
                       key=lambda r: Decimal(r["projected_net_score"]), reverse=True)
     winner = {key: eligible[0][key] for key in ("provider", "settlement")} if eligible else None
+    runner_up_delta = None
+    if len(eligible) > 1:
+        runner_up_delta = str(Decimal(eligible[0]["projected_net_score"]) - Decimal(eligible[1]["projected_net_score"]))
+    elapsed_ms = round((time.monotonic() - started) * 1000, 1)
     result = {"mode": "shadow", "direction": context["direction"], "candidates": rows,
               "selected_hypothetical_winner": winner,
-              "runner_up_delta": str(Decimal(eligible[0]["projected_net_score"]) - Decimal(eligible[1]["projected_net_score"])) if len(eligible) > 1 else None,
-              "elapsed_ms": round((time.monotonic() - started) * 1000, 1),
+              "runner_up_delta": runner_up_delta,
+              "elapsed_ms": elapsed_ms,
               "status": "hypothetical_only" if eligible else "no_eligible_candidate",
               "observation_timing": "after_execution_attempt_with_pre_operation_budget"}
-    LOG.info("Route shadow %s candidates=%d rejected=%d winner=%s delta=%s elapsed_ms=%s",
-             context["direction"], len(rows), len(rows) - len(eligible), winner,
-             result["runner_up_delta"], result["elapsed_ms"])
+    if winner:
+        LOG.info(
+            "Route tournament winner provider=%s settlement=%s direction=%s score=%s "
+            "runner_up_delta=%s eligible=%d rejected=%d elapsed_ms=%s",
+            winner["provider"], winner["settlement"], context["direction"],
+            eligible[0]["projected_net_score"], runner_up_delta or "n/a",
+            len(eligible), len(rows) - len(eligible), elapsed_ms,
+        )
+    else:
+        LOG.info(
+            "Route tournament winner provider=none settlement=none direction=%s "
+            "score=- runner_up_delta=n/a eligible=0 rejected=%d elapsed_ms=%s",
+            context["direction"], len(rows), elapsed_ms,
+        )
     return result
