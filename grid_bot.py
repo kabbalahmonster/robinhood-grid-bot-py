@@ -1016,7 +1016,7 @@ class GridBot:
         receipt = getattr(result, 'receipt', None) or {}
         token_address = str(self.config.token_address).lower()
         wallet_topic = "0x" + str(self.wallet.address).lower().removeprefix("0x").rjust(64, "0")
-        transfer_topic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f1639c4a11628f55a4df523b3ef"
+        transfer_topic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
         total = 0
         for entry in receipt.get('logs') or []:
             if str(entry.get('address', '')).lower() != token_address:

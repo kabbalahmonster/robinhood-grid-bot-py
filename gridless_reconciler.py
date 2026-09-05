@@ -13,7 +13,7 @@ from config import load_config
 from wallet import Wallet
 
 
-TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f1639c4a11628f55a4df523b3ef"
+TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 JOURNAL_FILE = Path("data/reconciled_gridless_buys.json")
 
 

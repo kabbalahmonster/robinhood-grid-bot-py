@@ -12,6 +12,13 @@ WALLET = "0x" + "aa" * 20
 TOKEN = "0x" + "bb" * 20
 
 
+def test_transfer_topic_is_canonical_erc20_signature():
+    assert reconciler.TRANSFER_TOPIC == (
+        "0xddf252ad1be2c89b69c2b068fc378daa"
+        "952ba7f163c4a11628f55a4df523b3ef"
+    )
+
+
 class FakeEth:
     def get_transaction(self, tx_hash):
         return {
