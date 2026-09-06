@@ -333,7 +333,10 @@ def test_tournament_passes_each_candidate_a_bounded_quote_timeout():
 
 def bot(mode):
     b = GridBot.__new__(GridBot)
-    b.config = SimpleNamespace(route_tournament_mode=mode)
+    b.config = SimpleNamespace(
+        route_tournament_mode=mode,
+        route_tournament_canary=(mode == "gate"),
+    )
     b.wallet = Mock(address="wallet")
     b.wallet.normal_gas_price.return_value = 10**6  # tournament gas oracle
     b.wallet.check_allowance.return_value = 0  # conservative default for tests
@@ -420,6 +423,14 @@ def test_execute_and_unknown_modes_fail_closed(mode):
     cfg = BotConfig.__new__(BotConfig)
     cfg.route_tournament_mode = mode
     with pytest.raises(ValueError, match="supports off, shadow, or gate"):
+        cfg.validate()
+
+
+def test_gate_mode_requires_explicit_canary_flag():
+    cfg = BotConfig.__new__(BotConfig)
+    cfg.route_tournament_mode = "gate"
+    cfg.route_tournament_canary = False
+    with pytest.raises(ValueError, match="ROUTE_TOURNAMENT_CANARY=true"):
         cfg.validate()
 
 
@@ -624,6 +635,29 @@ def test_selected_route_revalidation_rejects_zero_fresh_output():
         {"provider": "sushiswap", "settlement": "native"}, "buy", 10**15,
     ) is None
     b.wallet.w3.eth.estimate_gas.assert_not_called()
+
+
+def test_gate_canary_refusal_covers_direct_banking_action():
+    b = bot("gate")
+    b.config.route_tournament_canary = False
+    b.provider = Mock()
+
+    assert b.bank_profit(0.01) is None
+    b.provider.build_swap_transaction.assert_not_called()
+
+
+def test_gate_action_requires_explicit_canary_flag():
+    b = bot("gate")
+    b.config.route_tournament_canary = False
+    b._collect_route_execution_preflight = Mock()
+
+    quote_result, weth_fallback = b._actionable_quote_with_weth_fallback(
+        sell_token="native", buy_token="token", sell_amount=10**15, direction="buy",
+    )
+
+    assert quote_result.success is False
+    assert weth_fallback is False
+    b._collect_route_execution_preflight.assert_not_called()
 
 
 def test_gate_mode_uses_only_a_freshly_revalidated_selected_route():

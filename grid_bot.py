@@ -27,6 +27,11 @@ def _with_swap_provider_fallback(method):
     @wraps(method)
     def wrapped(self, *args, **kwargs):
         mode = getattr(self.config, "route_tournament_mode", "off")
+        # Gate execution is a two-key rollout. The decorator covers direct
+        # actions (notably banking) that do not use the route-quote helper.
+        if mode == "gate" and not getattr(self.config, "route_tournament_canary", False):
+            logger.warning("Tournament gate requested without explicit canary flag; action skipped")
+            return None
         # Gate owns provider choice: its selected route must not be replayed by
         # the generic primary/fallback wrapper after validation begins.
         if mode == "gate":
@@ -1238,6 +1243,10 @@ class GridBot:
                                              sold_cost_wei=None):
         """Build the configured route, falling back to the direct WETH leg in native mode."""
         if getattr(self.config, "route_tournament_mode", "off") == "gate":
+            if not getattr(self.config, "route_tournament_canary", False):
+                from zero_x import QuoteResult
+                logger.warning("Tournament gate requested without explicit canary flag; execution skipped")
+                return QuoteResult(success=False, error="tournament gate canary flag required"), False
             selection = self._collect_route_execution_preflight(
                 direction, sell_amount, sold_cost_wei,
             )
