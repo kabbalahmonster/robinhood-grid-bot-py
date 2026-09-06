@@ -157,7 +157,7 @@ class TestUniswapAPIClient(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertEqual(result.error, "shadow quote deadline elapsed")
 
-    def test_no_route_retries_with_explicit_amm_protocols(self):
+    def test_no_route_retries_with_v4_only_protocol(self):
         config = SimpleNamespace(
             uniswap_api_key="test-key",
             uniswap_permit2_disabled=True,
@@ -192,7 +192,7 @@ class TestUniswapAPIClient(unittest.TestCase):
         first_payload = json.loads(post.call_args_list[0].kwargs["data"])
         retry_payload = json.loads(post.call_args_list[1].kwargs["data"])
         self.assertNotIn("protocols", first_payload)
-        self.assertEqual(retry_payload["protocols"], ["V2", "V3", "V4"])
+        self.assertEqual(retry_payload["protocols"], ["V4"])
 
     def test_non_route_404_does_not_trigger_amm_retry(self):
         config = SimpleNamespace(

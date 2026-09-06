@@ -319,14 +319,15 @@ class UniswapAPIClient:
                     return QuoteResult(success=False, error=cooldown_error)
                 response = post_within_quote_deadline(payload)
 
-                # BEST_PRICE/default routing may involve UniswapX discovery.
-                # Retry the same attempt against canonical AMM liquidity.
+                # Robinhood's supported v2.1.1 gateway can find V4 liquidity
+                # while the combined V2/V3/V4 filter returns a false no-route.
+                # Retry the known available AMM path without changing router version.
                 if self._is_no_route_failure(response):
                     amm_payload = payload.copy()
-                    amm_payload["protocols"] = ["V2", "V3", "V4"]
+                    amm_payload["protocols"] = ["V4"]
                     self.logger.warning(
                         "Uniswap default routing found no route; retrying quote "
-                        "against explicit V2/V3/V4 AMM liquidity"
+                        "against explicit V4 liquidity"
                     )
                     cooldown_error = self._cooldown_error()
                     if cooldown_error is not None:
