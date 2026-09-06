@@ -548,6 +548,7 @@ def test_collection_deadline_skips_unstarted_candidate_requests():
     result = collect(cfg, "wallet", context("buy"), clients.__getitem__, max_seconds=0)
     assert len(result["candidates"]) == 4
     assert all(row["rejections"] == ["observation_deadline"] for row in result["candidates"])
+    assert all(row["candidate_outcome"] == "not_sampled" for row in result["candidates"])
     for client in clients.values():
         client.get_quote.assert_not_called()
 

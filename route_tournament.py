@@ -299,6 +299,7 @@ def collect(config, address, context, client_factory=None,
             if remaining_seconds <= 0:
                 rows.append({"provider": name, "settlement": settlement,
                              "validation_level": "rejected", "rejections": ["observation_deadline"],
+                             "candidate_outcome": "not_sampled",
                              "quoted_output_raw": None, "quoted_output_human": None,
                              "gas_components_wei": {}, "projected_total_gas_wei": None,
                              "gas_total_eth": None, "output_floor_raw": None,
