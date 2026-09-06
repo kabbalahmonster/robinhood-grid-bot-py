@@ -145,6 +145,8 @@ def _validate_economics(
     quote: Any,
     setup_gas_wei: int = 0,
     reserve_setup_gas_wei: int | None = None,
+    *,
+    native_settlement: bool = False,
 ) -> tuple[int, int, int]:
     gas_limit, gas_price = _gas_fields(wallet, config, quote)
     gas_wei = gas_limit * gas_price
@@ -158,7 +160,20 @@ def _validate_economics(
         raise ValueError("quoted output does not exceed projected setup and swap gas")
     reserve_wei = int(float(getattr(config, "eth_gas_reserve", 0.0005)) * 10**18)
     reserve_setup = int(setup_gas_wei) if reserve_setup_gas_wei is None else int(reserve_setup_gas_wei)
-    if wallet.get_eth_balance_wei() - gas_wei - reserve_setup < reserve_wei:
+    balance_wei = int(wallet.get_eth_balance_wei())
+    upfront_gas_wei = gas_wei + reserve_setup
+    if balance_wei < upfront_gas_wei:
+        raise ValueError("sale wallet cannot fund projected gas")
+    if native_settlement:
+        # Native swap proceeds arrive in the same transaction that consumes the
+        # swap gas. Use a slippage-adjusted floor, never the optimistic quote,
+        # before permitting the temporary reserve dip.
+        floor_scale = 1_000_000
+        slippage_units = int(round(_slippage_fraction(config) * floor_scale))
+        native_floor = quoted_output * (floor_scale - slippage_units) // floor_scale
+        if balance_wei - upfront_gas_wei + native_floor < reserve_wei:
+            raise ValueError("native sale floor would not restore ETH_GAS_RESERVE")
+    elif balance_wei - upfront_gas_wei < reserve_wei:
         raise ValueError("sale would breach ETH_GAS_RESERVE")
     return gas_limit, gas_price, gas_wei
 
@@ -199,7 +214,11 @@ def _select_provider_quote(
             errors.append(f"{candidate.name}: {quote.error or 'quote failed'}")
             continue
         try:
-            _validate_economics(wallet, config, quote)
+            _validate_economics(
+                wallet, config, quote,
+                native_settlement=str(buy_token or _configured_buy_token(config)).lower()
+                == UNISWAP_ETH_ADDRESS.lower(),
+            )
         except ValueError as exc:
             errors.append(f"{candidate.name}: {exc}")
             continue
@@ -253,7 +272,9 @@ def _validate_complete_economics(
     settles_to_weth: bool,
     treasury_recipient: str | None,
 ) -> tuple[int, int, int, int, int]:
-    gas_limit, gas_price, swap_gas = _validate_economics(wallet, config, quote)
+    gas_limit, gas_price, swap_gas = _validate_economics(
+        wallet, config, quote, native_settlement=not settles_to_weth,
+    )
     unwrap_gas, transfer_gas = _project_settlement_gas(
         wallet,
         config,
@@ -268,7 +289,7 @@ def _validate_complete_economics(
     # Treasury-transfer gas is paid after settlement and is deducted from the
     # proceeds above, so requiring it on top of the starting reserve would
     # reject otherwise safe wallets unnecessarily.
-    if wallet.get_eth_balance_wei() - swap_gas - unwrap_gas < reserve_wei:
+    if settles_to_weth and wallet.get_eth_balance_wei() - swap_gas - unwrap_gas < reserve_wei:
         raise ValueError("sale settlement would breach ETH_GAS_RESERVE")
     return gas_limit, gas_price, swap_gas, unwrap_gas, transfer_gas
 
@@ -382,11 +403,12 @@ def _execute_quote(
     provider: Any, wallet: Wallet, config: Any, amount: int, quote: Any,
     buy_token: str | None = None,
 ):
+    buy_token = buy_token or _configured_buy_token(config)
+    native_settlement = buy_token.lower() == UNISWAP_ETH_ADDRESS.lower()
     try:
-        _validate_economics(wallet, config, quote)
+        _validate_economics(wallet, config, quote, native_settlement=native_settlement)
     except Exception as exc:
         raise PreBroadcastRouteFailure(str(exc)) from exc
-    buy_token = buy_token or _configured_buy_token(config)
     broadcast_attempted = False
 
     if provider.capabilities.api_managed_approval:
@@ -407,12 +429,16 @@ def _execute_quote(
                 tx = _build_api_transaction(wallet, config, approval_plan[label])
                 projected_setup_gas += int(tx["gas"]) * int(tx["maxFeePerGas"])
                 prepared_approvals.append((label, tx))
-            _, _, swap_gas = _validate_economics(wallet, config, quote)
+            _, _, swap_gas = _validate_economics(
+                wallet, config, quote, projected_setup_gas,
+                native_settlement=native_settlement,
+            )
             if _effective_quote_output(config, quote) <= projected_setup_gas + swap_gas:
                 raise ValueError("quoted output does not exceed projected approval and swap gas")
-            reserve_wei = int(float(getattr(config, "eth_gas_reserve", 0.0005)) * 10**18)
-            if wallet.get_eth_balance_wei() - projected_setup_gas - swap_gas < reserve_wei:
-                raise ValueError("approval and sale would breach ETH_GAS_RESERVE")
+            if not native_settlement:
+                reserve_wei = int(float(getattr(config, "eth_gas_reserve", 0.0005)) * 10**18)
+                if wallet.get_eth_balance_wei() - projected_setup_gas - swap_gas < reserve_wei:
+                    raise ValueError("approval and sale would breach ETH_GAS_RESERVE")
         except Exception as exc:
             raise PreBroadcastRouteFailure(str(exc)) from exc
         setup_gas_wei = 0
@@ -448,7 +474,10 @@ def _execute_quote(
             allowance = wallet.check_allowance(config.token_address, spender, use_permit2=False)
             if allowance < amount:
                 approval_gas_wei = 100000 * int(wallet.normal_gas_price())
-                _validate_economics(wallet, config, quote, approval_gas_wei)
+                _validate_economics(
+                    wallet, config, quote, approval_gas_wei,
+                    native_settlement=native_settlement,
+                )
         except Exception as exc:
             raise PreBroadcastRouteFailure(str(exc)) from exc
         if allowance < amount:
@@ -480,7 +509,8 @@ def _execute_quote(
 
     try:
         gas_limit, gas_price, _ = _validate_economics(
-            wallet, config, quote, setup_gas_wei, reserve_setup_gas_wei=0
+            wallet, config, quote, setup_gas_wei, reserve_setup_gas_wei=0,
+            native_settlement=native_settlement,
         )
     except Exception as exc:
         if not broadcast_attempted:
@@ -514,7 +544,11 @@ def _execute_with_route_fallback(
                 f"{fallback.name}: {fallback_quote.error or 'quote failed'}"
             ) from primary_error
         try:
-            _validate_economics(wallet, config, fallback_quote)
+            _validate_economics(
+                wallet, config, fallback_quote,
+                native_settlement=str(buy_token or _configured_buy_token(config)).lower()
+                == UNISWAP_ETH_ADDRESS.lower(),
+            )
             result = _execute_quote(fallback, wallet, config, amount, fallback_quote, buy_token)
         except Exception as fallback_error:
             raise ValueError(

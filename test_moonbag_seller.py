@@ -145,6 +145,43 @@ class TestMoonbagSeller(unittest.TestCase):
         wallet.approve_token.assert_not_called()
         wallet._send_transaction.assert_not_called()
 
+    def test_native_moonbag_sale_can_use_gas_reserve_when_floor_restores_it(self):
+        cfg = config()
+        cfg.max_sell_gas_eth = 0.001
+        wallet = Mock()
+        wallet.normal_gas_price.return_value = 1_000_000_000
+        quote = SimpleNamespace(success=True, buy_amount=10**15, gas=100_000, gas_price=0)
+        gas_limit, gas_price = moonbag_seller._gas_fields(wallet, cfg, quote)
+        swap_gas = gas_limit * gas_price
+        reserve = int(cfg.eth_gas_reserve * 10**18)
+        # The transaction can pay its gas, dips one wei below the reserve, and
+        # the conservative native-output floor restores the reserve atomically.
+        wallet.get_eth_balance_wei.return_value = reserve + swap_gas - 1
+
+        moonbag_seller._validate_economics(
+            wallet, cfg, quote, native_settlement=True,
+        )
+
+    def test_native_route_selection_allows_sale_when_floor_restores_reserve(self):
+        cfg = config()
+        cfg.max_sell_gas_eth = 0.001
+        cfg.use_eth_trading = True
+        wallet = Mock()
+        wallet.normal_gas_price.return_value = 1_000_000_000
+        quote = SimpleNamespace(success=True, error=None, buy_amount=10**15, gas=100_000, gas_price=0)
+        gas_limit, gas_price = moonbag_seller._gas_fields(wallet, cfg, quote)
+        wallet.get_eth_balance_wei.return_value = int(cfg.eth_gas_reserve * 10**18) + gas_limit * gas_price - 1
+        provider = Mock()
+        provider.name = "uniswap"
+        provider.build_swap_transaction.return_value = quote
+
+        selected, selected_quote = moonbag_seller._select_provider_quote(
+            provider, wallet, cfg, 250, moonbag_seller.UNISWAP_ETH_ADDRESS,
+        )
+
+        self.assertIs(selected, provider)
+        self.assertIs(selected_quote, quote)
+
     def test_tries_fallback_when_primary_quote_exceeds_sell_gas_cap(self):
         cfg = config()
         cfg.max_sell_gas_eth = 0.0002
@@ -220,6 +257,19 @@ class TestMoonbagSeller(unittest.TestCase):
         )
         self.assertEqual(provider.build_swap_transaction.call_args_list[1].kwargs["buy_token"], WETH)
 
+    def test_complete_native_economics_allows_floor_to_restore_reserve(self):
+        cfg = config()
+        cfg.max_sell_gas_eth = 0.001
+        wallet = Mock()
+        wallet.normal_gas_price.return_value = 1_000_000_000
+        quote = SimpleNamespace(success=True, buy_amount=10**15, gas=100_000, gas_price=0)
+        gas_limit, gas_price = moonbag_seller._gas_fields(wallet, cfg, quote)
+        wallet.get_eth_balance_wei.return_value = int(cfg.eth_gas_reserve * 10**18) + gas_limit * gas_price - 1
+
+        moonbag_seller._validate_complete_economics(
+            wallet, cfg, quote, settles_to_weth=False, treasury_recipient=None,
+        )
+
     def test_complete_economics_counts_unwrap_and_treasury_transfer(self):
         cfg = config()
         wallet = Mock()
@@ -241,6 +291,63 @@ class TestMoonbagSeller(unittest.TestCase):
         self.assertGreater(swap, 0)
         self.assertEqual(unwrap, moonbag_seller.WETH_UNWRAP_GAS_LIMIT * 101_000_000)
         self.assertEqual(transfer, 21_000 * 101_000_000)
+
+    def test_execute_native_moonbag_allows_floor_to_restore_reserve(self):
+        cfg = config()
+        cfg.max_sell_gas_eth = 0.001
+        cfg.use_eth_trading = True
+        wallet = Mock()
+        wallet.address = "0x0000000000000000000000000000000000000003"
+        wallet.normal_gas_price.return_value = 1_000_000_000
+        quote = SimpleNamespace(
+            success=True, error=None, buy_amount=10**15, gas=100_000, gas_price=0,
+            allowance_target=WETH, to=WETH, data="0x1234", value=0,
+        )
+        gas_limit, gas_price = moonbag_seller._gas_fields(wallet, cfg, quote)
+        wallet.get_eth_balance_wei.return_value = int(cfg.eth_gas_reserve * 10**18) + gas_limit * gas_price - 1
+        wallet.check_allowance.return_value = 250
+        wallet.w3.eth.get_transaction_count.return_value = 1
+        wallet._send_transaction.return_value = SimpleNamespace(success=True, tx_hash="0xsale")
+        provider = Mock()
+        provider.capabilities = SimpleNamespace(
+            api_managed_approval=False, refresh_after_approval=False, quote_requires_preparation=False,
+        )
+
+        result = moonbag_seller._execute_quote(
+            provider, wallet, cfg, 250, quote, moonbag_seller.UNISWAP_ETH_ADDRESS,
+        )
+
+        self.assertTrue(result.success)
+        wallet._send_transaction.assert_called_once()
+
+    def test_api_native_moonbag_allows_floor_to_restore_reserve_without_approval(self):
+        cfg = config()
+        cfg.max_sell_gas_eth = 0.001
+        cfg.use_eth_trading = True
+        wallet = Mock()
+        wallet.address = "0x0000000000000000000000000000000000000003"
+        wallet.normal_gas_price.return_value = 1_000_000_000
+        quote = SimpleNamespace(
+            success=True, error=None, buy_amount=10**15, gas=100_000, gas_price=0,
+            to=WETH, data="0x1234", value=0,
+        )
+        gas_limit, gas_price = moonbag_seller._gas_fields(wallet, cfg, quote)
+        wallet.get_eth_balance_wei.return_value = int(cfg.eth_gas_reserve * 10**18) + gas_limit * gas_price - 1
+        wallet.w3.eth.get_transaction_count.return_value = 1
+        wallet._send_transaction.return_value = SimpleNamespace(success=True, tx_hash="0xsale")
+        provider = Mock()
+        provider.capabilities = SimpleNamespace(
+            api_managed_approval=True, refresh_after_approval=False, quote_requires_preparation=True,
+        )
+        provider.check_approval.return_value = {"cancel": None, "approval": None}
+        provider.prepare_swap.return_value = quote
+
+        result = moonbag_seller._execute_quote(
+            provider, wallet, cfg, 250, quote, moonbag_seller.UNISWAP_ETH_ADDRESS,
+        )
+
+        self.assertTrue(result.success)
+        wallet._send_transaction.assert_called_once()
 
     @patch("moonbag_seller.create_swap_provider")
     @patch("moonbag_seller.Wallet")
