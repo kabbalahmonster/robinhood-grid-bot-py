@@ -318,6 +318,9 @@ def collect(config, address, context, client_factory=None,
                             slippage_percentage=context["slippage"], apply_jitter_to_price=False)
                 if name == "uniswap":
                     args["routing_attempts"] = 1
+                    # Preserve one fallback probe per shadow candidate: this
+                    # experiment must not consume unbounded shared API capacity.
+                    args["protocol_probe_limit"] = 1
                 # Each adapter receives its share of the remaining observation
                 # budget, including any internal fallback request it makes.
                 remaining_candidates = max(1, total_candidates - candidate_index)

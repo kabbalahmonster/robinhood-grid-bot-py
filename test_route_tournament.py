@@ -151,6 +151,7 @@ def test_tournament_quote_requests_respect_shared_provider_cooldown_state():
     collect(cfg, "wallet", context(), lambda name: client)
     uniswap_calls = [call for call in client.get_quote.call_args_list if call.kwargs.get("routing_attempts") == 1]
     assert uniswap_calls
+    assert all(call.kwargs["protocol_probe_limit"] == 1 for call in uniswap_calls)
     assert all("isolated_rate_limit" not in call.kwargs for call in uniswap_calls)
 
 

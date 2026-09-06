@@ -275,6 +275,7 @@ class UniswapAPIClient:
         apply_jitter_to_price: bool = True,
         routing_attempts: int = 1,
         quote_timeout_seconds: Optional[float] = None,
+        protocol_probe_limit: Optional[int] = None,
     ) -> QuoteResult:
         """
         Get a quote from the Uniswap API.
@@ -340,6 +341,10 @@ class UniswapAPIClient:
             self.logger.debug(f"Fetching Uniswap quote: {payload}")
             
             routing_attempts = min(3, max(1, int(routing_attempts)))
+            probe_limit = len(self.PROTOCOL_DISCOVERY_ORDER) if protocol_probe_limit is None else max(
+                0, min(len(self.PROTOCOL_DISCOVERY_ORDER), int(protocol_probe_limit))
+            )
+            protocol_probe_order = self.PROTOCOL_DISCOVERY_ORDER[:probe_limit]
             quote_deadline = (time.monotonic() + max(0.05, float(quote_timeout_seconds))
                               if quote_timeout_seconds is not None else None)
 
@@ -377,7 +382,7 @@ class UniswapAPIClient:
                 # a time, then cache only a short-lived successful capability.
                 discovered_protocols = False
                 if self._is_no_route_failure(response):
-                    for protocol in self.PROTOCOL_DISCOVERY_ORDER:
+                    for protocol in protocol_probe_order:
                         if protocol == cached_protocol:
                             continue
                         protocol_payload = payload.copy()
