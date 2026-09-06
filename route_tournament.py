@@ -36,6 +36,10 @@ def _wei_to_eth(wei):
     return float(Decimal(str(wei)) / Decimal(10**18))
 
 
+def _raw_to_human(raw, decimals):
+    return float(Decimal(str(raw)) / Decimal(10 ** max(0, int(decimals))))
+
+
 def snapshot(bot, direction, amount, sold_cost_wei=None):
     """Capture pre-operation economics without touching provider/router state.
 
@@ -57,9 +61,10 @@ def snapshot(bot, direction, amount, sold_cost_wei=None):
         # Kept for dashboard payload backwards compatibility; collect() ignores
         # this and reads fresh gas price per candidate.
         "gas_price": int(bot.wallet.normal_gas_price()),
+        # normal_gas_price() already incorporates the configured dynamic price
+        # and freshness headroom.  Only the gas-limit multiplier remains for
+        # the unit estimate below; never apply price headroom twice.
         "gas_multiplier": max(1.0, float(getattr(config, "gas_limit_multiplier", 1.05))),
-        "price_multiplier": max(1.0, float(getattr(config, "gas_price_multiplier", 1.0)),
-                                float(getattr(config, "gas_price_freshness_multiplier", 1.0))),
         "reserve": int(Decimal(str(config.eth_gas_reserve)) * 10**18),
         "cap": int(Decimal(str(getattr(config, "max_" + direction + "_gas_eth",
                                        getattr(config, "max_swap_gas_eth", 0.00004)))) * 10**18),
@@ -108,7 +113,7 @@ def _approval_units(direction, settlement, native_trading, allowance, amount):
     return _RESET_AND_APPROVAL_GAS, "reset_and_exact_approval_budget"
 
 
-def score_candidate(quote, provider, settlement, context, *, allowance_probe=None):
+def score_candidate(quote, provider, settlement, context, *, allowance_probe=None, gas_estimate=None):
     """Compare equal inputs using provider gas, fresh gas price, allowance lookup.
 
     ``allowance_probe`` is a callable ``(token_address, spender_address) -> int``
@@ -128,7 +133,8 @@ def score_candidate(quote, provider, settlement, context, *, allowance_probe=Non
         return row
     output = int(quote.buy_amount or 0)
     row["quoted_output_raw"] = str(output)
-    row["quoted_output_human"] = _wei_to_eth(output) if c["direction"] == "sell" else float(output)
+    output_decimals = 18 if c["direction"] == "sell" else c.get("token_decimals", 18)
+    row["quoted_output_human"] = _raw_to_human(output, output_decimals)
     if c["amount"] <= 0 or output <= 0 or int(quote.sell_amount or 0) != c["amount"]:
         row["rejections"] = ["invalid_quote_amounts"]
         return row
@@ -136,9 +142,12 @@ def score_candidate(quote, provider, settlement, context, *, allowance_probe=Non
         row["rejections"] = ["invalid_economic_assumptions"]
         return row
 
-    # Provider gas estimate preferred over hardcoded fallback.
+    # A read-only RPC estimate of this exact quote is the freshest source. If
+    # the quote is not locally estimable, retain the provider estimate and then
+    # the conservative direction fallback.
     provider_gas = int(quote.gas or 0)
-    swap_gas = provider_gas if provider_gas > 0 else _FALLBACK_SWAP_GAS[c["direction"]]
+    local_gas = int(gas_estimate or 0)
+    swap_gas = local_gas or provider_gas or _FALLBACK_SWAP_GAS[c["direction"]]
 
     # Allowance lookup (only meaningful for sells with a known spender).
     token_for_allowance = c.get("trade_token_address") if c["direction"] == "sell" else c.get("token_address")
@@ -165,10 +174,11 @@ def score_candidate(quote, provider, settlement, context, *, allowance_probe=Non
              "approval": approval_gas,
              "wrap": _WRAP_UNWRAP_GAS if wrap else 0,
              "unwrap": _WRAP_UNWRAP_GAS if unwrap else 0}
-    # Fresh gas price: prefer the higher of snapshot's pre-capture value and
-    # the provider's own gas_price hint (which is quote-time fresh).
-    gas_price = max(c["gas_price"], int(quote.gas_price or 0))
-    multiplier = Decimal(str(c["gas_multiplier"])) * Decimal(str(c["price_multiplier"]))
+    # ``normal_gas_price`` is read immediately after each quote and already
+    # includes price/freshness headroom. Provider gas-price hints can be stale
+    # or use a different policy, so they must not override the live RPC value.
+    gas_price = c["gas_price"]
+    multiplier = Decimal(str(c["gas_multiplier"]))
     costs = {key: int((Decimal(value * gas_price) * multiplier).to_integral_value(rounding=ROUND_CEILING))
              for key, value in units.items()}
     total = sum(costs.values())
@@ -176,7 +186,8 @@ def score_candidate(quote, provider, settlement, context, *, allowance_probe=Non
     row.update(validation_level="quote_only", preparation_dependent=True,
                gas_components_wei={key: str(value) for key, value in costs.items()},
                projected_total_gas_wei=str(total), gas_total_eth=_wei_to_eth(total),
-               gas_basis=("provider_estimate" if provider_gas > 0 else "conservative_direction_fallback"),
+               gas_basis=("local_estimate" if local_gas > 0 else "provider_estimate" if provider_gas > 0
+                          else "conservative_direction_fallback"),
                output_floor_raw=str(floor),
                output_floor_human=_wei_to_eth(floor) if c["direction"] == "sell" else float(floor),
                slippage_fraction=c["slippage"], tax_fraction=c["tax"],
@@ -213,7 +224,8 @@ def score_candidate(quote, provider, settlement, context, *, allowance_probe=Non
 
 
 def collect(config, address, context, client_factory=None,
-            gas_price_provider=None, allowance_probe=None):
+            gas_price_provider=None, allowance_probe=None, gas_estimate_provider=None,
+            max_seconds=8):
     """One get_quote per provider/settlement; never prepare, approve, or send.
 
     Independent client instances avoid mutating execution clients. Uniswap's
@@ -238,11 +250,18 @@ def collect(config, address, context, client_factory=None,
             client = client_factory(name) if client_factory else PROVIDERS[name].load_client_class()(config)
         except Exception:
             client = None
-        # Fresh gas price per provider so quote-time accuracy is preserved
-        # even if snapshot ran seconds earlier.
-        fresh_gas_price = int(gas_price_provider()) if gas_price_provider else int(context["gas_price"])
-        per_context = {**context, "gas_price": fresh_gas_price}
         for settlement, token in (("native", NATIVE), ("weth", config.weth_address)):
+            if time.monotonic() - started >= max(0, float(max_seconds)):
+                rows.append({"provider": name, "settlement": settlement,
+                             "validation_level": "rejected", "rejections": ["observation_deadline"],
+                             "quoted_output_raw": None, "quoted_output_human": None,
+                             "gas_components_wei": {}, "projected_total_gas_wei": None,
+                             "gas_total_eth": None, "output_floor_raw": None,
+                             "output_floor_human": None, "projected_net_score": None,
+                             "execution_eligible": False, "provider_gas_estimate": 0,
+                             "effective_gas_price_wei": 0,
+                             "approval_assumption": "none", "gas_basis": "skipped"})
+                continue
             try:
                 if client is None:
                     raise ValueError("unavailable client")
@@ -253,8 +272,16 @@ def collect(config, address, context, client_factory=None,
                 if name == "uniswap":
                     args["routing_attempts"] = 1
                 quote = client.get_quote(**args)
+                # Read dynamic, already-normalized RPC gas after every quote.
+                # A single oracle failure rejects only this candidate.
+                fresh_gas_price = int(gas_price_provider()) if gas_price_provider else int(context["gas_price"])
+                per_context = {**context, "gas_price": fresh_gas_price}
+                try:
+                    local_gas = int(gas_estimate_provider(quote)) if gas_estimate_provider else 0
+                except Exception:
+                    local_gas = 0
                 row = score_candidate(quote, name, settlement, per_context,
-                                      allowance_probe=allowance_probe)
+                                      allowance_probe=allowance_probe, gas_estimate=local_gas)
                 rows.append(row)
                 # Emit one structured per-candidate log line for observability.
                 result_label = "eligible" if row["validation_level"] == "quote_only" else "rejected"

@@ -215,12 +215,12 @@ def test_snapshot_failure_is_reported_without_candidate_requests():
 
 def test_gas_headroom_applies_to_every_component():
     c = context("sell")
-    c.update(gas_multiplier=1.1, price_multiplier=1.2)
-    row = score_candidate(quote(gas_price=2 * 10**6), "uniswap", "weth", c)
+    c.update(gas_multiplier=1.1, price_multiplier=1.2, gas_price=2 * 10**6)
+    row = score_candidate(quote(gas_price=9 * 10**6), "uniswap", "weth", c)
     assert row["gas_components_wei"] == {
-        "swap": str(300000 * 2 * 10**6 * 132 // 100),
-        "approval": str(200000 * 2 * 10**6 * 132 // 100),
-        "wrap": "0", "unwrap": str(60000 * 2 * 10**6 * 132 // 100)}
+        "swap": str(300000 * 2 * 10**6 * 110 // 100),
+        "approval": str(200000 * 2 * 10**6 * 110 // 100),
+        "wrap": "0", "unwrap": str(60000 * 2 * 10**6 * 110 // 100)}
 
 
 @pytest.mark.parametrize("engine", ["gridless", "legacy"])
@@ -294,13 +294,12 @@ def test_missing_provider_gas_falls_back_to_direction_budget():
     assert int(row["gas_components_wei"]["swap"]) == 300000 * 10**6
 
 
-def test_provider_gas_price_used_when_higher_than_snapshot():
-    """Provider's gas_price hint can exceed the captured normal_gas_price."""
-    # Snapshot gas_price is 1e6 (context default); provider claims 5e6.
+def test_live_rpc_gas_price_beats_provider_hint():
+    """A fresh, normalized RPC price is preferred over a provider hint."""
+    # Snapshot fixture represents the freshly-read RPC value; provider is stale.
     q = quote(gas=300000, gas_price=5 * 10**6)
     row = score_candidate(q, "sushiswap", "native", context())
-    # All gas components should use the higher of the two.
-    assert int(row["gas_components_wei"]["swap"]) == 300000 * 5 * 10**6
+    assert int(row["gas_components_wei"]["swap"]) == 300000 * 10**6
 
 
 def test_existing_allowance_skips_approval_budget():
@@ -438,3 +437,55 @@ def test_snapshot_no_longer_captures_gas_price_for_scoring():
     # The contract here: snapshot MUST NOT block scoring freshness.
     # If snapshot is stale, collect re-reads — and that's the test below.
     assert "direction" in snap and snap["amount"] == 10**15
+
+
+def test_normalized_live_gas_price_is_not_multiplied_twice():
+    """The wallet's live normal price already includes price headroom."""
+    c = context("sell")
+    c.update(gas_multiplier=1.1, price_multiplier=1.2, gas_price=2_000_000)
+    row = score_candidate(quote(gas=300000), "uniswap", "native", c)
+    assert int(row["gas_components_wei"]["swap"]) == 300000 * 2_000_000 * 110 // 100
+    assert row["effective_gas_price_wei"] == 2_000_000
+
+
+def test_collect_reads_fresh_normalized_gas_for_every_candidate_and_isolates_failure():
+    clients = {name: Mock() for name in ("uniswap", "sushiswap")}
+    for client in clients.values():
+        client.get_quote.return_value = quote(gas=100)
+    prices = iter((1_000_000, RuntimeError("rpc unavailable"), 3_000_000, 4_000_000))
+
+    def fresh_price():
+        value = next(prices)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    cfg = SimpleNamespace(uniswap_api_key="key", weth_address="weth", token_address="token")
+    result = collect(cfg, "wallet", context("buy"), clients.__getitem__, gas_price_provider=fresh_price)
+    assert len(result["candidates"]) == 4
+    assert result["candidates"][0]["effective_gas_price_wei"] == 1_000_000
+    assert result["candidates"][1]["rejections"] == ["candidate_failed"]
+    assert result["candidates"][2]["effective_gas_price_wei"] == 3_000_000
+    assert result["candidates"][3]["effective_gas_price_wei"] == 4_000_000
+
+
+def test_buy_output_human_uses_token_decimals():
+    c = context("buy", token_decimals=6)
+    row = score_candidate(quote(output=12_500_000), "sushiswap", "native", c)
+    assert row["quoted_output_human"] == 12.5
+
+
+def test_collection_deadline_skips_unstarted_candidate_requests():
+    clients = {name: Mock() for name in ("uniswap", "sushiswap")}
+    cfg = SimpleNamespace(uniswap_api_key="key", weth_address="weth", token_address="token")
+    result = collect(cfg, "wallet", context("buy"), clients.__getitem__, max_seconds=0)
+    assert len(result["candidates"]) == 4
+    assert all(row["rejections"] == ["observation_deadline"] for row in result["candidates"])
+    for client in clients.values():
+        client.get_quote.assert_not_called()
+
+
+def test_local_estimate_beats_provider_hint_for_current_quote():
+    row = score_candidate(quote(gas=300000), "uniswap", "native", context("buy"), gas_estimate=180000)
+    assert row["gas_basis"] == "local_estimate"
+    assert int(row["gas_components_wei"]["swap"]) == 180000 * 10**6

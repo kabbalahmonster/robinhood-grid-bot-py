@@ -1066,9 +1066,20 @@ class GridBot:
                         return int(self.wallet.check_allowance(token, spender))
                     except Exception:
                         return 0
+                def gas_estimate_provider(quote):
+                    if not getattr(quote, "to", None) or not getattr(quote, "data", None):
+                        return 0
+                    return int(self.wallet.w3.eth.estimate_gas({
+                        "from": self.wallet.address,
+                        "to": quote.to,
+                        "data": quote.data,
+                        "value": int(quote.value or 0),
+                    }))
                 comparison = collect(self.config, self.wallet.address, enriched,
                                      gas_price_provider=gas_price_provider,
-                                     allowance_probe=allowance_probe)
+                                     allowance_probe=allowance_probe,
+                                     gas_estimate_provider=gas_estimate_provider,
+                                     max_seconds=8)
             except Exception:
                 comparison = {"mode": "shadow", "direction": direction,
                               "status": "observation_failed", "candidates": [],

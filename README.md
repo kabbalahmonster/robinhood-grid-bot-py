@@ -1563,13 +1563,13 @@ each actionable operation adds at most four candidate calls / ten HTTP requests
 with both providers, or two with Sushi alone. A budget snapshot also reads the
 native balance and normal gas price, plus WETH balance in WETH trading mode;
 the wallet's existing RPC failover behavior applies. Existing execution traffic
-is additional. Calls are sequential, each
-HTTP request has the existing 30-second timeout, and shared Uniswap rate-limit
-coordination can add waiting. There is no strict overall wall-clock deadline.
-`elapsed_ms` measures total collection time. Independent observer clients do
-not modify execution-client state, but traffic consumes upstream quota and
-Uniswap's shared limiter, so subsequent operation timing/fallback can still
-be affected. Shadow is observational, not zero-impact infrastructure.
+is additional. Collection has an 8-second budget: no new candidate request is
+started once it expires, and skipped candidates are marked `observation_deadline`.
+An already-started provider HTTP call still obeys that client's timeout, so
+shadow remains observational rather than zero-impact infrastructure. `elapsed_ms`
+measures total collection time. Independent observer clients do not modify
+execution-client state, but traffic consumes upstream quota and Uniswap's shared
+limiter, so subsequent operation timing/fallback can still be affected.
 
 Dashboard `buy_attempt.route_comparison` and `sell_attempt.route_comparison`
 contain candidates, fixed rejection codes, provider, settlement, raw quoted
@@ -1581,16 +1581,17 @@ exception text, address, calldata or credential is included in this payload.
 All successful candidates are **quote_only**, including responses containing
 transaction fields; none is `executable_simulated` or execution-eligible.
 Rejected quotes/budgets are `rejected`. No setup or preparation request is made.
-Swap gas uses the larger of the quote hint and a 350k buy / 300k sell budget;
-ERC20 inputs budget 200k for reset plus approval, and settlement conversion
-budgets 60k for wrap or unwrap. Existing allowance is deliberately not credited.
-These are conservative scenario budgets, not guaranteed upper bounds or exact
-RPC estimates. Gas/price headroom applies to every component. The higher of
-the captured normal RPC price and provider price is used. The total budget
-must pass the direction's gas cap and native reserve check. Slippage and
-declared/detected tax haircuts apply to output. Buy score is output raw units
-per ETH of principal plus gas; sell score is output floor minus all gas in
-wei and must cover sold cost basis plus `MIN_PROFIT_PERCENT`. Stoploss
+When quote calldata is available, shadow uses a read-only local `eth_estimateGas`
+for that exact quote; otherwise it uses the provider's current gas hint, then
+the 350k buy / 300k sell fallback. ERC20 inputs budget 200k for reset plus
+approval, and settlement conversion budgets 60k for wrap or unwrap. Existing
+allowance removes that setup budget only when the current allowance covers the
+amount. The live wallet RPC normal gas price is re-read after every quote and
+already includes configured price/freshness headroom, which is applied exactly
+once. The total budget must pass the direction's gas cap and native reserve
+check. Slippage and declared/detected tax haircuts apply to output. Buy score is
+output raw units per ETH of principal plus gas; sell score is output floor minus
+all gas in wei and must cover sold cost basis plus `MIN_PROFIT_PERCENT`. Stoploss
 observations still apply that floor, without affecting actual stoploss behavior.
 
 `ROUTE_TOURNAMENT_MODE=execute` is **intentionally unavailable** and fails
