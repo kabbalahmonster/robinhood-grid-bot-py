@@ -91,6 +91,15 @@ def baseline_series(variants, rounds):
     ]
 
 
+def select_variants(variants, names):
+    """Select named probes in caller order, rejecting accidental unsupported labels."""
+    available = {variant["name"]: variant for variant in variants}
+    unknown = [name for name in names if name not in available]
+    if unknown:
+        raise ValueError(f"unknown variants: {', '.join(unknown)}")
+    return [deepcopy(available[name]) for name in names]
+
+
 def _record_response(variant, response, latency_ms):
     fingerprint, encoded = _fingerprint(variant["body"])
     try:
@@ -184,6 +193,8 @@ def parse_args(argv=None):
     parser.add_argument("--rounds", type=int, default=1)
     parser.add_argument("--baseline-only", action="store_true",
                         help="Repeat only the exact production baseline (up to 12 rounds)")
+    parser.add_argument("--variants",
+                        help="Comma-separated supported probe names, repeated in this order each round")
     parser.add_argument("--delay-seconds", type=float, default=DEFAULT_DELAY_SECONDS)
     parser.add_argument("--timeout-seconds", type=float, default=10)
     parser.add_argument("--output", help="JSONL output path; defaults to stdout")
@@ -192,6 +203,8 @@ def parse_args(argv=None):
 
 def main(argv=None):
     args = parse_args(argv)
+    if args.baseline_only and args.variants:
+        raise SystemExit("--baseline-only cannot be combined with --variants")
     max_rounds = 12 if args.baseline_only else MAX_ROUNDS
     if not 1 <= args.rounds <= max_rounds:
         raise SystemExit(f"--rounds must be between 1 and {max_rounds}")
@@ -225,6 +238,14 @@ def main(argv=None):
     }
     variants = build_variants(body, headers, args.slippage is not None,
                               0.5 if args.slippage is None else args.slippage)
+    if args.variants:
+        names = [name.strip() for name in args.variants.split(",") if name.strip()]
+        if not names:
+            raise SystemExit("--variants must name at least one probe")
+        try:
+            variants = select_variants(variants, names)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from None
     variants = (baseline_series(variants, args.rounds) if args.baseline_only
                 else variants * args.rounds)
     if len(variants) > MAX_REQUESTS:

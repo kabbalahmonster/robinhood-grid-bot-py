@@ -4,7 +4,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-from ops.fleet.probe_uniswap_route_matrix import build_variants, baseline_series, run_matrix
+from ops.fleet.probe_uniswap_route_matrix import build_variants, baseline_series, run_matrix, select_variants
 
 
 class ProbeUniswapRouteMatrixTests(unittest.TestCase):
@@ -54,6 +54,11 @@ class ProbeUniswapRouteMatrixTests(unittest.TestCase):
         ])
         self.assertEqual({item["body"]["amount"] for item in series}, {"100"})
         self.assertEqual({item["headers"]["x-universal-router-version"] for item in series}, {"2.1.1"})
+
+    def test_select_variants_preserves_requested_ab_order(self):
+        selected = select_variants(build_variants(self.body, self.headers), ["baseline", "v4_only"])
+
+        self.assertEqual([item["name"] for item in selected], ["baseline", "v4_only"])
 
     def test_slippage_variant_omits_existing_baseline_slippage(self):
         body = {**self.body, "slippageTolerance": 2.0}
