@@ -17,6 +17,7 @@ from the cost stack rather than pessimistically assuming a reset.
 
 from decimal import Decimal, ROUND_CEILING
 import logging
+import re
 import time
 
 from swap_provider import PROVIDERS
@@ -30,6 +31,31 @@ _FALLBACK_SWAP_GAS = {"buy": 350000, "sell": 300000}
 # Legacy approval budget when allowance is unknown or insufficient.
 _RESET_AND_APPROVAL_GAS = 200000
 _WRAP_UNWRAP_GAS = 60000
+
+
+def _quote_failure_reason(provider, error):
+    """Classify a provider failure without exposing response or credential data."""
+    text = str(error or "").lower()
+    if "noroutefounderror" in text or "no route" in text or "no quotes available" in text:
+        return {"category": "no_liquidity", "retryable": False,
+                "provider_error": "NoRouteFoundError"}
+    if "cooldown active" in text or "timed out" in text or "timeout" in text:
+        return {"category": "transient", "retryable": True,
+                "provider_error": "transient_provider_failure"}
+    status = next((int(value) for value in re.findall(r"\b(\d{3})\b", text)
+                   if 400 <= int(value) <= 599), None)
+    if status is not None:
+        retryable = status in {408, 409, 425, 429} or status >= 500
+        return {"category": "transient" if retryable else "provider_rejected",
+                "retryable": retryable, "provider_error": f"http_{status}"}
+    if "not configured" in text:
+        return {"category": "configuration", "retryable": False,
+                "provider_error": "credentials_not_configured"}
+    if "required" in text or "must specify" in text:
+        return {"category": "invalid_request", "retryable": False,
+                "provider_error": "invalid_quote_request"}
+    return {"category": "provider_error", "retryable": False,
+            "provider_error": f"{provider}_quote_failed"}
 
 
 def _wei_to_eth(wei):
@@ -130,6 +156,7 @@ def score_candidate(quote, provider, settlement, context, *, allowance_probe=Non
            "projected_net_score": None, "rejections": [], "execution_eligible": False}
     if not quote.success:
         row["rejections"] = ["provider_quote_failed"]
+        row["failure_reason"] = _quote_failure_reason(provider, getattr(quote, "error", None))
         return row
     output = int(quote.buy_amount or 0)
     row["quoted_output_raw"] = str(output)
@@ -271,6 +298,8 @@ def collect(config, address, context, client_factory=None,
                             slippage_percentage=context["slippage"], apply_jitter_to_price=False)
                 if name == "uniswap":
                     args["routing_attempts"] = 1
+                    # Do not consume or inherit execution's shared cooldown.
+                    args["isolated_rate_limit"] = True
                 quote = client.get_quote(**args)
                 # Read dynamic, already-normalized RPC gas after every quote.
                 # A single oracle failure rejects only this candidate.

@@ -114,6 +114,29 @@ def test_no_eligible_and_missing_provider():
     assert result["runner_up_delta"] is None
 
 
+def test_provider_quote_failure_has_structured_actionable_reason():
+    row = score_candidate(
+        QuoteResult(success=False, error="Uniswap API returned status 404: NoRouteFoundError"),
+        "uniswap", "native", context(),
+    )
+    assert row["rejections"] == ["provider_quote_failed"]
+    assert row["failure_reason"] == {
+        "category": "no_liquidity",
+        "retryable": False,
+        "provider_error": "NoRouteFoundError",
+    }
+
+
+def test_tournament_quote_requests_bypass_shared_provider_cooldown_state():
+    client = Mock()
+    client.get_quote.return_value = quote()
+    cfg = SimpleNamespace(uniswap_api_key="key", weth_address="weth", token_address="token")
+    collect(cfg, "wallet", context(), lambda name: client)
+    uniswap_calls = [call for call in client.get_quote.call_args_list if call.kwargs.get("routing_attempts") == 1]
+    assert uniswap_calls
+    assert all(call.kwargs["isolated_rate_limit"] is True for call in uniswap_calls)
+
+
 def bot(mode):
     b = GridBot.__new__(GridBot)
     b.config = SimpleNamespace(route_tournament_mode=mode)
