@@ -240,7 +240,15 @@ def score_candidate(quote, provider, settlement, context, *, allowance_probe=Non
     costs = {key: int((Decimal(value * gas_price) * multiplier).to_integral_value(rounding=ROUND_CEILING))
              for key, value in units.items()}
     total = sum(costs.values())
-    floor = int(Decimal(output) * (1 - Decimal(str(c["slippage"]))) * (1 - Decimal(str(c["tax"]))))
+    # ``slippage`` is transaction tolerance, not a second quoted-output fee.
+    # For taxed sells it already contains the transfer fee plus market buffer;
+    # the live sell guard applies the transfer fee exactly once to a fresh quote.
+    # Mirror that economic guard so shadow does not reject executable trades.
+    if c["direction"] == "sell":
+        floor = int(Decimal(output) * (1 - Decimal(str(c["tax"]))))
+    else:
+        floor = int(Decimal(output) * (1 - Decimal(str(c["slippage"]))) *
+                    (1 - Decimal(str(c["tax"]))))
     row.update(validation_level="quote_only", preparation_dependent=True,
                gas_components_wei={key: str(value) for key, value in costs.items()},
                projected_total_gas_wei=str(total), gas_total_eth=_wei_to_eth(total),

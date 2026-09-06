@@ -54,15 +54,35 @@ def test_buy_and_sell_scoring_tax_slippage_and_all_gas():
     """Provider gas estimate (300k from fixture) drives swap cost, not the fallback."""
     c = context()
     buy = score_candidate(quote(), "sushiswap", "weth", c)
-    floor = 2 * 10**15 * 99 * 98 // 10000
+    buy_floor = 2 * 10**15 * 99 * 98 // 10000
     # Provider says 300k (fixture default); weth buy needs approval + wrap.
     gas = (300000 + 200000 + 60000) * 10**6
-    assert int(buy["output_floor_raw"]) == floor
-    assert Decimal(buy["projected_net_score"]) == Decimal(floor) * 10**18 / (10**15 + gas)
+    assert int(buy["output_floor_raw"]) == buy_floor
+    assert Decimal(buy["projected_net_score"]) == Decimal(buy_floor) * 10**18 / (10**15 + gas)
     assert buy["gas_basis"] == "provider_estimate"
     c["direction"] = "sell"
     sell = score_candidate(quote(), "sushiswap", "weth", c)
-    assert Decimal(sell["projected_net_score"]) == floor - (300000 + 200000 + 60000) * 10**6
+    sell_floor = 2 * 10**15 * 98 // 100
+    assert Decimal(sell["projected_net_score"]) == sell_floor - (300000 + 200000 + 60000) * 10**6
+
+
+def test_taxed_sell_does_not_charge_fee_twice_when_slippage_includes_fee():
+    # Taxed-token execution tolerance is fee + market buffer. Applying both
+    # that total tolerance and tax again rejects a sell the live guard accepts.
+    c = context("sell")
+    c.update(
+        amount=1, sold_cost_wei=3_746_083_335_437_205,
+        gas_price=377_542_040, gas_multiplier=1.05, cap=10**18,
+        slippage=0.083, tax=0.063, min_profit=2,
+    )
+    observed = score_candidate(
+        QuoteResult(success=True, buy_amount=4_312_533_175_868_646,
+                    sell_amount=1, gas=300000),
+        "uniswap", "native", c, allowance_probe={"value": 1},
+    )
+
+    assert int(observed["output_floor_raw"]) == 4_312_533_175_868_646 * 937 // 1000
+    assert "sell_profit_floor" not in observed["rejections"]
 
 
 @pytest.mark.parametrize("change,reason", [
