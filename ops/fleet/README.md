@@ -624,6 +624,22 @@ or API credential and never signs, approves, broadcasts, or modifies files.
 Failures make the command exit nonzero; warnings (such as an intentionally
 disabled dashboard) remain visible but do not.
 
+### Uniswap transient-route matrix
+
+`probe_uniswap_route_matrix.py` isolates intermittent `/quote` route failures without touching bot state. It sends quote-only requests, one variable at a time, and prints sanitized JSONL (status, error code, request ID, latency, and a non-reversible payload fingerprint). It never signs, approves, requests swap calldata, broadcasts, prints credentials, or prints token/wallet inputs.
+
+Run it from one checkout only, serialized at its 2-second minimum delay; do not run concurrent matrices across fleet bots that share an API key:
+
+```bash
+python3 ops/fleet/probe_uniswap_route_matrix.py \
+  --env .env \
+  --sell-token "$TOKEN" --buy-token "$WETH" \
+  --sell-amount "$RAW_AMOUNT" --swapper "$BOT_PUBLIC_ADDRESS" \
+  --output "/tmp/uniswap-route-matrix-$(date +%s).jsonl"
+```
+
+It emits a baseline plus one-variable variants for AMM-only protocols, ERC20-ETH negotiation, router version, connection, user agent, and optionally explicit slippage. It stops early on rate limits, retry-after responses, repeated 5xx, or repeated transport failures. Use an explicit public `--swapper` to avoid loading signing material.
+
 Use inventory for a concise current-state snapshot without the route probe:
 
 ```bash
