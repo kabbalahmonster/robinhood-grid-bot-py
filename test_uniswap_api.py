@@ -157,7 +157,43 @@ class TestUniswapAPIClient(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertEqual(result.error, "shadow quote deadline elapsed")
 
-    def test_no_route_retries_with_explicit_amm_protocols(self):
+    def test_no_route_discovers_v3_then_reuses_cached_protocol(self):
+        config = SimpleNamespace(
+            uniswap_api_key="test-key",
+            uniswap_permit2_disabled=True,
+            chain_id=4663,
+            anti_mev_jitter=False,
+        )
+        no_route = SimpleNamespace(
+            status_code=404,
+            text='{"errorCode":"NoRouteFoundError","detail":"No route with sufficient liquidity"}',
+            headers={},
+        )
+        recovered = SimpleNamespace(
+            status_code=200,
+            text="",
+            headers={},
+            json=lambda: {
+                "quote": {"input": {"amount": "100"}, "output": {"amount": "95"}},
+                "tx": {},
+            },
+        )
+
+        client = UniswapAPIClient(config)
+        with patch("uniswap_api.requests.post", side_effect=[no_route, no_route, recovered, recovered]) as post:
+            first = client.get_quote("0xin", "0xout", sell_amount=100, taker_address="0xtaker")
+            second = client.get_quote("0xin", "0xout", sell_amount=100, taker_address="0xtaker")
+
+        self.assertTrue(first.success)
+        self.assertTrue(second.success)
+        self.assertEqual(post.call_count, 4)
+        payloads = [json.loads(call.kwargs["data"]) for call in post.call_args_list]
+        self.assertNotIn("protocols", payloads[0])
+        self.assertEqual(payloads[1]["protocols"], ["V4"])
+        self.assertEqual(payloads[2]["protocols"], ["V3"])
+        self.assertEqual(payloads[3]["protocols"], ["V3"])
+
+    def test_no_route_discovers_first_available_protocol(self):
         config = SimpleNamespace(
             uniswap_api_key="test-key",
             uniswap_permit2_disabled=True,
@@ -192,7 +228,7 @@ class TestUniswapAPIClient(unittest.TestCase):
         first_payload = json.loads(post.call_args_list[0].kwargs["data"])
         retry_payload = json.loads(post.call_args_list[1].kwargs["data"])
         self.assertNotIn("protocols", first_payload)
-        self.assertEqual(retry_payload["protocols"], ["V2", "V3", "V4"])
+        self.assertEqual(retry_payload["protocols"], ["V4"])
 
     def test_non_route_404_does_not_trigger_amm_retry(self):
         config = SimpleNamespace(

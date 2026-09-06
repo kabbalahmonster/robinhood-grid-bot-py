@@ -48,6 +48,8 @@ class UniswapAPIClient:
     """
     
     BASE_URL = "https://trade-api.gateway.uniswap.org/v1"
+    PROTOCOL_DISCOVERY_ORDER = ("V4", "V3", "V2")
+    DEFAULT_PROTOCOL_CACHE_TTL_SECONDS = 300.0
     
     def __init__(self, config: BotConfig):
         """
@@ -62,6 +64,12 @@ class UniswapAPIClient:
         self.api_key = getattr(config, 'uniswap_api_key', '')
         self.permit2_disabled = getattr(config, 'uniswap_permit2_disabled', True)
         self.chain_id = config.chain_id
+        self._protocol_cache = {}
+        self._protocol_cache_ttl_seconds = min(
+            3600.0,
+            max(30.0, float(getattr(config, "uniswap_protocol_cache_ttl_seconds",
+                                    self.DEFAULT_PROTOCOL_CACHE_TTL_SECONDS))),
+        )
         self.rate_limiter = SharedRateLimiter(
             namespace="uniswap",
             credential=self.api_key,
@@ -217,6 +225,35 @@ class UniswapAPIClient:
         error_text = (response.text or "")[:1000].lower()
         return "noroutefounderror" in error_text or "no route" in error_text or "no quotes available" in error_text
 
+    def _protocol_cache_key(self, payload: dict) -> tuple:
+        """Key a capability hint by the quote shape, never by price or calldata."""
+        return (
+            payload.get("tokenInChainId"), payload.get("tokenOutChainId"),
+            str(payload.get("tokenIn", "")).lower(), str(payload.get("tokenOut", "")).lower(),
+            payload.get("type"),
+        )
+
+    def _cached_protocol(self, cache_key: tuple) -> Optional[str]:
+        entry = self._protocol_cache.get(cache_key)
+        if not entry:
+            return None
+        protocol, expires_at = entry
+        if time.monotonic() >= expires_at:
+            self._protocol_cache.pop(cache_key, None)
+            return None
+        return protocol
+
+    def _remember_protocol(self, cache_key: tuple, protocol: str) -> None:
+        self._protocol_cache[cache_key] = (
+            protocol, time.monotonic() + self._protocol_cache_ttl_seconds,
+        )
+        self.logger.info("Uniswap protocol capability cached: %s", protocol)
+
+    def _forget_protocol(self, cache_key: tuple, protocol: str) -> None:
+        if self._protocol_cache.get(cache_key, (None,))[0] == protocol:
+            self._protocol_cache.pop(cache_key, None)
+            self.logger.warning("Uniswap cached protocol no longer quoted: %s", protocol)
+
     @classmethod
     def _is_retryable_routing_failure(cls, response) -> bool:
         """Failures where rerunning discovery is explicitly safe/useful."""
@@ -313,27 +350,60 @@ class UniswapAPIClient:
                 return self._post_json("quote", request_payload, timeout_seconds=timeout)
 
             response = None
+            cache_key = self._protocol_cache_key(payload)
             for routing_attempt in range(1, routing_attempts + 1):
+                cached_protocol = self._cached_protocol(cache_key)
+                if cached_protocol:
+                    cooldown_error = self._cooldown_error()
+                    if cooldown_error is not None:
+                        return QuoteResult(success=False, error=cooldown_error)
+                    cached_payload = payload.copy()
+                    cached_payload["protocols"] = [cached_protocol]
+                    self.logger.info("Uniswap quote using cached protocol capability: %s", cached_protocol)
+                    response = post_within_quote_deadline(cached_payload)
+                    if response.status_code == 200:
+                        break
+                    self._forget_protocol(cache_key, cached_protocol)
+
+                # Refresh default routing after an unavailable cached path so a
+                # gateway timeout never reuses a prior response object.
                 cooldown_error = self._cooldown_error()
                 if cooldown_error is not None:
                     return QuoteResult(success=False, error=cooldown_error)
                 response = post_within_quote_deadline(payload)
 
-                # BEST_PRICE/default routing may involve UniswapX discovery.
-                # Retry the same attempt against canonical AMM liquidity.
+                # A combined V2/V3/V4 filter can itself return a false no-route
+                # on Robinhood Chain. Discover supported protocol families one at
+                # a time, then cache only a short-lived successful capability.
+                discovered_protocols = False
                 if self._is_no_route_failure(response):
-                    amm_payload = payload.copy()
-                    amm_payload["protocols"] = ["V2", "V3", "V4"]
-                    self.logger.warning(
-                        "Uniswap default routing found no route; retrying quote "
-                        "against explicit V2/V3/V4 AMM liquidity"
-                    )
-                    cooldown_error = self._cooldown_error()
-                    if cooldown_error is not None:
-                        return QuoteResult(success=False, error=cooldown_error)
-                    response = post_within_quote_deadline(amm_payload)
+                    for protocol in self.PROTOCOL_DISCOVERY_ORDER:
+                        if protocol == cached_protocol:
+                            continue
+                        protocol_payload = payload.copy()
+                        protocol_payload["protocols"] = [protocol]
+                        self.logger.warning(
+                            "Uniswap default routing found no route; probing explicit %s liquidity",
+                            protocol,
+                        )
+                        cooldown_error = self._cooldown_error()
+                        if cooldown_error is not None:
+                            return QuoteResult(success=False, error=cooldown_error)
+                        response = post_within_quote_deadline(protocol_payload)
+                        discovered_protocols = True
+                        if response.status_code == 200:
+                            self._remember_protocol(cache_key, protocol)
+                            break
+                        if not self._is_no_route_failure(response):
+                            break
 
-                if response.status_code == 200 or routing_attempt == routing_attempts:
+                if response.status_code == 200:
+                    break
+                # Individual protocol discovery already sampled every supported
+                # candidate for this quote; repeating that cycle only adds load.
+                if discovered_protocols:
+                    break
+                if routing_attempt == routing_attempts:
                     break
                 if not self._is_retryable_routing_failure(response):
                     break
