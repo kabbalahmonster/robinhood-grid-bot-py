@@ -1042,20 +1042,6 @@ class GridBot:
                                   "direction": direction}
             self._route_shadow_pending = pending
 
-    def _record_route_shadow_approval(self, direction, provider, settlement, required):
-        """Attach a normal-flow approval outcome to its passive shadow snapshot."""
-        if getattr(self.config, "route_tournament_mode", "off") != "shadow":
-            return
-        pending = getattr(self, "_route_shadow_pending", {})
-        context = pending.get(direction)
-        if context is None:
-            return
-        observations = dict(context.get("approval_observations", {}))
-        observations[f"{provider}:{settlement}"] = "required" if required else "not_required"
-        context["approval_observations"] = observations
-        pending[direction] = context
-        self._route_shadow_pending = pending
-
     def _finish_route_shadow(self):
         pending = getattr(self, "_route_shadow_pending", {})
         self._route_shadow_pending = {}
@@ -2493,11 +2479,6 @@ class GridBot:
                 # Uniswap check_approval returns {"approval": tx} when approval is needed, null otherwise
                 cancel_tx = approval_result.get("cancel")
                 approval_tx = approval_result.get("approval")
-                settlement = "weth" if (weth_fallback or not self.config.use_eth_trading) else "native"
-                self._record_route_shadow_approval(
-                    "sell", self.api_client.name, settlement,
-                    required=(cancel_tx is not None or approval_tx is not None),
-                )
                 
                 # Helper function to build EIP-1559 transaction with fresh fees
                 def build_eip1559_tx(api_tx):

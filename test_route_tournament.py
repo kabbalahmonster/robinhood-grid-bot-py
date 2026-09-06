@@ -299,17 +299,6 @@ def test_shadow_observation_budget_is_four_seconds():
     assert collection.call_args.kwargs["max_seconds"] == 4
 
 
-def test_shadow_records_exact_normal_provider_approval_outcome():
-    b = bot("shadow")
-    b._route_shadow_pending = {"sell": {"direction": "sell", "amount": 10}}
-
-    b._record_route_shadow_approval("sell", "uniswap", "native", required=False)
-
-    assert b._route_shadow_pending["sell"]["approval_observations"] == {
-        "uniswap:native": "not_required",
-    }
-
-
 def test_poll_and_observer_failure_do_not_change_operation():
     b = bot("shadow")
     @_with_swap_provider_fallback
@@ -452,31 +441,6 @@ def test_existing_allowance_skips_approval_budget():
     )
     assert int(row["gas_components_wei"]["approval"]) == 0
     assert row.get("approval_assumption") == "existing_allowance_covers"
-
-
-def test_execution_observed_no_approval_skips_shadow_approval_budget():
-    c = context("sell")
-    c["approval_observations"] = {"uniswap:native": "not_required"}
-    row = score_candidate(
-        quote(allowance_target="router"), "uniswap", "native", c,
-        allowance_probe=None,
-    )
-
-    assert int(row["gas_components_wei"]["approval"]) == 0
-    assert row["approval_assumption"] == "execution_observed_no_approval"
-
-
-def test_execution_approval_observation_is_limited_to_exact_route():
-    c = context("sell")
-    c["approval_observations"] = {"uniswap:native": "not_required"}
-
-    row = score_candidate(
-        quote(allowance_target="router"), "uniswap", "weth", c,
-        allowance_probe=None,
-    )
-
-    assert int(row["gas_components_wei"]["approval"]) > 0
-    assert row["approval_assumption"] == "reset_and_exact_approval_budget"
 
 
 def test_insufficient_allowance_budgets_reset_and_approval():
