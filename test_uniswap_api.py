@@ -1,4 +1,5 @@
 import unittest
+import uniswap_api
 import tempfile
 import json
 from types import SimpleNamespace
@@ -139,6 +140,22 @@ class TestUniswapAPIClient(unittest.TestCase):
         self.assertEqual(post.call_args_list[1].kwargs["headers"]["User-Agent"], "curl/8.0")
         self.assertEqual(post.call_args_list[0].kwargs["headers"]["Connection"], "close")
         self.assertEqual(post.call_args_list[1].kwargs["headers"]["Connection"], "close")
+
+    def test_shadow_read_timeout_has_explicit_observation_deadline_error(self):
+        config = SimpleNamespace(
+            uniswap_api_key="test-key",
+            uniswap_permit2_disabled=True,
+            chain_id=4663,
+            anti_mev_jitter=False,
+        )
+        with patch("uniswap_api.requests.post", side_effect=uniswap_api.requests.ReadTimeout("read timed out")):
+            result = UniswapAPIClient(config).get_quote(
+                "0xin", "0xout", sell_amount=100, taker_address="0xtaker",
+                quote_timeout_seconds=0.5,
+            )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.error, "shadow quote deadline elapsed")
 
     def test_no_route_retries_with_explicit_amm_protocols(self):
         config = SimpleNamespace(

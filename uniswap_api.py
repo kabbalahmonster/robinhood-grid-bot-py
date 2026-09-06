@@ -296,6 +296,7 @@ class UniswapAPIClient:
         if slippage_percentage is not None:
             payload["slippageTolerance"] = round(slippage_percentage * 100, 2)
         
+        quote_deadline = None
         try:
             url = f"{self.BASE_URL}/quote"
 
@@ -393,7 +394,9 @@ class UniswapAPIClient:
             )
         
         except requests.exceptions.RequestException as e:
-            error_msg = f"Request failed: {e}"
+            error_msg = ("shadow quote deadline elapsed"
+                         if quote_deadline is not None and isinstance(e, requests.Timeout)
+                         else f"Request failed: {e}")
             self.logger.error(error_msg)
             return QuoteResult(success=False, error=error_msg)
         
