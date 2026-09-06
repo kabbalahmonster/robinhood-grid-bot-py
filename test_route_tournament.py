@@ -443,6 +443,20 @@ def test_existing_allowance_skips_approval_budget():
     assert row.get("approval_assumption") == "existing_allowance_covers"
 
 
+def test_unverified_execution_approval_observation_keeps_conservative_budget():
+    """A passive normal-flow result cannot prove a shadow candidate's spender."""
+    c = context("sell")
+    c["approval_observations"] = {"uniswap:native": "not_required"}
+
+    row = score_candidate(
+        quote(allowance_target="router"), "uniswap", "native", c,
+        allowance_probe=None,
+    )
+
+    assert int(row["gas_components_wei"]["approval"]) > 0
+    assert row["approval_assumption"] == "reset_and_exact_approval_budget"
+
+
 def test_insufficient_allowance_budgets_reset_and_approval():
     """When allowance is below amount, still budget reset+approval (legacy behavior)."""
     c = context("sell")
