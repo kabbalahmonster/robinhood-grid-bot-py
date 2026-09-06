@@ -1248,14 +1248,17 @@ class GridBot:
                 )
         gas_source = "rpc_execution" if estimated_gas is not None else "provider"
         gas_limit = int((estimated_gas if estimated_gas is not None else provider_gas) * gas_limit_mult)
-        normal_gas_price = int(self.wallet.w3.eth.gas_price)
+        # The wallet oracle reads both the RPC normal price and current base-fee
+        # observations (including pending where available), then applies the
+        # configured price/freshness headroom once.  Do not bypass it here: a
+        # raw eth_gasPrice can already be below the pending block base fee by
+        # the time this executable quote is sent.
+        normal_gas_price = int(self.wallet.normal_gas_price())
         gas_price_mult = getattr(self.config, 'gas_price_multiplier', 1.0)
         freshness_mult = max(
             float(getattr(self.config, 'gas_price_freshness_multiplier', 1.01)), 1.0
         )
-        gas_price = int(
-            normal_gas_price * max(float(gas_price_mult), 1.0) * freshness_mult
-        )
+        gas_price = normal_gas_price
         provider_gas_price = int(quote.gas_price or 0)
         logger.info(
             "Gas plan: strategy=normal source=%s simulated_gas=%s provider_gas=%s "

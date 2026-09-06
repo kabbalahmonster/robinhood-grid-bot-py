@@ -18,6 +18,7 @@ class GasAwareProfitTests(unittest.TestCase):
         )
         bot.wallet = Mock()
         bot.wallet.w3.eth.gas_price = 400_000_000
+        bot.wallet.normal_gas_price.return_value = 400_000_000
         bot.wallet.w3.eth.estimate_gas.side_effect = RuntimeError("simulation unavailable")
         bot.provider = SimpleNamespace(name="sushiswap")
         bot._buy_attempt = None
@@ -55,6 +56,9 @@ class GasAwareProfitTests(unittest.TestCase):
         bot = self.make_bot()
         bot.config.gas_limit_multiplier = 1.05
         bot.config.gas_price_multiplier = 1.05
+        # The wallet oracle owns configured price headroom, so return its
+        # already-normalized 5% result rather than applying it a second time.
+        bot.wallet.normal_gas_price.return_value = 420_000_000
         quote = SimpleNamespace(gas=200_000, gas_price=400_000_000)
 
         self.assertEqual(bot._projected_gas_cost_wei(quote), 88_200_000_000_000)
@@ -68,14 +72,15 @@ class GasAwareProfitTests(unittest.TestCase):
         self.assertEqual(gas_limit, 200_000)
         self.assertEqual(gas_price, 400_000_000)
 
-    def test_normal_price_uses_only_configured_freshness_margin(self):
+    def test_normal_price_uses_wallet_base_fee_aware_oracle(self):
         bot = self.make_bot()
-        bot.config.gas_price_freshness_multiplier = 1.01
+        bot.wallet.normal_gas_price.return_value = 418_000_000
         quote = SimpleNamespace(gas=200_000, gas_price=2_000_000_000)
 
         _, gas_price = bot._swap_gas_fields(quote)
 
-        self.assertEqual(gas_price, 404_000_000)
+        self.assertEqual(gas_price, 418_000_000)
+        bot.wallet.normal_gas_price.assert_called_once_with()
 
     def test_executable_quote_uses_rpc_simulation_instead_of_provider_gas(self):
         bot = self.make_bot()

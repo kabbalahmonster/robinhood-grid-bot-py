@@ -24,6 +24,7 @@ class BankingGasReserveTests(unittest.TestCase):
         bot.wallet.address = "0x2222222222222222222222222222222222222222"
         bot.wallet.get_eth_balance_wei.return_value = balance_wei
         bot.wallet.w3.eth.gas_price = 1_000_000_000
+        bot.wallet.normal_gas_price.return_value = 1_000_000_000
         bot.wallet.w3.eth.get_transaction_count.return_value = 1
         bot.provider = Mock()
         bot.provider.capabilities.quote_requires_preparation = False

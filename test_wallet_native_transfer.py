@@ -48,6 +48,21 @@ class TestWalletNativeTransfer(unittest.TestCase):
 
         self.assertEqual(wallet.normal_gas_price(), 386_024_020)
 
+    def test_normal_gas_price_keeps_latest_base_fee_when_pending_read_fails(self):
+        wallet = Wallet.__new__(Wallet)
+        wallet.logger = logging.getLogger("test.wallet")
+        wallet.config = SimpleNamespace(
+            gas_price_multiplier=1.0,
+            gas_price_freshness_multiplier=1.0,
+        )
+        wallet.w3 = SimpleNamespace(eth=Mock())
+        wallet.w3.eth.gas_price = 400_000_000
+        wallet.w3.eth.get_block.side_effect = [
+            {"baseFeePerGas": 430_000_000}, RuntimeError("pending unavailable"),
+        ]
+
+        self.assertEqual(wallet.normal_gas_price(), 430_000_000)
+
     def test_erc20_transfer_rebuilds_once_after_prebroadcast_stale_fee_rejection(self):
         wallet = Wallet.__new__(Wallet)
         wallet.logger = logging.getLogger("test.wallet")

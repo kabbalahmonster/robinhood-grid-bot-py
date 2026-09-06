@@ -240,16 +240,16 @@ class Wallet:
         multiplier = max(float(getattr(self.config, "gas_price_multiplier", 1.0)), 1.0)
         freshness = max(float(getattr(self.config, "gas_price_freshness_multiplier", 1.01)), 1.0)
         rpc_gas_price = int(self.w3.eth.gas_price)
-        try:
-            latest_block = self.w3.eth.get_block("latest")
-            pending_block = self.w3.eth.get_block("pending")
-            base_fee = max(
-                int(latest_block.get("baseFeePerGas") or 0),
-                int(pending_block.get("baseFeePerGas") or 0),
-            )
-        except Exception as exc:
-            self.logger.warning("Could not refresh latest block base fee: %s", exc)
-            base_fee = 0
+        base_fees = []
+        for block_tag in ("latest", "pending"):
+            try:
+                block = self.w3.eth.get_block(block_tag)
+                base_fees.append(int(block.get("baseFeePerGas") or 0))
+            except Exception as exc:
+                # A pending-block failure must not discard a successfully read
+                # latest fee floor (and vice versa).
+                self.logger.warning("Could not refresh %s block base fee: %s", block_tag, exc)
+        base_fee = max(base_fees, default=0)
         return int(max(rpc_gas_price, base_fee, int(minimum_base_fee)) * multiplier * freshness)
 
     @staticmethod
