@@ -164,6 +164,107 @@ def test_quote_deadline_is_exposed_as_an_observation_timeout():
     }
 
 
+def test_collection_rejects_quote_returned_after_global_deadline():
+    clock = [0.0]
+    client = Mock()
+
+    def late_quote(**_kwargs):
+        clock[0] = 1.1
+        return quote()
+
+    client.get_quote.side_effect = late_quote
+    cfg = SimpleNamespace(uniswap_api_key="", weth_address="weth", token_address="token")
+    gas_oracle = Mock(return_value=10**6)
+    with patch("route_tournament.time.monotonic", side_effect=lambda: clock[0]):
+        result = collect(
+            cfg, "wallet", context(), lambda _name: client,
+            gas_price_provider=gas_oracle, max_seconds=1,
+        )
+
+    first = result["candidates"][0]
+    assert first["rejections"] == ["observation_timeout"]
+    assert first["quote_failure_kind"] == "observation_timeout"
+    assert result["selected_hypothetical_winner"] is None
+    gas_oracle.assert_not_called()
+
+
+def test_collection_rejects_economics_finished_after_global_deadline():
+    clock = [0.0]
+    client = Mock()
+    client.get_quote.return_value = quote()
+
+    def late_gas_price():
+        clock[0] = 1.1
+        return 10**6
+
+    gas_estimator = Mock(return_value=123456)
+    cfg = SimpleNamespace(uniswap_api_key="", weth_address="weth", token_address="token")
+    with patch("route_tournament.time.monotonic", side_effect=lambda: clock[0]):
+        result = collect(
+            cfg, "wallet", context(), lambda _name: client,
+            gas_price_provider=late_gas_price,
+            gas_estimate_provider=gas_estimator, max_seconds=1,
+        )
+
+    first = result["candidates"][0]
+    assert first["rejections"] == ["observation_timeout"]
+    assert result["selected_hypothetical_winner"] is None
+    gas_estimator.assert_not_called()
+
+
+def test_collection_rejects_allowance_probe_finished_after_global_deadline():
+    clock = [0.0]
+    client = Mock()
+    client.get_quote.return_value = quote(allowance_target="spender")
+
+    def late_allowance(_token, _spender):
+        clock[0] = 1.1
+        return 10**15
+
+    cfg = SimpleNamespace(uniswap_api_key="", weth_address="weth", token_address="token")
+    with patch("route_tournament.time.monotonic", side_effect=lambda: clock[0]):
+        result = collect(
+            cfg, "wallet", context("sell"), lambda _name: client,
+            allowance_probe=late_allowance, max_seconds=1,
+        )
+
+    first = result["candidates"][0]
+    assert first["rejections"] == ["observation_timeout"]
+    assert result["selected_hypothetical_winner"] is None
+
+
+def test_collection_labels_quote_exception_after_deadline_as_timeout():
+    clock = [0.0]
+    client = Mock()
+
+    def late_error(**_kwargs):
+        clock[0] = 1.1
+        raise RuntimeError("provider failed")
+
+    client.get_quote.side_effect = late_error
+    cfg = SimpleNamespace(uniswap_api_key="", weth_address="weth", token_address="token")
+    with patch("route_tournament.time.monotonic", side_effect=lambda: clock[0]):
+        result = collect(cfg, "wallet", context(), lambda _name: client, max_seconds=1)
+
+    assert result["candidates"][0]["rejections"] == ["observation_timeout"]
+
+
+def test_collection_does_not_start_allowance_probe_after_deadline():
+    client = Mock()
+    client.get_quote.return_value = quote(allowance_target="spender")
+    allowance_probe = Mock(return_value=10**15)
+    ticks = iter([0.0, 0.0, 0.0, 0.0, 0.0, 1.1])
+    cfg = SimpleNamespace(uniswap_api_key="", weth_address="weth", token_address="token")
+    with patch("route_tournament.time.monotonic", side_effect=lambda: next(ticks, 1.1)):
+        result = collect(
+            cfg, "wallet", context("sell"), lambda _name: client,
+            allowance_probe=allowance_probe, max_seconds=1,
+        )
+
+    assert result["candidates"][0]["rejections"] == ["observation_timeout"]
+    allowance_probe.assert_not_called()
+
+
 def test_tournament_quote_requests_respect_shared_provider_cooldown_state():
     client = Mock()
     client.get_quote.return_value = quote()

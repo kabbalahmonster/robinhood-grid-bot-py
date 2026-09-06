@@ -21,6 +21,7 @@ import re
 import time
 
 from swap_provider import PROVIDERS
+from zero_x import QuoteResult
 
 LOG = logging.getLogger("grid_bot.route_tournament")
 NATIVE = "0x" + "00" * 20
@@ -161,7 +162,8 @@ def _approval_units(direction, settlement, native_trading, allowance, amount):
     return _RESET_AND_APPROVAL_GAS, "reset_and_exact_approval_budget"
 
 
-def score_candidate(quote, provider, settlement, context, *, allowance_probe=None, gas_estimate=None):
+def score_candidate(quote, provider, settlement, context, *, allowance_probe=None,
+                    gas_estimate=None, deadline=None):
     """Compare equal inputs using provider gas, fresh gas price, allowance lookup.
 
     ``allowance_probe`` is a callable ``(token_address, spender_address) -> int``
@@ -210,6 +212,9 @@ def score_candidate(quote, provider, settlement, context, *, allowance_probe=Non
     # Allowance lookup (only meaningful for sells with a known spender).
     token_for_allowance = c.get("trade_token_address") if c["direction"] == "sell" else c.get("token_address")
     spender = getattr(quote, "allowance_target", None)
+    if deadline is not None and time.monotonic() >= deadline:
+        return score_candidate(QuoteResult(success=False, error="shadow quote deadline elapsed"),
+                               provider, settlement, c)
     # Wrap allowance_probe dict-shapes used by tests into callable semantics.
     def _probe_dict(token, sp):
         if isinstance(allowance_probe, dict):
@@ -220,6 +225,9 @@ def score_candidate(quote, provider, settlement, context, *, allowance_probe=Non
         return None
     probe = allowance_probe if callable(allowance_probe) else _probe_dict
     allowance, _probe_err = _probe_allowance(probe, token_for_allowance, spender, c["amount"])
+    if deadline is not None and time.monotonic() >= deadline:
+        return score_candidate(QuoteResult(success=False, error="shadow quote deadline elapsed"),
+                               provider, settlement, c)
     approval_gas, approval_label = _approval_units(c["direction"], settlement,
                                                     c["native_trading"], allowance, c["amount"])
 
@@ -314,6 +322,13 @@ def collect(config, address, context, client_factory=None,
     candidate_index = 0
     enabled_provider_count = 1 + int(bool(getattr(config, "uniswap_api_key", "")))
     total_candidates = enabled_provider_count * 2
+
+    def deadline_row(name, settlement):
+        return score_candidate(
+            QuoteResult(success=False, error="shadow quote deadline elapsed"),
+            name, settlement, context,
+        )
+
     for name in ("uniswap", "sushiswap"):
         if name == "uniswap" and not getattr(config, "uniswap_api_key", ""):
             continue
@@ -356,16 +371,31 @@ def collect(config, address, context, client_factory=None,
                 remaining_candidates = max(1, total_candidates - candidate_index)
                 args["quote_timeout_seconds"] = remaining_seconds / remaining_candidates
                 quote = client.get_quote(**args)
-                # Read dynamic, already-normalized RPC gas after every quote.
-                # A single oracle failure rejects only this candidate.
-                fresh_gas_price = int(gas_price_provider()) if gas_price_provider else int(context["gas_price"])
-                per_context = {**context, "gas_price": fresh_gas_price}
-                try:
-                    local_gas = int(gas_estimate_provider(quote)) if gas_estimate_provider else 0
-                except Exception:
-                    local_gas = 0
-                row = score_candidate(quote, name, settlement, per_context,
-                                      allowance_probe=allowance_probe, gas_estimate=local_gas)
+                # A provider can return after its requested socket timeout.
+                # Late economics must never become a tournament winner or trigger
+                # post-deadline RPC gas/allowance work.
+                if time.monotonic() >= deadline:
+                    row = deadline_row(name, settlement)
+                else:
+                    # Read dynamic, already-normalized RPC gas after every quote.
+                    # A single oracle failure rejects only this candidate.
+                    fresh_gas_price = int(gas_price_provider()) if gas_price_provider else int(context["gas_price"])
+                    if time.monotonic() >= deadline:
+                        row = deadline_row(name, settlement)
+                    else:
+                        per_context = {**context, "gas_price": fresh_gas_price}
+                        try:
+                            local_gas = int(gas_estimate_provider(quote)) if gas_estimate_provider else 0
+                        except Exception:
+                            local_gas = 0
+                        if time.monotonic() >= deadline:
+                            row = deadline_row(name, settlement)
+                        else:
+                            row = score_candidate(quote, name, settlement, per_context,
+                                                  allowance_probe=allowance_probe, gas_estimate=local_gas,
+                                                  deadline=deadline)
+                            if time.monotonic() >= deadline:
+                                row = deadline_row(name, settlement)
                 rows.append(row)
                 # Emit one structured per-candidate log line for observability.
                 result_label = "eligible" if row["validation_level"] == "quote_only" else "rejected"
@@ -390,21 +420,26 @@ def collect(config, address, context, client_factory=None,
             except Exception:
                 # Never publish exception text, raw provider responses, addresses,
                 # calldata, request headers, or credentials in dashboard data.
-                rows.append({"provider": name, "settlement": settlement,
-                             "validation_level": "rejected", "rejections": ["candidate_failed"],
-                             "quoted_output_raw": None, "quoted_output_human": None,
-                             "gas_components_wei": {}, "projected_total_gas_wei": None,
-                             "gas_total_eth": None, "output_floor_raw": None,
-                             "output_floor_human": None, "projected_net_score": None,
-                             "execution_eligible": False, "provider_gas_estimate": 0,
-                             "effective_gas_price_wei": 0,
-                             "approval_assumption": "none", "gas_basis": "skipped"})
+                if time.monotonic() >= deadline:
+                    rows.append(deadline_row(name, settlement))
+                    failure = "observation_timeout"
+                else:
+                    rows.append({"provider": name, "settlement": settlement,
+                                 "validation_level": "rejected", "rejections": ["candidate_failed"],
+                                 "quoted_output_raw": None, "quoted_output_human": None,
+                                 "gas_components_wei": {}, "projected_total_gas_wei": None,
+                                 "gas_total_eth": None, "output_floor_raw": None,
+                                 "output_floor_human": None, "projected_net_score": None,
+                                 "execution_eligible": False, "provider_gas_estimate": 0,
+                                 "effective_gas_price_wei": 0,
+                                 "approval_assumption": "none", "gas_basis": "skipped"})
+                    failure = "candidate_failed"
                 LOG.info(
                     "Route tournament candidate provider=%s settlement=%s direction=%s "
                     "quoted_output=- gas_estimate=0 gas_price_wei=0 approval_budget=0 "
                     "total_cost_wei=0 total_cost_eth=0.000000 output_floor=- score=- "
-                    "result=rejected reason=candidate_failed",
-                    name, settlement, context["direction"],
+                    "result=rejected reason=%s",
+                    name, settlement, context["direction"], failure,
                 )
             candidate_index += 1
     eligible = sorted((r for r in rows if r["validation_level"] == "quote_only"),
