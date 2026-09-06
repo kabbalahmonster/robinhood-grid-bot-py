@@ -31,7 +31,7 @@ class ProbeUniswapRouteMatrixTests(unittest.TestCase):
         variants = build_variants(self.body, self.headers, include_slippage=True)
 
         self.assertEqual([variant["name"] for variant in variants], [
-            "baseline", "amm_protocols", "erc20eth_false", "erc20eth_omitted",
+            "baseline", "amm_protocols", "v2_only", "v3_only", "v4_only", "erc20eth_false", "erc20eth_omitted",
             "connection_omitted", "user_agent_omitted", "slippage_explicit",
         ])
         baseline = variants[0]
@@ -104,6 +104,18 @@ class ProbeUniswapRouteMatrixTests(unittest.TestCase):
         self.assertNotIn(self.body["tokenIn"], output.getvalue())
         self.assertNotIn(self.body["swapper"], output.getvalue())
         self.assertTrue(record["payload_fingerprint"].startswith("sha256:"))
+        self.assertIsNone(record["routing"])
+
+    def test_matrix_records_allowlisted_success_routing(self):
+        response = SimpleNamespace(
+            status_code=200, headers={}, json=lambda: {"routing": "CLASSIC"}, text="ignored",
+        )
+        output = io.StringIO()
+
+        run_matrix(build_variants(self.body, self.headers)[:1], api_key="key", post=Mock(return_value=response),
+                   sleep=lambda _: None, output=output, timeout_seconds=2)
+
+        self.assertEqual(json.loads(output.getvalue())["routing"], "CLASSIC")
 
 
 if __name__ == "__main__":

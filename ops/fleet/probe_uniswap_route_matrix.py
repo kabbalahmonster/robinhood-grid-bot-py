@@ -47,6 +47,11 @@ def build_variants(body, headers, include_slippage=False, slippage_tolerance=0.5
     amm_body = deepcopy(body)
     amm_body["protocols"] = ["V2", "V3", "V4"]
     variants.append({"name": "amm_protocols", "body": amm_body, "headers": deepcopy(headers)})
+    for protocol in ("V2", "V3", "V4"):
+        protocol_body = deepcopy(body)
+        protocol_body["protocols"] = [protocol]
+        variants.append({"name": f"{protocol.lower()}_only", "body": protocol_body,
+                         "headers": deepcopy(headers)})
 
     false_headers = deepcopy(headers)
     false_headers["x-erc20eth-enabled"] = "false"
@@ -88,13 +93,15 @@ def baseline_series(variants, rounds):
 
 def _record_response(variant, response, latency_ms):
     fingerprint, encoded = _fingerprint(variant["body"])
-    error = {}
-    if response.status_code != 200:
-        try:
-            parsed = response.json()
-            error = parsed if isinstance(parsed, dict) else {}
-        except (ValueError, TypeError):
-            error = {}
+    try:
+        parsed = response.json()
+        parsed = parsed if isinstance(parsed, dict) else {}
+    except (ValueError, TypeError):
+        parsed = {}
+    error = parsed if response.status_code != 200 else {}
+    routing = _clean(parsed.get("routing"), 40).upper() or None
+    if routing is not None and not re.fullmatch(r"[A-Z0-9_]{1,40}", routing):
+        routing = None
     detail = error.get("detail") or error.get("error") or error.get("message") or ""
     return {
         "variant": variant["name"],
@@ -102,6 +109,7 @@ def _record_response(variant, response, latency_ms):
         "error_code": _clean(error.get("errorCode") or error.get("code")),
         "detail": _safe_detail(detail),
         "request_id": _clean(response.headers.get("x-request-id") or response.headers.get("request-id"), 100) or None,
+        "routing": routing,
         "latency_ms": round(latency_ms, 1),
         "payload_fingerprint": fingerprint,
         "body_bytes": len(encoded),
@@ -116,7 +124,7 @@ def _record_transport_error(variant, exc, latency_ms):
         error_code, detail = type(exc).__name__, "transport request failed"
     return {
         "variant": variant["name"], "status": None, "error_code": error_code,
-        "detail": detail, "request_id": None, "latency_ms": round(latency_ms, 1),
+        "detail": detail, "request_id": None, "routing": None, "latency_ms": round(latency_ms, 1),
         "payload_fingerprint": fingerprint, "body_bytes": len(encoded),
     }
 
