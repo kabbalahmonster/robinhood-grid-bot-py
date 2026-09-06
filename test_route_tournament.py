@@ -7,7 +7,8 @@ import pytest
 
 from config import BotConfig, load_config
 from grid_bot import GridBot, _with_swap_provider_fallback
-from route_tournament import collect, score_candidate, snapshot
+from route_tournament import (collect, collect_execution_preflight, score_candidate,
+                              snapshot, select_execution_candidate)
 from swap_provider import FallbackSwapProvider
 from zero_x import QuoteResult
 
@@ -418,7 +419,7 @@ def test_poll_and_observer_failure_do_not_change_operation():
 def test_execute_and_unknown_modes_fail_closed(mode):
     cfg = BotConfig.__new__(BotConfig)
     cfg.route_tournament_mode = mode
-    with pytest.raises(ValueError, match="execute is intentionally unavailable"):
+    with pytest.raises(ValueError, match="supports off, shadow, or gate"):
         cfg.validate()
 
 
@@ -429,6 +430,232 @@ def test_mode_parsing_and_default(monkeypatch, tmp_path):
         assert load_config().route_tournament_mode == "off"
         monkeypatch.setenv("ROUTE_TOURNAMENT_MODE", " SHADOW ")
         assert load_config().route_tournament_mode == "shadow"
+
+
+def test_execution_selector_accepts_one_valid_route_from_complete_accounting():
+    """One timely eligible route can win even when all alternatives are rejected."""
+    complete = {
+        "mode": "execution_preflight",
+        "direction": "sell",
+        "candidate_accounting_complete": True,
+        "deadline_met": True,
+        "candidates": [
+            {"provider": "uniswap", "settlement": "native", "validation_level": "rejected", "rejections": ["sell_profit_floor"], "projected_net_score": "20"},
+            {"provider": "uniswap", "settlement": "weth", "validation_level": "rejected", "rejections": ["total_gas_above_cap"], "projected_net_score": "10"},
+            {"provider": "sushiswap", "settlement": "native", "validation_level": "quote_only", "rejections": [], "projected_net_score": "30"},
+            {"provider": "sushiswap", "settlement": "weth", "validation_level": "rejected", "rejections": ["provider_quote_failed"], "projected_net_score": "5"},
+        ],
+    }
+
+    assert select_execution_candidate(complete, "sell") == {
+        "provider": "sushiswap", "settlement": "native",
+    }
+
+    incomplete = {**complete, "candidates": complete["candidates"][:-1]}
+    assert select_execution_candidate(incomplete, "sell") is None
+
+    no_valid_route = {**complete, "candidates": [
+        *complete["candidates"][:2],
+        {"provider": "sushiswap", "settlement": "native", "validation_level": "rejected",
+         "rejections": ["sell_profit_floor"]},
+        {"provider": "sushiswap", "settlement": "weth", "validation_level": "rejected",
+         "rejections": ["observation_timeout"]},
+    ]}
+    assert select_execution_candidate(no_valid_route, "sell") is None
+
+    # Shadow results are necessarily post-execution observations and can never
+    # be promoted by accident, even if their candidate rows look complete.
+    assert select_execution_candidate({**complete, "mode": "shadow"}, "sell") is None
+    assert select_execution_candidate({key: value for key, value in complete.items()
+                                       if key != "candidate_accounting_complete"}, "sell") is None
+
+    missing_rejections = {**complete, "candidates": [
+        {key: value for key, value in complete["candidates"][2].items() if key != "rejections"},
+        *complete["candidates"][:2], *complete["candidates"][3:],
+    ]}
+    assert select_execution_candidate(missing_rejections, "sell") is None
+
+    malformed_rejections = {**complete, "candidates": [
+        *complete["candidates"][:2],
+        {**complete["candidates"][2], "rejections": ""},
+        complete["candidates"][3],
+    ]}
+    assert select_execution_candidate(malformed_rejections, "sell") is None
+    assert select_execution_candidate({**complete, "direction": "bogus"}, "bogus") is None
+    # The complete accounting must also have completed inside the bounded
+    # preflight window; a late comparison cannot authorize a route.
+    assert select_execution_candidate({**complete, "deadline_met": False}, "sell") is None
+
+
+def test_execution_preflight_collects_only_when_all_required_providers_exist():
+    clients = {name: Mock() for name in ("uniswap", "sushiswap")}
+    for client in clients.values():
+        client.get_quote.return_value = quote()
+    config_with_both = SimpleNamespace(uniswap_api_key="key", weth_address="weth", token_address="token")
+
+    preflight = collect_execution_preflight(
+        config_with_both, "wallet", context("sell"), clients.__getitem__,
+    )
+
+    assert preflight["mode"] == "execution_preflight"
+    assert len(preflight["candidates"]) == 4
+    assert preflight["candidate_accounting_complete"] is True
+    assert preflight["deadline_met"] is True
+    assert preflight["selected_execution_candidate"] == {
+        "provider": "uniswap", "settlement": "native",
+    }
+
+    no_uniswap = SimpleNamespace(uniswap_api_key="", weth_address="weth", token_address="token")
+    blocked = collect_execution_preflight(no_uniswap, "wallet", context("sell"), clients.__getitem__)
+    assert blocked == {
+        "mode": "execution_preflight", "direction": "sell", "candidates": [],
+        "expected_candidates": [
+            {"provider": "sushiswap", "settlement": "native"},
+            {"provider": "sushiswap", "settlement": "weth"},
+            {"provider": "uniswap", "settlement": "native"},
+            {"provider": "uniswap", "settlement": "weth"},
+        ],
+        "observed_candidates": [], "candidate_accounting_complete": False,
+        "deadline_met": False, "selected_hypothetical_winner": None,
+        "selected_execution_candidate": None,
+        "runner_up_delta": None, "status": "required_provider_unavailable",
+        "failures": ["uniswap_unavailable"],
+    }
+
+
+def test_bot_execution_preflight_is_read_only_and_returns_only_complete_winner():
+    b = bot("off")
+    b.config.token_address = "token"
+    b.config.weth_address = "weth"
+    b.trade_token_address = "native"
+    b.wallet.w3 = Mock()
+    preflight = {
+        "mode": "execution_preflight", "direction": "buy",
+        "candidate_accounting_complete": True, "deadline_met": True,
+        "candidates": [
+            {"provider": provider, "settlement": settlement, "validation_level": "quote_only",
+             "rejections": [], "projected_net_score": str(score)}
+            for provider, settlement, score in (
+                ("uniswap", "native", 1), ("uniswap", "weth", 2),
+                ("sushiswap", "native", 4), ("sushiswap", "weth", 3),
+            )
+        ],
+    }
+    with patch("route_tournament.snapshot", return_value=context("buy")), \
+         patch("route_tournament.collect_execution_preflight", return_value=preflight) as collect_preflight:
+        assert b._collect_route_execution_preflight("buy", 10**15) == {
+            "provider": "sushiswap", "settlement": "native",
+        }
+    assert collect_preflight.call_args.kwargs["max_seconds"] == 4
+    # Unknown buy/WETH allowance must preserve the conservative approval budget.
+    assert collect_preflight.call_args.kwargs["allowance_probe"]("weth", "router") is None
+    b.wallet._send_transaction.assert_not_called()
+    b.wallet.approve_token.assert_not_called()
+
+
+def test_selected_route_is_freshly_requoted_and_locally_estimated_before_setup():
+    b = bot("off")
+    b.config.token_address = "token"
+    b.config.weth_address = "weth"
+    b.config.use_eth_trading = True
+    b.trade_token_address = "native"
+    b._swap_slippage_fraction = Mock(return_value=0.01)
+    fresh_quote = QuoteResult(success=True, sell_amount=10**15, buy_amount=2 * 10**15,
+                              to="router", data="0xdead", value=0)
+    primary = SimpleNamespace(name="uniswap", build_swap_transaction=Mock())
+    selected = SimpleNamespace(name="sushiswap", build_swap_transaction=Mock(return_value=fresh_quote))
+    b.provider = SimpleNamespace(primary=primary, fallback=selected)
+    b.wallet.w3.eth.estimate_gas.return_value = 123456
+
+    validated = b._revalidate_selected_route(
+        {"provider": "sushiswap", "settlement": "native"}, "buy", 10**15,
+    )
+
+    assert validated == {"provider": selected, "quote": fresh_quote,
+                         "weth_fallback": False, "gas_estimate": 123456}
+    selected.build_swap_transaction.assert_called_once_with(
+        sell_token="native", buy_token="token", sell_amount=10**15,
+        taker_address="wallet", slippage_percentage=0.01,
+    )
+    b.wallet._send_transaction.assert_not_called()
+    b.wallet.approve_token.assert_not_called()
+
+
+def test_selected_uniswap_route_is_prepared_before_calldata_validation():
+    b = bot("off")
+    b.config.token_address = "token"
+    b.config.weth_address = "weth"
+    b.config.use_eth_trading = True
+    b.trade_token_address = "native"
+    b._swap_slippage_fraction = Mock(return_value=0.01)
+    quote_only = QuoteResult(success=True, sell_amount=10**15, buy_amount=2 * 10**15)
+    prepared = QuoteResult(success=True, sell_amount=10**15, buy_amount=2 * 10**15,
+                           to="router", data="0xdead", value=0)
+    uniswap = SimpleNamespace(
+        name="uniswap", capabilities=SimpleNamespace(quote_requires_preparation=True),
+        build_swap_transaction=Mock(return_value=quote_only), prepare_swap=Mock(return_value=prepared),
+    )
+    b.provider = SimpleNamespace(primary=uniswap, fallback=SimpleNamespace(name="sushiswap"))
+    b.wallet.w3.eth.estimate_gas.return_value = 123456
+
+    validated = b._revalidate_selected_route(
+        {"provider": "uniswap", "settlement": "native"}, "buy", 10**15,
+    )
+
+    assert validated == {"provider": uniswap, "quote": prepared,
+                         "weth_fallback": False, "gas_estimate": 123456}
+    uniswap.prepare_swap.assert_called_once_with(quote_only)
+
+
+def test_selected_route_revalidation_rejects_zero_fresh_output():
+    b = bot("off")
+    b.config.token_address = "token"
+    b.config.weth_address = "weth"
+    b.config.use_eth_trading = True
+    b.trade_token_address = "native"
+    b._swap_slippage_fraction = Mock(return_value=0.01)
+    invalid = QuoteResult(success=True, sell_amount=10**15, buy_amount=0,
+                          to="router", data="0xdead", value=0)
+    selected = SimpleNamespace(name="sushiswap", capabilities=SimpleNamespace(quote_requires_preparation=False),
+                               build_swap_transaction=Mock(return_value=invalid))
+    b.provider = SimpleNamespace(primary=SimpleNamespace(name="uniswap"), fallback=selected)
+
+    assert b._revalidate_selected_route(
+        {"provider": "sushiswap", "settlement": "native"}, "buy", 10**15,
+    ) is None
+    b.wallet.w3.eth.estimate_gas.assert_not_called()
+
+
+def test_gate_mode_uses_only_a_freshly_revalidated_selected_route():
+    b = bot("gate")
+    b.config.use_eth_trading = True
+    b.config.token_address = "token"
+    b.config.weth_address = "weth"
+    b.trade_token_address = "native"
+    b._swap_slippage_fraction = Mock(return_value=0.01)
+    primary = SimpleNamespace(name="uniswap")
+    selected = SimpleNamespace(name="sushiswap")
+    b.provider = SimpleNamespace(primary=primary, fallback=selected, active=primary)
+    b.api_client = Mock()
+    original_api = b.api_client
+    fresh_quote = QuoteResult(success=True, sell_amount=10**15, buy_amount=2 * 10**15,
+                              to="router", data="0xdead")
+    b._collect_route_execution_preflight = Mock(return_value={
+        "provider": "sushiswap", "settlement": "native",
+    })
+    b._revalidate_selected_route = Mock(return_value={
+        "provider": selected, "quote": fresh_quote, "weth_fallback": False, "gas_estimate": 123456,
+    })
+
+    quote_result, weth_fallback = b._actionable_quote_with_weth_fallback(
+        sell_token="native", buy_token="token", sell_amount=10**15, direction="buy",
+    )
+
+    assert quote_result is fresh_quote
+    assert weth_fallback is False
+    assert b.provider.active is selected
+    assert getattr(fresh_quote, "_tournament_gate_prepared") is True
+    original_api.build_swap_transaction.assert_not_called()
 
 
 def test_snapshot_failure_is_reported_without_candidate_requests():
@@ -450,6 +677,98 @@ def test_gas_headroom_applies_to_every_component():
         "swap": str(300000 * 2 * 10**6 * 110 // 100),
         "approval": str(200000 * 2 * 10**6 * 110 // 100),
         "wrap": "0", "unwrap": str(60000 * 2 * 10**6 * 110 // 100)}
+
+
+def test_sell_allowance_probe_uses_the_sold_token_not_settlement():
+    seen = []
+    c = context("sell", token_address="sold-token", trade_token_address="settlement-token")
+    score_candidate(
+        quote(allowance_target="spender"), "uniswap", "native", c,
+        allowance_probe=lambda token, spender: seen.append((token, spender)) or c["amount"],
+    )
+    assert seen == [("sold-token", "spender")]
+
+
+def test_final_buy_reserve_uses_post_setup_balance():
+    b = bot("gate")
+    b.config.use_eth_trading = True
+    b.config.eth_gas_reserve = 0.001
+    b.wallet.get_eth_balance_wei.return_value = 1_001 * 10**12
+    q = QuoteResult(success=True, value=0)
+
+    assert b._final_buy_reserve_ok(q, gas_limit=1_500_000, gas_price=10**6, weth_fallback=True) is False
+
+
+def test_gate_mode_never_replays_a_selected_operation_through_fallback():
+    b = bot("gate")
+    b.provider = Mock()
+
+    @_with_swap_provider_fallback
+    def operation(self):
+        return "single selected attempt"
+
+    assert operation(b) == "single selected attempt"
+    b.provider.run_with_fallback.assert_not_called()
+
+
+def test_gate_mode_restores_provider_after_selected_operation():
+    b = bot("gate")
+    original, selected = SimpleNamespace(name="uniswap"), SimpleNamespace(name="sushiswap")
+    b.provider = SimpleNamespace(active=original)
+
+    @_with_swap_provider_fallback
+    def operation(self):
+        self.provider.active = selected
+        return "selected operation complete"
+
+    assert operation(b) == "selected operation complete"
+    assert b.provider.active is original
+
+
+def test_gate_mode_restores_absent_provider_active_state():
+    b = bot("gate")
+    b.provider = SimpleNamespace()
+
+    @_with_swap_provider_fallback
+    def operation(self):
+        self.provider.active = SimpleNamespace(name="sushiswap")
+
+    operation(b)
+    assert not hasattr(b.provider, "active")
+
+
+def test_gate_mode_never_replaces_selected_route_after_consistency_signal():
+    b = bot("gate")
+    selected = SimpleNamespace(name="uniswap")
+    alternate = SimpleNamespace(name="sushiswap", build_swap_transaction=Mock())
+    b.provider = SimpleNamespace(primary=selected, fallback=alternate)
+    original = QuoteResult(success=True, sell_amount=10**15, buy_amount=2 * 10**15)
+
+    assert b._best_fresh_sell_route(selected, original, 10**15) == (selected, original, None)
+    alternate.build_swap_transaction.assert_not_called()
+
+
+def test_gate_mode_never_replaces_selected_route_after_gas_cap_failure():
+    b = bot("gate")
+    b.config.token_address = "token"
+    b._swap_slippage_fraction = Mock(return_value=0.01)
+    selected = SimpleNamespace(name="uniswap")
+    alternate = SimpleNamespace(name="sushiswap", build_swap_transaction=Mock())
+    b.provider = SimpleNamespace(primary=selected, fallback=alternate)
+    original = QuoteResult(success=True, sell_amount=10**15, buy_amount=2 * 10**15,
+                           to="router", data="0xdead")
+
+    provider, quote_result, detail = b._alternate_route_for_gas_cap(
+        selected, original, sell_token="native", buy_token="token", sell_amount=10**15,
+        operation="buy", default_gas=350000,
+    )
+
+    assert (provider, quote_result, detail) == (selected, original, None)
+    alternate.build_swap_transaction.assert_not_called()
+    assert b._alternate_sell_route_for_profit_floor(
+        selected, sell_amount=10**15, sold_cost_wei=10**15, min_profit_percent=2,
+    ) == (None, None)
+    alternate.build_swap_transaction.assert_not_called()
 
 
 @pytest.mark.parametrize("engine", ["gridless", "legacy"])
@@ -654,7 +973,7 @@ def test_execute_mode_still_fails_closed():
     """execute remains intentionally unavailable after the improvements."""
     cfg = BotConfig.__new__(BotConfig)
     cfg.route_tournament_mode = "execute"
-    with pytest.raises(ValueError, match="execute is intentionally unavailable"):
+    with pytest.raises(ValueError, match="supports off, shadow, or gate"):
         cfg.validate()
 
 

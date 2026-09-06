@@ -192,8 +192,8 @@ class BotConfig:
         Raises:
             ValueError: If any required configuration is missing or invalid.
         """
-        if self.route_tournament_mode not in {"off", "shadow"}:
-            raise ValueError("ROUTE_TOURNAMENT_MODE supports off or shadow; execute is intentionally unavailable")
+        if self.route_tournament_mode not in {"off", "shadow", "gate"}:
+            raise ValueError("ROUTE_TOURNAMENT_MODE supports off, shadow, or gate; execute is intentionally unavailable")
         # Check required fields
         if not self.private_key or self.private_key == "0x...":
             raise ValueError("PRIVATE_KEY is required and must be set")

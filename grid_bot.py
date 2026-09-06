@@ -26,8 +26,24 @@ def _with_swap_provider_fallback(method):
     """Retry one complete pre-broadcast operation with the fallback provider."""
     @wraps(method)
     def wrapped(self, *args, **kwargs):
+        mode = getattr(self.config, "route_tournament_mode", "off")
+        # Gate owns provider choice: its selected route must not be replayed by
+        # the generic primary/fallback wrapper after validation begins.
+        if mode == "gate":
+            # The selected provider is scoped to this operation. Restoring the
+            # router's previous active provider prevents route choice leaking
+            # into unrelated price, banking, or fee activity.
+            had_active = hasattr(self.provider, "active")
+            previous_active = getattr(self.provider, "active", None)
+            try:
+                return method(self, *args, **kwargs)
+            finally:
+                if had_active:
+                    self.provider.active = previous_active
+                elif hasattr(self.provider, "active"):
+                    delattr(self.provider, "active")
         runner = getattr(self.provider, "run_with_fallback", None)
-        if getattr(self.config, "route_tournament_mode", "off") == "shadow":
+        if mode == "shadow":
             depth = getattr(self, "_route_shadow_depth", 0)
             self._route_shadow_depth = depth + 1
             try:
@@ -841,6 +857,10 @@ class GridBot:
         result is not a useful execution decision; fetch one fresh counterpart,
         simulate both exact calldata payloads, then select the higher net route.
         """
+        if getattr(self.config, "route_tournament_mode", "off") == "gate":
+            # The gate has already made a complete, bounded provider decision;
+            # a historical consistency signal cannot reopen route authority.
+            return current_provider, current_quote, None
         router = self.provider
         primary = getattr(router, "primary", None)
         fallback = getattr(router, "fallback", None)
@@ -908,6 +928,12 @@ class GridBot:
         pass the same operation-specific cap before it may replace the route.
         Subsequent buy/sell guards still validate all economics and approvals.
         """
+        # Gate mode already selected and revalidated one exact provider and
+        # settlement. A later gas-cap failure must abort, never quote-shop a
+        # replacement after that authority decision.
+        if getattr(self.config, "route_tournament_mode", "off") == "gate":
+            logger.warning("Tournament-selected %s route exceeded final gas cap; refusing route replacement", operation)
+            return current_provider, current_quote, None
         router = self.provider
         primary = getattr(router, "primary", None)
         fallback = getattr(router, "fallback", None)
@@ -966,6 +992,9 @@ class GridBot:
         This is only safe before allowance inspection. The alternate must
         independently pass both the sell-gas cap and gas-aware profit floor.
         """
+        if getattr(self.config, "route_tournament_mode", "off") == "gate":
+            logger.warning("Tournament-selected sell route missed final profit floor; refusing route replacement")
+            return None, None
         primary = getattr(self.provider, "primary", None)
         fallback = getattr(self.provider, "fallback", None)
         if primary is None or fallback is None:
@@ -1021,6 +1050,114 @@ class GridBot:
         if getattr(self.config, 'use_eth_trading', False):
             return int(self.wallet.get_eth_balance_wei())
         return self._raw_token_balance(self.config.weth_address)
+
+    def _collect_route_execution_preflight(self, direction, amount, sold_cost_wei=None):
+        """Read-only, fail-closed candidate collection for a future route gate.
+
+        This method deliberately has no execution authority.  It returns only a
+        provider/settlement identity after all four candidates are complete and
+        eligible; preparation, approval, signing, and broadcasting must perform
+        their own fresh validation later in the execution path.
+        """
+        try:
+            from route_tournament import (collect_execution_preflight, select_execution_candidate,
+                                          snapshot)
+            context = snapshot(self, direction, amount, sold_cost_wei)
+            enriched = {
+                **context,
+                "token_address": getattr(self.config, "token_address", ""),
+                "trade_token_address": getattr(self, "trade_token_address", ""),
+            }
+
+            def allowance_probe(token, spender):
+                if direction != "sell":
+                    # Buy/WETH needs a conservative approval budget. A fake zero
+                    # allowance would look like a known allowance and underprice
+                    # that route; unknown must stay unknown.
+                    return None
+                if not token or not spender:
+                    return 0
+                return int(self.wallet.check_allowance(token, spender))
+
+            def gas_estimate_provider(quote):
+                if not getattr(quote, "to", None) or not getattr(quote, "data", None):
+                    return 0
+                return int(self.wallet.w3.eth.estimate_gas({
+                    "from": self.wallet.address,
+                    "to": quote.to,
+                    "data": quote.data,
+                    "value": int(quote.value or 0),
+                }))
+
+            comparison = collect_execution_preflight(
+                self.config, self.wallet.address, enriched,
+                gas_price_provider=lambda: int(self.wallet.normal_gas_price()),
+                allowance_probe=allowance_probe,
+                gas_estimate_provider=gas_estimate_provider,
+                max_seconds=4,
+            )
+            selection = select_execution_candidate(comparison, direction)
+        except Exception:
+            logger.warning("Route execution preflight unavailable; refusing tournament selection")
+            comparison = {"mode": "execution_preflight", "direction": direction,
+                          "status": "preflight_failed", "candidates": []}
+            selection = None
+        self._route_execution_preflight = comparison
+        return selection
+
+    def _revalidate_selected_route(self, selection, direction, amount):
+        """Freshly build and locally simulate the chosen route without setup.
+
+        This deliberately stops before approval, wrapping, signing, or sending.
+        The caller must still rerun its normal profit, reserve, and final-fee
+        guards after any later approval-triggered quote refresh.
+        """
+        if (direction not in {"buy", "sell"} or not isinstance(selection, dict)
+                or selection.get("settlement") not in {"native", "weth"}):
+            return None
+        selected_name = selection.get("provider")
+        candidates = (getattr(self.provider, "primary", None),
+                      getattr(self.provider, "fallback", None))
+        provider = next((item for item in candidates
+                         if getattr(item, "name", None) == selected_name), None)
+        if provider is None:
+            return None
+        settlement_token = (self.trade_token_address if selection["settlement"] == "native"
+                            else self.config.weth_address)
+        sell_token, buy_token = ((settlement_token, self.config.token_address)
+                                 if direction == "buy"
+                                 else (self.config.token_address, settlement_token))
+        try:
+            quote = provider.build_swap_transaction(
+                sell_token=sell_token, buy_token=buy_token, sell_amount=int(amount),
+                taker_address=self.wallet.address,
+                slippage_percentage=self._swap_slippage_fraction(),
+            )
+            # Uniswap supplies an indicative quote first; its executable
+            # calldata is only created by prepare_swap().  Keep preparation
+            # inside the read-only gate, before any setup or authority change.
+            if (quote.success and getattr(getattr(provider, "capabilities", None),
+                                          "quote_requires_preparation", False)):
+                quote = provider.prepare_swap(quote)
+            if (not quote.success or int(getattr(quote, "sell_amount", 0) or 0) != int(amount)
+                    or int(getattr(quote, "buy_amount", 0) or 0) <= 0
+                    or not getattr(quote, "to", None) or not getattr(quote, "data", None)):
+                return None
+            gas_estimate = int(self.wallet.w3.eth.estimate_gas({
+                "from": self.wallet.address, "to": quote.to, "data": quote.data,
+                "value": int(getattr(quote, "value", 0) or 0),
+            }))
+            if gas_estimate <= 0:
+                return None
+        except Exception:
+            logger.warning("Selected tournament route revalidation failed; refusing route authority")
+            return None
+        return {
+            "provider": provider, "quote": quote,
+            "weth_fallback": bool(getattr(self.config, "use_eth_trading", False)
+                                  and selection["settlement"] == "weth"),
+            "gas_estimate": gas_estimate,
+        }
 
     def _queue_route_shadow(self, direction, amount, sold_cost_wei=None):
         if getattr(self.config, "route_tournament_mode", "off") != "shadow":
@@ -1097,8 +1234,29 @@ class GridBot:
         comparison = getattr(self, "_route_comparisons", {}).get(direction)
         return {**(attempt or {}), "route_comparison": comparison} if comparison else attempt
 
-    def _actionable_quote_with_weth_fallback(self, *, sell_token, buy_token, sell_amount, direction):
+    def _actionable_quote_with_weth_fallback(self, *, sell_token, buy_token, sell_amount, direction,
+                                             sold_cost_wei=None):
         """Build the configured route, falling back to the direct WETH leg in native mode."""
+        if getattr(self.config, "route_tournament_mode", "off") == "gate":
+            selection = self._collect_route_execution_preflight(
+                direction, sell_amount, sold_cost_wei,
+            )
+            validated = self._revalidate_selected_route(selection, direction, sell_amount) if selection else None
+            if validated is None:
+                from zero_x import QuoteResult
+                logger.warning("Tournament gate found no freshly valid %s route; execution skipped", direction)
+                return QuoteResult(success=False, error="tournament gate found no freshly valid route"), False
+            self.provider.active = validated["provider"]
+            self.api_client = self.provider
+            # The gate's fresh quote has already been prepared and locally
+            # estimated. Do not submit it to provider preparation a second time.
+            try:
+                setattr(validated["quote"], "_tournament_gate_prepared", True)
+            except Exception:
+                logger.warning("Tournament route preparation marker unavailable; execution skipped")
+                from zero_x import QuoteResult
+                return QuoteResult(success=False, error="tournament route preparation marker unavailable"), False
+            return validated["quote"], validated["weth_fallback"]
         if direction == "buy":
             self._queue_route_shadow(direction, sell_amount)
         quote = self.api_client.build_swap_transaction(
@@ -1241,7 +1399,13 @@ class GridBot:
                     "data": quote.data,
                     "value": int(quote.value or 0),
                 }))
+                if estimated_gas <= 0:
+                    raise ValueError("non-positive local gas estimate")
             except Exception as exc:
+                if getattr(self.config, "route_tournament_mode", "off") == "gate":
+                    # A post-approval/refreshed gate route has no authority
+                    # without a local simulation of the exact final calldata.
+                    raise RuntimeError("Tournament gate final gas simulation failed") from exc
                 logger.warning(
                     "Executable quote gas simulation failed; using provider estimate: %s",
                     exc,
@@ -1271,6 +1435,18 @@ class GridBot:
             gas_price_mult, freshness_mult, gas_limit * gas_price,
         )
         return gas_limit, gas_price
+
+    def _final_buy_reserve_ok(self, quote, gas_limit, gas_price, weth_fallback):
+        """Check ETH reserve against the actual post-setup balance and final swap."""
+        if not getattr(self.config, "use_eth_trading", False):
+            return True
+        reserve = int(float(getattr(self.config, "eth_gas_reserve", 0.001)) * 10**18)
+        principal = 0 if weth_fallback else int(getattr(quote, "value", 0) or 0)
+        required = principal + int(gas_limit) * int(gas_price)
+        if self.wallet.get_eth_balance_wei() - required < reserve:
+            logger.warning("Buy refused: final setup-adjusted balance would breach ETH_GAS_RESERVE")
+            return False
+        return True
 
     def _gas_within_hard_cap(self, gas_limit, gas_price, operation, attempt_context=None):
         legacy_cap = float(getattr(self.config, "max_swap_gas_eth", 0.00004))
@@ -2113,7 +2289,8 @@ class GridBot:
                         return
         
         # Some providers return pricing first and executable calldata separately.
-        if self.provider.capabilities.quote_requires_preparation:
+        if (self.provider.capabilities.quote_requires_preparation
+                and not getattr(quote, "_tournament_gate_prepared", False)):
             swap_result = self.provider.prepare_swap(quote)
             if not swap_result.success:
                 logger.error(f"{self.provider.name} swap preparation failed: {swap_result.error}")
@@ -2141,6 +2318,8 @@ class GridBot:
             "chainId": self.config.chain_id,
         }
         
+        if not self._final_buy_reserve_ok(quote, gas_limit, gas_price, weth_fallback):
+            return
         token_balance_before = self._raw_token_balance(self.config.token_address)
         result = self.wallet._send_transaction(tx_params)
         
@@ -2239,6 +2418,7 @@ class GridBot:
         quote, weth_fallback = self._actionable_quote_with_weth_fallback(
             sell_token=self.config.token_address, buy_token=self.trade_token_address,
             sell_amount=balance, direction="sell",
+            sold_cost_wei=int(pos.get("cost_wei") or pos.get("cost", 0) * 10**9),
         )
         
         if not quote.success:
@@ -2413,8 +2593,15 @@ class GridBot:
         logger.info(f"   Buy price: {buy_price:.10f}, Current: {price:.10f}")
         logger.info(f"   Expected: {expected_eth:.6f} {self.trade_token_name}, Profit: {profit_eth:.6f} ({pnl:+.2f}%)")
         
-        # Use pre-fetched quote if available (for moonbag, need to re-quote with different amount)
-        if pre_fetched_quote and moonbag_pct == 0 and sell_amount == balance:
+        # Gate mode always revalidates the exact final moonbag amount; it must
+        # never reuse a pre-trigger quote. Shadow/off retain the existing path.
+        if getattr(self.config, "route_tournament_mode", "off") == "gate":
+            quote, weth_fallback = self._actionable_quote_with_weth_fallback(
+                sell_token=self.config.token_address, buy_token=self.trade_token_address,
+                sell_amount=sell_amount, direction="sell",
+                sold_cost_wei=int(round(sold_cost_eth * 10**18)),
+            )
+        elif pre_fetched_quote and moonbag_pct == 0 and sell_amount == balance:
             quote = pre_fetched_quote
             weth_fallback = bool(getattr(quote, "weth_fallback", False))
         else:
@@ -2888,7 +3075,8 @@ class GridBot:
             return
         
         # Prepare executable calldata when the provider separates quote and swap.
-        if self.provider.capabilities.quote_requires_preparation:
+        if (self.provider.capabilities.quote_requires_preparation
+                and not getattr(quote, "_tournament_gate_prepared", False)):
             swap_result = self.provider.prepare_swap(quote)
             if not swap_result.success:
                 logger.error(f"{self.provider.name} swap preparation failed: {swap_result.error}")
@@ -2917,6 +3105,8 @@ class GridBot:
         }
         
         logger.info(f"Sending tx to {quote.to} with gas {gas_limit}")
+        if not self._final_buy_reserve_ok(quote, gas_limit, gas_price, weth_fallback):
+            return
         token_balance_before = self._raw_token_balance(self.config.token_address)
         result = self.wallet._send_transaction(tx_params)
         
@@ -3021,6 +3211,7 @@ class GridBot:
         quote, weth_fallback = self._actionable_quote_with_weth_fallback(
             sell_token=self.config.token_address, buy_token=self.trade_token_address,
             sell_amount=sell_amount, direction="sell",
+            sold_cost_wei=int(round(sold_cost_eth * 10**18)),
         )
         
         if not quote.success:
@@ -3144,7 +3335,8 @@ class GridBot:
         logger.info(f"✅ Quote validated: {quote_return_eth:.6f} {self.trade_token_name} >= {min_return_eth:.6f} {self.trade_token_name} minimum")
         
         # Prepare executable calldata when the provider separates quote and swap.
-        if self.provider.capabilities.quote_requires_preparation:
+        if (self.provider.capabilities.quote_requires_preparation
+                and not getattr(quote, "_tournament_gate_prepared", False)):
             swap_result = self.provider.prepare_swap(quote)
             if not swap_result.success:
                 logger.error(f"{self.provider.name} swap preparation failed: {swap_result.error}")
@@ -3331,7 +3523,8 @@ class GridBot:
                         return
         
         # Prepare executable calldata when the provider separates quote and swap.
-        if self.provider.capabilities.quote_requires_preparation:
+        if (self.provider.capabilities.quote_requires_preparation
+                and not getattr(quote, "_tournament_gate_prepared", False)):
             swap_result = self.provider.prepare_swap(quote)
             if not swap_result.success:
                 logger.error(f"{self.provider.name} swap preparation failed: {swap_result.error}")

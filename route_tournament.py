@@ -15,7 +15,7 @@ the wallet already covers the trade amount, the approval budget is removed
 from the cost stack rather than pessimistically assuming a reset.
 """
 
-from decimal import Decimal, ROUND_CEILING
+from decimal import Decimal, InvalidOperation, ROUND_CEILING
 import logging
 import re
 import time
@@ -32,6 +32,66 @@ _FALLBACK_SWAP_GAS = {"buy": 350000, "sell": 300000}
 # Legacy approval budget when allowance is unknown or insufficient.
 _RESET_AND_APPROVAL_GAS = 200000
 _WRAP_UNWRAP_GAS = 60000
+_EXECUTION_CANDIDATES = frozenset({
+    ("uniswap", "native"),
+    ("uniswap", "weth"),
+    ("sushiswap", "native"),
+    ("sushiswap", "weth"),
+})
+
+
+def select_execution_candidate(comparison, direction):
+    """Return the best complete pre-execution candidate, or ``None``.
+
+    This intentionally consumes only already-collected, sanitized economics.
+    It does not quote, prepare, probe allowance, approve, sign, or broadcast.
+    A future execution gate must re-quote and revalidate the returned identity
+    before any state-changing step.
+    """
+    if (not isinstance(comparison, dict)
+            or direction not in {"buy", "sell"}
+            or comparison.get("mode") != "execution_preflight"
+            or comparison.get("direction") != direction
+            or comparison.get("candidate_accounting_complete") is not True
+            or comparison.get("deadline_met") is not True):
+        return None
+    rows = comparison.get("candidates")
+    if not isinstance(rows, list) or len(rows) != len(_EXECUTION_CANDIDATES):
+        return None
+    identities = set()
+    eligible = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            return None
+        identity = (row.get("provider"), row.get("settlement"))
+        if identity not in _EXECUTION_CANDIDATES or identity in identities:
+            return None
+        identities.add(identity)
+        rejections = row.get("rejections")
+        if not isinstance(rejections, list):
+            return None
+        validation_level = row.get("validation_level")
+        if validation_level == "rejected":
+            # Every losing path must have an explicit reason, but does not
+            # disqualify a separately eligible route.
+            if not rejections:
+                return None
+            continue
+        if validation_level != "quote_only" or rejections:
+            return None
+        # A quote-only row is timely because collect() converts every late
+        # quote/economic result into a rejected observation_timeout row.
+        try:
+            score = Decimal(str(row["projected_net_score"]))
+        except (KeyError, InvalidOperation, ValueError):
+            return None
+        if not score.is_finite():
+            return None
+        eligible[identity] = score
+    if identities != _EXECUTION_CANDIDATES or not eligible:
+        return None
+    provider, settlement = max(eligible, key=eligible.__getitem__)
+    return {"provider": provider, "settlement": settlement}
 
 
 def _quote_failure_reason(provider, error):
@@ -209,8 +269,9 @@ def score_candidate(quote, provider, settlement, context, *, allowance_probe=Non
     local_gas = int(gas_estimate or 0)
     swap_gas = local_gas or provider_gas or _FALLBACK_SWAP_GAS[c["direction"]]
 
-    # Allowance lookup (only meaningful for sells with a known spender).
-    token_for_allowance = c.get("trade_token_address") if c["direction"] == "sell" else c.get("token_address")
+    # Allowance lookup is for the actual asset being sold. Settlement only
+    # determines wrap/unwrap economics; it is never the sell-token approval.
+    token_for_allowance = c.get("token_address") if c["direction"] == "sell" else c.get("token_address")
     spender = getattr(quote, "allowance_target", None)
     if deadline is not None and time.monotonic() >= deadline:
         return score_candidate(QuoteResult(success=False, error="shadow quote deadline elapsed"),
@@ -300,7 +361,7 @@ def score_candidate(quote, provider, settlement, context, *, allowance_probe=Non
 
 def collect(config, address, context, client_factory=None,
             gas_price_provider=None, allowance_probe=None, gas_estimate_provider=None,
-            max_seconds=8, protocol_hints=None):
+            max_seconds=8, protocol_hints=None, mode="shadow"):
     """One get_quote per provider/settlement; never prepare, approve, or send.
 
     Independent client instances avoid mutating execution clients. Uniswap's
@@ -449,7 +510,32 @@ def collect(config, address, context, client_factory=None,
     if len(eligible) > 1:
         runner_up_delta = str(Decimal(eligible[0]["projected_net_score"]) - Decimal(eligible[1]["projected_net_score"]))
     elapsed_ms = round((time.monotonic() - started) * 1000, 1)
-    result = {"mode": "shadow", "direction": context["direction"], "candidates": rows,
+    expected_identities = {
+        (name, settlement)
+        for name in ("uniswap", "sushiswap")
+        if name != "uniswap" or getattr(config, "uniswap_api_key", "")
+        for settlement in ("native", "weth")
+    }
+    observed_identities = {
+        (row.get("provider"), row.get("settlement"))
+        for row in rows if isinstance(row, dict)
+    }
+    candidate_accounting_complete = (
+        len(rows) == len(expected_identities)
+        and observed_identities == expected_identities
+    )
+    deadline_met = time.monotonic() < deadline
+    result = {"mode": mode, "direction": context["direction"], "candidates": rows,
+              "expected_candidates": [
+                  {"provider": provider, "settlement": settlement}
+                  for provider, settlement in sorted(expected_identities)
+              ],
+              "observed_candidates": [
+                  {"provider": provider, "settlement": settlement}
+                  for provider, settlement in sorted(observed_identities)
+              ],
+              "candidate_accounting_complete": candidate_accounting_complete,
+              "deadline_met": deadline_met,
               "selected_hypothetical_winner": winner,
               "runner_up_delta": runner_up_delta,
               "elapsed_ms": elapsed_ms,
@@ -470,3 +556,44 @@ def collect(config, address, context, client_factory=None,
             context["direction"], len(rows), elapsed_ms,
         )
     return result
+
+
+def collect_execution_preflight(config, address, context, client_factory=None,
+                                gas_price_provider=None, allowance_probe=None,
+                                gas_estimate_provider=None, max_seconds=4,
+                                protocol_hints=None):
+    """Collect a complete, bounded read-only comparison for a future gate.
+
+    Unlike shadow telemetry, execution preflight has no useful partial result:
+    both providers must be configured so all four provider/settlement candidates
+    can be collected. This helper is strictly read-only; route preparation,
+    approval, signing, and broadcast remain outside it.
+    """
+    if not getattr(config, "uniswap_api_key", ""):
+        return {
+            "mode": "execution_preflight", "direction": context.get("direction"),
+            "candidates": [], "expected_candidates": [
+                {"provider": provider, "settlement": settlement}
+                for provider, settlement in sorted(_EXECUTION_CANDIDATES)
+            ],
+            "observed_candidates": [], "candidate_accounting_complete": False,
+            "deadline_met": False, "selected_hypothetical_winner": None,
+            "selected_execution_candidate": None,
+            "runner_up_delta": None, "status": "required_provider_unavailable",
+            "failures": ["uniswap_unavailable"],
+        }
+    comparison = collect(
+        config, address, context, client_factory=client_factory,
+        gas_price_provider=gas_price_provider, allowance_probe=allowance_probe,
+        gas_estimate_provider=gas_estimate_provider, max_seconds=max_seconds,
+        protocol_hints=protocol_hints, mode="execution_preflight",
+    )
+    selection = select_execution_candidate(comparison, context.get("direction"))
+    comparison["selected_execution_candidate"] = selection
+    if selection is None:
+        # A partial collection or all-rejected set has no preflight winner.
+        comparison["selected_hypothetical_winner"] = None
+        comparison["status"] = "preflight_no_authorized_candidate"
+    else:
+        comparison["status"] = "preflight_candidate_selected"
+    return comparison
