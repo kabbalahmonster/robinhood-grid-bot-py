@@ -40,6 +40,27 @@ class TestWalletPreflight(unittest.TestCase):
         self.assertIn("exceeds transaction gas limit", result.error)
         wallet.account.sign_transaction.assert_not_called()
 
+    def test_final_boundary_raises_legacy_gas_price_to_fresh_floor(self):
+        wallet = self.make_wallet()
+        wallet.normal_gas_price = Mock(return_value=500)
+        wallet.w3.eth.call.return_value = b""
+        wallet.w3.eth.estimate_gas.return_value = 90_000
+        wallet.account.sign_transaction.return_value = SimpleNamespace(raw_transaction=b"signed")
+        tx_hash = Mock()
+        tx_hash.hex.return_value = "0xabc"
+        wallet.w3.eth.send_raw_transaction.return_value = tx_hash
+        wallet.w3.eth.wait_for_transaction_receipt.return_value = {
+            "status": 1, "gasUsed": 80_000, "effectiveGasPrice": 490,
+        }
+
+        result = wallet._send_transaction({
+            "from": "0x1", "to": "0x2", "data": "0x1234", "value": 0,
+            "gas": 100_000, "gasPrice": 400,
+        })
+
+        self.assertTrue(result.success)
+        self.assertEqual(wallet.account.sign_transaction.call_args.args[0]["gasPrice"], 500)
+
     def test_receipt_failure_preserves_broadcast_hash_and_marks_unknown(self):
         wallet = self.make_wallet()
         wallet.w3.eth.call.return_value = b""

@@ -717,6 +717,20 @@ class Wallet:
                 tx.get("to"), estimated_gas, configured_gas,
             )
 
+            # The final RPC preflight does not validate fee acceptance. Refresh
+            # the legacy fee floor immediately before signing so a base-fee move
+            # during quote, estimation, or approval cannot reuse stale gasPrice.
+            if "gasPrice" in tx:
+                final_gas_price = int(self.normal_gas_price())
+                submitted_gas_price = int(tx["gasPrice"])
+                if final_gas_price > submitted_gas_price:
+                    tx = dict(tx)
+                    tx["gasPrice"] = final_gas_price
+                    self.logger.info(
+                        "Final broadcast gas floor raised: planned=%s final=%s",
+                        submitted_gas_price, final_gas_price,
+                    )
+
             # Sign transaction
             signed_tx = self.account.sign_transaction(tx)
             
