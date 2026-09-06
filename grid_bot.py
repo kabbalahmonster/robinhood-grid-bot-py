@@ -1499,6 +1499,29 @@ class GridBot:
                 if self.wallet.get_eth_balance_wei() - max_cost < reserve_wei:
                     raise ValueError("profit-fee transfer would breach ETH_GAS_RESERVE")
                 result = self.wallet.transfer_eth(tx, wait_for_receipt=True)
+                if (
+                    not result.success
+                    and not result.tx_hash
+                    and not getattr(result, "outcome_unknown", False)
+                    and self.wallet.is_base_fee_too_low_error(result.error)
+                    and (reported_base_fee := int(self.wallet.base_fee_from_error(result.error))) > 0
+                ):
+                    minimum_base_fee = (reported_base_fee * 102 + 99) // 100
+                    retry_tx = self.wallet.build_eth_transfer_transaction(
+                        recipient, fee_wei, minimum_base_fee,
+                    )
+                    retry_gas = int(retry_tx.get("gas", 0)) * int(retry_tx.get("gasPrice", 0))
+                    if not self._gas_within_hard_cap(
+                        retry_tx.get("gas", 0), retry_tx.get("gasPrice", 0), "fee"
+                    ):
+                        raise ValueError("profit-fee retry blocked by gas cap")
+                    if self.wallet.get_eth_balance_wei() - fee_wei - retry_gas < reserve_wei:
+                        raise ValueError("profit-fee retry would breach ETH_GAS_RESERVE")
+                    logger.warning(
+                        "Profit-fee transfer rejected before broadcast because gas became stale; "
+                        "retrying once with rejecting-node base fee"
+                    )
+                    result = self.wallet.transfer_eth(retry_tx, wait_for_receipt=True)
             else:
                 fee_gas_limit = 100000
                 fee_gas_price = self.wallet.normal_gas_price()
