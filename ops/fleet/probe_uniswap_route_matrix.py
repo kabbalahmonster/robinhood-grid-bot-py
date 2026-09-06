@@ -56,10 +56,6 @@ def build_variants(body, headers, include_slippage=False, slippage_tolerance=0.5
     omitted_headers.pop("x-erc20eth-enabled", None)
     variants.append({"name": "erc20eth_omitted", "body": deepcopy(body), "headers": omitted_headers})
 
-    router_headers = deepcopy(headers)
-    router_headers["x-universal-router-version"] = "2.0"
-    variants.append({"name": "router_2_0", "body": deepcopy(body), "headers": router_headers})
-
     connection_headers = deepcopy(headers)
     connection_headers.pop("Connection", None)
     variants.append({"name": "connection_omitted", "body": deepcopy(body), "headers": connection_headers})
@@ -78,6 +74,16 @@ def build_variants(body, headers, include_slippage=False, slippage_tolerance=0.5
             name = "slippage_explicit"
         variants.append({"name": name, "body": slippage_body, "headers": deepcopy(headers)})
     return variants
+
+
+def baseline_series(variants, rounds):
+    """Repeat the exact current-production baseline for a bounded time series."""
+    baseline = next(variant for variant in variants if variant["name"] == "baseline")
+    return [
+        {"name": f"baseline_round_{round_number}", "body": deepcopy(baseline["body"]),
+         "headers": deepcopy(baseline["headers"])}
+        for round_number in range(1, int(rounds) + 1)
+    ]
 
 
 def _record_response(variant, response, latency_ms):
@@ -168,6 +174,8 @@ def parse_args(argv=None):
     parser.add_argument("--swapper")
     parser.add_argument("--slippage", type=float, help="Add one explicit slippageTolerance variant in percent")
     parser.add_argument("--rounds", type=int, default=1)
+    parser.add_argument("--baseline-only", action="store_true",
+                        help="Repeat only the exact production baseline (up to 12 rounds)")
     parser.add_argument("--delay-seconds", type=float, default=DEFAULT_DELAY_SECONDS)
     parser.add_argument("--timeout-seconds", type=float, default=10)
     parser.add_argument("--output", help="JSONL output path; defaults to stdout")
@@ -176,8 +184,9 @@ def parse_args(argv=None):
 
 def main(argv=None):
     args = parse_args(argv)
-    if not 1 <= args.rounds <= MAX_ROUNDS:
-        raise SystemExit(f"--rounds must be between 1 and {MAX_ROUNDS}")
+    max_rounds = 12 if args.baseline_only else MAX_ROUNDS
+    if not 1 <= args.rounds <= max_rounds:
+        raise SystemExit(f"--rounds must be between 1 and {max_rounds}")
     if args.delay_seconds < 2:
         raise SystemExit("--delay-seconds must be at least 2 seconds")
     if not 0.05 <= args.timeout_seconds <= 30:
@@ -208,7 +217,8 @@ def main(argv=None):
     }
     variants = build_variants(body, headers, args.slippage is not None,
                               0.5 if args.slippage is None else args.slippage)
-    variants = variants * args.rounds
+    variants = (baseline_series(variants, args.rounds) if args.baseline_only
+                else variants * args.rounds)
     if len(variants) > MAX_REQUESTS:
         raise SystemExit(f"matrix exceeds {MAX_REQUESTS} requests")
     handle = open(args.output, "w", encoding="utf-8") if args.output else sys.stdout

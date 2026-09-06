@@ -638,7 +638,7 @@ python3 ops/fleet/probe_uniswap_route_matrix.py \
   --output "/tmp/uniswap-route-matrix-$(date +%s).jsonl"
 ```
 
-It emits a baseline plus one-variable variants for AMM-only protocols, ERC20-ETH negotiation, router version, connection, user agent, and optionally explicit slippage. It stops early on rate limits, retry-after responses, repeated 5xx, or repeated transport failures. Use an explicit public `--swapper` to avoid loading signing material.
+It emits a baseline plus one-variable variants for AMM-only protocols, ERC20-ETH negotiation, connection, user agent, and optionally slippage. It stops early on rate limits, retry-after responses, repeated 5xx, or repeated transport failures. Use an explicit public `--swapper` to avoid loading signing material.
 
 Use inventory for a concise current-state snapshot without the route probe:
 

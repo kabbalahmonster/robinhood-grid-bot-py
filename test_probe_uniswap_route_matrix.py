@@ -4,7 +4,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-from ops.fleet.probe_uniswap_route_matrix import build_variants, run_matrix
+from ops.fleet.probe_uniswap_route_matrix import build_variants, baseline_series, run_matrix
 
 
 class ProbeUniswapRouteMatrixTests(unittest.TestCase):
@@ -32,7 +32,7 @@ class ProbeUniswapRouteMatrixTests(unittest.TestCase):
 
         self.assertEqual([variant["name"] for variant in variants], [
             "baseline", "amm_protocols", "erc20eth_false", "erc20eth_omitted",
-            "router_2_0", "connection_omitted", "user_agent_omitted", "slippage_explicit",
+            "connection_omitted", "user_agent_omitted", "slippage_explicit",
         ])
         baseline = variants[0]
         for variant in variants[1:]:
@@ -45,6 +45,15 @@ class ProbeUniswapRouteMatrixTests(unittest.TestCase):
                 if baseline["headers"].get(key) != variant["headers"].get(key)
             }
             self.assertEqual(len(body_changes) + len(header_changes), 1, variant["name"])
+
+    def test_baseline_series_keeps_one_exact_request_shape(self):
+        series = baseline_series(build_variants(self.body, self.headers), rounds=4)
+
+        self.assertEqual([item["name"] for item in series], [
+            "baseline_round_1", "baseline_round_2", "baseline_round_3", "baseline_round_4",
+        ])
+        self.assertEqual({item["body"]["amount"] for item in series}, {"100"})
+        self.assertEqual({item["headers"]["x-universal-router-version"] for item in series}, {"2.1.1"})
 
     def test_slippage_variant_omits_existing_baseline_slippage(self):
         body = {**self.body, "slippageTolerance": 2.0}
