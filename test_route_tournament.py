@@ -155,6 +155,46 @@ def test_tournament_quote_requests_respect_shared_provider_cooldown_state():
     assert all("isolated_rate_limit" not in call.kwargs for call in uniswap_calls)
 
 
+def test_tournament_uses_read_only_protocol_hint_for_matching_settlement():
+    clients = {name: Mock() for name in ("uniswap", "sushiswap")}
+    for client in clients.values():
+        client.get_quote.return_value = quote()
+    cfg = SimpleNamespace(uniswap_api_key="key", weth_address="weth", token_address="token")
+
+    collect(cfg, "wallet", context(), clients.__getitem__,
+            protocol_hints={"native": "V4", "weth": "V3"})
+
+    uniswap_calls = clients["uniswap"].get_quote.call_args_list
+    assert [call.kwargs["preferred_protocol"] for call in uniswap_calls] == ["V4", "V3"]
+    assert all("preferred_protocol" not in call.kwargs
+               for call in clients["sushiswap"].get_quote.call_args_list)
+
+
+def test_snapshot_copies_only_matching_execution_protocol_hints():
+    hint_reader = Mock(side_effect=["V4", "V3"])
+    b = SimpleNamespace(
+        config=SimpleNamespace(
+            use_eth_trading=True, eth_gas_reserve=0.001,
+            max_sell_gas_eth=0.002, max_swap_gas_eth=0.003,
+            min_profit_percent=2, weth_address="weth", token_address="token",
+            gas_limit_multiplier=1.05,
+        ),
+        wallet=Mock(),
+        provider=SimpleNamespace(primary=SimpleNamespace(client=SimpleNamespace(protocol_hint_for=hint_reader))),
+        _swap_slippage_fraction=Mock(return_value=0.01),
+        _effective_token_transfer_fee_percent=Mock(return_value=0),
+        _taxed_token_active=Mock(return_value=False),
+    )
+    b.wallet.get_eth_balance_wei.return_value = 10**18
+    b.wallet.normal_gas_price.return_value = 10**6
+
+    captured = snapshot(b, "sell", 10**15, sold_cost_wei=10**15)
+
+    assert captured["uniswap_protocol_hints"] == {"native": "V4", "weth": "V3"}
+    assert hint_reader.call_args_list[0].args == ("token", "0x" + "00" * 20)
+    assert hint_reader.call_args_list[1].args == ("token", "weth")
+
+
 def test_tournament_passes_each_candidate_a_bounded_quote_timeout():
     clients = {name: Mock() for name in ("uniswap", "sushiswap")}
     for client in clients.values():

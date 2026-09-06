@@ -243,6 +243,31 @@ class UniswapAPIClient:
             return None
         return protocol
 
+    def _peek_cached_protocol(self, cache_key: tuple) -> Optional[str]:
+        """Read a capability without eviction or other cache mutation."""
+        entry = self._protocol_cache.get(cache_key)
+        if not entry:
+            return None
+        protocol, expires_at = entry
+        return protocol if time.monotonic() < expires_at else None
+
+    def protocol_hint_for(self, sell_token: str, buy_token: str,
+                          quote_type: str = "EXACT_INPUT") -> Optional[str]:
+        """Read a live capability hint without changing cache state.
+
+        Shadow observers may use this short-lived protocol family hint to avoid
+        spending their bounded deadline rediscovering a route already used by
+        the execution client. It exposes neither routes nor quote economics.
+        """
+        payload = {
+            "tokenInChainId": self.chain_id,
+            "tokenOutChainId": self.chain_id,
+            "tokenIn": sell_token,
+            "tokenOut": buy_token,
+            "type": quote_type,
+        }
+        return self._peek_cached_protocol(self._protocol_cache_key(payload))
+
     def _remember_protocol(self, cache_key: tuple, protocol: str) -> None:
         self._protocol_cache[cache_key] = (
             protocol, time.monotonic() + self._protocol_cache_ttl_seconds,
@@ -276,6 +301,7 @@ class UniswapAPIClient:
         routing_attempts: int = 1,
         quote_timeout_seconds: Optional[float] = None,
         protocol_probe_limit: Optional[int] = None,
+        preferred_protocol: Optional[str] = None,
     ) -> QuoteResult:
         """
         Get a quote from the Uniswap API.
@@ -345,6 +371,13 @@ class UniswapAPIClient:
                 0, min(len(self.PROTOCOL_DISCOVERY_ORDER), int(protocol_probe_limit))
             )
             protocol_probe_order = self.PROTOCOL_DISCOVERY_ORDER[:probe_limit]
+            # A shadow observer may receive a short-lived, read-only capability
+            # hint captured from the execution client. It is not copied into
+            # this isolated client's cache and is ignored unless recognized.
+            preferred_protocol = (str(preferred_protocol).upper()
+                                  if preferred_protocol is not None else None)
+            if preferred_protocol not in self.PROTOCOL_DISCOVERY_ORDER:
+                preferred_protocol = None
             quote_deadline = (time.monotonic() + max(0.05, float(quote_timeout_seconds))
                               if quote_timeout_seconds is not None else None)
 
@@ -352,12 +385,15 @@ class UniswapAPIClient:
                 timeout = None if quote_deadline is None else quote_deadline - time.monotonic()
                 if timeout is not None and timeout <= 0:
                     raise requests.Timeout("shadow quote deadline elapsed")
-                return self._post_json("quote", request_payload, timeout_seconds=timeout)
+                response = self._post_json("quote", request_payload, timeout_seconds=timeout)
+                if quote_deadline is not None and time.monotonic() >= quote_deadline:
+                    raise requests.Timeout("shadow quote deadline elapsed")
+                return response
 
             response = None
             cache_key = self._protocol_cache_key(payload)
             for routing_attempt in range(1, routing_attempts + 1):
-                cached_protocol = self._cached_protocol(cache_key)
+                cached_protocol = self._cached_protocol(cache_key) or preferred_protocol
                 if cached_protocol:
                     cooldown_error = self._cooldown_error()
                     if cooldown_error is not None:
@@ -365,10 +401,18 @@ class UniswapAPIClient:
                     cached_payload = payload.copy()
                     cached_payload["protocols"] = [cached_protocol]
                     self.logger.info("Uniswap quote using cached protocol capability: %s", cached_protocol)
-                    response = post_within_quote_deadline(cached_payload)
-                    if response.status_code == 200:
-                        break
-                    self._forget_protocol(cache_key, cached_protocol)
+                    try:
+                        response = post_within_quote_deadline(cached_payload)
+                    except requests.exceptions.RequestException:
+                        # A copied observer hint is advisory. If its one-shot
+                        # request fails before the observation deadline, retain
+                        # the bounded fresh-default fallback rather than
+                        # treating the hint as an authoritative route result.
+                        self._forget_protocol(cache_key, cached_protocol)
+                    else:
+                        if response.status_code == 200:
+                            break
+                        self._forget_protocol(cache_key, cached_protocol)
 
                 # Refresh default routing after an unavailable cached path so a
                 # gateway timeout never reuses a prior response object.

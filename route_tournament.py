@@ -80,7 +80,7 @@ def snapshot(bot, direction, amount, sold_cost_wei=None):
     """
     config = bot.config
     native_balance = int(bot.wallet.get_eth_balance_wei())
-    return {
+    result = {
         "direction": direction,
         "amount": int(amount),
         "sold_cost_wei": sold_cost_wei,
@@ -101,6 +101,25 @@ def snapshot(bot, direction, amount, sold_cost_wei=None):
         "tax": bot._effective_token_transfer_fee_percent() / 100 if bot._taxed_token_active() else 0,
         "min_profit": float(getattr(config, "min_profit_percent", 2.0)),
     }
+    # Copy only a valid protocol family from the execution client's cache. The
+    # observer gets no mutable cache reference, route, quote, or calldata.
+    primary = getattr(getattr(bot, "provider", None), "primary", None)
+    hint_reader = getattr(getattr(primary, "client", None), "protocol_hint_for", None)
+    if callable(hint_reader):
+        hints = {}
+        for settlement, token in (("native", NATIVE), ("weth", config.weth_address)):
+            sell_token, buy_token = ((token, config.token_address)
+                                     if direction == "buy"
+                                     else (config.token_address, token))
+            try:
+                hint = hint_reader(sell_token, buy_token)
+            except Exception:
+                hint = None
+            if hint in {"V4", "V3", "V2"}:
+                hints[settlement] = hint
+        if hints:
+            result["uniswap_protocol_hints"] = hints
+    return result
 
 
 def _probe_allowance(allowance_probe, token_address, spender_address, amount):
@@ -265,7 +284,7 @@ def score_candidate(quote, provider, settlement, context, *, allowance_probe=Non
 
 def collect(config, address, context, client_factory=None,
             gas_price_provider=None, allowance_probe=None, gas_estimate_provider=None,
-            max_seconds=8):
+            max_seconds=8, protocol_hints=None):
     """One get_quote per provider/settlement; never prepare, approve, or send.
 
     Independent client instances avoid mutating execution clients. Uniswap's
@@ -321,6 +340,9 @@ def collect(config, address, context, client_factory=None,
                     # Preserve one fallback probe per shadow candidate: this
                     # experiment must not consume unbounded shared API capacity.
                     args["protocol_probe_limit"] = 1
+                    hint = (protocol_hints or context.get("uniswap_protocol_hints", {})).get(settlement)
+                    if hint in {"V4", "V3", "V2"}:
+                        args["preferred_protocol"] = hint
                 # Each adapter receives its share of the remaining observation
                 # budget, including any internal fallback request it makes.
                 remaining_candidates = max(1, total_candidates - candidate_index)

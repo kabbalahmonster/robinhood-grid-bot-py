@@ -9,6 +9,134 @@ from uniswap_api import UniswapAPIClient
 
 
 class TestUniswapAPIClient(unittest.TestCase):
+    def test_protocol_hint_lookup_does_not_evict_expired_execution_cache_entry(self):
+        config = SimpleNamespace(
+            uniswap_api_key="test-key", uniswap_permit2_disabled=True,
+            chain_id=4663, anti_mev_jitter=False,
+        )
+        client = UniswapAPIClient(config)
+        payload = {
+            "tokenInChainId": 4663, "tokenOutChainId": 4663,
+            "tokenIn": "0xin", "tokenOut": "0xout", "type": "EXACT_INPUT",
+        }
+        key = client._protocol_cache_key(payload)
+        client._protocol_cache[key] = ("V4", 0)
+
+        assert client.protocol_hint_for("0xin", "0xout") is None
+        assert client._protocol_cache[key] == ("V4", 0)
+
+    def test_successful_hinted_response_after_deadline_is_rejected(self):
+        config = SimpleNamespace(
+            uniswap_api_key="test-key", uniswap_permit2_disabled=True,
+            chain_id=4663, anti_mev_jitter=False,
+        )
+        response = SimpleNamespace(
+            status_code=200, text="", headers={},
+            json=lambda: {"quote": {"input": {"amount": "100"}, "output": {"amount": "95"}}, "tx": {}},
+        )
+        client = UniswapAPIClient(config)
+
+        with patch("uniswap_api.time.monotonic", side_effect=[100.0, 100.0, 101.0, 101.0]), \
+                patch.object(client, "_post_json", return_value=response):
+            result = client.get_quote(
+                sell_token="0xin", buy_token="0xout", sell_amount=100,
+                taker_address="0xtaker", preferred_protocol="V4",
+                quote_timeout_seconds=0.5,
+            )
+
+        assert not result.success
+        assert result.error == "shadow quote deadline elapsed"
+
+    def test_read_only_protocol_hint_starts_with_known_capability(self):
+        config = SimpleNamespace(
+            uniswap_api_key="test-key",
+            uniswap_permit2_disabled=True,
+            chain_id=4663,
+            anti_mev_jitter=False,
+        )
+        response = SimpleNamespace(
+            status_code=200,
+            text="",
+            headers={},
+            json=lambda: {
+                "quote": {
+                    "input": {"amount": "100"},
+                    "output": {"amount": "95"},
+                },
+                "tx": {},
+            },
+        )
+
+        with patch("uniswap_api.requests.post", return_value=response) as post:
+            result = UniswapAPIClient(config).get_quote(
+                sell_token="0x0000000000000000000000000000000000000001",
+                buy_token="0x0000000000000000000000000000000000000002",
+                sell_amount=100,
+                taker_address="0x0000000000000000000000000000000000000003",
+                preferred_protocol="V4",
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(post.call_count, 1)
+        self.assertEqual(json.loads(post.call_args.kwargs["data"])["protocols"], ["V4"])
+
+    def test_stale_read_only_protocol_hint_falls_back_to_default_routing(self):
+        config = SimpleNamespace(
+            uniswap_api_key="test-key",
+            uniswap_permit2_disabled=True,
+            chain_id=4663,
+            anti_mev_jitter=False,
+        )
+        no_route = SimpleNamespace(status_code=404, text="NoRouteFoundError", headers={})
+        success = SimpleNamespace(
+            status_code=200, text="", headers={},
+            json=lambda: {"quote": {"input": {"amount": "100"}, "output": {"amount": "95"}}, "tx": {}},
+        )
+
+        with patch("uniswap_api.requests.post", side_effect=[no_route, success]) as post:
+            result = UniswapAPIClient(config).get_quote(
+                sell_token="0x0000000000000000000000000000000000000001",
+                buy_token="0x0000000000000000000000000000000000000002",
+                sell_amount=100,
+                taker_address="0x0000000000000000000000000000000000000003",
+                preferred_protocol="V4",
+                protocol_probe_limit=0,
+            )
+
+        self.assertTrue(result.success)
+        payloads = [json.loads(call.kwargs["data"]) for call in post.call_args_list]
+        self.assertEqual(payloads[0]["protocols"], ["V4"])
+        self.assertNotIn("protocols", payloads[1])
+
+    def test_failed_read_only_protocol_hint_retries_default_routing_when_budget_remains(self):
+        config = SimpleNamespace(
+            uniswap_api_key="test-key",
+            uniswap_permit2_disabled=True,
+            chain_id=4663,
+            anti_mev_jitter=False,
+        )
+        success = SimpleNamespace(
+            status_code=200, text="", headers={},
+            json=lambda: {"quote": {"input": {"amount": "100"}, "output": {"amount": "95"}}, "tx": {}},
+        )
+
+        with patch("uniswap_api.requests.post", side_effect=[
+            uniswap_api.requests.ConnectionError("transient"), success,
+        ]) as post:
+            result = UniswapAPIClient(config).get_quote(
+                sell_token="0x0000000000000000000000000000000000000001",
+                buy_token="0x0000000000000000000000000000000000000002",
+                sell_amount=100,
+                taker_address="0x0000000000000000000000000000000000000003",
+                preferred_protocol="V4",
+                quote_timeout_seconds=5,
+            )
+
+        self.assertTrue(result.success)
+        payloads = [json.loads(call.kwargs["data"]) for call in post.call_args_list]
+        self.assertEqual(payloads[0]["protocols"], ["V4"])
+        self.assertNotIn("protocols", payloads[1])
+
     def test_slippage_is_normalized_to_two_decimal_places(self):
         config = SimpleNamespace(
             uniswap_api_key="test-key",
