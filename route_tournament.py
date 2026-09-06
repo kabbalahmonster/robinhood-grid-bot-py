@@ -141,16 +141,18 @@ def _probe_allowance(allowance_probe, token_address, spender_address, amount):
         return None, str(type(exc).__name__)
 
 
-def _approval_units(direction, settlement, native_trading, allowance, amount):
+def _approval_units(direction, settlement, native_trading, allowance, amount,
+                    execution_observation=None):
     """Return (gas_units, assumption_label).
 
     - For ``buy`` direction, no ERC20 is leaving the wallet, so no approval.
     - For sells: if allowance covers the amount, zero approval needed.
     - For sells with no probe or insufficient allowance: legacy budget.
-    - The original tournament also budgeted approval for ``buy + weth``
-      (WETH being spent on-router); when the probe is unavailable, keep
-      that conservative legacy default.
+    - The observed no-approval result from the exact live provider/settlement
+      may remove the shadow-only estimate without querying or mutating state.
     """
+    if execution_observation == "not_required":
+        return 0, "execution_observed_no_approval"
     if direction == "buy":
         if settlement == "weth" and allowance is None:
             return _RESET_AND_APPROVAL_GAS, "reset_and_exact_approval_budget"
@@ -220,8 +222,12 @@ def score_candidate(quote, provider, settlement, context, *, allowance_probe=Non
         return None
     probe = allowance_probe if callable(allowance_probe) else _probe_dict
     allowance, _probe_err = _probe_allowance(probe, token_for_allowance, spender, c["amount"])
-    approval_gas, approval_label = _approval_units(c["direction"], settlement,
-                                                    c["native_trading"], allowance, c["amount"])
+    approval_observation = (c.get("approval_observations", {})
+                             .get(f"{provider}:{settlement}"))
+    approval_gas, approval_label = _approval_units(
+        c["direction"], settlement, c["native_trading"], allowance, c["amount"],
+        execution_observation=approval_observation,
+    )
 
     # Wrap/unwrap accounting for native <-> WETH conversion.
     conversion = settlement == "weth" if c["native_trading"] else settlement == "native"
