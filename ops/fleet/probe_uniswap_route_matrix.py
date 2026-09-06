@@ -70,8 +70,13 @@ def build_variants(body, headers, include_slippage=False, slippage_tolerance=0.5
 
     if include_slippage:
         slippage_body = deepcopy(body)
-        slippage_body["slippageTolerance"] = round(float(slippage_tolerance), 2)
-        variants.append({"name": "slippage_explicit", "body": slippage_body, "headers": deepcopy(headers)})
+        if "slippageTolerance" in slippage_body:
+            slippage_body.pop("slippageTolerance")
+            name = "slippage_omitted"
+        else:
+            slippage_body["slippageTolerance"] = round(float(slippage_tolerance), 2)
+            name = "slippage_explicit"
+        variants.append({"name": name, "body": slippage_body, "headers": deepcopy(headers)})
     return variants
 
 
@@ -194,6 +199,8 @@ def main(argv=None):
         "tokenIn": args.sell_token, "tokenOut": args.buy_token, "swapper": swapper,
         "amount": str(amount), "type": "EXACT_INPUT" if args.sell_amount else "EXACT_OUTPUT",
     }
+    if args.slippage is not None:
+        body["slippageTolerance"] = round(float(args.slippage), 2)
     headers = {
         "x-universal-router-version": "2.1.1", "x-erc20eth-enabled": "true",
         "x-permit2-disabled": str(values.get("UNISWAP_PERMIT2_DISABLED", "true")).lower(),

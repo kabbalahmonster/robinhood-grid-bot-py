@@ -46,6 +46,14 @@ class ProbeUniswapRouteMatrixTests(unittest.TestCase):
             }
             self.assertEqual(len(body_changes) + len(header_changes), 1, variant["name"])
 
+    def test_slippage_variant_omits_existing_baseline_slippage(self):
+        body = {**self.body, "slippageTolerance": 2.0}
+
+        variants = build_variants(body, self.headers, include_slippage=True)
+
+        self.assertEqual(variants[-1]["name"], "slippage_omitted")
+        self.assertNotIn("slippageTolerance", variants[-1]["body"])
+
     def test_matrix_output_redacts_addresses_and_amounts_in_error_detail(self):
         response = SimpleNamespace(
             status_code=400,
