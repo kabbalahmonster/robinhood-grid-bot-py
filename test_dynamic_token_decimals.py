@@ -47,6 +47,31 @@ class DynamicTokenDecimalsTests(unittest.TestCase):
 
         self.assertAlmostEqual(bot.get_token_price(), 0.5)
 
+    def test_uniswap_price_discovery_includes_configured_slippage(self):
+        bot = GridBot.__new__(GridBot)
+        bot.token_decimals = 9
+        bot.token_unit = 10**9
+        bot.trade_token_address = "0xeth"
+        bot.config = SimpleNamespace(token_address="0xnet", route_tournament_mode="off")
+        bot.provider = MagicMock()
+        bot.provider.run_with_fallback = None
+        bot.provider.capabilities.price_requires_taker = True
+        bot.wallet = SimpleNamespace(address="0xswapper")
+        bot._swap_slippage_fraction = lambda: 0.0125
+        bot.api_client = MagicMock()
+        bot.api_client.get_quote.return_value = SimpleNamespace(success=True, price=500_000_000, error=None)
+
+        self.assertAlmostEqual(bot.get_token_price(), 0.5)
+
+        bot.api_client.get_quote.assert_called_once_with(
+            sell_token="0xeth",
+            buy_token="0xnet",
+            sell_amount=10**15,
+            taker_address="0xswapper",
+            slippage_percentage=0.0125,
+            apply_jitter_to_price=False,
+        )
+
     def test_wallet_reads_and_caches_nine_decimals(self):
         token = MagicMock()
         token.functions.symbol.return_value.call.return_value = "NET"

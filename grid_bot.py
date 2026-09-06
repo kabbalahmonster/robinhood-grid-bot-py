@@ -1792,6 +1792,7 @@ class GridBot:
                 buy_token=self.config.token_address,
                 sell_amount=10**15,  # 0.001 ETH/WETH
                 taker_address=self.wallet.address,
+                slippage_percentage=self._swap_slippage_fraction(),
                 apply_jitter_to_price=False,
             )
             if result.success and result.price:
