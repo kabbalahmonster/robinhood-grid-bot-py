@@ -116,7 +116,7 @@ class UniswapAPIClient:
             and "buffer" in error_text
         )
 
-    def _post_json(self, endpoint: str, payload: dict):
+    def _post_json(self, endpoint: str, payload: dict, *, timeout_seconds=None):
         """POST once, retrying only the known transient gateway packet 409.
 
         ``requests.post`` already creates a short-lived Session, so there was
@@ -140,7 +140,7 @@ class UniswapAPIClient:
                 url,
                 headers=self._get_headers(),
                 data=encoded,
-                timeout=30,
+                timeout=30 if timeout_seconds is None else max(0.05, float(timeout_seconds)),
             )
             elapsed_ms = round((time.monotonic() - started) * 1000, 1)
             self.logger.info(
@@ -237,6 +237,7 @@ class UniswapAPIClient:
         slippage_percentage: Optional[float] = None,
         apply_jitter_to_price: bool = True,
         routing_attempts: int = 1,
+        quote_timeout_seconds: Optional[float] = None,
     ) -> QuoteResult:
         """
         Get a quote from the Uniswap API.
@@ -301,12 +302,21 @@ class UniswapAPIClient:
             self.logger.debug(f"Fetching Uniswap quote: {payload}")
             
             routing_attempts = min(3, max(1, int(routing_attempts)))
+            quote_deadline = (time.monotonic() + max(0.05, float(quote_timeout_seconds))
+                              if quote_timeout_seconds is not None else None)
+
+            def post_within_quote_deadline(request_payload):
+                timeout = None if quote_deadline is None else quote_deadline - time.monotonic()
+                if timeout is not None and timeout <= 0:
+                    raise requests.Timeout("shadow quote deadline elapsed")
+                return self._post_json("quote", request_payload, timeout_seconds=timeout)
+
             response = None
             for routing_attempt in range(1, routing_attempts + 1):
                 cooldown_error = self._cooldown_error()
                 if cooldown_error is not None:
                     return QuoteResult(success=False, error=cooldown_error)
-                response = self._post_json("quote", payload)
+                response = post_within_quote_deadline(payload)
 
                 # BEST_PRICE/default routing may involve UniswapX discovery.
                 # Retry the same attempt against canonical AMM liquidity.
@@ -320,7 +330,7 @@ class UniswapAPIClient:
                     cooldown_error = self._cooldown_error()
                     if cooldown_error is not None:
                         return QuoteResult(success=False, error=cooldown_error)
-                    response = self._post_json("quote", amm_payload)
+                    response = post_within_quote_deadline(amm_payload)
 
                 if response.status_code == 200 or routing_attempt == routing_attempts:
                     break

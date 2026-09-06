@@ -83,7 +83,7 @@ class SushiAPIClient:
             return cls.NATIVE_TOKEN_ADDRESS
         return token_address
 
-    def _request(self, endpoint, params):
+    def _request(self, endpoint, params, *, timeout_seconds=None):
         now = time.time()
         if now < self._rate_limit_until:
             remaining = max(1, int(self._rate_limit_until - now + 0.999))
@@ -93,7 +93,7 @@ class SushiAPIClient:
             response = requests.get(
                 f"{self.BASE_URL}/{endpoint}/v7/{self.chain_id}",
                 params=params,
-                timeout=30,
+                timeout=30 if timeout_seconds is None else max(0.05, float(timeout_seconds)),
             )
             try:
                 data = response.json()
@@ -161,13 +161,14 @@ class SushiAPIClient:
         taker_address: Optional[str] = None,
         slippage_percentage: Optional[float] = None,
         apply_jitter_to_price: bool = True,
+        quote_timeout_seconds: Optional[float] = None,
     ) -> QuoteResult:
         if not sell_amount:
             error = "Sushi provider supports exact-input sell_amount quotes only"
             return QuoteResult(success=False, error=error)
 
         params = self._params(sell_token, buy_token, sell_amount, slippage_percentage)
-        status_code, data = self._request("quote", params)
+        status_code, data = self._request("quote", params, timeout_seconds=quote_timeout_seconds)
         if status_code != 200:
             detail = data.get("detail") or data.get("title") or "unknown error"
             return QuoteResult(

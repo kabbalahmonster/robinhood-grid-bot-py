@@ -1079,7 +1079,7 @@ class GridBot:
                                      gas_price_provider=gas_price_provider,
                                      allowance_probe=allowance_probe,
                                      gas_estimate_provider=gas_estimate_provider,
-                                     max_seconds=8)
+                                     max_seconds=4)
             except Exception:
                 comparison = {"mode": "shadow", "direction": direction,
                               "status": "observation_failed", "candidates": [],

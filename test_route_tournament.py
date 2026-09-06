@@ -129,6 +129,21 @@ def test_provider_quote_failure_has_structured_actionable_reason():
     assert row["gas_price_currentness"] == "unknown"
 
 
+def test_quote_deadline_is_exposed_as_an_observation_timeout():
+    row = score_candidate(
+        QuoteResult(success=False, error="shadow quote deadline elapsed"),
+        "uniswap", "native", context(),
+    )
+
+    assert row["rejections"] == ["observation_timeout"]
+    assert row["quote_failure_kind"] == "observation_timeout"
+    assert row["failure_reason"] == {
+        "category": "observation_timeout",
+        "retryable": True,
+        "provider_error": "shadow_quote_deadline",
+    }
+
+
 def test_tournament_quote_requests_respect_shared_provider_cooldown_state():
     client = Mock()
     client.get_quote.return_value = quote()
@@ -137,6 +152,20 @@ def test_tournament_quote_requests_respect_shared_provider_cooldown_state():
     uniswap_calls = [call for call in client.get_quote.call_args_list if call.kwargs.get("routing_attempts") == 1]
     assert uniswap_calls
     assert all("isolated_rate_limit" not in call.kwargs for call in uniswap_calls)
+
+
+def test_tournament_passes_each_candidate_a_bounded_quote_timeout():
+    clients = {name: Mock() for name in ("uniswap", "sushiswap")}
+    for client in clients.values():
+        client.get_quote.return_value = quote()
+    cfg = SimpleNamespace(uniswap_api_key="key", weth_address="weth", token_address="token")
+
+    collect(cfg, "wallet", context(), clients.__getitem__, max_seconds=4)
+
+    for client in clients.values():
+        assert client.get_quote.call_count == 2
+        for call in client.get_quote.call_args_list:
+            assert 0 < call.kwargs["quote_timeout_seconds"] <= 4
 
 
 def bot(mode):
@@ -194,6 +223,19 @@ def test_shadow_runs_after_fallback_and_cannot_select_or_replay():
     assert calls == ["uniswap", "sushiswap"]
     assert b.provider.active is primary
     assert b._attempt_with_route_comparison("buy")["route_comparison"]["selected_hypothetical_winner"]["provider"] == "uniswap"
+
+
+def test_shadow_observation_budget_is_four_seconds():
+    b = bot("shadow")
+    b.config.token_address = "token"
+    b.config.weth_address = "weth"
+    b.trade_token_address = "weth"
+    b._route_shadow_pending = {"sell": context("sell")}
+
+    with patch("route_tournament.collect", return_value={"mode": "shadow"}) as collection:
+        b._finish_route_shadow()
+
+    assert collection.call_args.kwargs["max_seconds"] == 4
 
 
 def test_poll_and_observer_failure_do_not_change_operation():

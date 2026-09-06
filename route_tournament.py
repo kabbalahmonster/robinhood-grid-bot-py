@@ -36,6 +36,9 @@ _WRAP_UNWRAP_GAS = 60000
 def _quote_failure_reason(provider, error):
     """Classify a provider failure without exposing response or credential data."""
     text = str(error or "").lower()
+    if "shadow quote deadline" in text or "observation deadline" in text:
+        return {"category": "observation_timeout", "retryable": True,
+                "provider_error": "shadow_quote_deadline"}
     if "noroutefounderror" in text or "no route" in text or "no quotes available" in text:
         return {"category": "no_liquidity", "retryable": False,
                 "provider_error": "NoRouteFoundError"}
@@ -155,12 +158,14 @@ def score_candidate(quote, provider, settlement, context, *, allowance_probe=Non
            "output_floor_raw": None, "output_floor_human": None,
            "projected_net_score": None, "rejections": [], "execution_eligible": False}
     if not quote.success:
-        row["rejections"] = ["provider_quote_failed"]
         failure_reason = _quote_failure_reason(provider, getattr(quote, "error", None))
+        row["rejections"] = ["observation_timeout" if failure_reason["category"] == "observation_timeout"
+                             else "provider_quote_failed"]
         row["failure_reason"] = failure_reason
         row["quote_failure_kind"] = {
             "no_liquidity": "no_route_or_liquidity",
             "invalid_request": "invalid_quote",
+            "observation_timeout": "observation_timeout",
         }.get(failure_reason["category"], "provider_quote_failed")
         # No provider quote means there is no candidate-specific fresh gas read.
         row["gas_price_currentness"] = "unknown"
@@ -276,8 +281,12 @@ def collect(config, address, context, client_factory=None,
     the legacy reset+approval budget is used for every sell candidate.
     """
     started = time.monotonic()
+    deadline = started + max(0, float(max_seconds))
     rows = []
     provider_outputs = []
+    candidate_index = 0
+    enabled_provider_count = 1 + int(bool(getattr(config, "uniswap_api_key", "")))
+    total_candidates = enabled_provider_count * 2
     for name in ("uniswap", "sushiswap"):
         if name == "uniswap" and not getattr(config, "uniswap_api_key", ""):
             continue
@@ -286,7 +295,8 @@ def collect(config, address, context, client_factory=None,
         except Exception:
             client = None
         for settlement, token in (("native", NATIVE), ("weth", config.weth_address)):
-            if time.monotonic() - started >= max(0, float(max_seconds)):
+            remaining_seconds = deadline - time.monotonic()
+            if remaining_seconds <= 0:
                 rows.append({"provider": name, "settlement": settlement,
                              "validation_level": "rejected", "rejections": ["observation_deadline"],
                              "quoted_output_raw": None, "quoted_output_human": None,
@@ -296,6 +306,7 @@ def collect(config, address, context, client_factory=None,
                              "execution_eligible": False, "provider_gas_estimate": 0,
                              "effective_gas_price_wei": 0,
                              "approval_assumption": "none", "gas_basis": "skipped"})
+                candidate_index += 1
                 continue
             try:
                 if client is None:
@@ -306,6 +317,10 @@ def collect(config, address, context, client_factory=None,
                             slippage_percentage=context["slippage"], apply_jitter_to_price=False)
                 if name == "uniswap":
                     args["routing_attempts"] = 1
+                # Each adapter receives its share of the remaining observation
+                # budget, including any internal fallback request it makes.
+                remaining_candidates = max(1, total_candidates - candidate_index)
+                args["quote_timeout_seconds"] = remaining_seconds / remaining_candidates
                 quote = client.get_quote(**args)
                 # Read dynamic, already-normalized RPC gas after every quote.
                 # A single oracle failure rejects only this candidate.
@@ -357,6 +372,7 @@ def collect(config, address, context, client_factory=None,
                     "result=rejected reason=candidate_failed",
                     name, settlement, context["direction"],
                 )
+            candidate_index += 1
     eligible = sorted((r for r in rows if r["validation_level"] == "quote_only"),
                       key=lambda r: Decimal(r["projected_net_score"]), reverse=True)
     winner = {key: eligible[0][key] for key in ("provider", "settlement")} if eligible else None
