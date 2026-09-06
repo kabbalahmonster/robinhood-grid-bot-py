@@ -237,7 +237,6 @@ class UniswapAPIClient:
         slippage_percentage: Optional[float] = None,
         apply_jitter_to_price: bool = True,
         routing_attempts: int = 1,
-        isolated_rate_limit: bool = False,
     ) -> QuoteResult:
         """
         Get a quote from the Uniswap API.
@@ -304,10 +303,9 @@ class UniswapAPIClient:
             routing_attempts = min(3, max(1, int(routing_attempts)))
             response = None
             for routing_attempt in range(1, routing_attempts + 1):
-                if not isolated_rate_limit:
-                    cooldown_error = self._cooldown_error()
-                    if cooldown_error is not None:
-                        return QuoteResult(success=False, error=cooldown_error)
+                cooldown_error = self._cooldown_error()
+                if cooldown_error is not None:
+                    return QuoteResult(success=False, error=cooldown_error)
                 response = self._post_json("quote", payload)
 
                 # BEST_PRICE/default routing may involve UniswapX discovery.
@@ -319,10 +317,9 @@ class UniswapAPIClient:
                         "Uniswap default routing found no route; retrying quote "
                         "against explicit V2/V3/V4 AMM liquidity"
                     )
-                    if not isolated_rate_limit:
-                        cooldown_error = self._cooldown_error()
-                        if cooldown_error is not None:
-                            return QuoteResult(success=False, error=cooldown_error)
+                    cooldown_error = self._cooldown_error()
+                    if cooldown_error is not None:
+                        return QuoteResult(success=False, error=cooldown_error)
                     response = self._post_json("quote", amm_payload)
 
                 if response.status_code == 200 or routing_attempt == routing_attempts:
@@ -343,15 +340,13 @@ class UniswapAPIClient:
                 error_text = response.text[:500]
                 self.logger.error(f"Uniswap API error: Status {response.status_code}")
                 self.logger.error(f"Response: {error_text}")
-                if not isolated_rate_limit:
-                    self._record_response_limit(response)
+                self._record_response_limit(response)
                 return QuoteResult(
                     success=False,
                     error=f"Uniswap API returned status {response.status_code}: {error_text}",
                 )
             
-            if not isolated_rate_limit:
-                self._record_response_limit(response)
+            self._record_response_limit(response)
             data = response.json()
             
             # Extract amounts and calculate price

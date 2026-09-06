@@ -156,7 +156,14 @@ def score_candidate(quote, provider, settlement, context, *, allowance_probe=Non
            "projected_net_score": None, "rejections": [], "execution_eligible": False}
     if not quote.success:
         row["rejections"] = ["provider_quote_failed"]
-        row["failure_reason"] = _quote_failure_reason(provider, getattr(quote, "error", None))
+        failure_reason = _quote_failure_reason(provider, getattr(quote, "error", None))
+        row["failure_reason"] = failure_reason
+        row["quote_failure_kind"] = {
+            "no_liquidity": "no_route_or_liquidity",
+            "invalid_request": "invalid_quote",
+        }.get(failure_reason["category"], "provider_quote_failed")
+        # No provider quote means there is no candidate-specific fresh gas read.
+        row["gas_price_currentness"] = "unknown"
         return row
     output = int(quote.buy_amount or 0)
     row["quoted_output_raw"] = str(output)
@@ -220,7 +227,8 @@ def score_candidate(quote, provider, settlement, context, *, allowance_probe=Non
                slippage_fraction=c["slippage"], tax_fraction=c["tax"],
                approval_assumption=approval_label,
                provider_gas_estimate=provider_gas,
-               effective_gas_price_wei=gas_price)
+               effective_gas_price_wei=gas_price,
+               gas_price_currentness="fresh", gas_price_age_seconds=0.0)
     if c["cap"] > 0 and total > c["cap"]:
         row["rejections"].append("total_gas_above_cap")
     # Native buy spend uses quote.value when present (ETH actually sent);
@@ -298,8 +306,6 @@ def collect(config, address, context, client_factory=None,
                             slippage_percentage=context["slippage"], apply_jitter_to_price=False)
                 if name == "uniswap":
                     args["routing_attempts"] = 1
-                    # Do not consume or inherit execution's shared cooldown.
-                    args["isolated_rate_limit"] = True
                 quote = client.get_quote(**args)
                 # Read dynamic, already-normalized RPC gas after every quote.
                 # A single oracle failure rejects only this candidate.
