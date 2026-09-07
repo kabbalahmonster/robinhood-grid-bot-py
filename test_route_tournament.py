@@ -1,4 +1,5 @@
 import json
+import time
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -830,6 +831,38 @@ def test_execution_preflight_collects_only_when_all_required_providers_exist():
         "runner_up_delta": None, "status": "required_provider_unavailable",
         "failures": ["uniswap_unavailable"],
     }
+
+
+def test_execution_preflight_gives_all_four_candidates_independent_time_budgets():
+    """Four slow candidates run together instead of starving later routes."""
+    def factory(_name):
+        client = Mock()
+
+        def delayed_quote(**_kwargs):
+            time.sleep(0.15)
+            return quote(
+                to="0x8e6fd69a77e88ee20ba4b4fbd59dfcda3ec0e98a",
+                allowance_target="spender", data="0xdead",
+            )
+
+        client.get_quote.side_effect = delayed_quote
+        return client
+
+    cfg = SimpleNamespace(uniswap_api_key="key", weth_address="weth", token_address="token")
+    started = time.monotonic()
+    result = collect_execution_preflight(
+        cfg, "wallet", context("sell"), factory,
+        allowance_probe=lambda _token, _spender: 10**15,
+        gas_estimate_provider=lambda _quote, _settlement: 100000,
+        conversion_gas_estimate_provider=lambda _quote, _settlement: 60000,
+        max_seconds=0.5,
+    )
+
+    assert time.monotonic() - started < 0.45
+    assert result["candidate_accounting_complete"] is True
+    assert result["deadline_met"] is True
+    assert len(result["candidates"]) == 4
+    assert all(row["rejections"] != ["observation_timeout"] for row in result["candidates"])
 
 
 def test_execution_preflight_uses_six_second_gate_budget():

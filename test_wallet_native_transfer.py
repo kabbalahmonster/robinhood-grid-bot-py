@@ -7,6 +7,30 @@ from wallet import TransactionResult, Wallet
 
 
 class TestWalletNativeTransfer(unittest.TestCase):
+    def test_future_weth_withdraw_projection_is_dynamic_and_conservative(self):
+        wallet = Wallet.__new__(Wallet)
+        wallet.address = "0x0000000000000000000000000000000000000002"
+        wallet.config = SimpleNamespace(chain_id=4663, gas_limit_multiplier=1.05)
+        wallet.w3 = SimpleNamespace(eth=Mock())
+        wallet.normal_gas_price = Mock(return_value=123)
+        wallet.w3.eth.get_transaction_count.return_value = 7
+        wallet.w3.eth.estimate_gas.return_value = 31_337
+        withdraw = wallet.w3.eth.contract.return_value.functions.withdraw.return_value
+        withdraw.build_transaction.side_effect = lambda params: {
+            **params, "to": "0x0000000000000000000000000000000000000003",
+            "data": "0x00",
+        }
+
+        projected = wallet.estimate_future_weth_withdraw_gas(
+            "0x0000000000000000000000000000000000000003"
+        )
+
+        self.assertEqual(projected, 62_674)
+        wallet.w3.eth.estimate_gas.assert_called_once()
+        estimated_tx = wallet.w3.eth.estimate_gas.call_args.args[0]
+        self.assertNotIn("gas", estimated_tx)
+        wallet.w3.eth.contract.return_value.functions.withdraw.assert_called_once_with(0)
+
     def test_build_eth_transfer_uses_estimate_and_configured_multipliers(self):
         wallet = Wallet.__new__(Wallet)
         wallet.address = "0x0000000000000000000000000000000000000002"

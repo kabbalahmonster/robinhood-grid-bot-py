@@ -19,6 +19,7 @@ from decimal import Decimal, InvalidOperation, ROUND_CEILING
 import logging
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
 
 from swap_provider import PROVIDERS
 from zero_x import QuoteResult
@@ -436,7 +437,8 @@ def score_candidate(quote, provider, settlement, context, *, allowance_probe=Non
 def collect(config, address, context, client_factory=None,
             gas_price_provider=None, allowance_probe=None, gas_estimate_provider=None,
             conversion_gas_estimate_provider=None, max_seconds=8,
-            protocol_hints=None, mode="shadow"):
+            protocol_hints=None, mode="shadow", _candidate_filter=None,
+            _suppress_summary=False):
     """One get_quote per provider/settlement; never prepare, approve, or send.
 
     Independent client instances avoid mutating execution clients. Uniswap's
@@ -457,7 +459,7 @@ def collect(config, address, context, client_factory=None,
     provider_outputs = []
     candidate_index = 0
     enabled_provider_count = 1 + int(bool(getattr(config, "uniswap_api_key", "")))
-    total_candidates = enabled_provider_count * 2
+    total_candidates = 1 if _candidate_filter else enabled_provider_count * 2
 
     def deadline_row(name, settlement):
         return score_candidate(
@@ -473,6 +475,8 @@ def collect(config, address, context, client_factory=None,
         except Exception:
             client = None
         for settlement, token in (("native", NATIVE), ("weth", config.weth_address)):
+            if _candidate_filter and (name, settlement) != _candidate_filter:
+                continue
             remaining_seconds = deadline - time.monotonic()
             if remaining_seconds <= 0:
                 rows.append({"provider": name, "settlement": settlement,
@@ -526,7 +530,10 @@ def collect(config, address, context, client_factory=None,
                         # Reserve an equal share of the absolute budget for every
                         # remaining candidate. Preparation must not consume the
                         # time needed to account for the other three routes.
-                        preparation_budget = remaining_preparation / remaining_candidates
+                        preparation_budget = min(
+                            remaining_preparation / remaining_candidates,
+                            max(0.05, float(max_seconds) / 2),
+                        )
                         if name == "uniswap":
                             quote = client.get_swap_transaction(
                                 quote.raw_response,
@@ -648,6 +655,7 @@ def collect(config, address, context, client_factory=None,
         for name in ("uniswap", "sushiswap")
         if name != "uniswap" or getattr(config, "uniswap_api_key", "")
         for settlement in ("native", "weth")
+        if not _candidate_filter or (name, settlement) == _candidate_filter
     }
     observed_identities = {
         (row.get("provider"), row.get("settlement"))
@@ -674,7 +682,7 @@ def collect(config, address, context, client_factory=None,
               "elapsed_ms": elapsed_ms,
               "status": "hypothetical_only" if eligible else "no_eligible_candidate",
               "observation_timing": "after_execution_attempt_with_pre_operation_budget"}
-    if winner:
+    if winner and not _suppress_summary:
         LOG.info(
             "Route tournament winner provider=%s settlement=%s direction=%s score=%s "
             "runner_up_delta=%s eligible=%d rejected=%d elapsed_ms=%s",
@@ -682,7 +690,7 @@ def collect(config, address, context, client_factory=None,
             eligible[0]["projected_net_score"], runner_up_delta or "n/a",
             len(eligible), len(rows) - len(eligible), elapsed_ms,
         )
-    else:
+    elif not _suppress_summary:
         LOG.info(
             "Route tournament winner provider=none settlement=none direction=%s "
             "score=- runner_up_delta=n/a eligible=0 rejected=%d elapsed_ms=%s",
@@ -732,13 +740,97 @@ def collect_execution_preflight(config, address, context, client_factory=None,
             "status": "required_local_gas_estimator_unavailable",
             "failures": ["local_gas_estimator_unavailable"],
         }
-    comparison = collect(
-        config, address, context, client_factory=client_factory,
-        gas_price_provider=gas_price_provider, allowance_probe=allowance_probe,
-        gas_estimate_provider=gas_estimate_provider, max_seconds=max_seconds,
-        conversion_gas_estimate_provider=conversion_gas_estimate_provider,
-        protocol_hints=protocol_hints, mode="execution_preflight",
+    # Run each provider/settlement identity in its own worker with the same
+    # absolute-sized budget. A slow Uniswap preparation can therefore never
+    # consume Sushi's opportunity to produce an executable candidate.
+    started = time.monotonic()
+    identities = [
+        ("uniswap", "native"), ("uniswap", "weth"),
+        ("sushiswap", "native"), ("sushiswap", "weth"),
+    ]
+
+    def collect_one(identity):
+        return collect(
+            config, address, context, client_factory=client_factory,
+            gas_price_provider=gas_price_provider, allowance_probe=allowance_probe,
+            gas_estimate_provider=gas_estimate_provider, max_seconds=max_seconds,
+            conversion_gas_estimate_provider=conversion_gas_estimate_provider,
+            protocol_hints=protocol_hints, mode="execution_preflight",
+            _candidate_filter=identity, _suppress_summary=True,
+        )
+
+    results = {}
+    pool = ThreadPoolExecutor(max_workers=len(identities), thread_name_prefix="route-preflight")
+    futures = {pool.submit(collect_one, identity): identity for identity in identities}
+    try:
+        for future in as_completed(futures, timeout=max(0.1, float(max_seconds) + 0.5)):
+            identity = futures[future]
+            try:
+                partial = future.result()
+                if partial.get("candidates"):
+                    results[identity] = partial["candidates"][0]
+            except Exception:
+                pass
+    except TimeoutError:
+        pass
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+
+    rows = []
+    for provider, settlement in identities:
+        row = results.get((provider, settlement))
+        if row is None:
+            row = score_candidate(
+                QuoteResult(success=False, error="observation deadline elapsed"),
+                provider, settlement, context,
+            )
+        rows.append(row)
+    eligible = sorted(
+        (row for row in rows if row.get("validation_level") == "quote_only"),
+        key=lambda row: Decimal(row["projected_net_score"]), reverse=True,
     )
+    runner_up_delta = None
+    if len(eligible) > 1:
+        runner_up_delta = str(
+            Decimal(eligible[0]["projected_net_score"])
+            - Decimal(eligible[1]["projected_net_score"])
+        )
+    comparison = {
+        "mode": "execution_preflight", "direction": context.get("direction"),
+        "candidates": rows,
+        "expected_candidates": [
+            {"provider": provider, "settlement": settlement}
+            for provider, settlement in identities
+        ],
+        "observed_candidates": [
+            {"provider": provider, "settlement": settlement}
+            for provider, settlement in identities
+        ],
+        "candidate_accounting_complete": True,
+        "deadline_met": len(results) == len(identities),
+        "selected_hypothetical_winner": (
+            {key: eligible[0][key] for key in ("provider", "settlement")}
+            if eligible else None
+        ),
+        "runner_up_delta": runner_up_delta,
+        "elapsed_ms": round((time.monotonic() - started) * 1000, 1),
+        "status": "hypothetical_only" if eligible else "no_eligible_candidate",
+        "observation_timing": "parallel_pre_execution",
+    }
+    if eligible:
+        LOG.info(
+            "Route tournament winner provider=%s settlement=%s direction=%s score=%s "
+            "runner_up_delta=%s eligible=%d rejected=%d elapsed_ms=%s",
+            eligible[0]["provider"], eligible[0]["settlement"], context.get("direction"),
+            eligible[0]["projected_net_score"], runner_up_delta or "n/a",
+            len(eligible), len(rows) - len(eligible), comparison["elapsed_ms"],
+        )
+    else:
+        LOG.info(
+            "Route tournament winner provider=none settlement=none direction=%s "
+            "score=- runner_up_delta=n/a eligible=0 rejected=%d elapsed_ms=%s",
+            context.get("direction"), len(rows), comparison["elapsed_ms"],
+        )
     selection = select_execution_candidate(comparison, context.get("direction"))
     comparison["selected_execution_candidate"] = selection
     if selection is None:

@@ -1190,6 +1190,14 @@ class GridBot:
                     int(amount) if conversion_direction == "buy"
                     else int(getattr(quote, "buy_amount", 0) or 0)
                 )
+                if conversion_direction == "sell":
+                    # The WETH is a future swap receipt, so simulating an exact
+                    # withdrawal against the pre-swap balance is invalid. Probe
+                    # the live WETH contract dynamically; execution re-estimates
+                    # the exact received amount before broadcasting the unwrap.
+                    return int(self.wallet.estimate_future_weth_withdraw_gas(
+                        self.config.weth_address,
+                    ))
                 tx, _ = self._project_weth_operation_gas(
                     conversion_direction, conversion_amount,
                 )
@@ -1439,6 +1447,13 @@ class GridBot:
         if not result.success:
             raise RuntimeError(f"WETH unwrap failed: {result.error}")
         return result, self._receipt_gas_cost_wei(result)
+
+    def _project_future_weth_unwrap_gas_wei(self):
+        """Price a future WETH receipt without requiring it in current state."""
+        gas_limit = int(self.wallet.estimate_future_weth_withdraw_gas(
+            self.config.weth_address,
+        ))
+        return gas_limit * int(self.wallet.normal_gas_price())
 
     def _guard_confirmed_wrap(self, result, amount_wei):
         """Durably prevent another buy from wrapping again before this one settles."""
@@ -2691,9 +2706,7 @@ class GridBot:
         quote_profit_eth = quote_return_eth - cost_eth
         unwrap_projected_wei = 0
         if weth_fallback:
-            _, unwrap_projected_wei = self._project_weth_operation_gas(
-                "sell", self._taxed_quote_return_wei(quote)
-            )
+            unwrap_projected_wei = self._project_future_weth_unwrap_gas_wei()
         projected_gas_eth = (self._projected_gas_cost_wei(quote) + unwrap_projected_wei) / 10**18
         projected_net_profit_eth = quote_profit_eth - projected_gas_eth
         
@@ -2797,9 +2810,7 @@ class GridBot:
         min_profit_eth = sold_cost_eth * (min_profit / 100)
         unwrap_projected_wei = 0
         if weth_fallback:
-            _, unwrap_projected_wei = self._project_weth_operation_gas(
-                "sell", self._taxed_quote_return_wei(quote)
-            )
+            unwrap_projected_wei = self._project_future_weth_unwrap_gas_wei()
         min_return_eth = self._minimum_gas_aware_return_wei(
             int(round(sold_cost_eth * 10**18)), quote, min_profit,
             setup_gas_wei=unwrap_projected_wei,
@@ -3432,9 +3443,7 @@ class GridBot:
         preapproval_return_wei = self._taxed_quote_return_wei(quote)
         unwrap_projected_wei = 0
         if weth_fallback:
-            _, unwrap_projected_wei = self._project_weth_operation_gas(
-                "sell", self._taxed_quote_return_wei(quote)
-            )
+            unwrap_projected_wei = self._project_future_weth_unwrap_gas_wei()
         preapproval_minimum_wei = self._minimum_gas_aware_return_wei(
             int(round(sold_cost_eth * 10**18)), quote, min_profit_percent,
             setup_gas_wei=unwrap_projected_wei,

@@ -501,6 +501,32 @@ class Wallet:
         tx["gas"] = max(estimated, int(estimated * max(float(self.config.gas_limit_multiplier), 1.0)))
         return tx
 
+    def estimate_future_weth_withdraw_gas(self, weth_address: str) -> int:
+        """Dynamically project an unwrap before the swap has delivered WETH.
+
+        Estimating ``withdraw(expected_amount)`` against the current state is
+        invalid when the expected WETH is a future swap receipt. ``withdraw(0)``
+        exercises the live contract/RPC path without requiring that future
+        balance. We apply 2x headroom for the non-zero balance write and event;
+        execution still re-estimates the exact amount after receipt.
+        """
+        weth = self.w3.eth.contract(
+            address=Web3.to_checksum_address(weth_address), abi=WETH_ABI,
+        )
+        tx = weth.functions.withdraw(0).build_transaction({
+            "from": self.address,
+            "nonce": self.w3.eth.get_transaction_count(self.address, "pending"),
+            "gasPrice": self.normal_gas_price(),
+            "chainId": int(self.config.chain_id),
+            # Prevent web3 from implicitly estimating while constructing it.
+            "gas": 1,
+        })
+        tx.pop("gas", None)
+        estimated = int(self.w3.eth.estimate_gas(tx))
+        return max(estimated, int(estimated * max(
+            float(self.config.gas_limit_multiplier), 2.0,
+        )))
+
     def unwrap_weth(self, tx: TxParams, wait_for_receipt: bool = True) -> TransactionResult:
         """Sign and send a previously reviewed WETH withdrawal transaction."""
         return self._send_transaction(tx, wait_for_receipt)
