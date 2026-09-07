@@ -211,7 +211,7 @@ def test_execution_preflight_prepares_uniswap_quote_for_local_gas():
                              gas=300000, raw_response={"quote": {}})
     prepared = QuoteResult(success=True, buy_amount=2 * 10**15, sell_amount=10**15,
                            gas=207348, to="0x8e6fd69a77e88ee20ba4b4fbd59dfcda3ec0e98a",
-                           data="0xdead", value=0)
+                           allowance_target="spender", data="0xdead", value=0)
     clients["uniswap"].get_quote.return_value = indicative
     clients["uniswap"].get_swap_transaction.return_value = prepared
     clients["sushiswap"].get_quote.return_value = quote()
@@ -220,7 +220,9 @@ def test_execution_preflight_prepares_uniswap_quote_for_local_gas():
 
     result = collect_execution_preflight(
         cfg, "wallet", context("sell"), clients.__getitem__,
+        allowance_probe=lambda _token, _spender: 10**15,
         gas_estimate_provider=lambda candidate, _settlement: 180612 if candidate is prepared else 0,
+        conversion_gas_estimate_provider=lambda _candidate, _settlement: 60001,
         max_seconds=4,
     )
 
@@ -238,7 +240,8 @@ def test_execution_preflight_prepares_uniswap_quote_for_local_gas():
 def test_execution_preflight_requires_local_gas_for_sushi_too():
     clients = {name: Mock() for name in ("uniswap", "sushiswap")}
     indicative = quote()
-    prepared = quote(to="0x8e6fd69a77e88ee20ba4b4fbd59dfcda3ec0e98a", data="0xdead")
+    prepared = quote(to="0x8e6fd69a77e88ee20ba4b4fbd59dfcda3ec0e98a",
+                     allowance_target="spender", data="0xdead")
     for client in clients.values():
         client.get_quote.return_value = indicative
         client.get_swap_transaction.return_value = prepared
@@ -246,9 +249,11 @@ def test_execution_preflight_requires_local_gas_for_sushi_too():
 
     result = collect_execution_preflight(
         cfg, "wallet", context("sell"), clients.__getitem__,
+        allowance_probe=lambda _token, _spender: 10**15,
         gas_estimate_provider=lambda candidate, _settlement: (
             180612 if candidate is prepared and candidate is not indicative else 0
         ),
+        conversion_gas_estimate_provider=lambda _candidate, _settlement: 60001,
         max_seconds=4,
     )
 
@@ -765,13 +770,21 @@ def test_execution_preflight_collects_only_when_all_required_providers_exist():
         if name == "uniswap":
             client.get_swap_transaction.return_value = QuoteResult(
                 success=True, buy_amount=2 * 10**15, sell_amount=10**15,
-                to="0x8e6fd69a77e88ee20ba4b4fbd59dfcda3ec0e98a", data="0xdead", value=0,
+                to="0x8e6fd69a77e88ee20ba4b4fbd59dfcda3ec0e98a",
+                allowance_target="spender", data="0xdead", value=0,
+            )
+        else:
+            client.get_swap_transaction.return_value = quote(
+                to="0x8e6fd69a77e88ee20ba4b4fbd59dfcda3ec0e98a",
+                allowance_target="spender", data="0xdead",
             )
     config_with_both = SimpleNamespace(uniswap_api_key="key", weth_address="weth", token_address="token")
 
     preflight = collect_execution_preflight(
         config_with_both, "wallet", context("sell"), clients.__getitem__,
+        allowance_probe=lambda _token, _spender: 10**15,
         gas_estimate_provider=lambda _quote, _settlement: 100000,
+        conversion_gas_estimate_provider=lambda _quote, _settlement: 60000,
     )
 
     assert preflight["mode"] == "execution_preflight"

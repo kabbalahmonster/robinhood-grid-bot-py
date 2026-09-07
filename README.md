@@ -1539,7 +1539,7 @@ quote = client.build_swap_transaction(
 - Moonbag and banking features
 - Multi-chain support (Robinhood, Base, Mainnet)
 
-## Experimental route tournament (shadow only)
+## Experimental route tournament
 
 `ROUTE_TOURNAMENT_MODE=off` is the default and performs no tournament API or
 RPC work. Set `shadow` to observe actionable regular buys and sells in both
@@ -1594,24 +1594,27 @@ output raw units per ETH of principal plus gas; sell score is output floor minus
 all gas in wei and must cover sold cost basis plus `MIN_PROFIT_PERCENT`. Stoploss
 observations still apply that floor, without affecting actual stoploss behavior.
 
-`ROUTE_TOURNAMENT_MODE=execute` is **intentionally unavailable** and fails
-startup validation. Safe execution requires a shared durable settlement seal
-before the first setup broadcast, exact-amount setup, fresh post-setup calldata,
-mandatory local `eth_call` plus `eth_estimateGas`, confirmed setup-gas accounting,
-and a no-runner-up abort gate. This commit does not introduce those execution
-semantics or claim to test them.
+`ROUTE_TOURNAMENT_MODE=gate` enables one-bot canary execution and additionally
+requires `ROUTE_TOURNAMENT_CANARY=true`. Both Uniswap and Sushi must be the
+configured primary/fallback pair and `UNISWAP_API_KEY` must be present. The gate
+collects all four identities, permits only prepared calldata with fresh local
+`eth_estimateGas`, and refreshes the RPC gas price again at the final broadcast
+boundary. A candidate needing an unproven approval, or a WETH conversion that
+cannot be locally estimated, is rejected instead of receiving a preset gas
+budget. `ROUTE_TOURNAMENT_MODE=execute` remains invalid.
 
 For a ROBINVAULT canary, record the current revision/config and baseline
 actionable request counts, latency, gas and route/fallback logs. Enable only
-`ROUTE_TOURNAMENT_MODE=shadow` on one existing bot during a monitored window,
+`ROUTE_TOURNAMENT_MODE=gate` plus `ROUTE_TOURNAMENT_CANARY=true` on one existing
+bot during a monitored window,
 keeping its current provider, sizing, caps and reserve settings. Let normal
 buy/sell triggers occur; do not force trades for coverage. Check both dashboard
 attempt payloads, quote-only labels, setup component budgets, rejection reasons,
 elapsed times and unchanged execution-path selection logs. Watch shared quota
 and cooldowns across the fleet. Return to `off` if latency or rate limits rise,
-or after collecting representative buy/sell observations. Do not enable execute
-or interpret a quote-only winner as authorization to trade. No canary config,
-service or deployment is changed by this development commit.
+or after collecting representative buy/sell observations. Set the mode back to
+`off` to roll back selection immediately. Do not enable `execute`. No canary
+config, service, or deployment is changed automatically.
 
 ## License
 

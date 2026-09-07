@@ -1176,11 +1176,34 @@ class GridBot:
                     ),
                 }))
 
+            def conversion_gas_estimate_provider(quote, settlement):
+                conversion = (
+                    settlement == "weth" if self.config.use_eth_trading
+                    else settlement == "native"
+                )
+                if not conversion:
+                    return 0
+                conversion_direction = "buy" if (
+                    (direction == "buy") == self.config.use_eth_trading
+                ) else "sell"
+                conversion_amount = (
+                    int(amount) if conversion_direction == "buy"
+                    else int(getattr(quote, "buy_amount", 0) or 0)
+                )
+                tx, _ = self._project_weth_operation_gas(
+                    conversion_direction, conversion_amount,
+                )
+                # The builder performs a fresh local estimate and applies the
+                # configured gas-limit headroom. Return that final limit so the
+                # tournament prices the same transaction execution will use.
+                return int(tx["gas"])
+
             comparison = collect_execution_preflight(
                 self.config, self.wallet.address, enriched,
                 gas_price_provider=lambda: int(self.wallet.normal_gas_price()),
                 allowance_probe=allowance_probe,
                 gas_estimate_provider=gas_estimate_provider,
+                conversion_gas_estimate_provider=conversion_gas_estimate_provider,
                 # Gate-only collection gets six seconds: Uniswap indicative
                 # routes require read-only swap preparation before local gas
                 # simulation, while shadow remains on its observation budget.

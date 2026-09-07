@@ -222,7 +222,8 @@ def _approval_units(direction, settlement, native_trading, allowance, amount):
 
 
 def score_candidate(quote, provider, settlement, context, *, allowance_probe=None,
-                    gas_estimate=None, deadline=None, require_local_gas=False):
+                    gas_estimate=None, conversion_gas_limit=None, deadline=None,
+                    require_local_gas=False, require_dynamic_setup_gas=False):
     """Compare equal inputs using provider gas, fresh gas price, allowance lookup.
 
     ``allowance_probe`` is a callable ``(token_address, spender_address) -> int``
@@ -295,16 +296,27 @@ def score_candidate(quote, provider, settlement, context, *, allowance_probe=Non
                                provider, settlement, c)
     approval_gas, approval_label = _approval_units(c["direction"], settlement,
                                                     c["native_trading"], allowance, c["amount"])
+    if require_dynamic_setup_gas and approval_gas:
+        row["rejections"] = ["approval_required_before_local_simulation"]
+        row["approval_assumption"] = approval_label
+        row["gas_basis"] = "dynamic_setup_required"
+        return row
 
     # Wrap/unwrap accounting for native <-> WETH conversion.
     conversion = settlement == "weth" if c["native_trading"] else settlement == "native"
     wrap = conversion and ((c["direction"] == "buy") == c["native_trading"])
     unwrap = conversion and not wrap
 
+    dynamic_conversion_gas = int(conversion_gas_limit or 0)
+    if require_dynamic_setup_gas and conversion and dynamic_conversion_gas <= 0:
+        row["rejections"] = ["local_conversion_gas_simulation_failed"]
+        row["gas_basis"] = "dynamic_setup_required"
+        return row
+
     units = {"swap": swap_gas,
              "approval": approval_gas,
-             "wrap": _WRAP_UNWRAP_GAS if wrap else 0,
-             "unwrap": _WRAP_UNWRAP_GAS if unwrap else 0}
+             "wrap": (dynamic_conversion_gas or _WRAP_UNWRAP_GAS) if wrap else 0,
+             "unwrap": (dynamic_conversion_gas or _WRAP_UNWRAP_GAS) if unwrap else 0}
     # ``normal_gas_price`` is read immediately after each quote and already
     # includes price/freshness headroom. Provider gas-price hints can be stale
     # or use a different policy, so they must not override the live RPC value.
@@ -318,6 +330,11 @@ def score_candidate(quote, provider, settlement, context, *, allowance_probe=Non
             key: int(value * normal_multiplier) * gas_price
             for key, value in units.items()
         }
+        # The wallet's wrap/unwrap builder already applied gas-limit headroom
+        # to its fresh local estimate. Do not multiply that final limit twice.
+        if dynamic_conversion_gas > 0:
+            costs["wrap"] = units["wrap"] * gas_price
+            costs["unwrap"] = units["unwrap"] * gas_price
     else:
         costs = {key: int((Decimal(value * gas_price) * multiplier).to_integral_value(rounding=ROUND_CEILING))
                  for key, value in units.items()}
@@ -411,7 +428,8 @@ def score_candidate(quote, provider, settlement, context, *, allowance_probe=Non
 
 def collect(config, address, context, client_factory=None,
             gas_price_provider=None, allowance_probe=None, gas_estimate_provider=None,
-            max_seconds=8, protocol_hints=None, mode="shadow"):
+            conversion_gas_estimate_provider=None, max_seconds=8,
+            protocol_hints=None, mode="shadow"):
     """One get_quote per provider/settlement; never prepare, approve, or send.
 
     Independent client instances avoid mutating execution clients. Uniswap's
@@ -539,14 +557,22 @@ def collect(config, address, context, client_factory=None,
                             local_gas = int(gas_estimate_provider(quote, settlement)) if gas_estimate_provider else 0
                         except Exception:
                             local_gas = 0
+                        try:
+                            conversion_gas = int(conversion_gas_estimate_provider(
+                                quote, settlement
+                            )) if conversion_gas_estimate_provider else 0
+                        except Exception:
+                            conversion_gas = 0
                         if time.monotonic() >= deadline:
                             row = deadline_row(name, settlement)
                         else:
                             row = score_candidate(
                                 quote, name, settlement, per_context,
                                 allowance_probe=allowance_probe, gas_estimate=local_gas,
+                                conversion_gas_limit=conversion_gas,
                                 deadline=deadline,
                                 require_local_gas=(mode == "execution_preflight"),
+                                require_dynamic_setup_gas=(mode == "execution_preflight"),
                             )
                             if time.monotonic() >= deadline:
                                 row = deadline_row(name, settlement)
@@ -653,7 +679,8 @@ def collect(config, address, context, client_factory=None,
 
 def collect_execution_preflight(config, address, context, client_factory=None,
                                 gas_price_provider=None, allowance_probe=None,
-                                gas_estimate_provider=None, max_seconds=4,
+                                gas_estimate_provider=None,
+                                conversion_gas_estimate_provider=None, max_seconds=4,
                                 protocol_hints=None):
     """Collect a complete, bounded read-only comparison for a future gate.
 
@@ -695,6 +722,7 @@ def collect_execution_preflight(config, address, context, client_factory=None,
         config, address, context, client_factory=client_factory,
         gas_price_provider=gas_price_provider, allowance_probe=allowance_probe,
         gas_estimate_provider=gas_estimate_provider, max_seconds=max_seconds,
+        conversion_gas_estimate_provider=conversion_gas_estimate_provider,
         protocol_hints=protocol_hints, mode="execution_preflight",
     )
     selection = select_execution_candidate(comparison, context.get("direction"))
