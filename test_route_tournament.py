@@ -86,8 +86,8 @@ def test_taxed_sell_does_not_charge_fee_twice_when_slippage_includes_fee():
     assert "sell_profit_floor" not in observed["rejections"]
 
 
-def test_execution_preflight_sell_uses_normal_preapproval_profit_floor():
-    """Route selection must not veto a sell normal execution would admit pre-approval."""
+def test_execution_preflight_sell_ranks_with_all_projected_gas():
+    """Route selection must compare complete economics, including approval gas."""
     c = context("sell")
     c.update(
         execution_preflight=True,
@@ -106,15 +106,17 @@ def test_execution_preflight_sell_uses_normal_preapproval_profit_floor():
         "sushiswap", "native", c, allowance_probe={"value": 0},
     )
 
-    # Select using the same swap-gas-only pre-approval floor used by normal
-    # execution. Actual approval cost is checked again by the normal final guard.
+    # Keep the staged pre-approval diagnostic, but rank the tournament using
+    # approval plus swap gas so a setup-heavy route cannot win incorrectly.
     swap_gas_wei = int(90_300 * 1.05) * 373_114_200
     output_floor = int(4_704_748_472_054_972 * (1.0 - 0.063))
-    assert Decimal(observed["projected_net_score"]) == Decimal(output_floor - swap_gas_wei)
     assert int(observed["preapproval_total_gas_wei"]) == swap_gas_wei
     assert int(observed["approval_budget_wei"]) > 0
     assert int(observed["projected_total_gas_wei"]) > swap_gas_wei
-    assert "sell_profit_floor" not in observed["rejections"]
+    assert Decimal(observed["projected_net_score"]) == Decimal(
+        output_floor - int(observed["projected_total_gas_wei"])
+    )
+    assert "sell_profit_floor" in observed["rejections"]
 
 
 def test_execution_preflight_weth_sell_hard_cap_matches_normal_swap_only_cap():
@@ -213,6 +215,7 @@ def test_execution_preflight_prepares_uniswap_quote_for_local_gas():
     clients["uniswap"].get_quote.return_value = indicative
     clients["uniswap"].get_swap_transaction.return_value = prepared
     clients["sushiswap"].get_quote.return_value = quote()
+    clients["sushiswap"].get_swap_transaction.return_value = prepared
     cfg = SimpleNamespace(uniswap_api_key="key", weth_address="weth", token_address="token")
 
     result = collect_execution_preflight(
@@ -229,7 +232,52 @@ def test_execution_preflight_prepares_uniswap_quote_for_local_gas():
     for call in clients["uniswap"].get_swap_transaction.call_args_list:
         assert call.args == ({"quote": {}},)
         assert 0 < call.kwargs["quote_timeout_seconds"] <= 2
-    clients["sushiswap"].get_swap_transaction.assert_not_called()
+    assert clients["sushiswap"].get_swap_transaction.call_count == 2
+
+
+def test_execution_preflight_requires_local_gas_for_sushi_too():
+    clients = {name: Mock() for name in ("uniswap", "sushiswap")}
+    indicative = quote()
+    prepared = quote(to="0x8e6fd69a77e88ee20ba4b4fbd59dfcda3ec0e98a", data="0xdead")
+    for client in clients.values():
+        client.get_quote.return_value = indicative
+        client.get_swap_transaction.return_value = prepared
+    cfg = SimpleNamespace(uniswap_api_key="key", weth_address="weth", token_address="token")
+
+    result = collect_execution_preflight(
+        cfg, "wallet", context("sell"), clients.__getitem__,
+        gas_estimate_provider=lambda candidate, _settlement: (
+            180612 if candidate is prepared and candidate is not indicative else 0
+        ),
+        max_seconds=4,
+    )
+
+    sushi_rows = [row for row in result["candidates"] if row["provider"] == "sushiswap"]
+    assert all(row["gas_basis"] == "local_estimate" for row in sushi_rows)
+    assert all(int(row["gas_components_wei"]["swap"]) == 180612 * 10**6
+               for row in sushi_rows)
+
+
+def test_execution_preflight_rejects_unsimulatable_sushi_approval_handshake():
+    clients = {name: Mock() for name in ("uniswap", "sushiswap")}
+    prepared = quote(to="0x8e6fd69a77e88ee20ba4b4fbd59dfcda3ec0e98a", data="0xdead")
+    clients["uniswap"].get_quote.return_value = quote()
+    clients["uniswap"].get_swap_transaction.return_value = prepared
+    clients["sushiswap"].get_quote.return_value = quote()
+    clients["sushiswap"].get_swap_transaction.return_value = quote(
+        allowance_target="0x8e6fd69a77e88ee20ba4b4fbd59dfcda3ec0e98a"
+    )
+    cfg = SimpleNamespace(uniswap_api_key="key", weth_address="weth", token_address="token")
+
+    result = collect_execution_preflight(
+        cfg, "wallet", context("sell"), clients.__getitem__,
+        gas_estimate_provider=lambda candidate, _settlement: 180612 if candidate.data else 0,
+        max_seconds=4,
+    )
+
+    sushi_rows = [row for row in result["candidates"] if row["provider"] == "sushiswap"]
+    assert all(row["rejections"] == ["local_gas_simulation_failed"] for row in sushi_rows)
+    assert all(row["projected_total_gas_wei"] is None for row in sushi_rows)
 
 
 def test_execution_preflight_rejects_failed_uniswap_preparation_without_gas_fallback():

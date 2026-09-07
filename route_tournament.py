@@ -392,8 +392,12 @@ def score_candidate(quote, provider, settlement, context, *, allowance_probe=Non
         score = Decimal(floor) * 10**18 / (c["amount"] + total)
         row["score_unit"] = "output_raw_per_eth_total_cost"
     else:
-        score = Decimal(floor - preapproval_total)
-        row["score_unit"] = "net_return_wei"
+        # Tournament ranking is all-in: setup/conversion costs cannot be
+        # omitted merely because normal execution validates them in stages.
+        # The winner must be the route with the highest output after every
+        # projected gas component, not just the cheapest swap transaction.
+        score = Decimal(floor - total)
+        row["score_unit"] = "net_return_after_all_projected_gas_wei"
         cost = c["sold_cost_wei"]
         if cost is None or cost <= 0:
             row["rejections"].append("missing_sell_cost_basis")
@@ -476,21 +480,19 @@ def collect(config, address, context, client_factory=None,
                 # Each adapter receives its share of the remaining observation
                 # budget, including any internal fallback request it makes.
                 remaining_candidates = max(1, total_candidates - candidate_index)
-                # A successful indicative Uniswap quote needs a second bounded
-                # read-only /swap request before it is eligible for scoring.
-                # Reserve a second equal slice up front so quote + preparation
-                # together cannot consume another candidate's time.
+                # Execution preflight needs a second bounded read-only /swap
+                # request for both providers. A price quote or provider gas hint
+                # cannot authorize or accurately rank an executable route.
                 request_slots = remaining_candidates + int(
-                    mode == "execution_preflight" and name == "uniswap"
+                    mode == "execution_preflight"
                 )
                 args["quote_timeout_seconds"] = remaining_seconds / request_slots
                 quote = client.get_quote(**args)
-                # Uniswap /quote can be indicative: its synthetic 300k gas
-                # default is not eligible for execution-gate economics when
-                # calldata is absent. Prepare a read-only /swap artifact inside
-                # the remaining absolute deadline so scoring uses the same
-                # locally simulatable route normal execution will receive.
-                if (mode == "execution_preflight" and name == "uniswap" and quote.success
+                # Provider /quote responses can be indicative and their gas
+                # hints are not eligible for execution-gate economics. Prepare
+                # a read-only /swap artifact inside the absolute deadline so
+                # every candidate can be locally simulated and compared.
+                if (mode == "execution_preflight" and quote.success
                         and (not getattr(quote, "to", None) or not getattr(quote, "data", None))):
                     remaining_preparation = deadline - time.monotonic()
                     if remaining_preparation <= 0:
@@ -500,10 +502,21 @@ def collect(config, address, context, client_factory=None,
                         # remaining candidate. Preparation must not consume the
                         # time needed to account for the other three routes.
                         preparation_budget = remaining_preparation / remaining_candidates
-                        quote = client.get_swap_transaction(
-                            quote.raw_response,
-                            quote_timeout_seconds=preparation_budget,
-                        )
+                        if name == "uniswap":
+                            quote = client.get_swap_transaction(
+                                quote.raw_response,
+                                quote_timeout_seconds=preparation_budget,
+                            )
+                        else:
+                            quote = client.get_swap_transaction(
+                                quote,
+                                sell_token=args["sell_token"],
+                                buy_token=args["buy_token"],
+                                sell_amount=args["sell_amount"],
+                                taker_address=args["taker_address"],
+                                slippage_percentage=args["slippage_percentage"],
+                                quote_timeout_seconds=preparation_budget,
+                            )
                         row = None
                 else:
                     row = None
@@ -533,9 +546,7 @@ def collect(config, address, context, client_factory=None,
                                 quote, name, settlement, per_context,
                                 allowance_probe=allowance_probe, gas_estimate=local_gas,
                                 deadline=deadline,
-                                require_local_gas=(
-                                    mode == "execution_preflight" and name == "uniswap"
-                                ),
+                                require_local_gas=(mode == "execution_preflight"),
                             )
                             if time.monotonic() >= deadline:
                                 row = deadline_row(name, settlement)

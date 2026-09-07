@@ -96,7 +96,7 @@ class TestSushiAPI(unittest.TestCase):
         client.get_quote("0xin", "0xout", sell_amount=10**15)
         self.assertEqual(client._rate_limit_until, 1030)
 
-    @patch("sushi_api.time.time", side_effect=[1000, 1031])
+    @patch("sushi_api.time.time", side_effect=[1000, 1000, 1031])
     @patch("sushi_api.requests.get")
     def test_success_after_cooldown_resets_backoff(self, get, now):
         get.side_effect = [

@@ -194,6 +194,7 @@ class SushiAPIClient:
         sell_amount: int,
         taker_address: str,
         slippage_percentage: float = 0.01,
+        quote_timeout_seconds: Optional[float] = None,
     ) -> QuoteResult:
         quote = self.get_quote(
             sell_token,
@@ -201,13 +202,41 @@ class SushiAPIClient:
             sell_amount=sell_amount,
             slippage_percentage=slippage_percentage,
             apply_jitter_to_price=False,
+            quote_timeout_seconds=quote_timeout_seconds,
         )
+        if not quote.success:
+            return quote
+
+        return self.get_swap_transaction(
+            quote,
+            sell_token=sell_token,
+            buy_token=buy_token,
+            sell_amount=sell_amount,
+            taker_address=taker_address,
+            slippage_percentage=slippage_percentage,
+            quote_timeout_seconds=quote_timeout_seconds,
+        )
+
+    def get_swap_transaction(
+        self,
+        quote: QuoteResult,
+        *,
+        sell_token: str,
+        buy_token: str,
+        sell_amount: int,
+        taker_address: str,
+        slippage_percentage: float = 0.01,
+        quote_timeout_seconds: Optional[float] = None,
+    ) -> QuoteResult:
+        """Prepare an already-fetched quote without fetching it again."""
         if not quote.success:
             return quote
 
         params = self._params(sell_token, buy_token, sell_amount, slippage_percentage)
         params.update({"sender": taker_address, "simulate": "true"})
-        status_code, data = self._request("swap", params)
+        status_code, data = self._request(
+            "swap", params, timeout_seconds=quote_timeout_seconds,
+        )
 
         # Sushi discovers its RouteProcessor spender during swap preparation.
         # Treat insufficient allowance as an approval handshake; the engine will
