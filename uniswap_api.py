@@ -545,6 +545,7 @@ class UniswapAPIClient:
         sell_amount: int,
         taker_address: str,
         slippage_percentage: float = 0.01,
+        preferred_protocol: Optional[str] = None,
     ) -> QuoteResult:
         """
         Build a swap transaction using Uniswap API.
@@ -567,6 +568,7 @@ class UniswapAPIClient:
             slippage_percentage=slippage_percentage,
             apply_jitter_to_price=False,
             routing_attempts=3,
+            preferred_protocol=preferred_protocol,
         )
     
     def get_price(
@@ -604,6 +606,7 @@ class UniswapAPIClient:
         sell_amount: int,
         taker_address: str,
         slippage_percentage: float = 0.01,
+        preferred_protocol: Optional[str] = None,
     ) -> QuoteResult:
         """
         Refresh a quote (called after token approval).
@@ -627,6 +630,7 @@ class UniswapAPIClient:
             slippage_percentage=slippage_percentage,
             apply_jitter_to_price=False,
             routing_attempts=3,
+            preferred_protocol=preferred_protocol,
         )
     
     def check_approval(

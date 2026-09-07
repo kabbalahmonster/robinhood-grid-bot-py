@@ -86,11 +86,15 @@ def select_execution_candidate(comparison, direction):
             return None
         if not score.is_finite():
             return None
-        eligible[identity] = score
+        eligible[identity] = (score, row)
     if identities != _EXECUTION_CANDIDATES or not eligible:
         return None
-    provider, settlement = max(eligible, key=eligible.__getitem__)
-    return {"provider": provider, "settlement": settlement}
+    provider, settlement = max(eligible, key=lambda identity: eligible[identity][0])
+    selection = {"provider": provider, "settlement": settlement}
+    protocol = eligible[(provider, settlement)][1].get("protocol")
+    if provider == "uniswap" and protocol in {"V4", "V3", "V2"}:
+        selection["protocol"] = protocol
+    return selection
 
 
 def _quote_failure_reason(provider, error):
@@ -379,6 +383,9 @@ def score_candidate(quote, provider, settlement, context, *, allowance_probe=Non
                provider_gas_estimate=provider_gas,
                effective_gas_price_wei=gas_price,
                gas_price_currentness="fresh", gas_price_age_seconds=0.0)
+    protocol = getattr(quote, "protocol_hint", None)
+    if provider == "uniswap" and protocol in {"V4", "V3", "V2"}:
+        row["protocol"] = protocol
     # WETH fallback sells skip the sell hard-cap check in normal execution; the
     # subsequent unwrap has its own native-reserve guard. Match that authority
     # boundary during execution preflight rather than rejecting either the swap
@@ -535,6 +542,13 @@ def collect(config, address, context, client_factory=None,
                                 slippage_percentage=args["slippage_percentage"],
                                 quote_timeout_seconds=preparation_budget,
                             )
+                        if name == "uniswap":
+                            protocol_reader = getattr(client, "protocol_hint_for", None)
+                            protocol = protocol_reader(
+                                args["sell_token"], args["buy_token"]
+                            ) if callable(protocol_reader) else None
+                            if protocol in {"V4", "V3", "V2"}:
+                                setattr(quote, "protocol_hint", protocol)
                         row = None
                 else:
                     row = None

@@ -714,6 +714,7 @@ def test_execution_selector_accepts_one_valid_route_from_complete_accounting():
     incomplete = {**complete, "candidates": complete["candidates"][:-1]}
     assert select_execution_candidate(incomplete, "sell") is None
 
+
     no_valid_route = {**complete, "candidates": [
         *complete["candidates"][:2],
         {"provider": "sushiswap", "settlement": "native", "validation_level": "rejected",
@@ -747,6 +748,24 @@ def test_execution_selector_accepts_one_valid_route_from_complete_accounting():
     # past the aggregate deadline.
     assert select_execution_candidate({**complete, "deadline_met": False}, "sell") == {
         "provider": "sushiswap", "settlement": "native",
+    }
+
+
+def test_execution_selector_carries_only_valid_uniswap_protocol_identity():
+    rows = [
+        {"provider": provider, "settlement": settlement,
+         "validation_level": "quote_only", "rejections": [],
+         "projected_net_score": str(score),
+         **({"protocol": "V4"} if provider == "uniswap" and settlement == "native" else {})}
+        for provider, settlement, score in (
+            ("uniswap", "native", 9), ("uniswap", "weth", 8),
+            ("sushiswap", "native", 7), ("sushiswap", "weth", 6),
+        )
+    ]
+    comparison = {"mode": "execution_preflight", "direction": "sell",
+                  "candidate_accounting_complete": True, "candidates": rows}
+    assert select_execution_candidate(comparison, "sell") == {
+        "provider": "uniswap", "settlement": "native", "protocol": "V4",
     }
 
 
@@ -988,8 +1007,10 @@ def test_selected_uniswap_route_is_prepared_before_calldata_validation():
     b.wallet.w3.eth.estimate_gas.return_value = 123456
 
     validated = b._revalidate_selected_route(
-        {"provider": "uniswap", "settlement": "native"}, "buy", 10**15,
+        {"provider": "uniswap", "settlement": "native", "protocol": "V4"}, "buy", 10**15,
     )
+    assert uniswap.build_swap_transaction.call_args.kwargs["preferred_protocol"] == "V4"
+    assert getattr(validated["quote"], "_tournament_protocol") == "V4"
 
     assert validated == {"provider": uniswap, "quote": prepared,
                          "weth_fallback": False, "gas_estimate": 123456}

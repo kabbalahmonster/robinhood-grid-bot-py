@@ -1241,11 +1241,15 @@ class GridBot:
                                  if direction == "buy"
                                  else (self.config.token_address, settlement_token))
         try:
-            quote = provider.build_swap_transaction(
+            quote_kwargs = dict(
                 sell_token=sell_token, buy_token=buy_token, sell_amount=int(amount),
                 taker_address=self.wallet.address,
                 slippage_percentage=self._swap_slippage_fraction(),
             )
+            protocol = selection.get("protocol")
+            if selected_name == "uniswap" and protocol in {"V4", "V3", "V2"}:
+                quote_kwargs["preferred_protocol"] = protocol
+            quote = provider.build_swap_transaction(**quote_kwargs)
             # Uniswap supplies an indicative quote first; its executable
             # calldata is only created by prepare_swap().  Keep preparation
             # inside the read-only gate, before any setup or authority change.
@@ -1265,6 +1269,8 @@ class GridBot:
             }))
             if gas_estimate <= 0:
                 return None
+            if selected_name == "uniswap" and protocol in {"V4", "V3", "V2"}:
+                setattr(quote, "_tournament_protocol", protocol)
         except Exception:
             logger.warning("Selected tournament route revalidation failed; refusing route authority")
             return None
@@ -2966,13 +2972,17 @@ class GridBot:
                             return
                 
                 # Step 4: Get fresh quote after approval
-                quote = self.api_client.get_quote(
+                refresh_kwargs = dict(
                     sell_token=self.config.token_address,
                     buy_token=(self.config.weth_address if weth_fallback else self.trade_token_address),
                     sell_amount=sell_amount,
                     taker_address=self.wallet.address,
-                        slippage_percentage=self._swap_slippage_fraction(),
+                    slippage_percentage=self._swap_slippage_fraction(),
                 )
+                protocol = getattr(quote, "_tournament_protocol", None)
+                if self.provider.name == "uniswap" and protocol in {"V4", "V3", "V2"}:
+                    refresh_kwargs["preferred_protocol"] = protocol
+                quote = self.api_client.get_quote(**refresh_kwargs)
                 if not quote.success:
                     logger.error(f"Fresh quote after approval failed: {quote.error}")
                     return
