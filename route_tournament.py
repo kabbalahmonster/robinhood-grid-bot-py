@@ -306,21 +306,49 @@ def score_candidate(quote, provider, settlement, context, *, allowance_probe=Non
     # or use a different policy, so they must not override the live RPC value.
     gas_price = c["gas_price"]
     multiplier = Decimal(str(c["gas_multiplier"]))
-    costs = {key: int((Decimal(value * gas_price) * multiplier).to_integral_value(rounding=ROUND_CEILING))
-             for key, value in units.items()}
+    if c.get("execution_preflight") is True:
+        # Match _swap_gas_fields(): normal execution uses Python's float
+        # multiplication and truncates gas-limit headroom before gas pricing.
+        normal_multiplier = float(c["gas_multiplier"])
+        costs = {
+            key: int(value * normal_multiplier) * gas_price
+            for key, value in units.items()
+        }
+    else:
+        costs = {key: int((Decimal(value * gas_price) * multiplier).to_integral_value(rounding=ROUND_CEILING))
+                 for key, value in units.items()}
     total = sum(costs.values())
+    # A normal sell applies its profit and hard-cap guard to the executable swap
+    # before it knows whether an approval transaction is actually needed. It
+    # then charges the confirmed setup fee in the final post-approval guard.
+    # Execution preflight must mirror that two-stage standard: retaining an
+    # unknown allowance budget in telemetry is conservative, but using it to
+    # veto route authority would reject a sell normal execution is allowed to
+    # prepare and validate. Shadow remains fully hypothetical and retains its
+    # all-in approval estimate for comparative reporting.
+    preapproval_total = total
+    if c["direction"] == "sell" and c.get("execution_preflight") is True:
+        preapproval_total -= costs["approval"]
     # ``slippage`` is transaction tolerance, not a second quoted-output fee.
     # For taxed sells it already contains the transfer fee plus market buffer;
     # the live sell guard applies the transfer fee exactly once to a fresh quote.
     # Mirror that economic guard so shadow does not reject executable trades.
     if c["direction"] == "sell":
-        floor = int(Decimal(output) * (1 - Decimal(str(c["tax"]))))
+        if c.get("execution_preflight") is True:
+            # Match _taxed_quote_return_wei() exactly at the authorization
+            # boundary, including its established float-to-int rounding.
+            floor = int(output * (1.0 - float(c["tax"])))
+        else:
+            floor = int(Decimal(output) * (1 - Decimal(str(c["tax"]))))
     else:
         floor = int(Decimal(output) * (1 - Decimal(str(c["slippage"]))) *
                     (1 - Decimal(str(c["tax"]))))
     row.update(validation_level="quote_only", preparation_dependent=True,
                gas_components_wei={key: str(value) for key, value in costs.items()},
-               projected_total_gas_wei=str(total), gas_total_eth=_wei_to_eth(total),
+               approval_budget_wei=str(costs["approval"]),
+               projected_total_gas_wei=str(total),
+               preapproval_total_gas_wei=str(preapproval_total),
+               gas_total_eth=_wei_to_eth(total),
                gas_basis=("local_estimate" if local_gas > 0 else "provider_estimate" if provider_gas > 0
                           else "conservative_direction_fallback"),
                output_floor_raw=str(floor),
@@ -330,7 +358,14 @@ def score_candidate(quote, provider, settlement, context, *, allowance_probe=Non
                provider_gas_estimate=provider_gas,
                effective_gas_price_wei=gas_price,
                gas_price_currentness="fresh", gas_price_age_seconds=0.0)
-    if c["cap"] > 0 and total > c["cap"]:
+    # WETH fallback sells skip the sell hard-cap check in normal execution; the
+    # subsequent unwrap has its own native-reserve guard. Match that authority
+    # boundary during execution preflight rather than rejecting either the swap
+    # or unwrap cost against the ordinary sell cap.
+    cap_total = preapproval_total
+    skip_sell_cap = (c["direction"] == "sell" and c.get("execution_preflight") is True
+                     and settlement == "weth")
+    if c["cap"] > 0 and not skip_sell_cap and cap_total > c["cap"]:
         row["rejections"].append("total_gas_above_cap")
     # Native buy spend uses quote.value when present (ETH actually sent);
     # otherwise assume the full amount is sent.
@@ -338,7 +373,10 @@ def score_candidate(quote, provider, settlement, context, *, allowance_probe=Non
         spend = int(quote.value or 0) or c["amount"]
     else:
         spend = c["amount"] if c["direction"] == "buy" and c["native_trading"] else 0
-    if c["native_balance"] - spend - total < c["reserve"]:
+    # Native reserve is a buy-funding guard. Normal sells do not use it to veto
+    # an exit; WETH unwrap enforces its own reserve immediately before sending.
+    if (c["direction"] == "buy" or c.get("execution_preflight") is not True) and (
+            c["native_balance"] - spend - total < c["reserve"]):
         row["rejections"].append("native_reserve")
     if c["direction"] == "buy":
         if c["trade_balance"] < c["amount"]:
@@ -346,7 +384,7 @@ def score_candidate(quote, provider, settlement, context, *, allowance_probe=Non
         score = Decimal(floor) * 10**18 / (c["amount"] + total)
         row["score_unit"] = "output_raw_per_eth_total_cost"
     else:
-        score = Decimal(floor - total)
+        score = Decimal(floor - preapproval_total)
         row["score_unit"] = "net_return_wei"
         cost = c["sold_cost_wei"]
         if cost is None or cost <= 0:

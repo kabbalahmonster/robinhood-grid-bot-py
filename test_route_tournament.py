@@ -86,6 +86,105 @@ def test_taxed_sell_does_not_charge_fee_twice_when_slippage_includes_fee():
     assert "sell_profit_floor" not in observed["rejections"]
 
 
+def test_execution_preflight_sell_uses_normal_preapproval_profit_floor():
+    """Route selection must not veto a sell normal execution would admit pre-approval."""
+    c = context("sell")
+    c.update(
+        execution_preflight=True,
+        amount=1,
+        sold_cost_wei=4_250_000_000_000_000,
+        gas_price=373_114_200,
+        gas_multiplier=1.05,
+        cap=10**18,
+        slippage=0.083,
+        tax=0.063,
+        min_profit=1.5,
+    )
+    observed = score_candidate(
+        QuoteResult(success=True, buy_amount=4_704_748_472_054_972,
+                    sell_amount=1, gas=90_300),
+        "sushiswap", "native", c, allowance_probe={"value": 0},
+    )
+
+    # Select using the same swap-gas-only pre-approval floor used by normal
+    # execution. Actual approval cost is checked again by the normal final guard.
+    swap_gas_wei = int(90_300 * 1.05) * 373_114_200
+    output_floor = int(4_704_748_472_054_972 * (1.0 - 0.063))
+    assert Decimal(observed["projected_net_score"]) == Decimal(output_floor - swap_gas_wei)
+    assert int(observed["preapproval_total_gas_wei"]) == swap_gas_wei
+    assert int(observed["approval_budget_wei"]) > 0
+    assert int(observed["projected_total_gas_wei"]) > swap_gas_wei
+    assert "sell_profit_floor" not in observed["rejections"]
+
+
+def test_execution_preflight_weth_sell_hard_cap_matches_normal_swap_only_cap():
+    c = context("sell", execution_preflight=True)
+    c.update(gas_price=10, gas_multiplier=1, cap=200_000,
+             native_balance=10**18, reserve=1, sold_cost_wei=10**15)
+    observed = score_candidate(
+        quote(gas=30_000), "sushiswap", "weth", c,
+        allowance_probe={"value": 10**15},
+    )
+
+    # Normal sell execution skips its swap hard-cap check for WETH fallback;
+    # unwrap cost is protected separately by its own reserve guard.
+    assert "total_gas_above_cap" not in observed["rejections"]
+
+
+def test_execution_preflight_sell_has_no_native_reserve_veto():
+    c = context("sell", execution_preflight=True)
+    c.update(gas_price=10, gas_multiplier=1, cap=10**18,
+             native_balance=600_000, reserve=500_000, sold_cost_wei=10**15)
+    observed = score_candidate(
+        quote(gas=30_000), "sushiswap", "native", c,
+        allowance_probe={"value": 10**15},
+    )
+
+    # Normal sell execution does not use buy-side ETH reserve as an exit veto.
+    assert "native_reserve" not in observed["rejections"]
+
+
+def test_execution_preflight_sell_gas_rounding_matches_normal_execution():
+    c = context("sell", execution_preflight=True)
+    c.update(gas_price=10, gas_multiplier=1.05, cap=30,
+             native_balance=10**18, reserve=1, sold_cost_wei=10**15)
+    observed = score_candidate(
+        quote(gas=3), "sushiswap", "native", c,
+        allowance_probe={"value": 10**15},
+    )
+
+    # Normal execution truncates gas-limit headroom before applying gas price.
+    assert int(observed["preapproval_total_gas_wei"]) == 30
+    assert "total_gas_above_cap" not in observed["rejections"]
+
+
+def test_execution_preflight_gas_multiplier_keeps_normal_float_rounding():
+    c = context("sell", execution_preflight=True)
+    c.update(gas_price=10, gas_multiplier=1.15, cap=1_140,
+             native_balance=10**18, reserve=1, sold_cost_wei=10**15)
+    observed = score_candidate(
+        quote(gas=100), "sushiswap", "native", c,
+        allowance_probe={"value": 10**15},
+    )
+
+    # This intentionally follows int(100 * 1.15), including binary-float loss.
+    assert int(observed["preapproval_total_gas_wei"]) == 1_140
+    assert "total_gas_above_cap" not in observed["rejections"]
+
+
+def test_execution_preflight_tax_floor_matches_normal_execution_rounding():
+    c = context("sell", execution_preflight=True)
+    c.update(tax=0.063, cap=10**18, sold_cost_wei=1)
+    observed = score_candidate(
+        QuoteResult(success=True, buy_amount=444_157_599_796_692_942,
+                    sell_amount=10**15, gas=1),
+        "sushiswap", "native", c, allowance_probe={"value": 10**15},
+    )
+
+    # This is int(output * (1.0 - fee)), exactly as _taxed_quote_return_wei.
+    assert int(observed["output_floor_raw"]) == 416_175_671_009_501_312
+
+
 @pytest.mark.parametrize("change,reason", [
     ({"cap": 1}, "total_gas_above_cap"),
     ({"native_balance": 0}, "native_reserve"),

@@ -1070,6 +1070,7 @@ class GridBot:
             context = snapshot(self, direction, amount, sold_cost_wei)
             enriched = {
                 **context,
+                "execution_preflight": True,
                 "token_address": getattr(self.config, "token_address", ""),
                 "trade_token_address": getattr(self, "trade_token_address", ""),
             }
