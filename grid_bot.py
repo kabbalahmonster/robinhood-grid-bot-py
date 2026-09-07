@@ -1127,6 +1127,14 @@ class GridBot:
             return int(self.wallet.get_eth_balance_wei())
         return self._raw_token_balance(self.config.weth_address)
 
+    def _simulation_value_wei(self, quote, *, direction, settlement, amount):
+        """Return the exact native value for a route's local gas simulation."""
+        if settlement == "weth":
+            return 0
+        if direction == "buy" and settlement == "native":
+            return self._native_buy_principal_wei(quote, int(amount), weth_fallback=False)
+        return int(getattr(quote, "value", 0) or 0)
+
     def _collect_route_execution_preflight(self, direction, amount, sold_cost_wei=None):
         """Read-only, fail-closed candidate collection for a future route gate.
 
@@ -1156,14 +1164,16 @@ class GridBot:
                     return 0
                 return int(self.wallet.check_allowance(token, spender))
 
-            def gas_estimate_provider(quote):
+            def gas_estimate_provider(quote, settlement):
                 if not getattr(quote, "to", None) or not getattr(quote, "data", None):
                     return 0
                 return int(self.wallet.w3.eth.estimate_gas({
                     "from": Web3.to_checksum_address(self.wallet.address),
                     "to": Web3.to_checksum_address(quote.to),
                     "data": quote.data,
-                    "value": int(quote.value or 0),
+                    "value": self._simulation_value_wei(
+                        quote, direction=direction, settlement=settlement, amount=amount
+                    ),
                 }))
 
             comparison = collect_execution_preflight(
@@ -1226,7 +1236,9 @@ class GridBot:
             gas_estimate = int(self.wallet.w3.eth.estimate_gas({
                 "from": Web3.to_checksum_address(self.wallet.address),
                 "to": Web3.to_checksum_address(quote.to), "data": quote.data,
-                "value": int(getattr(quote, "value", 0) or 0),
+                "value": self._simulation_value_wei(
+                    quote, direction=direction, settlement=selection["settlement"], amount=amount
+                ),
             }))
             if gas_estimate <= 0:
                 return None
@@ -1284,14 +1296,17 @@ class GridBot:
                         return int(self.wallet.check_allowance(token, spender))
                     except Exception:
                         return 0
-                def gas_estimate_provider(quote):
+                def gas_estimate_provider(quote, settlement):
                     if not getattr(quote, "to", None) or not getattr(quote, "data", None):
                         return 0
                     return int(self.wallet.w3.eth.estimate_gas({
                         "from": Web3.to_checksum_address(self.wallet.address),
                         "to": Web3.to_checksum_address(quote.to),
                         "data": quote.data,
-                        "value": int(quote.value or 0),
+                        "value": self._simulation_value_wei(
+                            quote, direction=direction, settlement=settlement,
+                            amount=context["amount"]
+                        ),
                     }))
                 comparison = collect(self.config, self.wallet.address, enriched,
                                      gas_price_provider=gas_price_provider,
@@ -1462,7 +1477,9 @@ class GridBot:
         gas_limit, gas_price = self._swap_gas_fields(quote, default_gas)
         return gas_limit * gas_price
 
-    def _swap_gas_fields(self, quote, default_gas=300000):
+    def _swap_gas_fields(
+        self, quote, default_gas=300000, *, native_buy_principal_wei=0, force_zero_native_value=False
+    ):
         """Return the exact gas limit/price used for economics and broadcast.
 
         Robinhood Chain's sequencer is first-come-first-served, so paying a
@@ -1482,7 +1499,10 @@ class GridBot:
                     "from": Web3.to_checksum_address(self.wallet.address),
                     "to": Web3.to_checksum_address(quote.to),
                     "data": quote.data,
-                    "value": int(quote.value or 0),
+                    "value": (
+                        0 if force_zero_native_value
+                        else int(getattr(quote, "value", 0) or native_buy_principal_wei)
+                    ),
                 }))
                 if estimated_gas <= 0:
                     raise ValueError("non-positive local gas estimate")
@@ -1521,15 +1541,33 @@ class GridBot:
         )
         return gas_limit, gas_price
 
-    def _final_buy_reserve_ok(self, quote, gas_limit, gas_price, weth_fallback):
-        """Check ETH reserve against the actual post-setup balance and final swap."""
+    def _native_buy_principal_wei(self, quote, requested_principal_wei, weth_fallback):
+        """Use provider value when supplied, otherwise send the requested native input."""
+        if weth_fallback:
+            return 0
+        return int(getattr(quote, "value", 0) or requested_principal_wei)
+
+    def _final_buy_reserve_ok(
+        self, quote, gas_limit, gas_price, weth_fallback, requested_principal_wei=0
+    ):
+        """Require funds for the final buy, without treating the gas reserve as untouchable."""
         if not getattr(self.config, "use_eth_trading", False):
             return True
-        reserve = int(float(getattr(self.config, "eth_gas_reserve", 0.001)) * 10**18)
-        principal = 0 if weth_fallback else int(getattr(quote, "value", 0) or 0)
+        principal = self._native_buy_principal_wei(quote, requested_principal_wei, weth_fallback)
         required = principal + int(gas_limit) * int(gas_price)
-        if self.wallet.get_eth_balance_wei() - required < reserve:
-            logger.warning("Buy refused: final setup-adjusted balance would breach ETH_GAS_RESERVE")
+        if self.wallet.get_eth_balance_wei() < required:
+            logger.warning("Buy refused: wallet cannot fund principal plus final projected gas")
+            return False
+        return True
+
+    def _weth_buy_fallback_funds_ok(self, quote, *, buy_amount_wei, wrap_gas_wei, approval_gas_wei):
+        """Require native ETH for the whole WETH fallback before setup mutates state."""
+        swap_gas_wei = self._projected_gas_cost_wei(quote, 350000)
+        required = int(buy_amount_wei) + int(wrap_gas_wei) + int(approval_gas_wei) + swap_gas_wei
+        if self.wallet.get_eth_balance_wei() < required:
+            logger.warning(
+                "WETH buy fallback refused: wallet cannot fund wrap, approval, and swap gas"
+            )
             return False
         return True
 
@@ -2306,7 +2344,10 @@ class GridBot:
                     logger.info(f"   Price moved from trigger. Buy price: {quote_buy_price:.10f}, Top position buy: {get_buy_price(top[1], self.token_decimals):.10f}")
                     return
 
-        initial_gas_limit, initial_gas_price = self._swap_gas_fields(quote, 350000)
+        initial_gas_limit, initial_gas_price = self._swap_gas_fields(
+            quote, 350000, native_buy_principal_wei=(0 if weth_fallback else buy_amount_wei),
+            force_zero_native_value=weth_fallback
+        )
         buy_attempt_context = {
             "buy_amount_eth": round(buy_amount_eth, 8),
             "available_slots": available_slots,
@@ -2331,12 +2372,18 @@ class GridBot:
             self._buy_attempt = {**buy_attempt_context, **selection}
         
         buy_setup_gas_wei = 0
+        weth_allowance = None
         if weth_fallback:
+            spender = quote.allowance_target or self.config.zero_x_proxy
+            weth_allowance = self.wallet.check_allowance(self.config.weth_address, spender, use_permit2=False)
+            approval_gas_wei = 0 if weth_allowance >= buy_amount_wei else 100000 * int(self.wallet.normal_gas_price())
             wrap_tx, wrap_projected_gas = self._project_weth_operation_gas("buy", buy_amount_wei)
-            reserve = int(float(getattr(self.config, "eth_gas_reserve", 0.001)) * 10**18)
-            projected_swap_gas = self._projected_gas_cost_wei(quote, 350000)
-            if self.wallet.get_eth_balance_wei() - buy_amount_wei - wrap_projected_gas - projected_swap_gas < reserve:
-                logger.warning("WETH buy fallback refused: wrap + swap would breach ETH_GAS_RESERVE")
+            if not self._weth_buy_fallback_funds_ok(
+                quote,
+                buy_amount_wei=buy_amount_wei,
+                wrap_gas_wei=wrap_projected_gas,
+                approval_gas_wei=approval_gas_wei,
+            ):
                 return
             wrap_result = self.wallet.wrap_eth(wrap_tx, wait_for_receipt=True)
             if not wrap_result.success:
@@ -2351,7 +2398,10 @@ class GridBot:
         # Check/approve WETH
         # Check/approve WETH (skip for native ETH - it doesn't need approval)
         if not getattr(self.config, 'use_eth_trading', False) or weth_fallback:
-            allowance = self.wallet.check_allowance(self.config.weth_address, spender, use_permit2=False)
+            allowance = (
+                weth_allowance if weth_fallback
+                else self.wallet.check_allowance(self.config.weth_address, spender, use_permit2=False)
+            )
             if allowance < buy_amount_wei:
                 logger.info(f"Approving WETH to {spender[:20]}...")
                 result = self.wallet.approve_token(self.config.weth_address, spender, 2**256 - 1)
@@ -2384,26 +2434,34 @@ class GridBot:
         
         # Execute swap with configurable gas multipliers
         # Use API's gas price estimate if available (more accurate than network average)
-        gas_limit, gas_price = self._swap_gas_fields(quote, 350000)
+        gas_limit, gas_price = self._swap_gas_fields(
+            quote, 350000, native_buy_principal_wei=(0 if weth_fallback else buy_amount_wei),
+            force_zero_native_value=weth_fallback
+        )
         buy_attempt_context["phase"] = "prepared_quote"
         if not self._gas_within_hard_cap(
             gas_limit, gas_price, "buy", buy_attempt_context,
         ):
             return
         
+        native_buy_value_wei = self._native_buy_principal_wei(
+            quote, buy_amount_wei, weth_fallback
+        )
         from web3 import Web3
         tx_params = {
             "from": Web3.to_checksum_address(self.wallet.address),
             "to": Web3.to_checksum_address(quote.to),
             "data": quote.data,
-            "value": quote.value or 0,
+            "value": native_buy_value_wei,
             "gas": gas_limit,
             "gasPrice": gas_price,
             "nonce": self.wallet.w3.eth.get_transaction_count(self.wallet.address),
             "chainId": self.config.chain_id,
         }
         
-        if not self._final_buy_reserve_ok(quote, gas_limit, gas_price, weth_fallback):
+        if not self._final_buy_reserve_ok(
+            quote, gas_limit, gas_price, weth_fallback, requested_principal_wei=buy_amount_wei
+        ):
             return
         token_balance_before = self._raw_token_balance(self.config.token_address)
         result = self.wallet._send_transaction(tx_params)
@@ -3088,7 +3146,10 @@ class GridBot:
             self._observe_token_tax_failure(quote, direction="buy")
             return
 
-        initial_gas_limit, initial_gas_price = self._swap_gas_fields(quote, 350000)
+        initial_gas_limit, initial_gas_price = self._swap_gas_fields(
+            quote, 350000, native_buy_principal_wei=(0 if weth_fallback else buy_amount_wei),
+            force_zero_native_value=weth_fallback
+        )
         buy_attempt_context = {
             "position_id": str(pos_id),
             "buy_amount_eth": round(buy_amount_eth, 8),
@@ -3114,11 +3175,18 @@ class GridBot:
             self._buy_attempt = {**buy_attempt_context, **selection}
         
         buy_setup_gas_wei = 0
+        weth_allowance = None
         if weth_fallback:
+            spender = quote.allowance_target or self.config.zero_x_proxy
+            weth_allowance = self.wallet.check_allowance(self.config.weth_address, spender, use_permit2=False)
+            approval_gas_wei = 0 if weth_allowance >= buy_amount_wei else 100000 * int(self.wallet.normal_gas_price())
             wrap_tx, wrap_projected_gas = self._project_weth_operation_gas("buy", buy_amount_wei)
-            reserve = int(float(getattr(self.config, "eth_gas_reserve", 0.001)) * 10**18)
-            if self.wallet.get_eth_balance_wei() - buy_amount_wei - wrap_projected_gas - self._projected_gas_cost_wei(quote, 350000) < reserve:
-                logger.warning("WETH buy fallback refused: wrap + swap would breach ETH_GAS_RESERVE")
+            if not self._weth_buy_fallback_funds_ok(
+                quote,
+                buy_amount_wei=buy_amount_wei,
+                wrap_gas_wei=wrap_projected_gas,
+                approval_gas_wei=approval_gas_wei,
+            ):
                 return
             wrap_result = self.wallet.wrap_eth(wrap_tx, wait_for_receipt=True)
             if not wrap_result.success:
@@ -3132,10 +3200,11 @@ class GridBot:
         
         # Check ERC20 approval (skip for native ETH - it doesn't need approval)
         if not getattr(self.config, 'use_eth_trading', False) or weth_fallback:
-            allowance = self.wallet.check_allowance(
-                self.config.weth_address,
-                spender,
-                use_permit2=False
+            allowance = (
+                weth_allowance if weth_fallback
+                else self.wallet.check_allowance(
+                    self.config.weth_address, spender, use_permit2=False
+                )
             )
             logger.info(f"WETH allowance to {spender[:20]}...: {allowance}")
             if allowance < buy_amount_wei:
@@ -3181,19 +3250,25 @@ class GridBot:
 
         # Execute swap with checksummed addresses and configurable gas multipliers
         # Use API's gas price estimate if available (more accurate than network average)
-        gas_limit, gas_price = self._swap_gas_fields(quote, 350000)
+        gas_limit, gas_price = self._swap_gas_fields(
+            quote, 350000, native_buy_principal_wei=(0 if weth_fallback else buy_amount_wei),
+            force_zero_native_value=weth_fallback
+        )
         buy_attempt_context["phase"] = "prepared_quote"
         if not self._gas_within_hard_cap(
             gas_limit, gas_price, "buy", buy_attempt_context,
         ):
             return
         
+        native_buy_value_wei = self._native_buy_principal_wei(
+            quote, buy_amount_wei, weth_fallback
+        )
         from web3 import Web3
         tx_params = {
             "from": Web3.to_checksum_address(self.wallet.address),
             "to": Web3.to_checksum_address(quote.to),
             "data": quote.data,
-            "value": quote.value or 0,
+            "value": native_buy_value_wei,
             "gas": gas_limit,
             "gasPrice": gas_price,
             "nonce": self.wallet.w3.eth.get_transaction_count(self.wallet.address),
@@ -3201,7 +3276,9 @@ class GridBot:
         }
         
         logger.info(f"Sending tx to {quote.to} with gas {gas_limit}")
-        if not self._final_buy_reserve_ok(quote, gas_limit, gas_price, weth_fallback):
+        if not self._final_buy_reserve_ok(
+            quote, gas_limit, gas_price, weth_fallback, requested_principal_wei=buy_amount_wei
+        ):
             return
         token_balance_before = self._raw_token_balance(self.config.token_address)
         result = self.wallet._send_transaction(tx_params)

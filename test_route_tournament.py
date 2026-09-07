@@ -202,6 +202,7 @@ def test_rejections(change, reason):
     assert reason in row["rejections"]
 
 
+
 def test_execution_preflight_prepares_uniswap_quote_for_local_gas():
     clients = {name: Mock() for name in ("uniswap", "sushiswap")}
     indicative = QuoteResult(success=True, buy_amount=2 * 10**15, sell_amount=10**15,
@@ -216,7 +217,7 @@ def test_execution_preflight_prepares_uniswap_quote_for_local_gas():
 
     result = collect_execution_preflight(
         cfg, "wallet", context("sell"), clients.__getitem__,
-        gas_estimate_provider=lambda candidate: 180612 if candidate is prepared else 0,
+        gas_estimate_provider=lambda candidate, _settlement: 180612 if candidate is prepared else 0,
         max_seconds=4,
     )
 
@@ -722,7 +723,7 @@ def test_execution_preflight_collects_only_when_all_required_providers_exist():
 
     preflight = collect_execution_preflight(
         config_with_both, "wallet", context("sell"), clients.__getitem__,
-        gas_estimate_provider=lambda _quote: 100000,
+        gas_estimate_provider=lambda _quote, _settlement: 100000,
     )
 
     assert preflight["mode"] == "execution_preflight"
@@ -783,7 +784,7 @@ def test_execution_preflight_local_gas_estimate_checksums_api_addresses():
 
     b.wallet.w3.eth.estimate_gas.return_value = 123456
     def invoke_estimator(*args, **kwargs):
-        assert kwargs["gas_estimate_provider"](fresh_quote) == 123456
+        assert kwargs["gas_estimate_provider"](fresh_quote, "native") == 123456
         return {"mode": "execution_preflight", "direction": "sell",
                 "candidate_accounting_complete": False, "deadline_met": False,
                 "candidates": []}
@@ -811,7 +812,7 @@ def test_shadow_local_gas_estimate_checksums_api_addresses():
 
     b.wallet.w3.eth.estimate_gas.return_value = 123456
     def invoke_estimator(*args, **kwargs):
-        assert kwargs["gas_estimate_provider"](fresh_quote) == 123456
+        assert kwargs["gas_estimate_provider"](fresh_quote, "native") == 123456
         return {"mode": "shadow", "direction": "sell", "candidates": []}
     with patch("route_tournament.collect", side_effect=invoke_estimator):
         b._finish_route_shadow()
@@ -871,13 +872,40 @@ def test_selected_route_is_freshly_requoted_and_locally_estimated_before_setup()
     )
 
     assert validated == {"provider": selected, "quote": fresh_quote,
-                         "weth_fallback": False, "gas_estimate": 123456}
+                        "weth_fallback": False, "gas_estimate": 123456}
+    assert b.wallet.w3.eth.estimate_gas.call_args.args[0]["value"] == 10**15
     selected.build_swap_transaction.assert_called_once_with(
         sell_token="native", buy_token="token", sell_amount=10**15,
         taker_address="0x3d8c491b7fe2d43468b5e45162e374719003ef16", slippage_percentage=0.01,
     )
     b.wallet._send_transaction.assert_not_called()
     b.wallet.approve_token.assert_not_called()
+
+
+
+def test_selected_weth_buy_route_simulates_zero_native_value_even_when_provider_sets_value():
+    b = bot("off")
+    b.wallet.address = "0x3d8c491b7fe2d43468b5e45162e374719003ef16"
+    b.config.token_address = "token"
+    b.config.weth_address = "weth"
+    b.config.use_eth_trading = True
+    b.trade_token_address = "native"
+    b._swap_slippage_fraction = Mock(return_value=0.01)
+    quote = QuoteResult(
+        success=True, sell_amount=10**15, buy_amount=2 * 10**15,
+        to="0x8e6fd69a77e88ee20ba4b4fbd59dfcda3ec0e98a", data="0xdead", value=10**15,
+    )
+    selected = SimpleNamespace(
+        name="sushiswap", capabilities=SimpleNamespace(quote_requires_preparation=False),
+        build_swap_transaction=Mock(return_value=quote),
+    )
+    b.provider = SimpleNamespace(primary=SimpleNamespace(name="uniswap"), fallback=selected)
+    b.wallet.w3.eth.estimate_gas.return_value = 123456
+
+    assert b._revalidate_selected_route(
+        {"provider": "sushiswap", "settlement": "weth"}, "buy", 10**15,
+    ) is not None
+    assert b.wallet.w3.eth.estimate_gas.call_args.args[0]["value"] == 0
 
 
 def test_selected_uniswap_route_is_prepared_before_calldata_validation():
@@ -1048,14 +1076,14 @@ def test_sell_allowance_probe_uses_the_sold_token_not_settlement():
     assert seen == [("sold-token", "spender")]
 
 
-def test_final_buy_reserve_uses_post_setup_balance():
+def test_final_buy_can_spend_reserved_eth_on_gas_after_setup():
     b = bot("gate")
     b.config.use_eth_trading = True
     b.config.eth_gas_reserve = 0.001
     b.wallet.get_eth_balance_wei.return_value = 1_001 * 10**12
     q = QuoteResult(success=True, value=0)
 
-    assert b._final_buy_reserve_ok(q, gas_limit=1_500_000, gas_price=10**6, weth_fallback=True) is False
+    assert b._final_buy_reserve_ok(q, gas_limit=1_500_000, gas_price=10**6, weth_fallback=True) is True
 
 
 def test_gate_mode_never_replays_a_selected_operation_through_fallback():
@@ -1268,6 +1296,19 @@ def test_allowance_probe_failure_falls_back_to_legacy_budget():
     )
     assert int(row["gas_components_wei"]["approval"]) == 200000 * 10**6
     assert row.get("approval_assumption") == "reset_and_exact_approval_budget"
+
+
+
+def test_native_buy_tournament_can_spend_reserved_eth_on_gas():
+    c = context("buy")
+    c.update(native_balance=1_300_000, reserve=1_000_000,
+             amount=1_000_000, trade_balance=1_000_000, gas_price=1_000,
+             gas_multiplier=1, cap=1_000_000)
+    candidate = QuoteResult(success=True, buy_amount=2_000_000, sell_amount=1_000_000,
+                            gas=100, value=1_000_000)
+    row = score_candidate(candidate, "uniswap", "native", c)
+
+    assert "native_reserve" not in row["rejections"]
 
 
 def test_provider_value_used_for_native_buy_spend():

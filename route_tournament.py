@@ -377,10 +377,14 @@ def score_candidate(quote, provider, settlement, context, *, allowance_probe=Non
         spend = int(quote.value or 0) or c["amount"]
     else:
         spend = c["amount"] if c["direction"] == "buy" and c["native_trading"] else 0
-    # Native reserve is a buy-funding guard. Normal sells do not use it to veto
-    # an exit; WETH unwrap enforces its own reserve immediately before sending.
-    if (c["direction"] == "buy" or c.get("execution_preflight") is not True) and (
-            c["native_balance"] - spend - total < c["reserve"]):
+    # ETH_GAS_RESERVE is excluded while sizing a buy, not an untouchable floor
+    # afterwards: an authorized buy may consume it for gas.  It still must fund
+    # native input plus all projected transaction gas.  Passive sell observation
+    # retains its reserve diagnostic; live sell execution has its own guard.
+    if c["direction"] == "buy":
+        if c["native_balance"] - spend - total < 0:
+            row["rejections"].append("native_reserve")
+    elif c.get("execution_preflight") is not True and c["native_balance"] - total < c["reserve"]:
         row["rejections"].append("native_reserve")
     if c["direction"] == "buy":
         if c["trade_balance"] < c["amount"]:
@@ -519,7 +523,7 @@ def collect(config, address, context, client_factory=None,
                     else:
                         per_context = {**context, "gas_price": fresh_gas_price}
                         try:
-                            local_gas = int(gas_estimate_provider(quote)) if gas_estimate_provider else 0
+                            local_gas = int(gas_estimate_provider(quote, settlement)) if gas_estimate_provider else 0
                         except Exception:
                             local_gas = 0
                         if time.monotonic() >= deadline:
