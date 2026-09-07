@@ -592,9 +592,12 @@ def test_execution_selector_accepts_one_valid_route_from_complete_accounting():
     ]}
     assert select_execution_candidate(malformed_rejections, "sell") is None
     assert select_execution_candidate({**complete, "direction": "bogus"}, "bogus") is None
-    # The complete accounting must also have completed inside the bounded
-    # preflight window; a late comparison cannot authorize a route.
-    assert select_execution_candidate({**complete, "deadline_met": False}, "sell") is None
+    # Candidate-local deadline checks reject late rows before scoring. A timely
+    # valid route remains selectable even if later accounting pushes collection
+    # past the aggregate deadline.
+    assert select_execution_candidate({**complete, "deadline_met": False}, "sell") == {
+        "provider": "sushiswap", "settlement": "native",
+    }
 
 
 def test_execution_preflight_collects_only_when_all_required_providers_exist():
@@ -633,6 +636,58 @@ def test_execution_preflight_collects_only_when_all_required_providers_exist():
     }
 
 
+def test_execution_preflight_local_gas_estimate_checksums_api_addresses():
+    from web3 import Web3
+
+    b = bot("gate")
+    b.config.token_address = "token"
+    b.config.weth_address = "weth"
+    b.trade_token_address = "native"
+    b.wallet.address = "0x3d8c491b7fe2d43468b5e45162e374719003ef16"
+    lowercase_router = "0x8e6fd69a77e88ee20ba4b4fbd59dfcda3ec0e98a"
+    fresh_quote = QuoteResult(success=True, sell_amount=10**15, buy_amount=2 * 10**15,
+                               to=lowercase_router, data="0xdead", value=0)
+
+    b.wallet.w3.eth.estimate_gas.return_value = 123456
+    def invoke_estimator(*args, **kwargs):
+        assert kwargs["gas_estimate_provider"](fresh_quote) == 123456
+        return {"mode": "execution_preflight", "direction": "sell",
+                "candidate_accounting_complete": False, "deadline_met": False,
+                "candidates": []}
+    with patch("route_tournament.snapshot", return_value=context("sell")), \
+         patch("route_tournament.collect_execution_preflight", side_effect=invoke_estimator):
+        assert b._collect_route_execution_preflight("sell", 10**15) is None
+
+    tx = b.wallet.w3.eth.estimate_gas.call_args.args[0]
+    assert tx["from"] == Web3.to_checksum_address(b.wallet.address)
+    assert tx["to"] == Web3.to_checksum_address(lowercase_router)
+
+
+def test_shadow_local_gas_estimate_checksums_api_addresses():
+    from web3 import Web3
+
+    b = bot("shadow")
+    b.config.token_address = "token"
+    b.config.weth_address = "weth"
+    b.trade_token_address = "native"
+    b.wallet.address = "0x3d8c491b7fe2d43468b5e45162e374719003ef16"
+    b._route_shadow_pending = {"sell": context("sell")}
+    lowercase_router = "0x8e6fd69a77e88ee20ba4b4fbd59dfcda3ec0e98a"
+    fresh_quote = QuoteResult(success=True, sell_amount=10**15, buy_amount=2 * 10**15,
+                               to=lowercase_router, data="0xdead", value=0)
+
+    b.wallet.w3.eth.estimate_gas.return_value = 123456
+    def invoke_estimator(*args, **kwargs):
+        assert kwargs["gas_estimate_provider"](fresh_quote) == 123456
+        return {"mode": "shadow", "direction": "sell", "candidates": []}
+    with patch("route_tournament.collect", side_effect=invoke_estimator):
+        b._finish_route_shadow()
+
+    tx = b.wallet.w3.eth.estimate_gas.call_args.args[0]
+    assert tx["from"] == Web3.to_checksum_address(b.wallet.address)
+    assert tx["to"] == Web3.to_checksum_address(lowercase_router)
+
+
 def test_bot_execution_preflight_is_read_only_and_returns_only_complete_winner():
     b = bot("off")
     b.config.token_address = "token"
@@ -665,13 +720,14 @@ def test_bot_execution_preflight_is_read_only_and_returns_only_complete_winner()
 
 def test_selected_route_is_freshly_requoted_and_locally_estimated_before_setup():
     b = bot("off")
+    b.wallet.address = "0x3d8c491b7fe2d43468b5e45162e374719003ef16"
     b.config.token_address = "token"
     b.config.weth_address = "weth"
     b.config.use_eth_trading = True
     b.trade_token_address = "native"
     b._swap_slippage_fraction = Mock(return_value=0.01)
     fresh_quote = QuoteResult(success=True, sell_amount=10**15, buy_amount=2 * 10**15,
-                              to="router", data="0xdead", value=0)
+                              to="0x8e6fd69a77e88ee20ba4b4fbd59dfcda3ec0e98a", data="0xdead", value=0)
     primary = SimpleNamespace(name="uniswap", build_swap_transaction=Mock())
     selected = SimpleNamespace(name="sushiswap", build_swap_transaction=Mock(return_value=fresh_quote))
     b.provider = SimpleNamespace(primary=primary, fallback=selected)
@@ -685,7 +741,7 @@ def test_selected_route_is_freshly_requoted_and_locally_estimated_before_setup()
                          "weth_fallback": False, "gas_estimate": 123456}
     selected.build_swap_transaction.assert_called_once_with(
         sell_token="native", buy_token="token", sell_amount=10**15,
-        taker_address="wallet", slippage_percentage=0.01,
+        taker_address="0x3d8c491b7fe2d43468b5e45162e374719003ef16", slippage_percentage=0.01,
     )
     b.wallet._send_transaction.assert_not_called()
     b.wallet.approve_token.assert_not_called()
@@ -693,6 +749,7 @@ def test_selected_route_is_freshly_requoted_and_locally_estimated_before_setup()
 
 def test_selected_uniswap_route_is_prepared_before_calldata_validation():
     b = bot("off")
+    b.wallet.address = "0x3d8c491b7fe2d43468b5e45162e374719003ef16"
     b.config.token_address = "token"
     b.config.weth_address = "weth"
     b.config.use_eth_trading = True
@@ -700,7 +757,7 @@ def test_selected_uniswap_route_is_prepared_before_calldata_validation():
     b._swap_slippage_fraction = Mock(return_value=0.01)
     quote_only = QuoteResult(success=True, sell_amount=10**15, buy_amount=2 * 10**15)
     prepared = QuoteResult(success=True, sell_amount=10**15, buy_amount=2 * 10**15,
-                           to="router", data="0xdead", value=0)
+                           to="0x8e6fd69a77e88ee20ba4b4fbd59dfcda3ec0e98a", data="0xdead", value=0)
     uniswap = SimpleNamespace(
         name="uniswap", capabilities=SimpleNamespace(quote_requires_preparation=True),
         build_swap_transaction=Mock(return_value=quote_only), prepare_swap=Mock(return_value=prepared),
@@ -715,6 +772,42 @@ def test_selected_uniswap_route_is_prepared_before_calldata_validation():
     assert validated == {"provider": uniswap, "quote": prepared,
                          "weth_fallback": False, "gas_estimate": 123456}
     uniswap.prepare_swap.assert_called_once_with(quote_only)
+
+
+def test_selected_route_revalidation_checksums_lowercase_calldata_target():
+    """Gate revalidation must accept an API route normal execution can simulate."""
+    from web3 import Web3
+
+    b = bot("off")
+    b.config.token_address = "token"
+    b.config.weth_address = "weth"
+    b.config.use_eth_trading = True
+    b.trade_token_address = "native"
+    b.wallet.address = "0x3d8c491b7fe2d43468b5e45162e374719003ef16"
+    b._swap_slippage_fraction = Mock(return_value=0.01)
+    lowercase_router = "0x8e6fd69a77e88ee20ba4b4fbd59dfcda3ec0e98a"
+    selected = SimpleNamespace(
+        name="sushiswap", capabilities=SimpleNamespace(quote_requires_preparation=False),
+        build_swap_transaction=Mock(return_value=QuoteResult(
+            success=True, sell_amount=10**15, buy_amount=2 * 10**15,
+            to=lowercase_router, data="0xdead", value=0,
+        )),
+    )
+    b.provider = SimpleNamespace(primary=SimpleNamespace(name="uniswap"), fallback=selected)
+
+    def accept_only_checksummed_target(tx):
+        assert tx["from"] == Web3.to_checksum_address(b.wallet.address)
+        assert tx["to"] == Web3.to_checksum_address(lowercase_router)
+        return 123456
+
+    b.wallet.w3.eth.estimate_gas.side_effect = accept_only_checksummed_target
+
+    validated = b._revalidate_selected_route(
+        {"provider": "sushiswap", "settlement": "native"}, "sell", 10**15,
+    )
+
+    assert validated is not None
+    assert validated["gas_estimate"] == 123456
 
 
 def test_selected_route_revalidation_rejects_zero_fresh_output():

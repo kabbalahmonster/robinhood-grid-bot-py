@@ -52,8 +52,7 @@ def select_execution_candidate(comparison, direction):
             or direction not in {"buy", "sell"}
             or comparison.get("mode") != "execution_preflight"
             or comparison.get("direction") != direction
-            or comparison.get("candidate_accounting_complete") is not True
-            or comparison.get("deadline_met") is not True):
+            or comparison.get("candidate_accounting_complete") is not True):
         return None
     rows = comparison.get("candidates")
     if not isinstance(rows, list) or len(rows) != len(_EXECUTION_CANDIDATES):

@@ -1089,8 +1089,8 @@ class GridBot:
                 if not getattr(quote, "to", None) or not getattr(quote, "data", None):
                     return 0
                 return int(self.wallet.w3.eth.estimate_gas({
-                    "from": self.wallet.address,
-                    "to": quote.to,
+                    "from": Web3.to_checksum_address(self.wallet.address),
+                    "to": Web3.to_checksum_address(quote.to),
                     "data": quote.data,
                     "value": int(quote.value or 0),
                 }))
@@ -1150,7 +1150,8 @@ class GridBot:
                     or not getattr(quote, "to", None) or not getattr(quote, "data", None)):
                 return None
             gas_estimate = int(self.wallet.w3.eth.estimate_gas({
-                "from": self.wallet.address, "to": quote.to, "data": quote.data,
+                "from": Web3.to_checksum_address(self.wallet.address),
+                "to": Web3.to_checksum_address(quote.to), "data": quote.data,
                 "value": int(getattr(quote, "value", 0) or 0),
             }))
             if gas_estimate <= 0:
@@ -1213,8 +1214,8 @@ class GridBot:
                     if not getattr(quote, "to", None) or not getattr(quote, "data", None):
                         return 0
                     return int(self.wallet.w3.eth.estimate_gas({
-                        "from": self.wallet.address,
-                        "to": quote.to,
+                        "from": Web3.to_checksum_address(self.wallet.address),
+                        "to": Web3.to_checksum_address(quote.to),
                         "data": quote.data,
                         "value": int(quote.value or 0),
                     }))
