@@ -95,6 +95,11 @@ def select_execution_candidate(comparison, direction):
     protocol = eligible[(provider, settlement)][1].get("protocol")
     if provider == "uniswap" and protocol in {"V4", "V3", "V2"}:
         selection["protocol"] = protocol
+    if eligible[(provider, settlement)][1].get("staged_weth_buy") is True:
+        selection["staged_weth_buy"] = True
+        target = eligible[(provider, settlement)][1].get("allowance_target")
+        if target:
+            selection["allowance_target"] = target
     return selection
 
 
@@ -219,7 +224,7 @@ def _approval_units(direction, settlement, native_trading, allowance, amount):
       that conservative legacy default.
     """
     if direction == "buy":
-        if settlement == "weth" and allowance is None:
+        if settlement == "weth" and (allowance is None or allowance < amount):
             return _RESET_AND_APPROVAL_GAS, "reset_and_exact_approval_budget"
         return 0, "none"
     # Sells always go through an ERC20 transferFrom, so approval can apply.
@@ -229,8 +234,10 @@ def _approval_units(direction, settlement, native_trading, allowance, amount):
 
 
 def score_candidate(quote, provider, settlement, context, *, allowance_probe=None,
-                    gas_estimate=None, conversion_gas_limit=None, deadline=None,
-                    require_local_gas=False, require_dynamic_setup_gas=False):
+                    gas_estimate=None, conversion_gas_limit=None,
+                    approval_gas_limit=None, deadline=None,
+                    require_local_gas=False, require_dynamic_setup_gas=False,
+                    staged_weth_buy=False):
     """Compare equal inputs using provider gas, fresh gas price, allowance lookup.
 
     ``allowance_probe`` is a callable ``(token_address, spender_address) -> int``
@@ -274,7 +281,11 @@ def score_candidate(quote, provider, settlement, context, *, allowance_probe=Non
     # the conservative direction fallback.
     provider_gas = int(quote.gas or 0)
     local_gas = int(gas_estimate or 0)
-    if require_local_gas and local_gas <= 0:
+    if staged_weth_buy and provider_gas <= 0:
+        row["rejections"] = ["provider_swap_gas_estimate_missing"]
+        row["gas_basis"] = "staged_setup_requires_provider_swap_estimate"
+        return row
+    if require_local_gas and local_gas <= 0 and not staged_weth_buy:
         row["rejections"] = ["local_gas_simulation_failed"]
         row["provider_gas_estimate"] = provider_gas
         row["gas_basis"] = "local_simulation_required"
@@ -303,7 +314,10 @@ def score_candidate(quote, provider, settlement, context, *, allowance_probe=Non
                                provider, settlement, c)
     approval_gas, approval_label = _approval_units(c["direction"], settlement,
                                                     c["native_trading"], allowance, c["amount"])
-    if require_dynamic_setup_gas and approval_gas:
+    if approval_gas and approval_gas_limit:
+        approval_gas = int(approval_gas_limit)
+        approval_label = "dynamic_local_approval_estimate"
+    if require_dynamic_setup_gas and approval_gas and not approval_gas_limit:
         row["rejections"] = ["approval_required_before_local_simulation"]
         row["approval_assumption"] = approval_label
         row["gas_basis"] = "dynamic_setup_required"
@@ -386,6 +400,10 @@ def score_candidate(quote, provider, settlement, context, *, allowance_probe=Non
                provider_gas_estimate=provider_gas,
                effective_gas_price_wei=gas_price,
                gas_price_currentness="fresh", gas_price_age_seconds=0.0)
+    if staged_weth_buy:
+        row["staged_weth_buy"] = True
+        row["allowance_target"] = getattr(quote, "allowance_target", None)
+        row["gas_basis"] = "provider_estimate_pending_post_setup_local_simulation"
     protocol = getattr(quote, "protocol_hint", None)
     if provider == "uniswap" and protocol in {"V4", "V3", "V2"}:
         row["protocol"] = protocol
@@ -438,7 +456,8 @@ def score_candidate(quote, provider, settlement, context, *, allowance_probe=Non
 
 def collect(config, address, context, client_factory=None,
             gas_price_provider=None, allowance_probe=None, gas_estimate_provider=None,
-            conversion_gas_estimate_provider=None, max_seconds=8,
+            conversion_gas_estimate_provider=None, approval_gas_estimate_provider=None,
+            max_seconds=8,
             protocol_hints=None, mode="shadow", _candidate_filter=None,
             _suppress_summary=False):
     """One get_quote per provider/settlement; never prepare, approve, or send.
@@ -523,6 +542,11 @@ def collect(config, address, context, client_factory=None,
                 )
                 args["quote_timeout_seconds"] = remaining_seconds / request_slots
                 quote = client.get_quote(**args)
+                staged_weth_buy = bool(
+                    mode == "execution_preflight"
+                    and context["direction"] == "buy"
+                    and settlement == "weth"
+                )
                 # Provider /quote responses can be indicative and their gas
                 # hints are not eligible for execution-gate economics. Prepare
                 # a read-only /swap artifact inside the absolute deadline so
@@ -544,6 +568,7 @@ def collect(config, address, context, client_factory=None,
                             quote = client.get_swap_transaction(
                                 quote.raw_response,
                                 quote_timeout_seconds=preparation_budget,
+                                **({"simulate_transaction": False} if staged_weth_buy else {}),
                             )
                         else:
                             quote = client.get_swap_transaction(
@@ -554,6 +579,7 @@ def collect(config, address, context, client_factory=None,
                                 taker_address=args["taker_address"],
                                 slippage_percentage=args["slippage_percentage"],
                                 quote_timeout_seconds=preparation_budget,
+                                **({"simulate_transaction": False} if staged_weth_buy else {}),
                             )
                         if name == "uniswap":
                             protocol_reader = getattr(client, "protocol_hint_for", None)
@@ -590,6 +616,12 @@ def collect(config, address, context, client_factory=None,
                             )) if conversion_gas_estimate_provider else 0
                         except Exception:
                             conversion_gas = 0
+                        try:
+                            approval_gas = int(approval_gas_estimate_provider(
+                                quote, settlement
+                            )) if approval_gas_estimate_provider else 0
+                        except Exception:
+                            approval_gas = 0
                         if time.monotonic() >= deadline:
                             row = deadline_row(name, settlement)
                         else:
@@ -597,9 +629,11 @@ def collect(config, address, context, client_factory=None,
                                 quote, name, settlement, per_context,
                                 allowance_probe=allowance_probe, gas_estimate=local_gas,
                                 conversion_gas_limit=conversion_gas,
+                                approval_gas_limit=approval_gas,
                                 deadline=deadline,
                                 require_local_gas=(mode == "execution_preflight"),
                                 require_dynamic_setup_gas=(mode == "execution_preflight"),
+                                staged_weth_buy=staged_weth_buy,
                             )
                             if time.monotonic() >= deadline:
                                 row = deadline_row(name, settlement)
@@ -709,6 +743,7 @@ def collect_execution_preflight(config, address, context, client_factory=None,
                                 gas_price_provider=None, allowance_probe=None,
                                 gas_estimate_provider=None,
                                 conversion_gas_estimate_provider=None, max_seconds=4,
+                                approval_gas_estimate_provider=None,
                                 protocol_hints=None):
     """Collect a complete, bounded read-only comparison for a future gate.
 
@@ -761,6 +796,7 @@ def collect_execution_preflight(config, address, context, client_factory=None,
             gas_price_provider=gas_price_provider, allowance_probe=allowance_probe,
             gas_estimate_provider=gas_estimate_provider, max_seconds=max_seconds,
             conversion_gas_estimate_provider=conversion_gas_estimate_provider,
+            approval_gas_estimate_provider=approval_gas_estimate_provider,
             protocol_hints=protocol_hints, mode="execution_preflight",
             _candidate_filter=identity, _suppress_summary=True,
         )

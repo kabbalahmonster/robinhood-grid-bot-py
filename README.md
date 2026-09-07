@@ -1601,7 +1601,11 @@ collects all four identities, permits only prepared calldata with fresh local
 `eth_estimateGas`, and refreshes the RPC gas price again at the final broadcast
 boundary. A candidate needing an unproven approval, or a WETH conversion that
 cannot be locally estimated, is rejected instead of receiving a preset gas
-budget. `ROUTE_TOURNAMENT_MODE=execute` remains invalid.
+budget. WETH buys are staged because their swap cannot be simulated before the
+wallet owns the future wrapped principal: ranking includes the provider swap
+estimate plus locally estimated wrap and exact-amount approval gas, then the
+winner is wrapped/approved, refreshed, and locally simulated before swap
+broadcast. `ROUTE_TOURNAMENT_MODE=execute` remains invalid.
 
 For a ROBINVAULT canary, record the current revision/config and baseline
 actionable request counts, latency, gas and route/fallback logs. Enable only

@@ -27,6 +27,27 @@ def quote(output=2 * 10**15, gas=300000, **kwargs):
                        gas=gas, **kwargs)
 
 
+def test_staged_weth_buy_prices_dynamic_wrap_approval_and_swap_gas():
+    q = quote(gas=210000, allowance_target="router")
+    row = score_candidate(
+        q, "uniswap", "weth", context("buy"),
+        allowance_probe=lambda _token, _spender: 0,
+        gas_estimate=0, conversion_gas_limit=42000,
+        approval_gas_limit=51000, require_local_gas=True,
+        require_dynamic_setup_gas=True, staged_weth_buy=True,
+    )
+
+    assert row["validation_level"] == "quote_only"
+    assert row["staged_weth_buy"] is True
+    assert row["gas_basis"] == "provider_estimate_pending_post_setup_local_simulation"
+    assert row["gas_components_wei"] == {
+        "swap": str(210000 * 10**6),
+        "approval": str(51000 * 10**6),
+        "wrap": str(42000 * 10**6),
+        "unwrap": "0",
+    }
+
+
 @pytest.mark.parametrize("direction,settlement,components", [
     ("buy", "native", {"swap"}),
     ("buy", "weth", {"swap", "approval", "wrap"}),
@@ -959,8 +980,9 @@ def test_bot_execution_preflight_is_read_only_and_returns_only_complete_winner()
             "provider": "sushiswap", "settlement": "native",
         }
     assert collect_preflight.call_args.kwargs["max_seconds"] == 6
-    # Unknown buy/WETH allowance must preserve the conservative approval budget.
-    assert collect_preflight.call_args.kwargs["allowance_probe"]("weth", "router") is None
+    # Buy/WETH now reads the real allowance so staged setup can be priced.
+    assert collect_preflight.call_args.kwargs["allowance_probe"]("weth", "router") == 0
+    assert callable(collect_preflight.call_args.kwargs["approval_gas_estimate_provider"])
     b.wallet._send_transaction.assert_not_called()
     b.wallet.approve_token.assert_not_called()
 

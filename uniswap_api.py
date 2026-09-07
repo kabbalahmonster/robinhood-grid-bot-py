@@ -521,7 +521,7 @@ class UniswapAPIClient:
                 data=tx_data.get("data"),
                 to=tx_data.get("to"),
                 value=int(tx_data.get("value", 0)) if tx_data.get("value") else 0,
-                gas=int(gas) if gas else 300000,
+                gas=int(gas) if gas else None,
                 gas_price=int(gas_price) if gas_price else None,
                 raw_response=data,
             )
@@ -698,6 +698,7 @@ class UniswapAPIClient:
         self,
         quote_data: dict,
         quote_timeout_seconds: Optional[float] = None,
+        simulate_transaction: bool = True,
     ) -> QuoteResult:
         """
         Get swap transaction calldata from quote.
@@ -737,7 +738,7 @@ class UniswapAPIClient:
             payload = {
                 "quote": nested_quote,
                 "refreshGasPrice": True,
-                "simulateTransaction": True,
+                "simulateTransaction": bool(simulate_transaction),
                 "safetyMode": "SAFE",
             }
             

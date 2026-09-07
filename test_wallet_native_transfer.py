@@ -7,6 +7,27 @@ from wallet import TransactionResult, Wallet
 
 
 class TestWalletNativeTransfer(unittest.TestCase):
+    def test_token_approval_builder_uses_local_dynamic_estimate(self):
+        wallet = Wallet.__new__(Wallet)
+        wallet.address = "0x0000000000000000000000000000000000000002"
+        wallet.config = SimpleNamespace(gas_limit_multiplier=1.05)
+        wallet.w3 = SimpleNamespace(eth=Mock())
+        wallet.normal_gas_price = Mock(return_value=123)
+        wallet.w3.eth.get_transaction_count.return_value = 7
+        wallet.w3.eth.estimate_gas.return_value = 48_000
+        approve = wallet.w3.eth.contract.return_value.functions.approve.return_value
+        approve.build_transaction.side_effect = lambda params: dict(params)
+
+        tx = wallet.build_token_approval_transaction(
+            "0x0000000000000000000000000000000000000003",
+            "0x0000000000000000000000000000000000000004", 99,
+        )
+
+        self.assertEqual(tx["gas"], 50_400)
+        self.assertEqual(tx["gasPrice"], 123)
+        wallet.w3.eth.estimate_gas.assert_called_once()
+        self.assertNotIn("gas", wallet.w3.eth.estimate_gas.call_args.args[0])
+
     def test_future_weth_withdraw_projection_is_dynamic_and_conservative(self):
         wallet = Wallet.__new__(Wallet)
         wallet.address = "0x0000000000000000000000000000000000000002"

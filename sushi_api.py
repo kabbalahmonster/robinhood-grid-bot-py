@@ -227,13 +227,17 @@ class SushiAPIClient:
         taker_address: str,
         slippage_percentage: float = 0.01,
         quote_timeout_seconds: Optional[float] = None,
+        simulate_transaction: bool = True,
     ) -> QuoteResult:
         """Prepare an already-fetched quote without fetching it again."""
         if not quote.success:
             return quote
 
         params = self._params(sell_token, buy_token, sell_amount, slippage_percentage)
-        params.update({"sender": taker_address, "simulate": "true"})
+        params.update({
+            "sender": taker_address,
+            "simulate": "true" if simulate_transaction else "false",
+        })
         status_code, data = self._request(
             "swap", params, timeout_seconds=quote_timeout_seconds,
         )

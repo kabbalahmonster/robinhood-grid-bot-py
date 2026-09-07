@@ -1155,11 +1155,10 @@ class GridBot:
             }
 
             def allowance_probe(token, spender):
-                if direction != "sell":
-                    # Buy/WETH needs a conservative approval budget. A fake zero
-                    # allowance would look like a known allowance and underprice
-                    # that route; unknown must stay unknown.
-                    return None
+                if direction == "buy":
+                    if token.lower() != self.config.weth_address.lower() or not spender:
+                        return None
+                    return int(self.wallet.check_allowance(token, spender, use_permit2=False))
                 if not token or not spender:
                     return 0
                 return int(self.wallet.check_allowance(token, spender))
@@ -1206,12 +1205,29 @@ class GridBot:
                 # tournament prices the same transaction execution will use.
                 return int(tx["gas"])
 
+            def approval_gas_estimate_provider(quote, settlement):
+                if direction != "buy" or settlement != "weth":
+                    return 0
+                spender = getattr(quote, "allowance_target", None)
+                if not spender:
+                    return 0
+                allowance = int(self.wallet.check_allowance(
+                    self.config.weth_address, spender, use_permit2=False,
+                ))
+                if allowance >= int(amount):
+                    return 0
+                tx = self.wallet.build_token_approval_transaction(
+                    self.config.weth_address, spender, int(amount),
+                )
+                return int(tx["gas"])
+
             comparison = collect_execution_preflight(
                 self.config, self.wallet.address, enriched,
                 gas_price_provider=lambda: int(self.wallet.normal_gas_price()),
                 allowance_probe=allowance_probe,
                 gas_estimate_provider=gas_estimate_provider,
                 conversion_gas_estimate_provider=conversion_gas_estimate_provider,
+                approval_gas_estimate_provider=approval_gas_estimate_provider,
                 # Gate-only collection gets six seconds: Uniswap indicative
                 # routes require read-only swap preparation before local gas
                 # simulation, while shadow remains on its observation budget.
@@ -1257,7 +1273,20 @@ class GridBot:
             protocol = selection.get("protocol")
             if selected_name == "uniswap" and protocol in {"V4", "V3", "V2"}:
                 quote_kwargs["preferred_protocol"] = protocol
-            quote = provider.build_swap_transaction(**quote_kwargs)
+            staged_weth_buy = bool(
+                direction == "buy" and selection.get("staged_weth_buy") is True
+            )
+            quote = (provider.get_quote(**quote_kwargs)
+                     if staged_weth_buy else provider.build_swap_transaction(**quote_kwargs))
+            if staged_weth_buy:
+                if (not quote.success or int(getattr(quote, "sell_amount", 0) or 0) != int(amount)
+                        or int(getattr(quote, "buy_amount", 0) or 0) <= 0):
+                    return None
+                quote.allowance_target = selection.get("allowance_target")
+                return {
+                    "provider": provider, "quote": quote, "weth_fallback": True,
+                    "gas_estimate": 0, "staged_weth_buy": True,
+                }
             # Uniswap supplies an indicative quote first; its executable
             # calldata is only created by prepare_swap().  Keep preparation
             # inside the read-only gate, before any setup or authority change.
@@ -1388,7 +1417,8 @@ class GridBot:
             # The gate's fresh quote has already been prepared and locally
             # estimated. Do not submit it to provider preparation a second time.
             try:
-                setattr(validated["quote"], "_tournament_gate_prepared", True)
+                if not validated.get("staged_weth_buy"):
+                    setattr(validated["quote"], "_tournament_gate_prepared", True)
             except Exception:
                 logger.warning("Tournament route preparation marker unavailable; execution skipped")
                 from zero_x import QuoteResult
@@ -2420,7 +2450,14 @@ class GridBot:
         if weth_fallback:
             spender = quote.allowance_target or self.config.zero_x_proxy
             weth_allowance = self.wallet.check_allowance(self.config.weth_address, spender, use_permit2=False)
-            approval_gas_wei = 0 if weth_allowance >= buy_amount_wei else 100000 * int(self.wallet.normal_gas_price())
+            approval_gas_wei = 0
+            if weth_allowance < buy_amount_wei:
+                approval_tx = self.wallet.build_token_approval_transaction(
+                    self.config.weth_address, spender, buy_amount_wei,
+                )
+                approval_gas_wei = int(approval_tx["gas"]) * int(
+                    approval_tx.get("gasPrice") or approval_tx.get("maxFeePerGas") or 0
+                )
             wrap_tx, wrap_projected_gas = self._project_weth_operation_gas("buy", buy_amount_wei)
             if not self._weth_buy_fallback_funds_ok(
                 quote,
@@ -2448,7 +2485,7 @@ class GridBot:
             )
             if allowance < buy_amount_wei:
                 logger.info(f"Approving WETH to {spender[:20]}...")
-                result = self.wallet.approve_token(self.config.weth_address, spender, 2**256 - 1)
+                result = self.wallet.approve_token(self.config.weth_address, spender, buy_amount_wei)
                 if not result.success:
                     logger.error(f"Approval failed: {result.error}")
                     return
@@ -3223,7 +3260,14 @@ class GridBot:
         if weth_fallback:
             spender = quote.allowance_target or self.config.zero_x_proxy
             weth_allowance = self.wallet.check_allowance(self.config.weth_address, spender, use_permit2=False)
-            approval_gas_wei = 0 if weth_allowance >= buy_amount_wei else 100000 * int(self.wallet.normal_gas_price())
+            approval_gas_wei = 0
+            if weth_allowance < buy_amount_wei:
+                approval_tx = self.wallet.build_token_approval_transaction(
+                    self.config.weth_address, spender, buy_amount_wei,
+                )
+                approval_gas_wei = int(approval_tx["gas"]) * int(
+                    approval_tx.get("gasPrice") or approval_tx.get("maxFeePerGas") or 0
+                )
             wrap_tx, wrap_projected_gas = self._project_weth_operation_gas("buy", buy_amount_wei)
             if not self._weth_buy_fallback_funds_ok(
                 quote,
@@ -3256,7 +3300,7 @@ class GridBot:
                 result = self.wallet.approve_token(
                     self.config.weth_address,
                     spender,
-                    2**256 - 1
+                    buy_amount_wei
                 )
                 if not result.success:
                     logger.error(f"Approval failed: {result.error}")

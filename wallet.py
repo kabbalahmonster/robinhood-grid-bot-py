@@ -472,7 +472,7 @@ class Wallet:
             "gasPrice": gas_price,
             "chainId": int(self.config.chain_id),
         })
-        estimated = int(self.w3.eth.estimate_gas(tx))
+        estimated = int(self.w3.eth.estimate_gas(dict(tx)))
         tx["gas"] = max(
             estimated,
             int(estimated * max(float(self.config.gas_limit_multiplier), 1.0)),
@@ -550,6 +550,15 @@ class Wallet:
         Returns:
             TransactionResult: Transaction result.
         """
+        tx = self.build_token_approval_transaction(
+            token_address, spender_address, amount,
+        )
+        return self._send_transaction(tx, wait_for_receipt)
+
+    def build_token_approval_transaction(
+        self, token_address: str, spender_address: str, amount: int,
+    ) -> TxParams:
+        """Build and locally estimate an ERC-20 approval without sending it."""
         token = self.w3.eth.contract(
             address=Web3.to_checksum_address(token_address),
             abi=ERC20_ABI,
@@ -567,12 +576,17 @@ class Wallet:
             amount,
         ).build_transaction({
             "from": self.address,
-            "nonce": self.w3.eth.get_transaction_count(self.address),
-            "gas": 100000,  # Approve is typically ~45k gas
+            "nonce": self.w3.eth.get_transaction_count(self.address, "pending"),
+            "gas": 1,
             **gas_price_params,
         })
-        
-        return self._send_transaction(tx, wait_for_receipt)
+        tx.pop("gas", None)
+        estimated = int(self.w3.eth.estimate_gas(dict(tx)))
+        tx["gas"] = max(
+            estimated,
+            int(estimated * max(float(self.config.gas_limit_multiplier), 1.0)),
+        )
+        return tx
     
     def approve_token_permit2(
         self,
