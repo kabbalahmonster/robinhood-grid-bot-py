@@ -1489,7 +1489,7 @@ def test_winner_announcement_log_present(caplog):
 
 
 def test_per_candidate_observability_log(caplog):
-    """collect() emits one structured log line per candidate with quote, gas, and result."""
+    """collect() emits one concise human-readable line per candidate."""
     import logging
     clients = {name: Mock() for name in ("uniswap", "sushiswap")}
     clients["uniswap"].get_quote.return_value = quote(gas=180000, gas_price=10**6)
@@ -1502,8 +1502,23 @@ def test_per_candidate_observability_log(caplog):
     assert len(candidate_lines) == 4
     for line in candidate_lines:
         msg = line.getMessage()
-        for field in ("provider=", "settlement=", "quoted_output=", "gas_estimate=", "gas_price_wei=", "approval_budget=", "total_cost_wei=", "score=", "result="):
+        for field in ("/", "output", "gas", "eligible"):
             assert field in msg, f"missing {field} in candidate log: {msg}"
+
+
+def test_sell_candidate_exposes_projected_profit_and_minimum():
+    row = score_candidate(
+        QuoteResult(success=True, buy_amount=2_300_000_000_000_000,
+                    sell_amount=100, gas=300000),
+        "uniswap", "native",
+        {**context("sell"), "amount": 100, "sold_cost_wei": 2_000_000_000_000_000,
+         "min_profit": 5.0, "tax": 0.0, "gas_price": 1},
+        gas_estimate=100_000,
+    )
+    assert row["minimum_profit_percent"] == 5.0
+    assert row["minimum_return_wei"] == "2100000000000000"
+    assert row["projected_profit_wei"] == "299999999700000"
+    assert row["projected_profit_percent"] > 14.99
 
 
 def test_execute_mode_still_fails_closed():

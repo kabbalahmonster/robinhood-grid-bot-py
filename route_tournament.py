@@ -446,8 +446,20 @@ def score_candidate(quote, provider, settlement, context, *, allowance_probe=Non
         cost = c["sold_cost_wei"]
         if cost is None or cost <= 0:
             row["rejections"].append("missing_sell_cost_basis")
-        elif score < Decimal(cost) * (1 + Decimal(str(c["min_profit"])) / 100):
-            row["rejections"].append("sell_profit_floor")
+        else:
+            minimum = Decimal(cost) * (1 + Decimal(str(c["min_profit"])) / 100)
+            profit = score - Decimal(cost)
+            row.update(
+                sold_cost_wei=str(cost),
+                projected_profit_wei=str(int(profit)),
+                projected_profit_eth=_wei_to_eth(profit),
+                projected_profit_percent=float(profit * 100 / Decimal(cost)),
+                minimum_return_wei=str(int(minimum)),
+                minimum_return_eth=_wei_to_eth(minimum),
+                minimum_profit_percent=float(c["min_profit"]),
+            )
+            if score < minimum:
+                row["rejections"].append("sell_profit_floor")
     row["projected_net_score"] = str(score)
     if row["rejections"]:
         row["validation_level"] = "rejected"
@@ -641,21 +653,21 @@ def collect(config, address, context, client_factory=None,
                 # Emit one structured per-candidate log line for observability.
                 result_label = "eligible" if row["validation_level"] == "quote_only" else "rejected"
                 rejection = "+".join(row["rejections"]) if row["rejections"] else "-"
-                LOG.info(
-                    "Route tournament candidate provider=%s settlement=%s direction=%s "
-                    "quoted_output=%s gas_estimate=%s gas_price_wei=%s approval_budget=%s "
-                    "total_cost_wei=%s total_cost_eth=%.6f output_floor=%s score=%s result=%s reason=%s",
-                    name, settlement, context["direction"],
-                    row.get("quoted_output_raw", "-"),
-                    row.get("provider_gas_estimate", 0),
-                    row.get("effective_gas_price_wei", 0),
-                    row["gas_components_wei"].get("approval", "0"),
-                    row.get("projected_total_gas_wei", "0"),
-                    row.get("gas_total_eth", 0.0) or 0.0,
-                    row.get("output_floor_raw", "-"),
-                    row.get("projected_net_score", "-"),
-                    result_label, rejection,
-                )
+                if context["direction"] == "sell" and row.get("projected_profit_percent") is not None:
+                    LOG.info(
+                        "Route tournament candidate ⚔️ %s/%s: net %.6f ETH (%+.2f%%) · minimum %.6f ETH (%.2f%%) · gas %.6f ETH · %s%s",
+                        name, settlement, Decimal(row["projected_net_score"]) / Decimal(10**18),
+                        row["projected_profit_percent"], row["minimum_return_eth"],
+                        row["minimum_profit_percent"], row.get("gas_total_eth", 0.0) or 0.0,
+                        result_label, " · " + rejection if rejection != "-" else "",
+                    )
+                else:
+                    LOG.info(
+                        "Route tournament candidate ⚔️ %s/%s: output %s · gas %.6f ETH · %s%s",
+                        name, settlement, row.get("quoted_output_human", "-"),
+                        row.get("gas_total_eth", 0.0) or 0.0, result_label,
+                        " · " + rejection if rejection != "-" else "",
+                    )
                 if row["validation_level"] == "quote_only":
                     provider_outputs.append(row)
             except Exception:

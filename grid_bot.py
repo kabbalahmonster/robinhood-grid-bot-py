@@ -1240,6 +1240,9 @@ class GridBot:
                           "status": "preflight_failed", "candidates": []}
             selection = None
         self._route_execution_preflight = comparison
+        comparisons = getattr(self, "_route_comparisons", {})
+        comparisons[direction] = comparison
+        self._route_comparisons = comparisons
         return selection
 
     def _revalidate_selected_route(self, selection, direction, amount):
@@ -1391,7 +1394,7 @@ class GridBot:
 
     def _attempt_with_route_comparison(self, direction):
         attempt = getattr(self, "_" + direction + "_attempt", None)
-        if getattr(self.config, "route_tournament_mode", "off") != "shadow":
+        if getattr(self.config, "route_tournament_mode", "off") not in {"shadow", "gate"}:
             return attempt
         comparison = getattr(self, "_route_comparisons", {}).get(direction)
         return {**(attempt or {}), "route_comparison": comparison} if comparison else attempt
@@ -2097,6 +2100,22 @@ class GridBot:
             trade["profit_eth"] = float(profit_eth)
         if gas_fee_eth is not None:
             trade["gas_fee_eth"] = float(gas_fee_eth)
+        if side == "sell" and getattr(self.config, "route_tournament_mode", "off") == "gate":
+            comparison = getattr(self, "_route_comparisons", {}).get("sell")
+            if isinstance(comparison, dict):
+                cost_eth = (
+                    float(eth_amount) - float(gas_fee_eth or 0) - float(profit_eth or 0)
+                )
+                comparison["status"] = "completed"
+                comparison["final"] = {
+                    "tx_hash": str(tx_hash),
+                    "received_eth": float(eth_amount),
+                    "gas_fee_eth": float(gas_fee_eth or 0),
+                    "profit_eth": float(profit_eth or 0),
+                    "profit_percent": (
+                        float(profit_eth or 0) * 100 / cost_eth if cost_eth > 0 else 0
+                    ),
+                }
         self.dashboard_trades = (self.dashboard_trades + [trade])[-50:]
         try:
             os.makedirs(os.path.dirname(self.dashboard_trades_file), exist_ok=True)
@@ -3879,7 +3898,7 @@ class GridBot:
         # round's quote check or it disappears from the next dashboard report.
         self._sell_attempt = None
         elapsed = time.time() - self.start_time
-        if getattr(self.config, "route_tournament_mode", "off") == "shadow":
+        if getattr(self.config, "route_tournament_mode", "off") in {"shadow", "gate"}:
             getattr(self, "_route_comparisons", {}).pop("sell", None)
         
         # Get balances
