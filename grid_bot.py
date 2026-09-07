@@ -1100,7 +1100,10 @@ class GridBot:
                 gas_price_provider=lambda: int(self.wallet.normal_gas_price()),
                 allowance_probe=allowance_probe,
                 gas_estimate_provider=gas_estimate_provider,
-                max_seconds=4,
+                # Gate-only collection gets six seconds: Uniswap indicative
+                # routes require read-only swap preparation before local gas
+                # simulation, while shadow remains on its observation budget.
+                max_seconds=6,
             )
             selection = select_execution_candidate(comparison, direction)
         except Exception:

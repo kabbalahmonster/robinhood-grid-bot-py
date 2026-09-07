@@ -124,7 +124,7 @@ class UniswapAPIClient:
             and "buffer" in error_text
         )
 
-    def _post_json(self, endpoint: str, payload: dict, *, timeout_seconds=None):
+    def _post_json(self, endpoint: str, payload: dict, *, timeout_seconds=None, deadline=None):
         """POST once, retrying only the known transient gateway packet 409.
 
         ``requests.post`` already creates a short-lived Session, so there was
@@ -142,13 +142,24 @@ class UniswapAPIClient:
             if key.lower() not in {"x-api-key", "authorization"}
         }
 
+        request_deadline = deadline
+        if request_deadline is None and timeout_seconds is not None:
+            request_deadline = time.monotonic() + float(timeout_seconds)
+        if request_deadline is not None and request_deadline <= time.monotonic():
+            raise requests.Timeout("Uniswap request deadline elapsed")
         for attempt in (1, 2):
+            if request_deadline is None:
+                request_timeout = 30
+            else:
+                request_timeout = request_deadline - time.monotonic()
+                if request_timeout <= 0:
+                    raise requests.Timeout("Uniswap request deadline elapsed")
             started = time.monotonic()
             response = requests.post(
                 url,
                 headers=self._get_headers(),
                 data=encoded,
-                timeout=30 if timeout_seconds is None else max(0.05, float(timeout_seconds)),
+                timeout=request_timeout,
             )
             elapsed_ms = round((time.monotonic() - started) * 1000, 1)
             self.logger.info(
@@ -378,14 +389,17 @@ class UniswapAPIClient:
                                   if preferred_protocol is not None else None)
             if preferred_protocol not in self.PROTOCOL_DISCOVERY_ORDER:
                 preferred_protocol = None
-            quote_deadline = (time.monotonic() + max(0.05, float(quote_timeout_seconds))
+            quote_deadline = (time.monotonic() + float(quote_timeout_seconds)
                               if quote_timeout_seconds is not None else None)
 
             def post_within_quote_deadline(request_payload):
                 timeout = None if quote_deadline is None else quote_deadline - time.monotonic()
                 if timeout is not None and timeout <= 0:
                     raise requests.Timeout("shadow quote deadline elapsed")
-                response = self._post_json("quote", request_payload, timeout_seconds=timeout)
+                response = self._post_json(
+                    "quote", request_payload, timeout_seconds=timeout,
+                    deadline=quote_deadline,
+                )
                 if quote_deadline is not None and time.monotonic() >= quote_deadline:
                     raise requests.Timeout("shadow quote deadline elapsed")
                 return response
@@ -679,6 +693,7 @@ class UniswapAPIClient:
     def get_swap_transaction(
         self,
         quote_data: dict,
+        quote_timeout_seconds: Optional[float] = None,
     ) -> QuoteResult:
         """
         Get swap transaction calldata from quote.
@@ -729,7 +744,19 @@ class UniswapAPIClient:
                 nested_quote = quote_data.get('quote', {})
                 self.logger.debug(f"Nested quote keys: {list(nested_quote.keys()) if isinstance(nested_quote, dict) else 'not dict'}")
             
-            response = self._post_json("swap", payload)
+            preparation_deadline = (
+                time.monotonic() + float(quote_timeout_seconds)
+                if quote_timeout_seconds is not None else None
+            )
+            request_timeout = None if preparation_deadline is None else preparation_deadline - time.monotonic()
+            if request_timeout is not None and request_timeout <= 0:
+                raise requests.Timeout("shadow quote deadline elapsed")
+            response = self._post_json(
+                "swap", payload, timeout_seconds=request_timeout,
+                deadline=preparation_deadline,
+            )
+            if preparation_deadline is not None and time.monotonic() >= preparation_deadline:
+                raise requests.Timeout("shadow quote deadline elapsed")
             
             self.logger.debug(f"Uniswap swap API response status: {response.status_code}")
             
@@ -794,7 +821,9 @@ class UniswapAPIClient:
             )
         
         except requests.exceptions.RequestException as e:
-            error_msg = f"Swap request failed: {e}"
+            error_msg = ("shadow quote deadline elapsed"
+                         if quote_timeout_seconds is not None and isinstance(e, requests.Timeout)
+                         else f"Swap request failed: {e}")
             self.logger.error(error_msg)
             return QuoteResult(success=False, error=error_msg)
         

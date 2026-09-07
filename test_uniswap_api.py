@@ -269,6 +269,58 @@ class TestUniswapAPIClient(unittest.TestCase):
         self.assertEqual(post.call_args_list[0].kwargs["headers"]["Connection"], "close")
         self.assertEqual(post.call_args_list[1].kwargs["headers"]["Connection"], "close")
 
+    def test_post_json_does_not_extend_sub_50ms_deadline(self):
+        config = SimpleNamespace(
+            uniswap_api_key="test-key", uniswap_permit2_disabled=True,
+            chain_id=4663, anti_mev_jitter=False,
+        )
+        packet_failure = SimpleNamespace(
+            status_code=409, text='{"error":"packet length exceeds buffer"}', headers={},
+        )
+        client = UniswapAPIClient(config)
+        with patch("uniswap_api.requests.post", return_value=packet_failure) as post, \
+             patch("uniswap_api.time.monotonic", side_effect=[0.0, 0.0, 0.0, 0.02, 0.02, 0.02, 0.02]):
+            with self.assertRaises(uniswap_api.requests.Timeout):
+                client._post_json("swap", {"quote": {}}, timeout_seconds=0.01)
+
+        self.assertEqual(post.call_count, 1)
+
+    def test_post_json_does_not_retry_past_supplied_deadline(self):
+        config = SimpleNamespace(
+            uniswap_api_key="test-key", uniswap_permit2_disabled=True,
+            chain_id=4663, anti_mev_jitter=False,
+        )
+        packet_failure = SimpleNamespace(
+            status_code=409, text='{"error":"packet length exceeds buffer"}', headers={},
+        )
+        client = UniswapAPIClient(config)
+        with patch("uniswap_api.requests.post", return_value=packet_failure) as post, \
+             patch("uniswap_api.time.monotonic", side_effect=[0.0, 0.0, 0.0, 0.0, 0.4, 0.6]):
+            with self.assertRaises(uniswap_api.requests.Timeout):
+                client._post_json("swap", {"quote": {}}, timeout_seconds=0.5)
+
+        self.assertEqual(post.call_count, 1)
+
+    def test_swap_preparation_respects_supplied_deadline(self):
+        config = SimpleNamespace(
+            uniswap_api_key="test-key", uniswap_permit2_disabled=True,
+            chain_id=4663, anti_mev_jitter=False,
+        )
+        response = SimpleNamespace(
+            status_code=200, text="", headers={},
+            json=lambda: {
+                "quote": {"input": {"amount": "100"}, "output": {"amount": "95"}},
+                "swap": {"to": "0x8e6fd69a77e88ee20ba4b4fbd59dfcda3ec0e98a", "data": "0xdead", "value": "0x0"},
+            },
+        )
+        client = UniswapAPIClient(config)
+        with patch.object(client, "_post_json", return_value=response) as post:
+            result = client.get_swap_transaction({"quote": {}}, quote_timeout_seconds=0.5)
+
+        self.assertTrue(result.success)
+        self.assertGreater(post.call_args.kwargs["timeout_seconds"], 0)
+        self.assertLessEqual(post.call_args.kwargs["timeout_seconds"], 0.5)
+
     def test_shadow_read_timeout_has_explicit_observation_deadline_error(self):
         config = SimpleNamespace(
             uniswap_api_key="test-key",

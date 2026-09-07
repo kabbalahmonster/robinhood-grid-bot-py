@@ -222,7 +222,7 @@ def _approval_units(direction, settlement, native_trading, allowance, amount):
 
 
 def score_candidate(quote, provider, settlement, context, *, allowance_probe=None,
-                    gas_estimate=None, deadline=None):
+                    gas_estimate=None, deadline=None, require_local_gas=False):
     """Compare equal inputs using provider gas, fresh gas price, allowance lookup.
 
     ``allowance_probe`` is a callable ``(token_address, spender_address) -> int``
@@ -266,6 +266,11 @@ def score_candidate(quote, provider, settlement, context, *, allowance_probe=Non
     # the conservative direction fallback.
     provider_gas = int(quote.gas or 0)
     local_gas = int(gas_estimate or 0)
+    if require_local_gas and local_gas <= 0:
+        row["rejections"] = ["local_gas_simulation_failed"]
+        row["provider_gas_estimate"] = provider_gas
+        row["gas_basis"] = "local_simulation_required"
+        return row
     swap_gas = local_gas or provider_gas or _FALLBACK_SWAP_GAS[c["direction"]]
 
     # Allowance lookup is for the actual asset being sold. Settlement only
@@ -467,12 +472,43 @@ def collect(config, address, context, client_factory=None,
                 # Each adapter receives its share of the remaining observation
                 # budget, including any internal fallback request it makes.
                 remaining_candidates = max(1, total_candidates - candidate_index)
-                args["quote_timeout_seconds"] = remaining_seconds / remaining_candidates
+                # A successful indicative Uniswap quote needs a second bounded
+                # read-only /swap request before it is eligible for scoring.
+                # Reserve a second equal slice up front so quote + preparation
+                # together cannot consume another candidate's time.
+                request_slots = remaining_candidates + int(
+                    mode == "execution_preflight" and name == "uniswap"
+                )
+                args["quote_timeout_seconds"] = remaining_seconds / request_slots
                 quote = client.get_quote(**args)
+                # Uniswap /quote can be indicative: its synthetic 300k gas
+                # default is not eligible for execution-gate economics when
+                # calldata is absent. Prepare a read-only /swap artifact inside
+                # the remaining absolute deadline so scoring uses the same
+                # locally simulatable route normal execution will receive.
+                if (mode == "execution_preflight" and name == "uniswap" and quote.success
+                        and (not getattr(quote, "to", None) or not getattr(quote, "data", None))):
+                    remaining_preparation = deadline - time.monotonic()
+                    if remaining_preparation <= 0:
+                        row = deadline_row(name, settlement)
+                    else:
+                        # Reserve an equal share of the absolute budget for every
+                        # remaining candidate. Preparation must not consume the
+                        # time needed to account for the other three routes.
+                        preparation_budget = remaining_preparation / remaining_candidates
+                        quote = client.get_swap_transaction(
+                            quote.raw_response,
+                            quote_timeout_seconds=preparation_budget,
+                        )
+                        row = None
+                else:
+                    row = None
                 # A provider can return after its requested socket timeout.
                 # Late economics must never become a tournament winner or trigger
                 # post-deadline RPC gas/allowance work.
-                if time.monotonic() >= deadline:
+                if row is not None:
+                    pass
+                elif time.monotonic() >= deadline:
                     row = deadline_row(name, settlement)
                 else:
                     # Read dynamic, already-normalized RPC gas after every quote.
@@ -489,9 +525,14 @@ def collect(config, address, context, client_factory=None,
                         if time.monotonic() >= deadline:
                             row = deadline_row(name, settlement)
                         else:
-                            row = score_candidate(quote, name, settlement, per_context,
-                                                  allowance_probe=allowance_probe, gas_estimate=local_gas,
-                                                  deadline=deadline)
+                            row = score_candidate(
+                                quote, name, settlement, per_context,
+                                allowance_probe=allowance_probe, gas_estimate=local_gas,
+                                deadline=deadline,
+                                require_local_gas=(
+                                    mode == "execution_preflight" and name == "uniswap"
+                                ),
+                            )
                             if time.monotonic() >= deadline:
                                 row = deadline_row(name, settlement)
                 rows.append(row)
@@ -603,8 +644,10 @@ def collect_execution_preflight(config, address, context, client_factory=None,
 
     Unlike shadow telemetry, execution preflight has no useful partial result:
     both providers must be configured so all four provider/settlement candidates
-    can be collected. This helper is strictly read-only; route preparation,
-    approval, signing, and broadcast remain outside it.
+    can be collected. This helper remains non-signing and non-broadcasting. In
+    execution-preflight only, an indicative Uniswap quote may be read-only
+    prepared with ``simulateTransaction`` to obtain calldata for local gas
+    estimation; approval and all state-changing work remain outside it.
     """
     if not getattr(config, "uniswap_api_key", ""):
         return {
@@ -618,6 +661,20 @@ def collect_execution_preflight(config, address, context, client_factory=None,
             "selected_execution_candidate": None,
             "runner_up_delta": None, "status": "required_provider_unavailable",
             "failures": ["uniswap_unavailable"],
+        }
+    if not callable(gas_estimate_provider):
+        return {
+            "mode": "execution_preflight", "direction": context.get("direction"),
+            "candidates": [], "expected_candidates": [
+                {"provider": provider, "settlement": settlement}
+                for provider, settlement in sorted(_EXECUTION_CANDIDATES)
+            ],
+            "observed_candidates": [], "candidate_accounting_complete": False,
+            "deadline_met": False, "selected_hypothetical_winner": None,
+            "selected_execution_candidate": None,
+            "runner_up_delta": None,
+            "status": "required_local_gas_estimator_unavailable",
+            "failures": ["local_gas_estimator_unavailable"],
         }
     comparison = collect(
         config, address, context, client_factory=client_factory,

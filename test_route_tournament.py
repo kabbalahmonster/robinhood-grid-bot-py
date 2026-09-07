@@ -202,6 +202,101 @@ def test_rejections(change, reason):
     assert reason in row["rejections"]
 
 
+def test_execution_preflight_prepares_uniswap_quote_for_local_gas():
+    clients = {name: Mock() for name in ("uniswap", "sushiswap")}
+    indicative = QuoteResult(success=True, buy_amount=2 * 10**15, sell_amount=10**15,
+                             gas=300000, raw_response={"quote": {}})
+    prepared = QuoteResult(success=True, buy_amount=2 * 10**15, sell_amount=10**15,
+                           gas=207348, to="0x8e6fd69a77e88ee20ba4b4fbd59dfcda3ec0e98a",
+                           data="0xdead", value=0)
+    clients["uniswap"].get_quote.return_value = indicative
+    clients["uniswap"].get_swap_transaction.return_value = prepared
+    clients["sushiswap"].get_quote.return_value = quote()
+    cfg = SimpleNamespace(uniswap_api_key="key", weth_address="weth", token_address="token")
+
+    result = collect_execution_preflight(
+        cfg, "wallet", context("sell"), clients.__getitem__,
+        gas_estimate_provider=lambda candidate: 180612 if candidate is prepared else 0,
+        max_seconds=4,
+    )
+
+    uniswap_rows = [row for row in result["candidates"] if row["provider"] == "uniswap"]
+    assert all(row["gas_basis"] == "local_estimate" for row in uniswap_rows)
+    assert all(int(row["gas_components_wei"]["swap"]) == 180612 * 10**6
+               for row in uniswap_rows)
+    assert clients["uniswap"].get_swap_transaction.call_count == 2
+    for call in clients["uniswap"].get_swap_transaction.call_args_list:
+        assert call.args == ({"quote": {}},)
+        assert 0 < call.kwargs["quote_timeout_seconds"] <= 2
+    clients["sushiswap"].get_swap_transaction.assert_not_called()
+
+
+def test_execution_preflight_rejects_failed_uniswap_preparation_without_gas_fallback():
+    clients = {name: Mock() for name in ("uniswap", "sushiswap")}
+    indicative = QuoteResult(success=True, buy_amount=2 * 10**15, sell_amount=10**15,
+                             gas=300000, raw_response={"quote": {}})
+    clients["uniswap"].get_quote.return_value = indicative
+    clients["uniswap"].get_swap_transaction.return_value = QuoteResult(
+        success=False, error="swap preparation unavailable",
+    )
+    clients["sushiswap"].get_quote.return_value = quote()
+    cfg = SimpleNamespace(uniswap_api_key="key", weth_address="weth", token_address="token")
+
+    result = collect_execution_preflight(
+        cfg, "wallet", context("sell"), clients.__getitem__, max_seconds=4,
+    )
+
+    uniswap_rows = [row for row in result["candidates"] if row["provider"] == "uniswap"]
+    assert all(row["rejections"] == ["provider_quote_failed"] for row in uniswap_rows)
+    assert all(row["projected_total_gas_wei"] is None for row in uniswap_rows)
+
+
+def test_execution_preflight_rejects_zero_local_gas_after_uniswap_preparation():
+    clients = {name: Mock() for name in ("uniswap", "sushiswap")}
+    indicative = QuoteResult(success=True, buy_amount=2 * 10**15, sell_amount=10**15,
+                             gas=300000, raw_response={"quote": {}})
+    prepared = QuoteResult(success=True, buy_amount=2 * 10**15, sell_amount=10**15,
+                           gas=300000, to="0x8e6fd69a77e88ee20ba4b4fbd59dfcda3ec0e98a",
+                           data="0xdead", value=0)
+    clients["uniswap"].get_quote.return_value = indicative
+    clients["uniswap"].get_swap_transaction.return_value = prepared
+    clients["sushiswap"].get_quote.return_value = quote()
+    cfg = SimpleNamespace(uniswap_api_key="key", weth_address="weth", token_address="token")
+
+    result = collect_execution_preflight(
+        cfg, "wallet", context("sell"), clients.__getitem__,
+        gas_estimate_provider=lambda _quote: 0, max_seconds=4,
+    )
+
+    uniswap_rows = [row for row in result["candidates"] if row["provider"] == "uniswap"]
+    assert all(row["rejections"] == ["local_gas_simulation_failed"] for row in uniswap_rows)
+    assert all(row["projected_total_gas_wei"] is None for row in uniswap_rows)
+
+
+def test_execution_preflight_rejects_local_gas_exception_after_uniswap_preparation():
+    clients = {name: Mock() for name in ("uniswap", "sushiswap")}
+    indicative = QuoteResult(success=True, buy_amount=2 * 10**15, sell_amount=10**15,
+                             gas=300000, raw_response={"quote": {}})
+    prepared = QuoteResult(success=True, buy_amount=2 * 10**15, sell_amount=10**15,
+                           gas=300000, to="0x8e6fd69a77e88ee20ba4b4fbd59dfcda3ec0e98a",
+                           data="0xdead", value=0)
+    clients["uniswap"].get_quote.return_value = indicative
+    clients["uniswap"].get_swap_transaction.return_value = prepared
+    clients["sushiswap"].get_quote.return_value = quote()
+    cfg = SimpleNamespace(uniswap_api_key="key", weth_address="weth", token_address="token")
+
+    def failed_simulation(_quote):
+        raise RuntimeError("rpc unavailable")
+
+    result = collect_execution_preflight(
+        cfg, "wallet", context("sell"), clients.__getitem__,
+        gas_estimate_provider=failed_simulation, max_seconds=4,
+    )
+
+    uniswap_rows = [row for row in result["candidates"] if row["provider"] == "uniswap"]
+    assert all(row["rejections"] == ["local_gas_simulation_failed"] for row in uniswap_rows)
+
+
 def test_collection_bounded_partial_failure_and_payload():
     clients = {name: Mock() for name in ("uniswap", "sushiswap")}
     clients["uniswap"].get_quote.side_effect = [RuntimeError("api-key=SECRET"), quote()]
@@ -215,6 +310,7 @@ def test_collection_bounded_partial_failure_and_payload():
     for client in clients.values():
         assert client.get_quote.call_count == 2
         client.prepare_swap.assert_not_called()
+        client.get_swap_transaction.assert_not_called()
         client.build_swap_transaction.assert_not_called()
     assert clients["uniswap"].get_quote.call_args.kwargs["routing_attempts"] == 1
     assert result["elapsed_ms"] >= 0
@@ -600,14 +696,33 @@ def test_execution_selector_accepts_one_valid_route_from_complete_accounting():
     }
 
 
+def test_execution_preflight_requires_local_gas_estimator():
+    clients = {name: Mock() for name in ("uniswap", "sushiswap")}
+    cfg = SimpleNamespace(uniswap_api_key="key", weth_address="weth", token_address="token")
+
+    result = collect_execution_preflight(cfg, "wallet", context("sell"), clients.__getitem__)
+
+    assert result["status"] == "required_local_gas_estimator_unavailable"
+    assert result["failures"] == ["local_gas_estimator_unavailable"]
+    assert result["selected_execution_candidate"] is None
+    for client in clients.values():
+        client.get_quote.assert_not_called()
+
+
 def test_execution_preflight_collects_only_when_all_required_providers_exist():
     clients = {name: Mock() for name in ("uniswap", "sushiswap")}
-    for client in clients.values():
+    for name, client in clients.items():
         client.get_quote.return_value = quote()
+        if name == "uniswap":
+            client.get_swap_transaction.return_value = QuoteResult(
+                success=True, buy_amount=2 * 10**15, sell_amount=10**15,
+                to="0x8e6fd69a77e88ee20ba4b4fbd59dfcda3ec0e98a", data="0xdead", value=0,
+            )
     config_with_both = SimpleNamespace(uniswap_api_key="key", weth_address="weth", token_address="token")
 
     preflight = collect_execution_preflight(
         config_with_both, "wallet", context("sell"), clients.__getitem__,
+        gas_estimate_provider=lambda _quote: 100000,
     )
 
     assert preflight["mode"] == "execution_preflight"
@@ -634,6 +749,24 @@ def test_execution_preflight_collects_only_when_all_required_providers_exist():
         "runner_up_delta": None, "status": "required_provider_unavailable",
         "failures": ["uniswap_unavailable"],
     }
+
+
+def test_execution_preflight_uses_six_second_gate_budget():
+    b = bot("gate")
+    b.config.token_address = "token"
+    b.config.weth_address = "weth"
+    b.trade_token_address = "native"
+    incomplete = {
+        "mode": "execution_preflight", "direction": "sell",
+        "candidate_accounting_complete": False, "deadline_met": False,
+        "candidates": [],
+    }
+
+    with patch("route_tournament.snapshot", return_value=context("sell")), \
+         patch("route_tournament.collect_execution_preflight", return_value=incomplete) as collect:
+        assert b._collect_route_execution_preflight("sell", 10**15) is None
+
+    assert collect.call_args.kwargs["max_seconds"] == 6
 
 
 def test_execution_preflight_local_gas_estimate_checksums_api_addresses():
@@ -711,7 +844,7 @@ def test_bot_execution_preflight_is_read_only_and_returns_only_complete_winner()
         assert b._collect_route_execution_preflight("buy", 10**15) == {
             "provider": "sushiswap", "settlement": "native",
         }
-    assert collect_preflight.call_args.kwargs["max_seconds"] == 4
+    assert collect_preflight.call_args.kwargs["max_seconds"] == 6
     # Unknown buy/WETH allowance must preserve the conservative approval budget.
     assert collect_preflight.call_args.kwargs["allowance_probe"]("weth", "router") is None
     b.wallet._send_transaction.assert_not_called()
