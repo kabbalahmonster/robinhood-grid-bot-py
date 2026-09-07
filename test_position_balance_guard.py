@@ -42,6 +42,66 @@ class PositionBalanceGuardTests(unittest.TestCase):
         with patch("grid_bot.logger.error"):
             self.assertFalse(bot._wallet_can_cover_sell(1_000, "1"))
 
+    def test_halts_when_pre_sell_balance_cannot_be_snapshotted(self):
+        bot = self.bot(0)
+        bot.running = True
+        bot.wallet.unresolved_broadcast = None
+        bot.wallet.get_token_balance.side_effect = RuntimeError("RPC unavailable")
+
+        with patch("grid_bot.logger.critical"):
+            balance = bot._snapshot_sell_token_balance_or_halt("7", {"nonce": 42})
+
+        self.assertIsNone(balance)
+        self.assertFalse(bot.running)
+        bot.wallet._record_unresolved_broadcast.assert_called_once()
+
+    def test_halts_and_journals_when_failed_sell_reduces_token_balance(self):
+        bot = self.bot(6_726)
+        bot.running = True
+        bot.wallet.unresolved_broadcast = None
+        tx = {"nonce": 42, "to": "router", "value": 0}
+
+        with patch("grid_bot.logger.critical"):
+            detected = bot._halt_on_unexpected_sell_balance_delta(
+                balance_before=10_656, sell_amount=3_930, position_id="7", tx=tx,
+                tx_hash="0xknown",
+            )
+
+        self.assertTrue(detected)
+        self.assertFalse(bot.running)
+        bot.wallet._record_unresolved_broadcast.assert_called_once()
+        record = bot.wallet._record_unresolved_broadcast.call_args
+        self.assertEqual(record.args[0], "0xknown")
+        self.assertEqual(record.args[1], tx)
+        self.assertIn("position 7", record.args[2])
+
+    def test_does_not_halt_when_failed_sell_leaves_balance_unchanged(self):
+        bot = self.bot(10_656)
+        bot.running = True
+        bot.wallet.unresolved_broadcast = None
+
+        detected = bot._halt_on_unexpected_sell_balance_delta(
+            balance_before=10_656, sell_amount=3_930, position_id="7", tx={"nonce": 42}
+        )
+
+        self.assertFalse(detected)
+        self.assertTrue(bot.running)
+        bot.wallet._record_unresolved_broadcast.assert_not_called()
+
+    def test_preserves_existing_broadcast_journal(self):
+        bot = self.bot(6_726)
+        bot.running = True
+        bot.wallet.unresolved_broadcast = {"tx_hash": "0xactual"}
+
+        with patch("grid_bot.logger.critical"):
+            bot._halt_on_unexpected_sell_balance_delta(
+                balance_before=10_656, sell_amount=3_930, position_id="7",
+                tx={"nonce": 42}, tx_hash="0xknown",
+            )
+
+        bot.wallet._record_unresolved_broadcast.assert_not_called()
+        self.assertEqual(bot._sell_attempt["tx_hash"], "0xactual")
+
 
 if __name__ == "__main__":
     unittest.main()

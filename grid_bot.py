@@ -818,6 +818,77 @@ class GridBot:
         )
         return False
 
+    def _snapshot_sell_token_balance_or_halt(self, position_id, tx):
+        """Get the pre-send token balance, or durably halt before any broadcast."""
+        try:
+            return self._raw_token_balance(self.config.token_address)
+        except Exception as exc:
+            self.running = False
+            reason = f"cannot snapshot token balance before sell for position {position_id}: {exc}"
+            self._sell_attempt = {
+                "status": "pre_sell_balance_unavailable",
+                "position_id": str(position_id),
+                "reason": reason,
+            }
+            existing = getattr(self.wallet, "unresolved_broadcast", None)
+            if not existing:
+                try:
+                    self.wallet._record_unresolved_broadcast(
+                        "pre-sell-balance-unavailable", tx, reason
+                    )
+                except Exception as journal_exc:
+                    logger.critical(
+                        "TRADING HALTED: failed to persist pre-sell safety journal for position %s: %s",
+                        position_id, journal_exc,
+                    )
+            logger.critical("TRADING HALTED: %s", reason)
+            return None
+
+    def _halt_on_unexpected_sell_balance_delta(
+        self, *, balance_before, sell_amount, position_id, tx, tx_hash=None
+    ):
+        """Fail closed and preserve evidence if a failed sell changes the token wallet."""
+        try:
+            balance_after = self._raw_token_balance(self.config.token_address)
+        except Exception as exc:
+            balance_after = None
+            reason = f"failed sell for position {position_id}; token balance verification failed: {exc}"
+        else:
+            delta = int(balance_before) - int(balance_after)
+            if delta <= 0:
+                return False
+            reason = (
+                f"failed sell for position {position_id} reduced wallet token balance by {delta} raw "
+                f"units (attempted {int(sell_amount)}); outcome requires receipt audit"
+            )
+
+        self.running = False
+        existing = getattr(self.wallet, "unresolved_broadcast", None)
+        journal_hash = (
+            (existing or {}).get("tx_hash")
+            if isinstance(existing, dict)
+            else None
+        ) or tx_hash or "balance-delta-without-success"
+        self._sell_attempt = {
+            "status": "balance_delta_after_failed_sell",
+            "position_id": str(position_id),
+            "balance_before_raw": int(balance_before),
+            "balance_after_raw": balance_after,
+            "attempted_sell_amount_raw": int(sell_amount),
+            "tx_hash": journal_hash,
+            "reason": reason,
+        }
+        if not existing:
+            try:
+                self.wallet._record_unresolved_broadcast(journal_hash, tx, reason)
+            except Exception as journal_exc:
+                logger.critical(
+                    "TRADING HALTED: failed to persist sell safety journal for position %s: %s",
+                    position_id, journal_exc,
+                )
+        logger.critical("TRADING HALTED: %s", reason)
+        return True
+
     def _sell_quote_consistency_guard(self, position_id, provider, return_wei, now=None):
         """Flag a provider change so the caller can compare fresh routes."""
         now = time.time() if now is None else float(now)
@@ -2887,7 +2958,7 @@ class GridBot:
             self._raw_token_balance(self.config.weth_address)
             if weth_fallback else self._raw_trade_balance()
         )
-        result = self.wallet._send_transaction({
+        sell_tx = {
             "from": Web3.to_checksum_address(self.wallet.address),
             "to": Web3.to_checksum_address(quote.to),
             "data": quote.data,
@@ -2896,7 +2967,11 @@ class GridBot:
             "gasPrice": gas_price,
             "nonce": self.wallet.w3.eth.get_transaction_count(self.wallet.address),
             "chainId": self.config.chain_id,
-        })
+        }
+        attempted_token_balance_before = self._snapshot_sell_token_balance_or_halt(pos_id, sell_tx)
+        if attempted_token_balance_before is None:
+            return
+        result = self.wallet._send_transaction(sell_tx)
         
         if result.success:
             if weth_fallback:
@@ -2966,6 +3041,13 @@ class GridBot:
             logger.info(f"   Tx: {result.tx_hash}")
         else:
             logger.error(f"❌ Gridless sell failed: {result.error}")
+            self._halt_on_unexpected_sell_balance_delta(
+                balance_before=attempted_token_balance_before,
+                sell_amount=sell_amount,
+                position_id=pos_id,
+                tx=sell_tx,
+                tx_hash=getattr(result, "tx_hash", None),
+            )
     
     @_with_swap_provider_fallback
     def execute_buy(self, pos_id, price):
@@ -3383,7 +3465,7 @@ class GridBot:
             self._raw_token_balance(self.config.weth_address)
             if weth_fallback else self._raw_trade_balance()
         )
-        result = self.wallet._send_transaction({
+        sell_tx = {
             "from": Web3.to_checksum_address(self.wallet.address),
             "to": Web3.to_checksum_address(quote.to),
             "data": quote.data,
@@ -3392,7 +3474,11 @@ class GridBot:
             "gasPrice": gas_price,
             "nonce": self.wallet.w3.eth.get_transaction_count(self.wallet.address),
             "chainId": self.config.chain_id,
-        })
+        }
+        attempted_token_balance_before = self._snapshot_sell_token_balance_or_halt(pos_id, sell_tx)
+        if attempted_token_balance_before is None:
+            return
+        result = self.wallet._send_transaction(sell_tx)
         
         if result.success:
             # Get actual ETH/WETH received from transaction
@@ -3464,6 +3550,13 @@ class GridBot:
             logger.info(f"   Tx: {result.tx_hash}")
         else:
             logger.error(f"❌ Sell failed: {result.error}")
+            self._halt_on_unexpected_sell_balance_delta(
+                balance_before=attempted_token_balance_before,
+                sell_amount=sell_amount,
+                position_id=pos_id,
+                tx=sell_tx,
+                tx_hash=getattr(result, "tx_hash", None),
+            )
     
     @_with_swap_provider_fallback
     def bank_profit(self, eth_amount, profit_budget_eth=None):
@@ -3653,6 +3746,36 @@ class GridBot:
             active = len(gridless_positions)
             empty = 0  # Gridless doesn't have empty slots
             position_balance_raw = sum(p.get('balance', 0) for p in gridless_positions.values())
+            if int(token_raw) < int(position_balance_raw):
+                deficit = int(position_balance_raw) - int(token_raw)
+                self.running = False
+                self._sell_attempt = {
+                    "status": "position_balance_mismatch",
+                    "tracked_total_raw": int(position_balance_raw),
+                    "wallet_balance_raw": int(token_raw),
+                    "deficit_raw": deficit,
+                }
+                mismatch_reason = (
+                    f"gridless tracked balance exceeds wallet balance by {deficit} raw units; "
+                    "receipt audit required"
+                )
+                existing = getattr(self.wallet, "unresolved_broadcast", None)
+                if not existing:
+                    try:
+                        self.wallet._record_unresolved_broadcast(
+                            "position-balance-mismatch", None, mismatch_reason
+                        )
+                    except Exception as journal_exc:
+                        logger.critical(
+                            "TRADING HALTED: failed to persist gridless balance-mismatch journal: %s",
+                            journal_exc,
+                        )
+                logger.critical(
+                    "TRADING HALTED: gridless tracked balance %s exceeds wallet token balance %s "
+                    "by %s raw units; receipt audit required",
+                    position_balance_raw, token_raw, deficit,
+                )
+                return
             position_balance_total = position_balance_raw / self.token_unit
         else:
             active = sum(1 for p in self.positions.values() if p['balance'] > 0)
