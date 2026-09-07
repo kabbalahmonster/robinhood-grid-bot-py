@@ -199,6 +199,8 @@ def _probe_allowance(allowance_probe, token_address, spender_address, amount):
         return None, "no_probe"
     try:
         value = allowance_probe(token_address, spender_address)
+        if value is None:
+            return None, "unknown"
         return int(value), None
     except Exception as exc:
         # Log without leaking the underlying provider/wallet error text.
@@ -469,6 +471,10 @@ def collect(config, address, context, client_factory=None,
 
     for name in ("uniswap", "sushiswap"):
         if name == "uniswap" and not getattr(config, "uniswap_api_key", ""):
+            continue
+        # A parallel execution-preflight worker owns exactly one identity.
+        # Do not construct/log clients for the other provider before skipping.
+        if _candidate_filter and name != _candidate_filter[0]:
             continue
         try:
             client = client_factory(name) if client_factory else PROVIDERS[name].load_client_class()(config)
