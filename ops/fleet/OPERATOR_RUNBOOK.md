@@ -123,6 +123,10 @@ To canary Umbra, append it on one bot with
 `ROUTE_TOURNAMENT_PROVIDERS=uniswap,sushiswap,umbra`. It adds one public-API
 candidate per settlement. Watch 429s/timeouts before expanding; executable
 builds pin UmbraRH and use local gas estimation.
+To canary LI.FI, set `LI_FI_API_KEY` and use
+`ROUTE_TOURNAMENT_PROVIDERS=uniswap,sushiswap,lifi`, initially with
+`ROUTE_TOURNAMENT_SETTLEMENTS=native` and `ROUTE_TOURNAMENT_MODE=shadow`.
+`lofi` is accepted as an input alias, though documentation uses `lifi`.
 
 ## Position-balance reconciliation
 

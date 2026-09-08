@@ -1564,7 +1564,8 @@ The existing same-provider WETH recovery/replay safeguards remain in place.
 
 Each configured provider gets one `get_quote` call per configured settlement,
 with price jitter disabled. `ROUTE_TOURNAMENT_PROVIDERS` accepts a non-empty
-comma-separated subset of `uniswap,sushiswap,umbra`, while
+comma-separated subset of `uniswap,sushiswap,umbra,lifi` (`lofi` is accepted
+as an alias), while
 `ROUTE_TOURNAMENT_SETTLEMENTS` accepts `native,weth`. The defaults compare all
 four combinations by default; adding Umbra produces six. Setting settlements to `native` halves candidate count and
 usually shortens rounds, but deliberately gives up WETH fallback liquidity and
@@ -1594,6 +1595,14 @@ fee is already in output. The flat 3M provider gas recommendation is ignored;
 gate economics require local `eth_estimateGas`. Because the public API is
 rate-limited and the router lacks a completed external audit, canary it first:
 `ROUTE_TOURNAMENT_PROVIDERS=uniswap,sushiswap,umbra`.
+
+LI.FI can likewise participate as a fully executable contestant with
+`ROUTE_TOURNAMENT_PROVIDERS=uniswap,sushiswap,lifi`. Its API key is mandatory.
+The adapter applies the tournament's absolute socket deadline, requires exact
+input amount, chain, native value, target and calldata, and then uses local gas
+simulation like every other gate candidate. Begin with `native` settlement in
+shadow mode: LI.FI adds routing breadth but overlaps underlying DEX liquidity
+and increases provider/RPC traffic.
 
 Dashboard `buy_attempt.route_comparison` and `sell_attempt.route_comparison`
 contain candidates, fixed rejection codes, provider, settlement, raw quoted

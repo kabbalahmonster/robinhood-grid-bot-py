@@ -752,6 +752,8 @@ def test_mode_parsing_and_default(monkeypatch, tmp_path):
 
         monkeypatch.setenv("ROUTE_TOURNAMENT_PROVIDERS", "uniswap,sushiswap,umbra")
         assert load_config().route_tournament_providers == ("uniswap", "sushiswap", "umbra")
+        monkeypatch.setenv("ROUTE_TOURNAMENT_PROVIDERS", "uniswap,lofi")
+        assert load_config().route_tournament_providers == ("uniswap", "lifi")
 
 
 def test_native_only_preflight_collects_and_selects_two_candidates():

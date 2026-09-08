@@ -64,7 +64,11 @@ def _parse_rpc_urls(env_value: str) -> Optional[list]:
 
 def _parse_csv_choices(env_value: str, default: tuple[str, ...]) -> tuple[str, ...]:
     """Parse a normalized, de-duplicated comma-separated env list."""
-    values = tuple(dict.fromkeys(value.strip().lower() for value in env_value.split(",") if value.strip()))
+    aliases = {"lofi": "lifi", "li.fi": "lifi", "li_fi": "lifi", "sushi": "sushiswap"}
+    values = tuple(dict.fromkeys(
+        aliases.get(value.strip().lower(), value.strip().lower())
+        for value in env_value.split(",") if value.strip()
+    ))
     return values or default
 
 
@@ -210,12 +214,14 @@ class BotConfig:
             raise ValueError("ROUTE_TOURNAMENT_MODE=gate requires ROUTE_TOURNAMENT_CANARY=true")
         providers = tuple(getattr(self, "route_tournament_providers", ("uniswap", "sushiswap")))
         settlements = tuple(getattr(self, "route_tournament_settlements", ("native", "weth")))
-        if not providers or any(value not in {"uniswap", "sushiswap", "umbra"} for value in providers):
-            raise ValueError("ROUTE_TOURNAMENT_PROVIDERS supports a non-empty comma-separated subset of uniswap,sushiswap,umbra")
+        if not providers or any(value not in {"uniswap", "sushiswap", "umbra", "lifi"} for value in providers):
+            raise ValueError("ROUTE_TOURNAMENT_PROVIDERS supports a non-empty comma-separated subset of uniswap,sushiswap,umbra,lifi")
         if not settlements or any(value not in {"native", "weth"} for value in settlements):
             raise ValueError("ROUTE_TOURNAMENT_SETTLEMENTS supports a non-empty comma-separated subset of native,weth")
         if "umbra" in providers and self.chain_id != 4663:
             raise ValueError("Umbra tournament routes support Robinhood Chain 4663 only")
+        if "lifi" in providers and not self.li_fi_api_key:
+            raise ValueError("LI_FI_API_KEY is required when LI.FI participates in the route tournament")
         for name in ("route_tournament_shadow_timeout_seconds", "route_tournament_gate_timeout_seconds"):
             value = float(getattr(self, name, 4 if "shadow" in name else 6))
             if not 1 <= value <= 15:
@@ -452,7 +458,8 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
         route_tournament_mode=os.getenv("ROUTE_TOURNAMENT_MODE", "off").strip().lower(),
         route_tournament_canary=os.getenv("ROUTE_TOURNAMENT_CANARY", "false").lower() == "true",
         route_tournament_providers=_parse_csv_choices(
-            os.getenv("ROUTE_TOURNAMENT_PROVIDERS", "uniswap,sushiswap"), ("uniswap", "sushiswap", "umbra")
+            os.getenv("ROUTE_TOURNAMENT_PROVIDERS", "uniswap,sushiswap"),
+            ("uniswap", "sushiswap", "umbra", "lifi")
         ),
         route_tournament_settlements=_parse_csv_choices(
             os.getenv("ROUTE_TOURNAMENT_SETTLEMENTS", "native,weth"), ("native", "weth")

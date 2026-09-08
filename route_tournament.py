@@ -41,6 +41,7 @@ _DEFAULT_EXECUTION_CANDIDATES = frozenset({
 })
 _SUPPORTED_EXECUTION_CANDIDATES = _DEFAULT_EXECUTION_CANDIDATES | frozenset({
     ("umbra", "native"), ("umbra", "weth"),
+    ("lifi", "native"), ("lifi", "weth"),
 })
 
 
