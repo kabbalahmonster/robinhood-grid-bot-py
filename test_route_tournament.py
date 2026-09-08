@@ -689,6 +689,21 @@ def test_poll_and_observer_failure_do_not_change_operation():
     assert b._attempt_with_route_comparison("buy")["route_comparison"]["status"] == "observation_failed"
 
 
+@pytest.mark.parametrize("mode", ["shadow", "gate"])
+def test_reported_buy_tournament_is_expired_before_next_buy_check(mode):
+    """A reported buy contest must not be retransmitted without a new contest."""
+    b = bot(mode)
+    b._funding_warning = {"status": "reported"}
+    b._buy_attempt = {"status": "reported"}
+    b._route_comparisons = {"buy": {"direction": "buy"}}
+
+    b._expire_reported_buy_state()
+
+    assert b._funding_warning is None
+    assert b._buy_attempt is None
+    assert b._attempt_with_route_comparison("buy") is None
+
+
 @pytest.mark.parametrize("mode", ["execute", "invalid"])
 def test_execute_and_unknown_modes_fail_closed(mode):
     cfg = BotConfig.__new__(BotConfig)

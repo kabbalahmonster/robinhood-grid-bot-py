@@ -1399,6 +1399,13 @@ class GridBot:
         comparison = getattr(self, "_route_comparisons", {}).get(direction)
         return {**(attempt or {}), "route_comparison": comparison} if comparison else attempt
 
+    def _expire_reported_buy_state(self):
+        """Clear buy-only telemetry after it has been included in a report."""
+        self._funding_warning = None
+        self._buy_attempt = None
+        if getattr(self.config, "route_tournament_mode", "off") in {"shadow", "gate"}:
+            getattr(self, "_route_comparisons", {}).pop("buy", None)
+
     def _actionable_quote_with_weth_fallback(self, *, sell_token, buy_token, sell_amount, direction,
                                              sold_cost_wei=None):
         """Build the configured route, falling back to the direct WETH leg in native mode."""
@@ -4260,11 +4267,13 @@ class GridBot:
         # enough to report it above, then reset it immediately before the next
         # check. Clearing it at cycle start made the warning exist only between
         # reports, so DoomDash could never receive it.
-        self._funding_warning = None
-        self._buy_attempt = None
-        if getattr(self.config, "route_tournament_mode", "off") == "shadow":
-            getattr(self, "_route_comparisons", {}).pop("buy", None)
-
+        self._expire_reported_buy_state()
+        # Buys run after the dashboard report, so their tournament first becomes
+        # visible in the following round's report. Expire it immediately after
+        # that report in both observational and execution-gate modes; a fresh
+        # buy check below will replace it only if another tournament actually
+        # occurs. Leaving gate comparisons here made completed buy cards repeat
+        # forever.
         # Then check buys
         self.check_buys(price)
 
