@@ -67,10 +67,11 @@ class FallbackSwapProvider:
         "cooldown active",
     )
 
-    def __init__(self, primary, fallback):
+    def __init__(self, primary, fallback, additional=()):
         self.primary = primary
         self.fallback = fallback
         self.active = primary
+        self.providers = {item.name: item for item in (primary, fallback, *additional) if item}
         self._operation_retries = []
         self._operation_sealed = []
         self.logger = logging.getLogger("grid_bot.swap_provider")
@@ -90,6 +91,9 @@ class FallbackSwapProvider:
     @property
     def fallback_active(self):
         return self.active is self.fallback
+
+    def provider_for_name(self, name):
+        return self.providers.get(name)
 
     def run_with_fallback(self, operation, operation_name="swap operation"):
         """Run one complete operation with primary, then fallback if marked."""
@@ -226,6 +230,9 @@ PROVIDERS = {
     "sushiswap": ProviderDefinition("sushi_api", "SushiAPIClient", ProviderCapabilities(
         refresh_after_approval=True,
     )),
+    "umbra": ProviderDefinition("umbra_api", "UmbraAPIClient", ProviderCapabilities(
+        refresh_after_approval=True,
+    )),
 }
 
 
@@ -276,4 +283,13 @@ def create_swap_provider(config):
     logging.getLogger("grid_bot.swap_provider").info(
         f"Swap fallback enabled: {name} -> {fallback_name}"
     )
-    return FallbackSwapProvider(primary, fallback)
+    extras = []
+    for extra_name in getattr(config, "route_tournament_providers", ()):
+        if extra_name in {name, fallback_name}:
+            continue
+        extra_definition = PROVIDERS[extra_name]
+        extras.append(SwapProvider(
+            extra_name, extra_definition.load_client_class()(config),
+            extra_definition.capabilities,
+        ))
+    return FallbackSwapProvider(primary, fallback, extras)

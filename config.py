@@ -126,7 +126,7 @@ class BotConfig:
     minimal_logs: bool
     
     # API Provider Selection
-    swap_provider: str  # Explicit provider: 0x, lifi, uniswap, or sushiswap
+    swap_provider: str  # Explicit provider: 0x, lifi, uniswap, sushiswap, or umbra
     swap_fallback_provider: str  # Optional fallback after retryable provider failures
     sushi_api_key: str  # Optional Sushi API key for higher service limits
     use_li_fi: bool  # If True, use LI.FI instead of 0x
@@ -210,10 +210,12 @@ class BotConfig:
             raise ValueError("ROUTE_TOURNAMENT_MODE=gate requires ROUTE_TOURNAMENT_CANARY=true")
         providers = tuple(getattr(self, "route_tournament_providers", ("uniswap", "sushiswap")))
         settlements = tuple(getattr(self, "route_tournament_settlements", ("native", "weth")))
-        if not providers or any(value not in {"uniswap", "sushiswap"} for value in providers):
-            raise ValueError("ROUTE_TOURNAMENT_PROVIDERS supports a non-empty comma-separated subset of uniswap,sushiswap")
+        if not providers or any(value not in {"uniswap", "sushiswap", "umbra"} for value in providers):
+            raise ValueError("ROUTE_TOURNAMENT_PROVIDERS supports a non-empty comma-separated subset of uniswap,sushiswap,umbra")
         if not settlements or any(value not in {"native", "weth"} for value in settlements):
             raise ValueError("ROUTE_TOURNAMENT_SETTLEMENTS supports a non-empty comma-separated subset of native,weth")
+        if "umbra" in providers and self.chain_id != 4663:
+            raise ValueError("Umbra tournament routes support Robinhood Chain 4663 only")
         for name in ("route_tournament_shadow_timeout_seconds", "route_tournament_gate_timeout_seconds"):
             value = float(getattr(self, name, 4 if "shadow" in name else 6))
             if not 1 <= value <= 15:
@@ -234,8 +236,10 @@ class BotConfig:
         provider = {"li.fi": "lifi", "li_fi": "lifi", "zero_x": "0x", "zerox": "0x", "sushi": "sushiswap"}.get(provider, provider)
         if not provider:
             provider = "uniswap" if self.use_uniswap_api else ("lifi" if self.use_li_fi else "0x")
-        if provider not in {"0x", "lifi", "uniswap", "sushiswap"}:
+        if provider not in {"0x", "lifi", "uniswap", "sushiswap", "umbra"}:
             raise ValueError(f"Unsupported SWAP_PROVIDER: {provider}")
+        if provider == "umbra" and self.chain_id != 4663:
+            raise ValueError("SWAP_PROVIDER=umbra supports Robinhood Chain 4663 only")
         if provider == "lifi":
             if not self.li_fi_api_key:
                 raise ValueError("LI_FI_API_KEY is required for the lifi provider")
@@ -250,8 +254,10 @@ class BotConfig:
         fallback_provider = {"li.fi": "lifi", "li_fi": "lifi", "zero_x": "0x", "zerox": "0x", "sushi": "sushiswap"}.get(
             fallback_provider, fallback_provider
         )
-        if fallback_provider not in {"", "0x", "lifi", "uniswap", "sushiswap"}:
+        if fallback_provider not in {"", "0x", "lifi", "uniswap", "sushiswap", "umbra"}:
             raise ValueError(f"Unsupported SWAP_FALLBACK_PROVIDER: {fallback_provider}")
+        if fallback_provider == "umbra" and self.chain_id != 4663:
+            raise ValueError("SWAP_FALLBACK_PROVIDER=umbra supports Robinhood Chain 4663 only")
         if fallback_provider == "lifi" and not self.li_fi_api_key:
             raise ValueError("LI_FI_API_KEY is required for the lifi fallback provider")
         if fallback_provider == "uniswap" and not self.uniswap_api_key:
@@ -446,7 +452,7 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
         route_tournament_mode=os.getenv("ROUTE_TOURNAMENT_MODE", "off").strip().lower(),
         route_tournament_canary=os.getenv("ROUTE_TOURNAMENT_CANARY", "false").lower() == "true",
         route_tournament_providers=_parse_csv_choices(
-            os.getenv("ROUTE_TOURNAMENT_PROVIDERS", "uniswap,sushiswap"), ("uniswap", "sushiswap")
+            os.getenv("ROUTE_TOURNAMENT_PROVIDERS", "uniswap,sushiswap"), ("uniswap", "sushiswap", "umbra")
         ),
         route_tournament_settlements=_parse_csv_choices(
             os.getenv("ROUTE_TOURNAMENT_SETTLEMENTS", "native,weth"), ("native", "weth")

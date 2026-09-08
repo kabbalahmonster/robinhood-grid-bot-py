@@ -1258,10 +1258,14 @@ class GridBot:
                 or selection.get("settlement") not in {"native", "weth"}):
             return None
         selected_name = selection.get("provider")
-        candidates = (getattr(self.provider, "primary", None),
-                      getattr(self.provider, "fallback", None))
-        provider = next((item for item in candidates
-                         if getattr(item, "name", None) == selected_name), None)
+        provider_lookup = getattr(self.provider, "provider_for_name", None)
+        if callable(provider_lookup):
+            provider = provider_lookup(selected_name)
+        else:
+            candidates = (self.provider, getattr(self.provider, "primary", None),
+                          getattr(self.provider, "fallback", None))
+            provider = next((item for item in candidates
+                             if getattr(item, "name", None) == selected_name), None)
         if provider is None:
             return None
         settlement_token = (self.trade_token_address if selection["settlement"] == "native"
@@ -1775,7 +1779,8 @@ class GridBot:
     def _taxed_quote_return_wei(self, quote):
         """Conservatively fee-adjust a sell quote before the pre-trade guard."""
         quoted = int(quote.buy_amount or 0)
-        if not self._taxed_token_active():
+        if (not self._taxed_token_active()
+                or getattr(quote, "output_includes_transfer_tax", False)):
             return quoted
         fee_fraction = self._effective_token_transfer_fee_percent() / 100.0
         return int(quoted * (1.0 - fee_fraction))

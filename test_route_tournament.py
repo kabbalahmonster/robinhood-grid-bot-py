@@ -750,6 +750,9 @@ def test_mode_parsing_and_default(monkeypatch, tmp_path):
         assert configured.route_tournament_shadow_timeout_seconds == 5
         assert configured.route_tournament_gate_timeout_seconds == 7
 
+        monkeypatch.setenv("ROUTE_TOURNAMENT_PROVIDERS", "uniswap,sushiswap,umbra")
+        assert load_config().route_tournament_providers == ("uniswap", "sushiswap", "umbra")
+
 
 def test_native_only_preflight_collects_and_selects_two_candidates():
     cfg = SimpleNamespace(

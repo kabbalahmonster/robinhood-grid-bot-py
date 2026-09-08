@@ -35,6 +35,7 @@ def test_capabilities_are_provider_owned():
     assert PROVIDERS["uniswap"].capabilities.quote_requires_preparation is True
     assert PROVIDERS["sushiswap"].capabilities.refresh_after_approval is True
     assert PROVIDERS["sushiswap"].capabilities.api_managed_approval is False
+    assert PROVIDERS["umbra"].capabilities.refresh_after_approval is True
 
 
 class Result:

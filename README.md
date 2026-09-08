@@ -107,7 +107,7 @@ python grid_bot.py
 | `UNISWAP_PROTOCOL_CACHE_TTL_SECONDS` | No | 300 | Seconds to retain protocol-family discovery only; bounded to 30-3600 and never caches quote economics |
 | `UNISWAP_RATE_STATE_FILE` | No | automatic | Optional shared state path; blank derives an owner-only runtime file from the API-key hash |
 | `SUSHI_API_KEY` | No | empty | Optional Sushi portal API key; the public v7 API works without one |
-| `SWAP_PROVIDER` | No | empty | Explicit provider: `0x`, `lifi`, `uniswap`, or `sushiswap`; empty uses legacy flags |
+| `SWAP_PROVIDER` | No | empty | Explicit provider: `0x`, `lifi`, `uniswap`, `sushiswap`, or `umbra`; empty uses legacy flags |
 | `SWAP_FALLBACK_PROVIDER` | No | sushiswap | Immediate per-operation fallback after retryable pre-broadcast failures; empty disables fallback |
 | `ROUTE_TOURNAMENT_MODE` | No | off | Route comparison mode: `off`, read-only `shadow`, or guarded one-bot `gate` |
 | `ROUTE_TOURNAMENT_CANARY` | No | false | Explicit safety acknowledgement required by `gate`; not permission for fleet-wide rollout |
@@ -847,7 +847,7 @@ robinhood-grid-bot-py/
 Prefer the explicit provider setting:
 
 ```dotenv
-SWAP_PROVIDER=sushiswap  # 0x, lifi, uniswap, or sushiswap
+SWAP_PROVIDER=sushiswap  # 0x, lifi, uniswap, sushiswap, or umbra
 ```
 
 The older `USE_UNISWAP_API` and `USE_LI_FI` flags remain backward compatible when `SWAP_PROVIDER` is empty. Explicit `SWAP_PROVIDER` takes precedence. Sushi currently supports exact-input swaps, which is the only execution mode used by this bot. Each provider keeps its own quote, approval, slippage, and transaction behavior behind the common capability layer.
@@ -1564,9 +1564,9 @@ The existing same-provider WETH recovery/replay safeguards remain in place.
 
 Each configured provider gets one `get_quote` call per configured settlement,
 with price jitter disabled. `ROUTE_TOURNAMENT_PROVIDERS` accepts a non-empty
-comma-separated subset of `uniswap,sushiswap`, while
+comma-separated subset of `uniswap,sushiswap,umbra`, while
 `ROUTE_TOURNAMENT_SETTLEMENTS` accepts `native,weth`. The defaults compare all
-four combinations. Setting settlements to `native` halves candidate count and
+four combinations by default; adding Umbra produces six. Setting settlements to `native` halves candidate count and
 usually shortens rounds, but deliberately gives up WETH fallback liquidity and
 any WETH route whose net result would have won.
 Uniswap uses one routing attempt; its internal explicit AMM fallback and known
@@ -1585,6 +1585,15 @@ rather than zero-impact infrastructure. `elapsed_ms`
 measures total collection time. Independent observer clients do not modify
 execution-client state, but traffic consumes upstream quota and Uniswap's shared
 limiter, so subsequent operation timing/fallback can still be affected.
+
+Umbra is Robinhood-only. It uses `/api/rh/quote` and `/api/rh/build` and pins
+every build to UmbraRH `0xfC830D7861C5ceBefF2272a03aacEf9baC8A7603`.
+Only `ExecuteSim` or `Verified` quotes are admitted; malformed calldata,
+unexpected routers/native value, or missing output floors fail closed. Its 1%
+fee is already in output. The flat 3M provider gas recommendation is ignored;
+gate economics require local `eth_estimateGas`. Because the public API is
+rate-limited and the router lacks a completed external audit, canary it first:
+`ROUTE_TOURNAMENT_PROVIDERS=uniswap,sushiswap,umbra`.
 
 Dashboard `buy_attempt.route_comparison` and `sell_attempt.route_comparison`
 contain candidates, fixed rejection codes, provider, settlement, raw quoted

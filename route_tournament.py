@@ -33,11 +33,14 @@ _FALLBACK_SWAP_GAS = {"buy": 350000, "sell": 300000}
 # Legacy approval budget when allowance is unknown or insufficient.
 _RESET_AND_APPROVAL_GAS = 200000
 _WRAP_UNWRAP_GAS = 60000
-_EXECUTION_CANDIDATES = frozenset({
+_DEFAULT_EXECUTION_CANDIDATES = frozenset({
     ("uniswap", "native"),
     ("uniswap", "weth"),
     ("sushiswap", "native"),
     ("sushiswap", "weth"),
+})
+_SUPPORTED_EXECUTION_CANDIDATES = _DEFAULT_EXECUTION_CANDIDATES | frozenset({
+    ("umbra", "native"), ("umbra", "weth"),
 })
 
 
@@ -50,13 +53,13 @@ def _configured_identities(config):
 def _comparison_identities(comparison):
     configured = comparison.get("expected_candidates") if isinstance(comparison, dict) else None
     if not isinstance(configured, list) or not configured:
-        return _EXECUTION_CANDIDATES
+        return _DEFAULT_EXECUTION_CANDIDATES
     identities = set()
     for item in configured:
         if not isinstance(item, dict):
             return frozenset()
         identity = (item.get("provider"), item.get("settlement"))
-        if identity not in _EXECUTION_CANDIDATES or identity in identities:
+        if identity not in _SUPPORTED_EXECUTION_CANDIDATES or identity in identities:
             return frozenset()
         identities.add(identity)
     return frozenset(identities)
@@ -397,16 +400,18 @@ def score_candidate(quote, provider, settlement, context, *, allowance_probe=Non
     # For taxed sells it already contains the transfer fee plus market buffer;
     # the live sell guard applies the transfer fee exactly once to a fresh quote.
     # Mirror that economic guard so shadow does not reject executable trades.
+    effective_tax = 0 if getattr(quote, "output_includes_transfer_tax", False) else c["tax"]
     if c["direction"] == "sell":
         if c.get("execution_preflight") is True:
             # Match _taxed_quote_return_wei() exactly at the authorization
             # boundary, including its established float-to-int rounding.
-            floor = int(output * (1.0 - float(c["tax"])))
+            floor = int(output * (1.0 - float(effective_tax)))
         else:
-            floor = int(Decimal(output) * (1 - Decimal(str(c["tax"]))))
+            floor = int(Decimal(output) * (1 - Decimal(str(effective_tax))))
     else:
-        floor = int(Decimal(output) * (1 - Decimal(str(c["slippage"]))) *
-                    (1 - Decimal(str(c["tax"]))))
+        effective_slippage = 0 if getattr(quote, "output_is_execution_floor", False) else c["slippage"]
+        floor = int(Decimal(output) * (1 - Decimal(str(effective_slippage))) *
+                    (1 - Decimal(str(effective_tax))))
     row.update(validation_level="quote_only", preparation_dependent=True,
                gas_components_wei={key: str(value) for key, value in costs.items()},
                approval_budget_wei=str(costs["approval"]),
@@ -420,7 +425,7 @@ def score_candidate(quote, provider, settlement, context, *, allowance_probe=Non
                    _wei_to_eth(floor) if c["direction"] == "sell"
                    else _raw_to_human(floor, output_decimals)
                ),
-               slippage_fraction=c["slippage"], tax_fraction=c["tax"],
+               slippage_fraction=c["slippage"], tax_fraction=effective_tax,
                approval_assumption=approval_label,
                provider_gas_estimate=provider_gas,
                effective_gas_price_wei=gas_price,
@@ -799,7 +804,7 @@ def collect_execution_preflight(config, address, context, client_factory=None,
             "mode": "execution_preflight", "direction": context.get("direction"),
             "candidates": [], "expected_candidates": [
                 {"provider": provider, "settlement": settlement}
-                for provider, settlement in sorted(_EXECUTION_CANDIDATES)
+                for provider, settlement in sorted(_DEFAULT_EXECUTION_CANDIDATES)
             ],
             "observed_candidates": [], "candidate_accounting_complete": False,
             "deadline_met": False, "selected_hypothetical_winner": None,
@@ -812,7 +817,7 @@ def collect_execution_preflight(config, address, context, client_factory=None,
             "mode": "execution_preflight", "direction": context.get("direction"),
             "candidates": [], "expected_candidates": [
                 {"provider": provider, "settlement": settlement}
-                for provider, settlement in sorted(_EXECUTION_CANDIDATES)
+                for provider, settlement in sorted(_DEFAULT_EXECUTION_CANDIDATES)
             ],
             "observed_candidates": [], "candidate_accounting_complete": False,
             "deadline_met": False, "selected_hypothetical_winner": None,
