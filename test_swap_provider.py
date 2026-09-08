@@ -256,3 +256,34 @@ def test_sushi_primary_uses_uniswap_as_reverse_default_fallback():
     assert isinstance(provider, FallbackSwapProvider)
     assert provider.primary.name == "sushiswap"
     assert provider.fallback.name == "uniswap"
+
+
+def test_tournament_providers_remain_resolvable_when_fallback_is_disabled():
+    """A roster-only winner must survive the quote-to-execution handoff."""
+    class DummyClient:
+        def __init__(self, config):
+            pass
+
+    settings = config(
+        swap_provider="0x",
+        swap_fallback_provider="",
+        route_tournament_providers=("uniswap", "sushiswap"),
+    )
+    with patch.object(ProviderDefinition, "load_client_class", return_value=DummyClient):
+        provider = create_swap_provider(settings)
+
+    assert isinstance(provider, FallbackSwapProvider)
+    assert provider.fallback is None
+    assert provider.provider_for_name("0x") is provider.primary
+    assert provider.provider_for_name("uniswap").name == "uniswap"
+    assert provider.provider_for_name("sushiswap").name == "sushiswap"
+
+    # A retryable primary failure still cannot silently grant tournament-only
+    # providers ordinary fallback authority.
+    attempts = []
+    result = provider.run_with_fallback(
+        lambda: attempts.append(provider.name) or Result(False, "status 404"),
+        "sell",
+    )
+    assert result.success is False
+    assert attempts == ["0x"]

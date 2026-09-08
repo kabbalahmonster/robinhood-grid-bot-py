@@ -1216,9 +1216,9 @@ class GridBot:
                     if allowance >= int(amount):
                         return 0
                     approval_amount = (
-                        2**256 - 1
-                        if getattr(quote, "_tournament_provider", None) == "lifi"
-                        else int(amount)
+                        int(amount)
+                        if getattr(quote, "_tournament_provider", None) == "umbra"
+                        else 2**256 - 1
                     )
                     tx = self.wallet.build_token_approval_transaction(
                         self.config.token_address, spender, approval_amount,
@@ -1282,6 +1282,11 @@ class GridBot:
             provider = next((item for item in candidates
                              if getattr(item, "name", None) == selected_name), None)
         if provider is None:
+            logger.warning(
+                "Selected tournament route revalidation failed: provider=%s is not "
+                "available in the execution registry; refusing route authority",
+                selected_name,
+            )
             return None
         settlement_token = (self.trade_token_address if selection["settlement"] == "native"
                             else self.config.weth_address)
@@ -1345,8 +1350,12 @@ class GridBot:
                 return None
             if selected_name == "uniswap" and protocol in {"V4", "V3", "V2"}:
                 setattr(quote, "_tournament_protocol", protocol)
-        except Exception:
-            logger.warning("Selected tournament route revalidation failed; refusing route authority")
+        except Exception as exc:
+            logger.warning(
+                "Selected tournament route revalidation failed at fresh build/simulation "
+                "for provider=%s settlement=%s error_type=%s; refusing route authority",
+                selected_name, selection.get("settlement"), type(exc).__name__,
+            )
             return None
         return {
             "provider": provider, "quote": quote,

@@ -123,6 +123,12 @@ To canary Umbra, append it on one bot with
 `ROUTE_TOURNAMENT_PROVIDERS=uniswap,sushiswap,umbra`. It adds one public-API
 candidate per settlement. Watch 429s/timeouts before expanding; executable
 builds pin UmbraRH and use local gas estimation.
+Unapproved LI.FI/Umbra sell rows appear as `approval required`, not as a local
+simulation failure. They are provisionally ranked with estimated approval gas;
+only the provisional winner is approved, refreshed, and required to pass exact
+local simulation. LI.FI approval is normally reusable; Umbra approval is exact
+and paid on each Umbra sell win. If the refreshed route fails its guards, the
+swap aborts and only the winner's approval gas is spent.
 To canary LI.FI, set `LI_FI_API_KEY` and use
 `ROUTE_TOURNAMENT_PROVIDERS=uniswap,sushiswap,lifi`, initially with
 `ROUTE_TOURNAMENT_SETTLEMENTS=native` and `ROUTE_TOURNAMENT_MODE=shadow`.

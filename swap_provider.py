@@ -92,7 +92,7 @@ class FallbackSwapProvider:
 
     @property
     def fallback_active(self):
-        return self.active is self.fallback
+        return self.fallback is not None and self.active is self.fallback
 
     def provider_for_name(self, name):
         return self.providers.get(name)
@@ -103,7 +103,7 @@ class FallbackSwapProvider:
         try:
             self.active = self.primary
             result, retry = self._run_operation_attempt(operation)
-            if not retry:
+            if not retry or self.fallback is None:
                 return result
 
             self.logger.warning(
@@ -165,7 +165,8 @@ class FallbackSwapProvider:
 
     def _request_retry_after_failure(self, method_name, result):
         if (
-            self.active is not self.primary
+            self.fallback is None
+            or self.active is not self.primary
             or (self._operation_sealed and self._operation_sealed[-1])
             or not self._is_retryable_failure(result)
         ):
@@ -271,22 +272,21 @@ def create_swap_provider(config):
     # SWAP_FALLBACK_PROVIDER still disables fallback explicitly.
     if fallback_name == name == "sushiswap" and getattr(config, "uniswap_api_key", ""):
         fallback_name = "uniswap"
-    if not fallback_name or fallback_name == name:
-        return primary
-    if fallback_name not in PROVIDERS:
+    if fallback_name and fallback_name != name and fallback_name not in PROVIDERS:
         supported = ", ".join(sorted(PROVIDERS))
         raise ValueError(f"Unsupported SWAP_FALLBACK_PROVIDER '{fallback_name}'. Supported: {supported}")
-
-    fallback_definition = PROVIDERS[fallback_name]
-    fallback_class = fallback_definition.load_client_class()
-    fallback = SwapProvider(
-        fallback_name,
-        fallback_class(config),
-        fallback_definition.capabilities,
-    )
-    logging.getLogger("grid_bot.swap_provider").info(
-        f"Swap fallback enabled: {name} -> {fallback_name}"
-    )
+    fallback = None
+    if fallback_name and fallback_name != name:
+        fallback_definition = PROVIDERS[fallback_name]
+        fallback_class = fallback_definition.load_client_class()
+        fallback = SwapProvider(
+            fallback_name,
+            fallback_class(config),
+            fallback_definition.capabilities,
+        )
+        logging.getLogger("grid_bot.swap_provider").info(
+            f"Swap fallback enabled: {name} -> {fallback_name}"
+        )
     extras = []
     for extra_name in getattr(config, "route_tournament_providers", ()):
         if extra_name in {name, fallback_name}:
@@ -296,4 +296,8 @@ def create_swap_provider(config):
             extra_name, extra_definition.load_client_class()(config),
             extra_definition.capabilities,
         ))
+    # Tournament providers need to remain resolvable for the winner's fresh
+    # execution build even when ordinary provider fallback is disabled.
+    if fallback is None and not extras:
+        return primary
     return FallbackSwapProvider(primary, fallback, extras)

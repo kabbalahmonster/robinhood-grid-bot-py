@@ -1591,8 +1591,11 @@ Umbra is Robinhood-only. It uses `/api/rh/quote` and `/api/rh/build` and pins
 every build to UmbraRH `0xfC830D7861C5ceBefF2272a03aacEf9baC8A7603`.
 Only `ExecuteSim` or `Verified` quotes are admitted; malformed calldata,
 unexpected routers/native value, or missing output floors fail closed. Its 1%
-fee is already in output. The flat 3M provider gas recommendation is ignored;
-gate economics require local `eth_estimateGas`. Because the public API is
+fee is already in output. The flat 3M provider gas recommendation is never
+final execution authority. An unapproved sell is provisionally scored with a
+conservative 300k swap budget plus locally estimated exact-approval gas; only
+the provisional winner is approved, rebuilt, and required to pass exact local
+`eth_estimateGas`. Because the public API is
 rate-limited and the router lacks a completed external audit, canary it first:
 `ROUTE_TOURNAMENT_PROVIDERS=uniswap,sushiswap,umbra`.
 
@@ -1600,7 +1603,9 @@ LI.FI can likewise participate as a fully executable contestant with
 `ROUTE_TOURNAMENT_PROVIDERS=uniswap,sushiswap,lifi`. Its API key is mandatory.
 The adapter applies the tournament's absolute socket deadline, requires exact
 input amount, chain, native value, target and calldata, and then uses local gas
-simulation like every other gate candidate. Begin with `native` settlement in
+simulation like every other gate candidate. An unapproved sell is provisionally
+scored with locally estimated reusable-approval gas; only a winning LI.FI route
+is approved, refreshed, and exactly simulated. Begin with `native` settlement in
 shadow mode: LI.FI adds routing breadth but overlaps underlying DEX liquidity
 and increases provider/RPC traffic.
 
@@ -1633,11 +1638,15 @@ requires `ROUTE_TOURNAMENT_CANARY=true`. Tournament providers must be available
 through the configured primary/fallback pair; an included Uniswap provider
 requires `UNISWAP_API_KEY`. The gate uses a six-second default preflight budget,
 collects every configured identity, and
-permits only prepared calldata with fresh local
-`eth_estimateGas`, and refreshes the RPC gas price again at the final broadcast
-boundary. A candidate needing an unproven approval, or a WETH conversion that
-cannot be locally estimated, is rejected instead of receiving a preset gas
-budget. WETH buys are staged because their swap cannot be simulated before the
+permits only prepared calldata with fresh local `eth_estimateGas` at final
+authorization, and refreshes the RPC gas price again at the broadcast boundary.
+Unapproved LI.FI and Umbra sells are staged: provisional ranking includes a
+provider/conservative swap estimate plus dynamically estimated local approval
+gas. Only the provisional winner is approved, then refreshed and required to
+pass exact local simulation and every final guard. Losing candidates are never
+approved. If a refreshed winner deteriorates, its swap is aborted and only the
+approval gas is spent. A WETH conversion that cannot be locally estimated is
+rejected. WETH buys are staged because their swap cannot be simulated before the
 wallet owns the future wrapped principal: ranking includes the provider swap
 estimate plus locally estimated wrap and exact-amount approval gas, then the
 winner is wrapped/approved, refreshed, and locally simulated before swap
