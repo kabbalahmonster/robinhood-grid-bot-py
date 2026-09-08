@@ -308,6 +308,57 @@ def test_execution_preflight_rejects_unsimulatable_sushi_approval_handshake():
     assert all(row["projected_total_gas_wei"] is None for row in sushi_rows)
 
 
+@pytest.mark.parametrize("provider_gas,expected_swap,expected_basis", [
+    (275000, 275000, "provisional_provider_gas_pending_post_approval_local_simulation"),
+    (0, 300000, "provisional_conservative_gas_pending_post_approval_local_simulation"),
+])
+def test_execution_preflight_stages_unapproved_lifi_and_umbra_sells(
+        provider_gas, expected_swap, expected_basis):
+    q = quote(gas=provider_gas, allowance_target="spender", to="router", data="0xdead")
+    sell_context = context("sell", execution_preflight=True)
+    sell_context["min_profit"] = -100
+    row = score_candidate(
+        q, "umbra", "native", sell_context,
+        allowance_probe=lambda _token, _spender: 0,
+        gas_estimate=0, approval_gas_limit=47000,
+        require_local_gas=True, require_dynamic_setup_gas=True,
+    )
+
+    assert row["validation_level"] == "quote_only"
+    assert row["rejections"] == []
+    assert row["staged_approval_required"] is True
+    assert row["execution_eligible"] is False
+    assert row["gas_basis"] == expected_basis
+    assert row["approval_assumption"] == "dynamic_local_approval_estimate"
+    assert row["gas_components_wei"]["approval"] == str(47000 * 10**6)
+    assert row["gas_components_wei"]["swap"] == str(expected_swap * 10**6)
+
+
+def test_execution_preflight_does_not_stage_unknown_or_sufficient_allowance():
+    q = quote(allowance_target="spender", to="router", data="0xdead")
+    for allowance in (None, 10**15):
+        row = score_candidate(
+            q, "lifi", "native", context("sell", execution_preflight=True),
+            allowance_probe=lambda _token, _spender, value=allowance: value,
+            gas_estimate=0, approval_gas_limit=47000,
+            require_local_gas=True, require_dynamic_setup_gas=True,
+        )
+        assert row["validation_level"] == "rejected"
+        assert row["rejections"] == ["local_gas_simulation_failed"]
+        assert "staged_approval_required" not in row
+
+
+def test_execution_preflight_staging_requires_dynamic_approval_estimate():
+    q = quote(allowance_target="spender", to="router", data="0xdead")
+    row = score_candidate(
+        q, "lifi", "native", context("sell", execution_preflight=True),
+        allowance_probe=lambda _token, _spender: 0,
+        gas_estimate=0, require_local_gas=True, require_dynamic_setup_gas=True,
+    )
+    assert row["validation_level"] == "rejected"
+    assert row["rejections"] == ["approval_required_before_local_simulation"]
+
+
 def test_execution_preflight_rejects_failed_uniswap_preparation_without_gas_fallback():
     clients = {name: Mock() for name in ("uniswap", "sushiswap")}
     indicative = QuoteResult(success=True, buy_amount=2 * 10**15, sell_amount=10**15,
@@ -1081,6 +1132,48 @@ def test_selected_route_is_freshly_requoted_and_locally_estimated_before_setup()
     )
     b.wallet._send_transaction.assert_not_called()
     b.wallet.approve_token.assert_not_called()
+
+
+def test_staged_sell_winner_is_handed_off_without_impossible_preapproval_simulation():
+    b = bot("gate")
+    b.wallet.address = "0x3d8c491b7fe2d43468b5e45162e374719003ef16"
+    b.config.token_address = "token"
+    b.config.weth_address = "weth"
+    b.config.use_eth_trading = True
+    b.trade_token_address = "native"
+    b._swap_slippage_fraction = Mock(return_value=0.01)
+    fresh_quote = QuoteResult(
+        success=True, sell_amount=10**15, buy_amount=2 * 10**15,
+        to="0x8e6fd69a77e88ee20ba4b4fbd59dfcda3ec0e98a", data="0xdead",
+        allowance_target="0xfc830d7861c5cebeff0000000000000000000000",
+    )
+    selected = SimpleNamespace(
+        name="umbra", build_swap_transaction=Mock(return_value=fresh_quote),
+        capabilities=SimpleNamespace(quote_requires_preparation=False),
+    )
+    b.provider = SimpleNamespace(provider_for_name=Mock(return_value=selected))
+
+    validated = b._revalidate_selected_route(
+        {"provider": "umbra", "settlement": "native",
+         "staged_approval_required": True},
+        "sell", 10**15,
+    )
+
+    assert validated["provider"] is selected
+    assert validated["staged_approval"] is True
+    assert getattr(validated["quote"], "_tournament_staged_approval") is True
+    b.wallet.w3.eth.estimate_gas.assert_not_called()
+    b.wallet.approve_token.assert_not_called()
+
+
+def test_staged_lifi_approval_remains_reusable_but_umbra_is_exact():
+    b = bot("gate")
+    b.provider = SimpleNamespace(
+        capabilities=SimpleNamespace(exact_amount_approval=False),
+    )
+    assert b._provider_approval_amount(123) == 2**256 - 1
+    b.provider.capabilities.exact_amount_approval = True
+    assert b._provider_approval_amount(123) == 123
 
 
 

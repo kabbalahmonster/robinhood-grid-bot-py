@@ -126,6 +126,11 @@ def select_execution_candidate(comparison, direction):
         target = eligible[(provider, settlement)][1].get("allowance_target")
         if target:
             selection["allowance_target"] = target
+    if eligible[(provider, settlement)][1].get("staged_approval_required") is True:
+        selection["staged_approval_required"] = True
+        target = eligible[(provider, settlement)][1].get("allowance_target")
+        if target:
+            selection["allowance_target"] = target
     return selection
 
 
@@ -311,13 +316,6 @@ def score_candidate(quote, provider, settlement, context, *, allowance_probe=Non
         row["rejections"] = ["provider_swap_gas_estimate_missing"]
         row["gas_basis"] = "staged_setup_requires_provider_swap_estimate"
         return row
-    if require_local_gas and local_gas <= 0 and not staged_weth_buy:
-        row["rejections"] = ["local_gas_simulation_failed"]
-        row["provider_gas_estimate"] = provider_gas
-        row["gas_basis"] = "local_simulation_required"
-        return row
-    swap_gas = local_gas or provider_gas or _FALLBACK_SWAP_GAS[c["direction"]]
-
     # Allowance lookup is for the actual asset being sold. Settlement only
     # determines wrap/unwrap economics; it is never the sell-token approval.
     token_for_allowance = c.get("token_address") if c["direction"] == "sell" else c.get("token_address")
@@ -343,11 +341,39 @@ def score_candidate(quote, provider, settlement, context, *, allowance_probe=Non
     if approval_gas and approval_gas_limit:
         approval_gas = int(approval_gas_limit)
         approval_label = "dynamic_local_approval_estimate"
+    # LI.FI and Umbra sell calldata necessarily reverts during eth_estimateGas
+    # until their spender can transfer the token. Keep such a route in the
+    # tournament only as an explicitly staged candidate: its provisional score
+    # uses the provider/conservative swap budget plus a *locally estimated*
+    # approval transaction. Provider gas can rank it, but can never authorize
+    # the eventual swap; the winner is approved, rebuilt and locally simulated
+    # at the execution boundary.
+    staged_approval = bool(
+        require_local_gas and c["direction"] == "sell"
+        and provider in {"lifi", "umbra"} and spender
+        and allowance is not None and allowance < c["amount"]
+        and approval_gas > 0
+        and local_gas <= 0 and approval_gas_limit
+    )
+    if (require_dynamic_setup_gas and c["direction"] == "sell"
+            and provider in {"lifi", "umbra"} and spender
+            and allowance is not None and allowance < c["amount"]
+            and approval_gas and not approval_gas_limit):
+        row["rejections"] = ["approval_required_before_local_simulation"]
+        row["approval_assumption"] = approval_label
+        row["gas_basis"] = "dynamic_setup_required"
+        return row
+    if require_local_gas and local_gas <= 0 and not staged_weth_buy and not staged_approval:
+        row["rejections"] = ["local_gas_simulation_failed"]
+        row["provider_gas_estimate"] = provider_gas
+        row["gas_basis"] = "local_simulation_required"
+        return row
     if require_dynamic_setup_gas and approval_gas and not approval_gas_limit:
         row["rejections"] = ["approval_required_before_local_simulation"]
         row["approval_assumption"] = approval_label
         row["gas_basis"] = "dynamic_setup_required"
         return row
+    swap_gas = local_gas or provider_gas or _FALLBACK_SWAP_GAS[c["direction"]]
 
     # Wrap/unwrap accounting for native <-> WETH conversion.
     conversion = settlement == "weth" if c["native_trading"] else settlement == "native"
@@ -435,6 +461,15 @@ def score_candidate(quote, provider, settlement, context, *, allowance_probe=Non
         row["staged_weth_buy"] = True
         row["allowance_target"] = getattr(quote, "allowance_target", None)
         row["gas_basis"] = "provider_estimate_pending_post_setup_local_simulation"
+    if staged_approval:
+        row["staged_approval_required"] = True
+        row["allowance_target"] = spender
+        row["candidate_state"] = "approval_required"
+        row["gas_basis"] = (
+            "provisional_provider_gas_pending_post_approval_local_simulation"
+            if provider_gas > 0
+            else "provisional_conservative_gas_pending_post_approval_local_simulation"
+        )
     protocol = getattr(quote, "protocol_hint", None)
     if provider == "uniswap" and protocol in {"V4", "V3", "V2"}:
         row["protocol"] = protocol
@@ -663,6 +698,10 @@ def collect(config, address, context, client_factory=None,
                         except Exception:
                             conversion_gas = 0
                         try:
+                            # Internal-only identity used to build the same
+                            # approval amount execution will send (Umbra exact,
+                            # LI.FI reusable). It is never exposed in telemetry.
+                            setattr(quote, "_tournament_provider", name)
                             approval_gas = int(approval_gas_estimate_provider(
                                 quote, settlement
                             )) if approval_gas_estimate_provider else 0
