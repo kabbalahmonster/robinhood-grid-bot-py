@@ -106,6 +106,57 @@ class GasAwareProfitTests(unittest.TestCase):
             "value": 0,
         })
 
+    def test_required_dynamic_gas_fails_closed_without_provider_fallback(self):
+        bot = self.make_bot()
+        bot.provider = SimpleNamespace(name="umbra")
+        bot.wallet.address = "0x0000000000000000000000000000000000000001"
+        quote = SimpleNamespace(
+            gas=300_000, gas_price=0,
+            to="0x0000000000000000000000000000000000000002",
+            data="0x1234", value=0,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "umbra final gas simulation failed"):
+            bot._swap_gas_fields(quote, require_simulation=True)
+
+    def test_local_dynamic_gas_estimate_is_reused_for_same_calldata(self):
+        bot = self.make_bot()
+        bot.wallet.address = "0x0000000000000000000000000000000000000001"
+        bot.wallet.w3.eth.estimate_gas.side_effect = None
+        bot.wallet.w3.eth.estimate_gas.return_value = 123_456
+        quote = SimpleNamespace(
+            gas=300_000, gas_price=0,
+            to="0x0000000000000000000000000000000000000002",
+            data="0x1234", value=0,
+        )
+
+        first = bot._swap_gas_fields(quote, require_simulation=True)
+        second = bot._swap_gas_fields(quote, require_simulation=True)
+
+        self.assertEqual(first, second)
+        self.assertEqual(first[0], 123_456)
+        bot.wallet.w3.eth.estimate_gas.assert_called_once()
+
+        quote.data = "0x5678"
+        bot.wallet.w3.eth.estimate_gas.return_value = 130_000
+        refreshed = bot._swap_gas_fields(quote, require_simulation=True)
+        self.assertEqual(refreshed[0], 130_000)
+        self.assertEqual(bot.wallet.w3.eth.estimate_gas.call_count, 2)
+
+    def test_exact_amount_provider_never_requests_unlimited_approval(self):
+        bot = self.make_bot()
+        bot.provider = SimpleNamespace(
+            capabilities=SimpleNamespace(exact_amount_approval=True),
+        )
+        self.assertEqual(bot._provider_approval_amount(987_654), 987_654)
+
+    def test_normal_provider_retains_unlimited_approval_behavior(self):
+        bot = self.make_bot()
+        bot.provider = SimpleNamespace(
+            capabilities=SimpleNamespace(exact_amount_approval=False),
+        )
+        self.assertEqual(bot._provider_approval_amount(987_654), 2**256 - 1)
+
     def test_final_profit_guard_can_use_exact_broadcast_gas_plan(self):
         bot = self.make_bot()
         quote = SimpleNamespace(gas=200_000, gas_price=400_000_000)

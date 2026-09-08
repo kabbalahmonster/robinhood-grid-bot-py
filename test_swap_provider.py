@@ -36,6 +36,8 @@ def test_capabilities_are_provider_owned():
     assert PROVIDERS["sushiswap"].capabilities.refresh_after_approval is True
     assert PROVIDERS["sushiswap"].capabilities.api_managed_approval is False
     assert PROVIDERS["umbra"].capabilities.refresh_after_approval is True
+    assert PROVIDERS["umbra"].capabilities.requires_dynamic_gas is True
+    assert PROVIDERS["umbra"].capabilities.exact_amount_approval is True
 
 
 class Result:

@@ -18,6 +18,8 @@ class ProviderCapabilities:
     refresh_after_approval: bool = False
     api_managed_approval: bool = False
     quote_requires_preparation: bool = False
+    requires_dynamic_gas: bool = False
+    exact_amount_approval: bool = False
 
 
 class SwapProvider:
@@ -232,6 +234,8 @@ PROVIDERS = {
     )),
     "umbra": ProviderDefinition("umbra_api", "UmbraAPIClient", ProviderCapabilities(
         refresh_after_approval=True,
+        requires_dynamic_gas=True,
+        exact_amount_approval=True,
     )),
 }
 
