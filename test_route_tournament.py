@@ -721,6 +721,16 @@ def test_gate_mode_requires_explicit_canary_flag():
         cfg.validate()
 
 
+def test_gridless_tournament_uses_exact_post_moonbag_amount_and_cost():
+    b = bot("gate")
+    b.config.moonbag_percentage = 1
+
+    amount, cost = b._gridless_sell_terms({"balance": 10_001, "cost_wei": 5_000})
+
+    assert amount == 9_901
+    assert cost == 5_000 * 9_901 // 10_001
+
+
 def test_mode_parsing_and_default(monkeypatch, tmp_path):
     # Avoid loading a checkout/operator .env or requiring live credentials.
     with patch("config.load_dotenv"), patch.object(BotConfig, "validate"):
@@ -728,6 +738,8 @@ def test_mode_parsing_and_default(monkeypatch, tmp_path):
         assert load_config().route_tournament_mode == "off"
         monkeypatch.setenv("ROUTE_TOURNAMENT_MODE", " SHADOW ")
         assert load_config().route_tournament_mode == "shadow"
+        monkeypatch.setenv("UNISWAP_PROTOCOL_CACHE_TTL_SECONDS", "420")
+        assert load_config().uniswap_protocol_cache_ttl_seconds == 420
 
 
 def test_execution_selector_accepts_one_valid_route_from_complete_accounting():

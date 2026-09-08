@@ -134,6 +134,7 @@ class BotConfig:
     uniswap_cooldown_base_seconds: int
     uniswap_cooldown_max_seconds: int
     uniswap_rate_state_file: str
+    uniswap_protocol_cache_ttl_seconds: float
     uniswap_router: str  # Universal Router address for token approvals
     
     # Gridless Trading Mode
@@ -437,6 +438,7 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
         uniswap_cooldown_base_seconds=int(os.getenv("UNISWAP_COOLDOWN_BASE_SECONDS", "30")),
         uniswap_cooldown_max_seconds=int(os.getenv("UNISWAP_COOLDOWN_MAX_SECONDS", "900")),
         uniswap_rate_state_file=os.getenv("UNISWAP_RATE_STATE_FILE", ""),
+        uniswap_protocol_cache_ttl_seconds=float(os.getenv("UNISWAP_PROTOCOL_CACHE_TTL_SECONDS", "300")),
         
         # Gridless Trading Mode
         use_gridless=os.getenv("USE_GRIDLESS", "true").lower() == "true",

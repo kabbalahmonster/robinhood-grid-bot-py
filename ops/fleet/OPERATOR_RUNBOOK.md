@@ -89,3 +89,26 @@ genuine 429 rate limits. DoomDash exposes both active sell checks and buys
 blocked by projected gas, including the actual quote source. Once a hash exists,
 never manually repeat a transaction without checking its receipt and local
 audit history.
+
+## Tournament canary
+
+Keep the fleet on `ROUTE_TOURNAMENT_MODE=off` by default. For a monitored
+single-bot trial, preview and apply both guarded values together, then restart
+only that bot:
+
+```bash
+update-variable --allow-add --only earn \
+  ROUTE_TOURNAMENT_MODE=gate ROUTE_TOURNAMENT_CANARY=true
+update-variable --apply --allow-add --only earn \
+  ROUTE_TOURNAMENT_MODE=gate ROUTE_TOURNAMENT_CANARY=true
+restart-bot EARN
+```
+
+`shadow` collects read-only comparison telemetry; `gate` gives route authority
+only to a freshly re-quoted and locally simulated winner. A displayed winner
+may still be safely skipped during revalidation. Watch latency, 429s, timeout
+rejections, gas, and successful buy/sell receipts before expanding the trial.
+Rollback is `ROUTE_TOURNAMENT_MODE=off` and
+`ROUTE_TOURNAMENT_CANARY=false` on that same bot. See the route-tournament
+section of the main README and the fleet README for accounting and timeout
+details.

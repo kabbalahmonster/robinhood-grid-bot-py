@@ -67,8 +67,9 @@ class TestUniswapAPIClient(unittest.TestCase):
             },
         )
 
+        client = UniswapAPIClient(config)
         with patch("uniswap_api.requests.post", return_value=response) as post:
-            result = UniswapAPIClient(config).get_quote(
+            result = client.get_quote(
                 sell_token="0x0000000000000000000000000000000000000001",
                 buy_token="0x0000000000000000000000000000000000000002",
                 sell_amount=100,
@@ -79,6 +80,10 @@ class TestUniswapAPIClient(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertEqual(post.call_count, 1)
         self.assertEqual(json.loads(post.call_args.kwargs["data"])["protocols"], ["V4"])
+        self.assertEqual(client.protocol_hint_for(
+            "0x0000000000000000000000000000000000000001",
+            "0x0000000000000000000000000000000000000002",
+        ), "V4")
 
     def test_stale_read_only_protocol_hint_falls_back_to_default_routing(self):
         config = SimpleNamespace(

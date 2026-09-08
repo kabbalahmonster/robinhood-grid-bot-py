@@ -1141,6 +1141,39 @@ remains atomic across the valid subset. If combined with `--restart`, the
 normal fleet-wide restart still includes skipped bots, which retain their old
 environment.
 
+### Route-tournament canary rollout
+
+Tournament mode defaults to `off`. `shadow` records read-only comparisons but
+adds provider/RPC traffic. `gate` can select and execute a freshly revalidated
+Uniswap or Sushi native/WETH route; configuration validation requires the
+separate `ROUTE_TOURNAMENT_CANARY=true` acknowledgement. Start with exactly one
+monitored bot, never a fleet-wide gate rollout.
+
+Preview and then enable a single canary whose `.env` may predate the variables:
+
+```bash
+update-variable --allow-add --only earn \
+  ROUTE_TOURNAMENT_MODE=gate ROUTE_TOURNAMENT_CANARY=true
+update-variable --apply --allow-add --only earn \
+  ROUTE_TOURNAMENT_MODE=gate ROUTE_TOURNAMENT_CANARY=true
+restart-bot EARN
+```
+
+Monitor quote latency, rate limits, rejection reasons, gas estimates, and buy
+and sell results. A displayed round winner can still be refused when its
+mandatory fresh execution quote times out, fails simulation, or falls below the
+gas-aware profit floor. Roll back only the canary with:
+
+```bash
+update-variable --apply --only earn \
+  ROUTE_TOURNAMENT_MODE=off ROUTE_TOURNAMENT_CANARY=false
+restart-bot EARN
+```
+
+Use `shadow` with `ROUTE_TOURNAMENT_CANARY=false` for comparison telemetry
+without tournament route authority. Promote beyond one bot only after a
+monitored window confirms acceptable provider quota and execution behavior.
+
 ## Backing up fleet private keys
 
 `backup-private-keys` reads `PRIVATE_KEY` and `TOKEN_SYMBOL` from every

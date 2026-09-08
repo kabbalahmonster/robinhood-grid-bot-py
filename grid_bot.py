@@ -1429,6 +1429,7 @@ class GridBot:
             try:
                 if not validated.get("staged_weth_buy"):
                     setattr(validated["quote"], "_tournament_gate_prepared", True)
+                setattr(validated["quote"], "weth_fallback", validated["weth_fallback"])
             except Exception:
                 logger.warning("Tournament route preparation marker unavailable; execution skipped")
                 from zero_x import QuoteResult
@@ -2315,6 +2316,18 @@ class GridBot:
         """Return non-negative capacity from the current gridless state."""
         return max(0, self.config.max_active_positions - len(positions))
 
+    def _gridless_sell_terms(self, position):
+        """Return the exact post-moonbag sell amount and proportional cost."""
+        balance = int(position.get("balance", 0) or 0)
+        cost_wei = int(position.get("cost_wei", 0) or 0)
+        if cost_wei <= 0:
+            cost_wei = int(position.get("cost", 0) or 0) * 10**9
+        moonbag_pct = float(getattr(self.config, "moonbag_percentage", 0) or 0)
+        moonbag_amount = int(balance * moonbag_pct / 100) if moonbag_pct > 0 else 0
+        sell_amount = max(0, balance - moonbag_amount)
+        sold_cost_wei = cost_wei * sell_amount // balance if balance > 0 else 0
+        return sell_amount, sold_cost_wei
+
     def _check_buys_gridless(self, price):
         """Gridless buy logic - buy when no positions or top position P&L <= threshold."""
         from gridless import should_buy, load_positions, add_position
@@ -2665,10 +2678,14 @@ class GridBot:
             return
         self._queue_route_shadow("sell", balance, int(pos.get("cost_wei") or pos.get("cost", 0) * 10**9))
             
+        # Quote the exact amount that execution will sell. Previously the gate
+        # first ran a full-position tournament, then discarded its winner and
+        # ran a second tournament after applying the moonbag percentage. That
+        # produced a real-looking crown which had no authority to execute.
+        sell_amount, sold_cost_wei = self._gridless_sell_terms(pos)
         quote, weth_fallback = self._actionable_quote_with_weth_fallback(
             sell_token=self.config.token_address, buy_token=self.trade_token_address,
-            sell_amount=balance, direction="sell",
-            sold_cost_wei=int(pos.get("cost_wei") or pos.get("cost", 0) * 10**9),
+            sell_amount=sell_amount, direction="sell", sold_cost_wei=sold_cost_wei,
         )
         
         if not quote.success:
@@ -2757,11 +2774,7 @@ class GridBot:
         
         # Check min profit requirement against individual position quote
         # Support both cost_wei (new) and cost (legacy nano-ETH)
-        cost_wei = pos.get('cost_wei', 0)
-        if cost_wei <= 0 and 'cost' in pos:
-            old_cost = pos.get('cost', 0)
-            if old_cost > 0:
-                cost_wei = old_cost * 10**9
+        cost_wei = sold_cost_wei
         cost_eth = cost_wei / 1e18
         min_profit = getattr(self.config, 'min_profit_percent', 1.5)
         min_profit_eth = cost_eth * (min_profit / 100)
@@ -2829,7 +2842,8 @@ class GridBot:
             sell_tokens = tokens
             moonbag_tokens = 0
         
-        sold_cost_eth = cost_eth * (sell_tokens / tokens) if tokens > 0 else 0
+        _, sold_cost_wei = self._gridless_sell_terms(pos)
+        sold_cost_eth = sold_cost_wei / 10**18
         self._queue_route_shadow("sell", sell_amount, int(round(sold_cost_eth * 10**18)))
         expected_eth = sell_tokens * price
         profit_eth = expected_eth - sold_cost_eth
@@ -2841,9 +2855,14 @@ class GridBot:
         logger.info(f"   Buy price: {buy_price:.10f}, Current: {price:.10f}")
         logger.info(f"   Expected: {expected_eth:.6f} {self.trade_token_name}, Profit: {profit_eth:.6f} ({pnl:+.2f}%)")
         
-        # Gate mode always revalidates the exact final moonbag amount; it must
-        # never reuse a pre-trigger quote. Shadow/off retain the existing path.
-        if getattr(self.config, "route_tournament_mode", "off") == "gate":
+        quoted_sell_amount = int(getattr(pre_fetched_quote, "sell_amount", 0) or 0)
+        if pre_fetched_quote and quoted_sell_amount == sell_amount:
+            # The caller already ran the gate and revalidated this exact
+            # post-moonbag amount. Reuse it; a second tournament creates a
+            # misleading first winner and doubles provider load.
+            quote = pre_fetched_quote
+            weth_fallback = bool(getattr(quote, "weth_fallback", False))
+        elif getattr(self.config, "route_tournament_mode", "off") == "gate":
             quote, weth_fallback = self._actionable_quote_with_weth_fallback(
                 sell_token=self.config.token_address, buy_token=self.trade_token_address,
                 sell_amount=sell_amount, direction="sell",

@@ -104,10 +104,13 @@ python grid_bot.py
 | `UNISWAP_RATE_LIMIT_RPS` | No | 4 | Fleet-wide request pace for one Uniswap key; safely below the usual 6 RPS allocation |
 | `UNISWAP_COOLDOWN_BASE_SECONDS` | No | 30 | Initial shared cooldown after Uniswap HTTP 429 |
 | `UNISWAP_COOLDOWN_MAX_SECONDS` | No | 900 | Maximum shared exponential cooldown after repeated Uniswap HTTP 429s |
+| `UNISWAP_PROTOCOL_CACHE_TTL_SECONDS` | No | 300 | Seconds to retain protocol-family discovery only; bounded to 30-3600 and never caches quote economics |
 | `UNISWAP_RATE_STATE_FILE` | No | automatic | Optional shared state path; blank derives an owner-only runtime file from the API-key hash |
 | `SUSHI_API_KEY` | No | empty | Optional Sushi portal API key; the public v7 API works without one |
 | `SWAP_PROVIDER` | No | empty | Explicit provider: `0x`, `lifi`, `uniswap`, or `sushiswap`; empty uses legacy flags |
 | `SWAP_FALLBACK_PROVIDER` | No | sushiswap | Immediate per-operation fallback after retryable pre-broadcast failures; empty disables fallback |
+| `ROUTE_TOURNAMENT_MODE` | No | off | Route comparison mode: `off`, read-only `shadow`, or guarded one-bot `gate` |
+| `ROUTE_TOURNAMENT_CANARY` | No | false | Explicit safety acknowledgement required by `gate`; not permission for fleet-wide rollout |
 | `USE_LI_FI` | No | false | Use LI.FI instead of 0x for swaps |
 | `USE_UNISWAP_API` | No | true | Legacy Uniswap selection used when `SWAP_PROVIDER` is empty |
 | **Token Configuration** ||||
@@ -1563,10 +1566,13 @@ each actionable operation adds at most four candidate calls / ten HTTP requests
 with both providers, or two with Sushi alone. A budget snapshot also reads the
 native balance and normal gas price, plus WETH balance in WETH trading mode;
 the wallet's existing RPC failover behavior applies. Existing execution traffic
-is additional. Collection has an 8-second budget: no new candidate request is
-started once it expires, and skipped candidates are marked `observation_deadline`.
-An already-started provider HTTP call still obeys that client's timeout, so
-shadow remains observational rather than zero-impact infrastructure. `elapsed_ms`
+is additional. Shadow collection has a four-second shared budget: no new
+candidate request is started once it expires, and skipped candidates are marked
+`observation_deadline`. An already-started provider HTTP call still obeys that
+client's timeout. Late candidates are rejected as `observation_timeout` and
+appear with blank economics on the dashboard; `-` means no fresh valid value
+arrived in that round, not a zero-value quote. Shadow remains observational
+rather than zero-impact infrastructure. `elapsed_ms`
 measures total collection time. Independent observer clients do not modify
 execution-client state, but traffic consumes upstream quota and Uniswap's shared
 limiter, so subsequent operation timing/fallback can still be affected.
@@ -1574,8 +1580,9 @@ limiter, so subsequent operation timing/fallback can still be affected.
 Dashboard `buy_attempt.route_comparison` and `sell_attempt.route_comparison`
 contain candidates, fixed rejection codes, provider, settlement, raw quoted
 output, gas components, projected score, hypothetical winner, runner-up score
-delta and elapsed time. Sell data expires next round; buy data survives until
-the following report because buys run after reporting. No raw provider response,
+delta and elapsed time. Sell data expires next round; buy data is shown in the
+following report because buys run after reporting, then expires unless a new
+buy tournament occurs. No raw provider response,
 exception text, address, calldata or credential is included in this payload.
 
 All successful candidates are **quote_only**, including responses containing
@@ -1597,7 +1604,8 @@ observations still apply that floor, without affecting actual stoploss behavior.
 `ROUTE_TOURNAMENT_MODE=gate` enables one-bot canary execution and additionally
 requires `ROUTE_TOURNAMENT_CANARY=true`. Both Uniswap and Sushi must be the
 configured primary/fallback pair and `UNISWAP_API_KEY` must be present. The gate
-collects all four identities, permits only prepared calldata with fresh local
+uses a six-second shared preflight budget, collects all four identities, and
+permits only prepared calldata with fresh local
 `eth_estimateGas`, and refreshes the RPC gas price again at the final broadcast
 boundary. A candidate needing an unproven approval, or a WETH conversion that
 cannot be locally estimated, is rejected instead of receiving a preset gas
@@ -1605,7 +1613,25 @@ budget. WETH buys are staged because their swap cannot be simulated before the
 wallet owns the future wrapped principal: ranking includes the provider swap
 estimate plus locally estimated wrap and exact-amount approval gas, then the
 winner is wrapped/approved, refreshed, and locally simulated before swap
-broadcast. `ROUTE_TOURNAMENT_MODE=execute` remains invalid.
+broadcast. Selection never authorizes a stale observation: the chosen identity
+is freshly quoted and validated again before execution. The bot skips the trade
+if that refresh times out, disappears, fails simulation, or no longer clears the
+gas-aware sell floor. A crowned round winner is therefore not a promise that a
+transaction will be sent; the next polling round may try again.
+
+Gridless moonbag sells tournament only the exact amount that can execute after
+the configured moonbag retention is deducted. The gate does not crown a
+full-position quote and then rerun the contest for a smaller sale; the selected
+quote, proportional sold cost basis, profit floor, and final transaction all
+refer to the same token amount.
+
+Uniswap caches only the discovered protocol family (`V4`, `V3`, or `V2`) for a
+token pair and quote type, not price, output, calldata, gas, or eligibility. The
+default lifetime is five minutes and is configurable with
+`UNISWAP_PROTOCOL_CACHE_TTL_SECONDS` (internally bounded to 30 seconds through
+one hour). It avoids repeating protocol discovery, but every tournament obtains
+fresh quote economics; if the cached protocol stops quoting it is discarded.
+`ROUTE_TOURNAMENT_MODE=execute` remains invalid.
 
 For a ROBINVAULT canary, record the current revision/config and baseline
 actionable request counts, latency, gas and route/fallback logs. Enable only

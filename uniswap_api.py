@@ -407,7 +407,8 @@ class UniswapAPIClient:
             response = None
             cache_key = self._protocol_cache_key(payload)
             for routing_attempt in range(1, routing_attempts + 1):
-                cached_protocol = self._cached_protocol(cache_key) or preferred_protocol
+                remembered_protocol = self._cached_protocol(cache_key)
+                cached_protocol = remembered_protocol or preferred_protocol
                 if cached_protocol:
                     cooldown_error = self._cooldown_error()
                     if cooldown_error is not None:
@@ -425,6 +426,8 @@ class UniswapAPIClient:
                         self._forget_protocol(cache_key, cached_protocol)
                     else:
                         if response.status_code == 200:
+                            if remembered_protocol is None and cached_protocol == preferred_protocol:
+                                self._remember_protocol(cache_key, cached_protocol)
                             break
                         self._forget_protocol(cache_key, cached_protocol)
 
