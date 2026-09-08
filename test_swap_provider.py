@@ -253,3 +253,40 @@ def test_sushi_primary_uses_uniswap_as_reverse_default_fallback():
     assert isinstance(provider, FallbackSwapProvider)
     assert provider.primary.name == "sushiswap"
     assert provider.fallback.name == "uniswap"
+
+
+def test_tournament_providers_remain_resolvable_without_fallback():
+    class DummyClient:
+        def __init__(self, config):
+            pass
+
+    settings = config(
+        swap_provider="0x",
+        swap_fallback_provider="",
+        route_tournament_providers=("uniswap", "sushiswap"),
+    )
+    with patch.object(ProviderDefinition, "load_client_class", return_value=DummyClient):
+        provider = create_swap_provider(settings)
+
+    assert isinstance(provider, FallbackSwapProvider)
+    assert provider.fallback is None
+    assert provider.provider_for_name("0x") is provider.primary
+    assert provider.provider_for_name("uniswap").name == "uniswap"
+    assert provider.provider_for_name("sushiswap").name == "sushiswap"
+
+
+def test_tournament_only_providers_never_become_automatic_fallbacks():
+    primary = SwapProvider(
+        "0x", Client([Result(False, "status 503")]), PROVIDERS["0x"].capabilities,
+    )
+    tournament_only = SwapProvider(
+        "sushiswap", Client([Result(True)]), PROVIDERS["sushiswap"].capabilities,
+    )
+    provider = FallbackSwapProvider(primary, None, (tournament_only,))
+
+    result = provider.run_with_fallback(
+        lambda: provider.build_swap_transaction(), "sell",
+    )
+
+    assert result.success is False
+    assert len(tournament_only.client.results) == 1
