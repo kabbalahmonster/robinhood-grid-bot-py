@@ -50,6 +50,26 @@ class FleetDocumentationTests(unittest.TestCase):
                     guide,
                 )
 
+    def test_high_risk_or_specialized_tools_have_workflow_sections(self):
+        guide = (FLEET / "README.md").read_text()
+        required_workflows = {
+            "reconcile-position-balances": (
+                "## Reconciling tracked positions with wallet balances",
+                "--apply --confirm-bot-stopped",
+                "data/position_balance_reconciliations.json",
+                ".bak.reconcile.*",
+            ),
+            "probe-uniswap-gateway.py": (
+                "The older `probe-uniswap-gateway.py`",
+                "--production --rounds 3",
+                "can consume shared quota",
+            ),
+        }
+        for command, requirements in required_workflows.items():
+            with self.subTest(command=command):
+                for requirement in requirements:
+                    self.assertIn(requirement, guide)
+
 
 if __name__ == "__main__":
     unittest.main()

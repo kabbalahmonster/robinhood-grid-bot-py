@@ -119,3 +119,28 @@ For a larger rollout, begin with `POLL_INTERVAL_SECONDS=12` and the defaults
 `6`. Increase polling toward 15-20 seconds if provider 429s or overlapping
 rounds appear. Native-only settlement halves tournament candidates but removes
 WETH fallback and should be an intentional liquidity tradeoff.
+
+## Position-balance reconciliation
+
+When `fleet-doctor`, inventory, or bot logs show tracked managed-token balances
+above the wallet's on-chain balance, preview the repair before stopping:
+
+```bash
+reconcile-position-balances --only BOTNAME
+```
+
+Review every proposed raw-unit haircut. Stop that bot, verify there is no
+unresolved broadcast/settlement, then apply and inspect inventory before
+restart:
+
+```bash
+stop-bot BOTNAME
+reconcile-position-balances --only BOTNAME --apply --confirm-bot-stopped
+fleet-inventory --only BOTNAME
+restart-bot BOTNAME
+```
+
+The tool proportionally reduces position balances to wallet reality, preserves
+cost basis, backs up changed ledgers, and writes a reconciliation audit record.
+It never assigns wallet surplus or recovers an omitted buy. See the fleet README
+for multi-bot partial-failure behavior and backup restoration guidance.

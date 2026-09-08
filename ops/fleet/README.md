@@ -640,6 +640,25 @@ python3 ops/fleet/probe_uniswap_route_matrix.py \
 
 It emits a baseline plus one-variable variants for AMM-only and individual V2/V3/V4 protocol routing, ERC20-ETH negotiation, connection, user agent, and optionally slippage. It stops early on rate limits, retry-after responses, repeated 5xx, or repeated transport failures. Use an explicit public `--swapper` to avoid loading signing material.
 
+The older `probe-uniswap-gateway.py` is a narrower diagnostic for reproducing
+gateway header, request-shape, authentication, and transport differences. Run
+it from one stopped checkout only; it loads `.env`, derives the public swapper
+address from `PRIVATE_KEY`, and sends read-only `/quote` requests but never
+prints the key, signs, approves, requests calldata, or broadcasts:
+
+```bash
+python3 ops/fleet/probe-uniswap-gateway.py --env .env --production --rounds 3
+python3 ops/fleet/probe-uniswap-gateway.py --env .env --transport --rounds 1
+```
+
+Other mutually exclusive diagnostic modes are `--boundary`, `--structure`,
+`--auth`, and `--isolate`. They intentionally make multiple serialized API
+requests and can consume shared quota; never run the probe concurrently across
+the fleet. Prefer `probe_uniswap_route_matrix.py` for ordinary route diagnosis
+because it accepts an explicit public swapper and emits more complete sanitized
+JSONL. Use the gateway probe only when isolating a specific Uniswap transport
+or payload-boundary suspicion.
+
 Use inventory for a concise current-state snapshot without the route probe:
 
 ```bash
@@ -684,6 +703,62 @@ executed automatically. Audit is historical reconciliation, not proof of live
 balances; use `fleet-inventory` to inspect current residual balances before a
 retry. Local files can also be missing or manually altered, so retain explorer
 receipts and never treat audit output as an automatic authorization to resend.
+
+## Reconciling tracked positions with wallet balances
+
+Use `reconcile-position-balances` only when a bot's combined active position
+balances exceed the managed-token balance actually held by its wallet. Typical
+causes are taxed transfers, an older partial-accounting bug, or tokens moved
+outside the bot. This is a ledger repair tool, not routine maintenance and not
+a way to discover a missing buy.
+
+Preview the entire configured fleet, or preferably select the affected bots:
+
+```bash
+ops/fleet/reconcile-position-balances
+ops/fleet/reconcile-position-balances --only robinvault,earn
+ops/fleet/reconcile-position-balances --exclude seedcoin
+```
+
+For each bot, preview output shows wallet raw units, total tracked raw units,
+the deficit, and every proposed position change. If tracked balance exceeds
+wallet balance, the real wallet balance is allocated proportionally across
+active entries in both `data/positions.json` and
+`data/gridless_positions.json`; integer remainders are assigned
+deterministically. Each position's cost basis is preserved, so missing tokens
+remain economic loss instead of becoming manufactured profit.
+
+Before applying, stop every selected bot and confirm no transaction or
+settlement is unresolved. Repeat the exact selection explicitly:
+
+```bash
+ops/fleet/stop-bot ROBINVAULT
+ops/fleet/stop-bot EARN
+ops/fleet/reconcile-position-balances --only robinvault,earn \
+  --apply --confirm-bot-stopped
+ops/fleet/fleet-inventory --only robinvault,earn
+ops/fleet/restart-bot ROBINVAULT
+ops/fleet/restart-bot EARN
+```
+
+`--confirm-bot-stopped` is an operator acknowledgement; the command cannot
+prove that no separately launched process is writing those files. Applying
+creates timestamped `.bak.reconcile.*` backups beside each changed ledger,
+writes atomically, and appends a bounded audit record to
+`data/position_balance_reconciliations.json`. Review inventory before restart.
+
+The repair is deliberately one-way and conservative:
+
+- it never increases tracked balances or absorbs untracked wallet surplus;
+- it never changes cost basis, sends tokens, approves, signs, or broadcasts;
+- it does not recover an omitted confirmed buy—use the receipt-driven
+  `--reconcile-gridless-buy` workflow in the recovery section;
+- a multi-bot apply is not one cross-checkout transaction. If a later bot
+  fails, earlier successful repairs retain their backups and audit entries.
+
+To undo a mistaken repair, keep the bot stopped, identify and inspect the exact
+timestamped backups from that run, restore only the affected ledger files, and
+rerun preview. Never restore a backup while the bot is running.
 
 ## Whole-fleet USDG sweep
 
