@@ -62,6 +62,12 @@ def _parse_rpc_urls(env_value: str) -> Optional[list]:
     return urls if urls else None
 
 
+def _parse_csv_choices(env_value: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    """Parse a normalized, de-duplicated comma-separated env list."""
+    values = tuple(dict.fromkeys(value.strip().lower() for value in env_value.split(",") if value.strip()))
+    return values or default
+
+
 @dataclass
 class BotConfig:
     """
@@ -175,6 +181,10 @@ class BotConfig:
     mercury_evocation: bool = True  # Print the Mercury evocation once at bot startup
     route_tournament_mode: str = "off"
     route_tournament_canary: bool = False
+    route_tournament_providers: tuple[str, ...] = ("uniswap", "sushiswap")
+    route_tournament_settlements: tuple[str, ...] = ("native", "weth")
+    route_tournament_shadow_timeout_seconds: float = 4.0
+    route_tournament_gate_timeout_seconds: float = 6.0
     
     # Derived properties
     @property
@@ -198,6 +208,16 @@ class BotConfig:
             raise ValueError("ROUTE_TOURNAMENT_MODE supports off, shadow, or gate; execute is intentionally unavailable")
         if self.route_tournament_mode == "gate" and not self.route_tournament_canary:
             raise ValueError("ROUTE_TOURNAMENT_MODE=gate requires ROUTE_TOURNAMENT_CANARY=true")
+        providers = tuple(getattr(self, "route_tournament_providers", ("uniswap", "sushiswap")))
+        settlements = tuple(getattr(self, "route_tournament_settlements", ("native", "weth")))
+        if not providers or any(value not in {"uniswap", "sushiswap"} for value in providers):
+            raise ValueError("ROUTE_TOURNAMENT_PROVIDERS supports a non-empty comma-separated subset of uniswap,sushiswap")
+        if not settlements or any(value not in {"native", "weth"} for value in settlements):
+            raise ValueError("ROUTE_TOURNAMENT_SETTLEMENTS supports a non-empty comma-separated subset of native,weth")
+        for name in ("route_tournament_shadow_timeout_seconds", "route_tournament_gate_timeout_seconds"):
+            value = float(getattr(self, name, 4 if "shadow" in name else 6))
+            if not 1 <= value <= 15:
+                raise ValueError(f"{name.upper()} must be between 1 and 15 seconds")
         # Check required fields
         if not self.private_key or self.private_key == "0x...":
             raise ValueError("PRIVATE_KEY is required and must be set")
@@ -425,6 +445,18 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
         swap_provider=os.getenv("SWAP_PROVIDER", ""),
         route_tournament_mode=os.getenv("ROUTE_TOURNAMENT_MODE", "off").strip().lower(),
         route_tournament_canary=os.getenv("ROUTE_TOURNAMENT_CANARY", "false").lower() == "true",
+        route_tournament_providers=_parse_csv_choices(
+            os.getenv("ROUTE_TOURNAMENT_PROVIDERS", "uniswap,sushiswap"), ("uniswap", "sushiswap")
+        ),
+        route_tournament_settlements=_parse_csv_choices(
+            os.getenv("ROUTE_TOURNAMENT_SETTLEMENTS", "native,weth"), ("native", "weth")
+        ),
+        route_tournament_shadow_timeout_seconds=float(
+            os.getenv("ROUTE_TOURNAMENT_SHADOW_TIMEOUT_SECONDS", "4")
+        ),
+        route_tournament_gate_timeout_seconds=float(
+            os.getenv("ROUTE_TOURNAMENT_GATE_TIMEOUT_SECONDS", "6")
+        ),
         swap_fallback_provider=os.getenv("SWAP_FALLBACK_PROVIDER", "sushiswap"),
         sushi_api_key=os.getenv("SUSHI_API_KEY", ""),
         use_li_fi=os.getenv("USE_LI_FI", "false").lower() == "true",

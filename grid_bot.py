@@ -1231,7 +1231,9 @@ class GridBot:
                 # Gate-only collection gets six seconds: Uniswap indicative
                 # routes require read-only swap preparation before local gas
                 # simulation, while shadow remains on its observation budget.
-                max_seconds=6,
+                max_seconds=float(getattr(
+                    self.config, "route_tournament_gate_timeout_seconds", 6
+                )),
             )
             selection = select_execution_candidate(comparison, direction)
         except Exception:
@@ -1381,7 +1383,9 @@ class GridBot:
                                      gas_price_provider=gas_price_provider,
                                      allowance_probe=allowance_probe,
                                      gas_estimate_provider=gas_estimate_provider,
-                                     max_seconds=4)
+                                     max_seconds=float(getattr(
+                                         self.config, "route_tournament_shadow_timeout_seconds", 4
+                                     )))
             except Exception:
                 comparison = {"mode": "shadow", "direction": direction,
                               "status": "observation_failed", "candidates": [],

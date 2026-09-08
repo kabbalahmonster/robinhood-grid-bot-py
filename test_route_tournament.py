@@ -740,6 +740,39 @@ def test_mode_parsing_and_default(monkeypatch, tmp_path):
         assert load_config().route_tournament_mode == "shadow"
         monkeypatch.setenv("UNISWAP_PROTOCOL_CACHE_TTL_SECONDS", "420")
         assert load_config().uniswap_protocol_cache_ttl_seconds == 420
+        monkeypatch.setenv("ROUTE_TOURNAMENT_PROVIDERS", "sushiswap,uniswap,sushiswap")
+        monkeypatch.setenv("ROUTE_TOURNAMENT_SETTLEMENTS", "native")
+        monkeypatch.setenv("ROUTE_TOURNAMENT_SHADOW_TIMEOUT_SECONDS", "5")
+        monkeypatch.setenv("ROUTE_TOURNAMENT_GATE_TIMEOUT_SECONDS", "7")
+        configured = load_config()
+        assert configured.route_tournament_providers == ("sushiswap", "uniswap")
+        assert configured.route_tournament_settlements == ("native",)
+        assert configured.route_tournament_shadow_timeout_seconds == 5
+        assert configured.route_tournament_gate_timeout_seconds == 7
+
+
+def test_native_only_preflight_collects_and_selects_two_candidates():
+    cfg = SimpleNamespace(
+        uniswap_api_key="key", weth_address="weth", token_address="token",
+        route_tournament_providers=("uniswap", "sushiswap"),
+        route_tournament_settlements=("native",),
+    )
+    clients = {name: Mock() for name in ("uniswap", "sushiswap")}
+    for index, client in enumerate(clients.values(), start=1):
+        client.get_quote.return_value = quote(
+            output=index * 10**15,
+            to="0x8e6fd69a77e88ee20ba4b4fbd59dfcda3ec0e98a", data="0xdead",
+        )
+    result = collect_execution_preflight(
+        cfg, "wallet", context("buy"), clients.__getitem__,
+        gas_estimate_provider=lambda _quote, _settlement: 100000,
+    )
+    assert [(row["provider"], row["settlement"]) for row in result["candidates"]] == [
+        ("uniswap", "native"), ("sushiswap", "native")
+    ]
+    assert select_execution_candidate(result, "buy") == {
+        "provider": "sushiswap", "settlement": "native"
+    }
 
 
 def test_execution_selector_accepts_one_valid_route_from_complete_accounting():

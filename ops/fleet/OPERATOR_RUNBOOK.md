@@ -112,3 +112,10 @@ Rollback is `ROUTE_TOURNAMENT_MODE=off` and
 `ROUTE_TOURNAMENT_CANARY=false` on that same bot. See the route-tournament
 section of the main README and the fleet README for accounting and timeout
 details.
+
+For a larger rollout, begin with `POLL_INTERVAL_SECONDS=12` and the defaults
+`ROUTE_TOURNAMENT_PROVIDERS=uniswap,sushiswap`,
+`ROUTE_TOURNAMENT_SETTLEMENTS=native,weth`, shadow timeout `4`, and gate timeout
+`6`. Increase polling toward 15-20 seconds if provider 429s or overlapping
+rounds appear. Native-only settlement halves tournament candidates but removes
+WETH fallback and should be an intentional liquidity tradeoff.

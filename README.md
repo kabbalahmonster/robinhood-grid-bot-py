@@ -111,6 +111,10 @@ python grid_bot.py
 | `SWAP_FALLBACK_PROVIDER` | No | sushiswap | Immediate per-operation fallback after retryable pre-broadcast failures; empty disables fallback |
 | `ROUTE_TOURNAMENT_MODE` | No | off | Route comparison mode: `off`, read-only `shadow`, or guarded one-bot `gate` |
 | `ROUTE_TOURNAMENT_CANARY` | No | false | Explicit safety acknowledgement required by `gate`; not permission for fleet-wide rollout |
+| `ROUTE_TOURNAMENT_PROVIDERS` | No | uniswap,sushiswap | Comma-separated non-empty subset of implemented tournament providers |
+| `ROUTE_TOURNAMENT_SETTLEMENTS` | No | native,weth | Comma-separated non-empty subset; `native` skips WETH candidates |
+| `ROUTE_TOURNAMENT_SHADOW_TIMEOUT_SECONDS` | No | 4 | Absolute shadow round deadline, bounded to 1-15 seconds |
+| `ROUTE_TOURNAMENT_GATE_TIMEOUT_SECONDS` | No | 6 | Absolute execution-preflight deadline, bounded to 1-15 seconds |
 | `USE_LI_FI` | No | false | Use LI.FI instead of 0x for swaps |
 | `USE_UNISWAP_API` | No | true | Legacy Uniswap selection used when `SWAP_PROVIDER` is empty |
 | **Token Configuration** ||||
@@ -1558,8 +1562,13 @@ transaction. Consequently this is a subsequent-market observation, not a
 claim that the hypothetical winner was available at the broadcast instant.
 The existing same-provider WETH recovery/replay safeguards remain in place.
 
-Each available provider (Sushi, plus Uniswap when its key is configured) gets
-one `get_quote` call per native/WETH settlement, with price jitter disabled.
+Each configured provider gets one `get_quote` call per configured settlement,
+with price jitter disabled. `ROUTE_TOURNAMENT_PROVIDERS` accepts a non-empty
+comma-separated subset of `uniswap,sushiswap`, while
+`ROUTE_TOURNAMENT_SETTLEMENTS` accepts `native,weth`. The defaults compare all
+four combinations. Setting settlements to `native` halves candidate count and
+usually shortens rounds, but deliberately gives up WETH fallback liquidity and
+any WETH route whose net result would have won.
 Uniswap uses one routing attempt; its internal explicit AMM fallback and known
 gateway-packet 409 retry can make up to four HTTP requests per candidate. Thus
 each actionable operation adds at most four candidate calls / ten HTTP requests
@@ -1601,10 +1610,11 @@ output raw units per ETH of principal plus gas; sell score is output floor minus
 all gas in wei and must cover sold cost basis plus `MIN_PROFIT_PERCENT`. Stoploss
 observations still apply that floor, without affecting actual stoploss behavior.
 
-`ROUTE_TOURNAMENT_MODE=gate` enables one-bot canary execution and additionally
-requires `ROUTE_TOURNAMENT_CANARY=true`. Both Uniswap and Sushi must be the
-configured primary/fallback pair and `UNISWAP_API_KEY` must be present. The gate
-uses a six-second shared preflight budget, collects all four identities, and
+`ROUTE_TOURNAMENT_MODE=gate` enables guarded execution and additionally
+requires `ROUTE_TOURNAMENT_CANARY=true`. Tournament providers must be available
+through the configured primary/fallback pair; an included Uniswap provider
+requires `UNISWAP_API_KEY`. The gate uses a six-second default preflight budget,
+collects every configured identity, and
 permits only prepared calldata with fresh local
 `eth_estimateGas`, and refreshes the RPC gas price again at the final broadcast
 boundary. A candidate needing an unproven approval, or a WETH conversion that
@@ -1632,6 +1642,15 @@ default lifetime is five minutes and is configurable with
 one hour). It avoids repeating protocol discovery, but every tournament obtains
 fresh quote economics; if the cached protocol stops quoting it is discarded.
 `ROUTE_TOURNAMENT_MODE=execute` remains invalid.
+
+The shadow and gate deadlines are configurable through
+`ROUTE_TOURNAMENT_SHADOW_TIMEOUT_SECONDS` and
+`ROUTE_TOURNAMENT_GATE_TIMEOUT_SECONDS`; both are startup-validated between 1
+and 15 seconds. A longer deadline improves slow-provider completion but also
+keeps more requests in flight and delays the trading round. For roughly 30 bots
+in gate mode, use `POLL_INTERVAL_SECONDS=12-20` with startup jitter rather than
+the six-second single-bot default. Twelve seconds is the practical first step;
+move toward 15-20 seconds if 429s or overlapping tournament rounds appear.
 
 For a ROBINVAULT canary, record the current revision/config and baseline
 actionable request counts, latency, gas and route/fallback logs. Enable only

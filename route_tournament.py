@@ -41,6 +41,27 @@ _EXECUTION_CANDIDATES = frozenset({
 })
 
 
+def _configured_identities(config):
+    providers = tuple(getattr(config, "route_tournament_providers", ("uniswap", "sushiswap")))
+    settlements = tuple(getattr(config, "route_tournament_settlements", ("native", "weth")))
+    return [(provider, settlement) for provider in providers for settlement in settlements]
+
+
+def _comparison_identities(comparison):
+    configured = comparison.get("expected_candidates") if isinstance(comparison, dict) else None
+    if not isinstance(configured, list) or not configured:
+        return _EXECUTION_CANDIDATES
+    identities = set()
+    for item in configured:
+        if not isinstance(item, dict):
+            return frozenset()
+        identity = (item.get("provider"), item.get("settlement"))
+        if identity not in _EXECUTION_CANDIDATES or identity in identities:
+            return frozenset()
+        identities.add(identity)
+    return frozenset(identities)
+
+
 def select_execution_candidate(comparison, direction):
     """Return the best complete pre-execution candidate, or ``None``.
 
@@ -55,8 +76,9 @@ def select_execution_candidate(comparison, direction):
             or comparison.get("direction") != direction
             or comparison.get("candidate_accounting_complete") is not True):
         return None
+    expected_identities = _comparison_identities(comparison)
     rows = comparison.get("candidates")
-    if not isinstance(rows, list) or len(rows) != len(_EXECUTION_CANDIDATES):
+    if not expected_identities or not isinstance(rows, list) or len(rows) != len(expected_identities):
         return None
     identities = set()
     eligible = {}
@@ -64,7 +86,7 @@ def select_execution_candidate(comparison, direction):
         if not isinstance(row, dict):
             return None
         identity = (row.get("provider"), row.get("settlement"))
-        if identity not in _EXECUTION_CANDIDATES or identity in identities:
+        if identity not in expected_identities or identity in identities:
             return None
         identities.add(identity)
         rejections = row.get("rejections")
@@ -88,7 +110,7 @@ def select_execution_candidate(comparison, direction):
         if not score.is_finite():
             return None
         eligible[identity] = (score, row)
-    if identities != _EXECUTION_CANDIDATES or not eligible:
+    if identities != expected_identities or not eligible:
         return None
     provider, settlement = max(eligible, key=lambda identity: eligible[identity][0])
     selection = {"provider": provider, "settlement": settlement}
@@ -494,8 +516,8 @@ def collect(config, address, context, client_factory=None,
     rows = []
     provider_outputs = []
     candidate_index = 0
-    enabled_provider_count = 1 + int(bool(getattr(config, "uniswap_api_key", "")))
-    total_candidates = 1 if _candidate_filter else enabled_provider_count * 2
+    configured_identities = _configured_identities(config)
+    total_candidates = 1 if _candidate_filter else len(configured_identities)
 
     def deadline_row(name, settlement):
         return score_candidate(
@@ -503,7 +525,9 @@ def collect(config, address, context, client_factory=None,
             name, settlement, context,
         )
 
-    for name in ("uniswap", "sushiswap"):
+    configured_providers = tuple(dict.fromkeys(provider for provider, _ in configured_identities))
+    configured_settlements = tuple(dict.fromkeys(settlement for _, settlement in configured_identities))
+    for name in configured_providers:
         if name == "uniswap" and not getattr(config, "uniswap_api_key", ""):
             continue
         # A parallel execution-preflight worker owns exactly one identity.
@@ -514,7 +538,8 @@ def collect(config, address, context, client_factory=None,
             client = client_factory(name) if client_factory else PROVIDERS[name].load_client_class()(config)
         except Exception:
             client = None
-        for settlement, token in (("native", NATIVE), ("weth", config.weth_address)):
+        for settlement in configured_settlements:
+            token = NATIVE if settlement == "native" else config.weth_address
             if _candidate_filter and (name, settlement) != _candidate_filter:
                 continue
             remaining_seconds = deadline - time.monotonic()
@@ -706,11 +731,9 @@ def collect(config, address, context, client_factory=None,
         runner_up_delta = str(Decimal(eligible[0]["projected_net_score"]) - Decimal(eligible[1]["projected_net_score"]))
     elapsed_ms = round((time.monotonic() - started) * 1000, 1)
     expected_identities = {
-        (name, settlement)
-        for name in ("uniswap", "sushiswap")
-        if name != "uniswap" or getattr(config, "uniswap_api_key", "")
-        for settlement in ("native", "weth")
-        if not _candidate_filter or (name, settlement) == _candidate_filter
+        identity for identity in configured_identities
+        if identity[0] != "uniswap" or getattr(config, "uniswap_api_key", "")
+        if not _candidate_filter or identity == _candidate_filter
     }
     observed_identities = {
         (row.get("provider"), row.get("settlement"))
@@ -769,7 +792,9 @@ def collect_execution_preflight(config, address, context, client_factory=None,
     prepared with ``simulateTransaction`` to obtain calldata for local gas
     estimation; approval and all state-changing work remain outside it.
     """
-    if not getattr(config, "uniswap_api_key", ""):
+    identities = _configured_identities(config)
+    configured_providers = {provider for provider, _ in identities}
+    if "uniswap" in configured_providers and not getattr(config, "uniswap_api_key", ""):
         return {
             "mode": "execution_preflight", "direction": context.get("direction"),
             "candidates": [], "expected_candidates": [
@@ -800,10 +825,6 @@ def collect_execution_preflight(config, address, context, client_factory=None,
     # absolute-sized budget. A slow Uniswap preparation can therefore never
     # consume Sushi's opportunity to produce an executable candidate.
     started = time.monotonic()
-    identities = [
-        ("uniswap", "native"), ("uniswap", "weth"),
-        ("sushiswap", "native"), ("sushiswap", "weth"),
-    ]
 
     def collect_one(identity):
         return collect(
