@@ -83,6 +83,7 @@ def test_buy_and_sell_scoring_tax_slippage_and_all_gas():
     assert int(buy["output_floor_raw"]) == buy_floor
     assert Decimal(buy["projected_net_score"]) == Decimal(buy_floor) * 10**18 / (10**15 + gas)
     assert buy["gas_basis"] == "provider_estimate"
+    assert buy["output_floor_human"] == pytest.approx(buy_floor / 10**18)
     c["direction"] = "sell"
     sell = score_candidate(quote(), "sushiswap", "weth", c)
     sell_floor = 2 * 10**15 * 98 // 100

@@ -394,7 +394,10 @@ def score_candidate(quote, provider, settlement, context, *, allowance_probe=Non
                gas_basis=("local_estimate" if local_gas > 0 else "provider_estimate" if provider_gas > 0
                           else "conservative_direction_fallback"),
                output_floor_raw=str(floor),
-               output_floor_human=_wei_to_eth(floor) if c["direction"] == "sell" else float(floor),
+               output_floor_human=(
+                   _wei_to_eth(floor) if c["direction"] == "sell"
+                   else _raw_to_human(floor, output_decimals)
+               ),
                slippage_fraction=c["slippage"], tax_fraction=c["tax"],
                approval_assumption=approval_label,
                provider_gas_estimate=provider_gas,
