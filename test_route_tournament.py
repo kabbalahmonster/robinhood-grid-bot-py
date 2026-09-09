@@ -756,6 +756,33 @@ def test_reported_buy_tournament_is_expired_before_next_buy_check(mode):
     assert b._attempt_with_route_comparison("buy") is None
 
 
+def test_buy_strategy_veto_marks_selected_tournament_terminal():
+    b = bot("gate")
+    b._route_comparisons = {
+        "buy": {
+            "mode": "execution_preflight", "direction": "buy",
+            "status": "preflight_candidate_selected",
+        }
+    }
+
+    b._mark_buy_tournament_aborted(
+        reason="buy_trigger_recovered",
+        quoted_pnl_percent=-3.5,
+        block_threshold_percent=-9.6,
+        trigger_threshold_percent=-10.0,
+    )
+
+    comparison = b._route_comparisons["buy"]
+    assert comparison["status"] == "execution_aborted"
+    assert comparison["execution_abort"] == {
+        "reason": "buy_trigger_recovered",
+        "quoted_pnl_percent": -3.5,
+        "block_threshold_percent": -9.6,
+        "trigger_threshold_percent": -10.0,
+    }
+    assert b._buy_attempt["status"] == "buy_trigger_recovered"
+
+
 @pytest.mark.parametrize("mode", ["execute", "invalid"])
 def test_execute_and_unknown_modes_fail_closed(mode):
     cfg = BotConfig.__new__(BotConfig)
