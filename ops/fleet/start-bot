@@ -3,16 +3,13 @@ set -Eeuo pipefail
 
 SCRIPT_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
 SCRIPT_DIR="$(cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)"
-# shellcheck source=fleet-common.sh
 source "$SCRIPT_DIR/fleet-common.sh"
 
-usage() {
-  cat <<'EOF'
-Usage: restart-bot NAME [--config PATH]
+usage() { cat <<'EOF'
+Usage: start-bot NAME [--config PATH]
 
-Cleanly restart one bot inside the running fleet tmux session. This kills the
-pane's entire old process tree first, including suspended Ctrl+Z jobs, then
-launches exactly one supervised bot process without disturbing other bots.
+Start one intentionally stopped bot and durably mark it desired-running. If
+the fleet session is absent, create it with only this bot running.
 EOF
 }
 
@@ -29,20 +26,23 @@ done
 
 fleet_load_config "$config_path"
 fleet_apply_selection "$name" ""
-((${#FLEET_BOT_DIRS[@]} == 1)) || fleet_die "Selection must resolve to one bot"
-fleet_require_tmux
 fleet_validate_bots
+fleet_require_tmux
 bot_dir="${FLEET_BOT_DIRS[0]}"
+
 if ! fleet_session_exists; then
-  exec "$SCRIPT_DIR/start-bot" "$name" --config "$FLEET_CONFIG_PATH"
+  exec "$SCRIPT_DIR/start-fleet" --detach --only "$name" --config "$FLEET_CONFIG_PATH"
 fi
+
 pane_id="$(fleet_pane_for_bot_dir "$bot_dir" 2>/dev/null || true)"
-if [[ -z "$pane_id" ]]; then
-  exec "$SCRIPT_DIR/start-bot" "$name" --config "$FLEET_CONFIG_PATH"
+if [[ -n "$pane_id" ]]; then
+  tmux respawn-pane -k -t "$pane_id" -c "$bot_dir"
+else
+  pane_id="$(tmux split-window -d -P -F '#{pane_id}' -t "$FLEET_SESSION:$FLEET_WINDOW" -c "$bot_dir")"
 fi
-tmux respawn-pane -k -t "$pane_id" -c "$bot_dir"
 tmux select-pane -t "$pane_id" -T "$(fleet_bot_name "$bot_dir")"
 fleet_send_command "$pane_id" "$(fleet_bot_command "$bot_dir")"
 fleet_record_bot_running "$bot_dir"
 fleet_record_running
-printf 'Restarted %s cleanly in pane %s.\n' "$(fleet_bot_name "$bot_dir")" "$pane_id"
+tmux select-layout -t "$FLEET_SESSION:$FLEET_WINDOW" tiled >/dev/null
+printf 'Started %s in pane %s; durable desired state is running.\n' "$(fleet_bot_name "$bot_dir")" "$pane_id"

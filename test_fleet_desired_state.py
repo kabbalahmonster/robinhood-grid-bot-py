@@ -65,6 +65,9 @@ class FleetDesiredStateTests(unittest.TestCase):
     def markers(self):
         return list((self.root / "state").glob("*.desired-stopped"))
 
+    def bot_markers(self):
+        return list((self.root / "state").glob("*.bots/*.desired-stopped"))
+
     def test_stop_if_running_records_intent_even_when_already_stopped(self):
         result = self.run_command("stop-fleet", "--if-running")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -123,6 +126,32 @@ class FleetDesiredStateTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(self.session.exists())
         self.assertIn("restoring missing", result.stderr)
+
+    def test_stop_bot_records_durable_intent_when_fleet_is_absent(self):
+        result = self.run_command("stop-bot", "repo")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(self.bot_markers()), 1)
+        self.assertIn("intentionally stopped", result.stdout)
+
+        guardian = self.run_command("fleet-guardian", "--once")
+        self.assertEqual(guardian.returncode, 0, guardian.stderr)
+        self.assertFalse(self.session.exists())
+
+    def test_start_bot_clears_individual_stop_and_creates_session(self):
+        self.run_command("stop-bot", "repo", check=True)
+        result = self.run_command("start-bot", "repo")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(self.session.exists())
+        self.assertEqual(self.bot_markers(), [])
+
+    def test_lifecycle_commands_declare_individual_desired_state(self):
+        common = (self.scripts / "fleet-common.sh").read_text()
+        guardian = (self.scripts / "fleet-guardian").read_text()
+        updater = (self.scripts / "update-bot").read_text()
+        self.assertIn("fleet_bot_desired_state_file", common)
+        self.assertIn('fleet_bot_should_run "$bot_dir"', guardian)
+        self.assertIn('fleet_bot_should_run "$bot_dir"', updater)
+        self.assertTrue((self.scripts / "start-bot").exists())
 
     def test_supervisor_delegates_desired_state_handling_to_guardian(self):
         trace = self.root / "guardian.trace"

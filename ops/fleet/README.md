@@ -56,11 +56,12 @@ The service runs `fleet-supervisor`, which runs `fleet-guardian`. The guardian
 keeps the tmux session aligned with durable operator intent: it restores a
 missing session when the fleet should be running, but remains quietly alive
 without resurrecting a fleet intentionally stopped by `stop-fleet`. It also
-watches each bot's local
+watches each desired-running bot's local
 `data/fleet_status.json`; only after a
 snapshot is stale for three consecutive checks (default: about 4 minutes) does
-it run `restart-bot` for that one pane. It does not cycle healthy bots or
-restart the whole fleet because one bot is grumpy.
+it run `start-bot` for that one pane. A bot stopped with `stop-bot` is excluded
+from health recovery until an explicit `start-bot` or `restart-bot`. It does
+not cycle healthy bots or restart the whole fleet because one bot is grumpy.
 
 For intentional full downtime, run `stop-fleet`; no separate service stop is
 needed. `start-fleet` or `restart-fleet` commits running intent after a complete
@@ -105,7 +106,8 @@ sudo apt install tmux git python3 python3-venv
    cp ops/fleet/fleet.conf.example ops/fleet/fleet.conf
    nano ops/fleet/fleet.conf
    chmod +x ops/fleet/start-fleet ops/fleet/stop-fleet \
-     ops/fleet/restart-fleet ops/fleet/update-fleet \
+     ops/fleet/restart-fleet ops/fleet/start-bot ops/fleet/stop-bot \
+     ops/fleet/restart-bot ops/fleet/update-fleet \
      ops/fleet/update-this-checkout ops/fleet/update-all ops/fleet/update-bot \
      ops/fleet/usdg-sweep \
      ops/fleet/treasury-transfer ops/fleet/fund-bots ops/fleet/update-variable \
@@ -135,6 +137,7 @@ sudo apt install tmux git python3 python3-venv
    ln -sf "$PWD/ops/fleet/start-fleet" "$HOME/bin/start-fleet"
    ln -sf "$PWD/ops/fleet/stop-fleet" "$HOME/bin/stop-fleet"
    ln -sf "$PWD/ops/fleet/restart-fleet" "$HOME/bin/restart-fleet"
+   ln -sf "$PWD/ops/fleet/start-bot" "$HOME/bin/start-bot"
    ln -sf "$PWD/ops/fleet/stop-bot" "$HOME/bin/stop-bot"
    ln -sf "$PWD/ops/fleet/restart-bot" "$HOME/bin/restart-bot"
    ln -sf "$PWD/ops/fleet/update-bot" "$HOME/bin/update-bot"
@@ -279,7 +282,7 @@ unless their section explicitly says otherwise.
 | `fleet-watch` | Phone-friendly live view from local status snapshots | No |
 | `fleet-audit` | Reconcile local treasury/liquidation audit records | No |
 | `start-fleet` / `stop-fleet` / `restart-fleet` | Manage the configured tmux fleet | Processes only |
-| `stop-bot NAME` / `restart-bot NAME` | Stop or cleanly restart one bot pane and its complete old process tree | Processes only |
+| `start-bot NAME` / `stop-bot NAME` / `restart-bot NAME` | Durably start, stop, or cleanly restart one bot | Processes/state marker |
 | `update-this-checkout` | Fast-forward the dedicated operations clone | Yes, Git |
 | `update-bot NAME` | Inspect, switch, fast-forward, and conditionally restart one bot checkout | Yes, Git/processes |
 | `update-fleet` / `update-all` | Fast-forward bot clones; full wrapper can restart | Yes, Git/processes |
@@ -313,7 +316,13 @@ Restart one bot without touching the rest of the fleet:
 ops/fleet/restart-bot hookr
 ```
 
-Stop one bot and leave its pane at a clean shell prompt:
+Start an intentionally stopped bot:
+
+```bash
+ops/fleet/start-bot hookr
+```
+
+Stop one bot durably and leave its pane at a clean shell prompt:
 
 ```bash
 ops/fleet/stop-bot hookr
@@ -324,7 +333,9 @@ the Python process instead of terminating it; launching the command again then
 stacks another bot process in the same pane. Repeating this consumes memory and
 can freeze the host. Both per-bot commands use `tmux respawn-pane -k`, which
 terminates the pane's entire prior process tree—including suspended jobs—before
-stopping or launching exactly one bot. Bot selectors are case-insensitive.
+stopping or launching exactly one bot. The stopped marker is written before
+the process is killed, so guardian checks, updates, and fleet restarts preserve
+the stop. Bot selectors are case-insensitive.
 
 Start without attaching:
 
@@ -354,6 +365,13 @@ ops/fleet/restart-fleet
 terminates tmux. The guardian therefore respects `--if-running` as well. A
 successful start/restart clears that state only after the full session exists;
 a failed start remains safely stopped.
+
+Individual desired state is stored beside the fleet marker in a scoped `.bots`
+directory. `start-fleet` and `restart-fleet` preserve stopped bots. Supplying
+`start-fleet --only ...` or `--exclude ...` explicitly replaces individual
+intent: selected bots become running after successful startup and omitted bots
+remain stopped. `update-bot` updates an intentionally stopped checkout without
+starting it. `restart-bot NAME` is an explicit request to mark that bot running.
 
 Update every clean checkout using `git pull --ff-only`:
 
@@ -1442,6 +1460,11 @@ target fails.
   and therefore every bot process in it. It does not delete bot data. The
   marker is scoped to the resolved config path and session name under
   `${XDG_STATE_HOME:-$HOME/.local/state}/rh-grid-bot/fleet`.
+- `stop-bot` records a separately scoped durable stopped marker before killing
+  its pane. `start-bot` and `restart-bot` clear it only after launch succeeds.
+  The guardian clears stale counters for intentionally stopped bots and never
+  revives them. If all bots are intentionally stopped, an absent tmux session
+  is healthy rather than something to reconstruct.
 - `update-fleet` preflights all repositories before changing any of them and
   reports every blocker in one pass. It refuses tracked modifications,
   detached HEADs, and branches without upstreams, and only permits

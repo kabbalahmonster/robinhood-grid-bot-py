@@ -10,8 +10,8 @@ usage() {
   cat <<'EOF'
 Usage: stop-bot NAME [--config PATH]
 
-Stop one bot inside the running fleet tmux session. The pane is replaced with
-a clean shell, which terminates both the active bot and any suspended jobs.
+Durably stop one bot. The guardian and update commands preserve this intent
+until start-bot or restart-bot explicitly starts it again.
 EOF
 }
 
@@ -30,9 +30,13 @@ fleet_load_config "$config_path"
 fleet_apply_selection "$name" ""
 ((${#FLEET_BOT_DIRS[@]} == 1)) || fleet_die "Selection must resolve to one bot"
 fleet_require_tmux
-fleet_session_exists || fleet_die "tmux session is not running: $FLEET_SESSION"
 bot_dir="${FLEET_BOT_DIRS[0]}"
+fleet_record_bot_stopped "$bot_dir"
+if ! fleet_session_exists; then
+  printf 'Recorded %s as intentionally stopped; fleet session is already absent.\n' "$(fleet_bot_name "$bot_dir")"
+  exit 0
+fi
 pane_id="$(fleet_pane_for_bot_dir "$bot_dir")" || fleet_die "No fleet pane found for: $name"
 tmux respawn-pane -k -t "$pane_id" -c "$bot_dir"
 tmux select-pane -t "$pane_id" -T "$(fleet_bot_name "$bot_dir")"
-printf 'Stopped %s in pane %s; the pane is now a clean shell.\n' "$(fleet_bot_name "$bot_dir")" "$pane_id"
+printf 'Stopped %s in pane %s; durable desired state is stopped.\n' "$(fleet_bot_name "$bot_dir")" "$pane_id"

@@ -142,6 +142,40 @@ fleet_record_running() {
   rm -f -- "$(fleet_desired_state_file)"
 }
 
+fleet_bot_desired_state_file() {
+  local bot_dir="$1" identity digest fleet_marker state_dir
+  bot_dir="$(readlink -f -- "$bot_dir")"
+  identity="$(readlink -f -- "$FLEET_CONFIG_PATH")"$'\n'"$FLEET_SESSION"$'\n'"$bot_dir"
+  if command -v sha256sum >/dev/null 2>&1; then
+    digest="$(printf '%s' "$identity" | sha256sum | awk '{print $1}')"
+  else
+    digest="$(printf '%s' "$identity" | cksum | awk '{print $1}')"
+  fi
+  fleet_marker="$(fleet_desired_state_file)"
+  state_dir="${fleet_marker%.desired-stopped}.bots"
+  printf '%s/%s.desired-stopped\n' "$state_dir" "$digest"
+}
+
+fleet_bot_should_run() {
+  [[ ! -e "$(fleet_bot_desired_state_file "$1")" ]]
+}
+
+fleet_record_bot_stopped() {
+  local bot_dir="$1" marker marker_dir temporary
+  marker="$(fleet_bot_desired_state_file "$bot_dir")"
+  marker_dir="$(dirname -- "$marker")"
+  mkdir -p -- "$marker_dir"
+  temporary="$(mktemp "$marker_dir/.desired-stopped.XXXXXX")"
+  printf 'config=%s\nsession=%s\nbot=%s\nname=%s\n' \
+    "$FLEET_CONFIG_PATH" "$FLEET_SESSION" "$(readlink -f -- "$bot_dir")" \
+    "$(fleet_bot_name "$bot_dir")" > "$temporary"
+  mv -f -- "$temporary" "$marker"
+}
+
+fleet_record_bot_running() {
+  rm -f -- "$(fleet_bot_desired_state_file "$1")"
+}
+
 fleet_python_for() {
   local bot_dir="$1"
   if [[ -x "$bot_dir/.venv/bin/python" ]]; then

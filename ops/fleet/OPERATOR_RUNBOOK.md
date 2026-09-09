@@ -143,7 +143,6 @@ For a larger rollout, begin with `POLL_INTERVAL_SECONDS=12` and the defaults
 `6`. Increase polling toward 15-20 seconds if provider 429s or overlapping
 rounds appear. Native-only settlement halves tournament candidates but removes
 WETH fallback and should be an intentional liquidity tradeoff.
-
 ## Position-balance reconciliation
 
 When `fleet-doctor`, inventory, or bot logs show tracked managed-token balances
@@ -163,6 +162,10 @@ reconcile-position-balances --only BOTNAME --apply --confirm-bot-stopped
 fleet-inventory --only BOTNAME
 restart-bot BOTNAME
 ```
+
+`stop-bot` is durable. Guardian checks, fleet restarts, and `update-bot` keep
+that bot stopped. Use `start-bot BOTNAME` or the explicit `restart-bot` above
+to return it to desired-running state.
 
 The tool proportionally reduces position balances to wallet reality, preserves
 cost basis, backs up changed ledgers, and writes a reconciliation audit record.
