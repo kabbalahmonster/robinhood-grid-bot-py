@@ -181,6 +181,12 @@ def _validated_treasury_recipient(config, wallet, args):
     return recipient, recipient_is_allowed
 
 
+def _emit_fleet_treasury_summary(status, amount):
+    """Emit a private, stable marker consumed by the fleet wrapper."""
+    if os.getenv("FLEET_TREASURY_SUMMARY") == "1":
+        print(f"FLEET_TREASURY_SUMMARY|{status}|{amount}")
+
+
 def run_treasury_transfer(args):
     """Plan or execute one deliberately guarded ERC-20 treasury transfer."""
     try:
@@ -215,6 +221,7 @@ def run_treasury_transfer(args):
 
         if not args.execute:
             print("DRY RUN: no transaction broadcast. Add --execute after reviewing this plan.")
+            _emit_fleet_treasury_summary("planned", amount)
             return 0
         if not args.confirm_bot_stopped:
             raise ValueError(
@@ -239,6 +246,7 @@ def run_treasury_transfer(args):
             print(f"TRANSFER FAILED: {result.error}")
             return 1
         print(f"TRANSFER CONFIRMED: {_terminal_transaction_link(config.chain_id, result.tx_hash)}")
+        _emit_fleet_treasury_summary("confirmed", amount)
         return 0
     except Exception as exc:
         print(f"TREASURY TRANSFER REFUSED: {exc}")
@@ -367,6 +375,7 @@ def run_native_treasury_transfer(args):
                 f"ETH_GAS_RESERVE={config.eth_gas_reserve} and position reserve="
                 f"{reserve_per_position} × {available_position_slots} available slots"
             )
+            _emit_fleet_treasury_summary("skipped", Decimal(0))
             return 0
         tx, balance_wei, amount_wei, fee_wei, reserve_wei = plan
 
@@ -395,6 +404,7 @@ def run_native_treasury_transfer(args):
 
         if not args.execute:
             print("DRY RUN: no transaction broadcast. Add --execute after reviewing this plan.")
+            _emit_fleet_treasury_summary("planned", amount)
             return 0
         if not args.confirm_bot_stopped:
             raise ValueError(
@@ -453,6 +463,7 @@ def run_native_treasury_transfer(args):
             print(f"TRANSFER FAILED: {result.error}")
             return 1
         print(f"TRANSFER CONFIRMED: {_terminal_transaction_link(config.chain_id, result.tx_hash)}")
+        _emit_fleet_treasury_summary("confirmed", amount)
         return 0
     except Exception as exc:
         print(f"NATIVE ETH TRANSFER REFUSED: {exc}")

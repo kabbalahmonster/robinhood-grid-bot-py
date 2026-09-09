@@ -970,7 +970,10 @@ ops/fleet/treasury-transfer \
 
 The dry run prints filled positions, configured capacity, available slots,
 reserve per slot, total position reserve, estimated maximum gas, and final send
-amount for every wallet. This
+amount for every wallet. A final fleet rollup lists each bot's contribution and
+status, skipped/failed counts, and the exact aggregate that would reach the
+treasury. During execution the same footer totals only confirmed transfers and
+labels the result as confirmed rather than planned. This
 calculated mode is restricted to an externally owned recipient. After reviewing
 the complete fleet plan, stop the fleet and repeat with
 `--execute --confirm-fleet-stopped`. The override is valid only with native ETH

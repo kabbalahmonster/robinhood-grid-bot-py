@@ -41,6 +41,8 @@ retains TREASURY_POSITION_RESERVE_ETH for every available buy slot
 --position-reserve-eth overrides that setting for one run. ETH
 "all" intentionally bypasses both reserves and requires --confirm-liquidate.
 When --recipient is omitted, FLEET_TREASURY_RECIPIENT from fleet.conf is used.
+Every run ends with a per-bot contribution summary and an exact aggregate;
+dry runs say "would be transferred" while executions count confirmed amounts.
 EOF
 }
 
@@ -128,8 +130,14 @@ printf 'Fleet treasury transfer: %s\nAsset: %s\nAmount per wallet: %s\nRecipient
 
 successes=0
 failures=0
+planned_or_confirmed=0
+skipped=0
+summary_amounts=()
+summary_names=()
+summary_statuses=()
 for bot_dir in "${FLEET_BOT_DIRS[@]}"; do
   python_bin="$(fleet_python_for "$bot_dir")"
+  bot_name="$(fleet_bot_name "$bot_dir")"
   printf '%s\n%s\n' '------------------------------------------------------------' "$bot_dir"
 
   if [[ "$asset_upper" == "ETH" ]]; then
@@ -144,14 +152,59 @@ for bot_dir in "${FLEET_BOT_DIRS[@]}"; do
   [[ -z "$confirmed_recipient" ]] || command_args+=(--confirm-recipient "$confirmed_recipient")
   ((execute == 0)) || command_args+=(--execute --confirm-bot-stopped)
 
-  if (cd "$bot_dir" && "${command_args[@]}"); then
+  summary_output_file="$(mktemp)" || fleet_die "Could not create treasury summary workspace"
+  trap 'rm -f -- "${summary_output_file:-}"' EXIT
+  command_status=0
+  (
+    cd "$bot_dir"
+    FLEET_TREASURY_SUMMARY=1 "${command_args[@]}" 2>&1 \
+      | tee "$summary_output_file" \
+      | sed '/^FLEET_TREASURY_SUMMARY|/d'
+  ) || command_status=$?
+  summary_line="$(sed -n '/^FLEET_TREASURY_SUMMARY|/p' "$summary_output_file" | tail -n 1)"
+  rm -f -- "$summary_output_file"
+  summary_output_file=""
+
+  if ((command_status == 0)); then
     successes=$((successes + 1))
+    if [[ "$summary_line" =~ ^FLEET_TREASURY_SUMMARY\|(planned|confirmed|skipped)\|([0-9]+([.][0-9]+)?)$ ]]; then
+      summary_status="${BASH_REMATCH[1]}"
+      summary_amount="${BASH_REMATCH[2]}"
+      summary_names+=("$bot_name")
+      summary_statuses+=("$summary_status")
+      summary_amounts+=("$summary_amount")
+      if [[ "$summary_status" == "skipped" ]]; then
+        skipped=$((skipped + 1))
+      else
+        planned_or_confirmed=$((planned_or_confirmed + 1))
+      fi
+    else
+      printf 'WARNING: %s succeeded but reported no summary amount.\n' "$bot_name" >&2
+    fi
   else
     printf 'FAILED: %s\n' "$bot_dir" >&2
     failures=$((failures + 1))
+    summary_names+=("$bot_name")
+    summary_statuses+=("failed")
+    summary_amounts+=("0")
   fi
 done
 
 printf '\nFleet treasury transfer complete: %d succeeded, %d failed (%s).\n' \
   "$successes" "$failures" "$mode"
+printf '\nTreasury contribution summary:\n'
+for index in "${!summary_names[@]}"; do
+  printf '  %-18s %20s %-9s %s\n' \
+    "${summary_names[$index]}" "${summary_amounts[$index]}" "$asset" "${summary_statuses[$index]}"
+done
+summary_python="$(fleet_python_for "${FLEET_BOT_DIRS[0]}")"
+summary_total="$(printf '%s\n' "${summary_amounts[@]}" | "$summary_python" -c \
+  'import sys; from decimal import Decimal; print(sum((Decimal(line.strip()) for line in sys.stdin if line.strip()), Decimal(0)))')"
+if ((execute)); then
+  printf 'Total confirmed for treasury: %s %s from %d bot(s); %d skipped, %d failed.\n' \
+    "$summary_total" "$asset" "$planned_or_confirmed" "$skipped" "$failures"
+else
+  printf 'Total that would be transferred: %s %s from %d bot(s); %d skipped, %d failed.\n' \
+    "$summary_total" "$asset" "$planned_or_confirmed" "$skipped" "$failures"
+fi
 ((failures == 0))

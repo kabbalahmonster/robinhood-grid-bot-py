@@ -374,7 +374,7 @@ option and safety invariant.
 | `backup-private-keys` | Validate every configured bot and write one sensitive key backup | Sensitive file output |
 | `fund-bots` | Top selected wallets up to a target ETH balance from a separate treasury signer | Broadcast only with all guards |
 | `usdg-sweep` | Plan or execute fleet USDG transfers | Broadcast only with all guards |
-| `treasury-transfer` | Plan or execute native/ERC-20 transfers | Broadcast only with all guards |
+| `treasury-transfer` | Plan or execute native/ERC-20 transfers with per-bot and aggregate contribution summaries | Broadcast only with all guards |
 | `sell-moonbags` | Plan or sell only unallocated trading-token balances for selected coins/all | Broadcast only with all guards |
 | `liquidate-assets` | Plan or sell verified bot-managed assets and clear matching positions | Broadcast only with all guards |
 | `dashboard-remove` | Preview/remove permanently retired DoomDash cards/history | Network mutation only with both confirmations |
@@ -1346,7 +1346,7 @@ for previewed, backed-up, atomic `.env` changes such as
 reserve and `TREASURY_POSITION_RESERVE_ETH` for each available buy slot
 (`MAX_ACTIVE_POSITIONS - filled` in gridless mode, otherwise
 `MAX_POSITIONS - filled`). Pass
-`--position-reserve-eth ETH` to override the per-position value for one run
+`--position-reserve-eth ETH` to override the per-slot value for one run
 without editing any bot `.env`.
 
 `scripts/sweep_fleet_usdg.sh` runs the USDG sweep command in every checkout
