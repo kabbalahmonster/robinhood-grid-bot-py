@@ -704,6 +704,8 @@ class GridBot:
         self.positions = {}
         self.running = True
         self._safety_halted = False
+        self._exact_approval_guard_path = "data/pending_exact_approval.json"
+        self._exact_approval_guard = self._load_exact_approval_guard()
         self.round_count = 0
         self.start_time = time.time()
         self.session_buys = 0
@@ -1483,13 +1485,13 @@ class GridBot:
         comparison = getattr(self, "_route_comparisons", {}).get(direction)
         return {**(attempt or {}), "route_comparison": comparison} if comparison else attempt
 
-    def _mark_buy_tournament_aborted(self, *, reason, quoted_pnl_percent,
+    def _mark_buy_tournament_aborted(self, *, reason, market_pnl_percent,
                                      block_threshold_percent, trigger_threshold_percent):
         """Close a selected buy tournament when a later strategy guard vetoes it."""
         comparison = getattr(self, "_route_comparisons", {}).get("buy")
         abort = {
             "reason": reason,
-            "quoted_pnl_percent": round(float(quoted_pnl_percent), 4),
+            "market_pnl_percent": round(float(market_pnl_percent), 4),
             "block_threshold_percent": round(float(block_threshold_percent), 4),
             "trigger_threshold_percent": round(float(trigger_threshold_percent), 4),
         }
@@ -1805,6 +1807,59 @@ class GridBot:
         seal = getattr(self.provider, "seal_current_operation", None)
         if seal is not None:
             seal()
+
+    def _load_exact_approval_guard(self):
+        """Load the durable one-approval fuse for exact-allowance providers."""
+        try:
+            with open(self._exact_approval_guard_path, "r", encoding="utf-8") as handle:
+                value = json.load(handle)
+            return value if isinstance(value, dict) else None
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError) as exc:
+            logger.critical("Could not read exact-approval safety guard: %s", exc)
+            self._safety_halted = True
+            return {"invalid": True}
+
+    def _record_exact_approval_guard(self, result, *, operation, spender, amount, position_id=None):
+        """Persist a fuse before continuing beyond a confirmed exact approval."""
+        if not self._provider_requires_exact_approval():
+            return
+        record = {
+            "operation": str(operation), "provider": str(self.provider.name),
+            "spender": str(spender).lower(), "amount": str(int(amount)),
+            "position_id": str(position_id) if position_id is not None else None,
+            "approval_tx_hash": str(getattr(result, "tx_hash", "") or ""),
+            "created_at": datetime.now().isoformat(),
+        }
+        os.makedirs(os.path.dirname(self._exact_approval_guard_path), exist_ok=True)
+        temporary = self._exact_approval_guard_path + ".tmp"
+        with open(temporary, "w", encoding="utf-8") as handle:
+            json.dump(record, handle, sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, self._exact_approval_guard_path)
+        self._exact_approval_guard = record
+
+    def _exact_approval_fuse_blocks(self, *, operation, spender, amount, position_id=None):
+        """Refuse a second exact approval until the first operation settles."""
+        guard = self._exact_approval_guard
+        if not self._provider_requires_exact_approval() or not guard:
+            return False
+        logger.critical(
+            "TRADING HALTED: refusing repeated %s approval for %s; confirmed approval %s "
+            "is still awaiting its swap outcome",
+            operation, spender, guard.get("approval_tx_hash", "unknown"),
+        )
+        self._safety_halted = True
+        return True
+
+    def _clear_exact_approval_guard(self):
+        try:
+            os.remove(self._exact_approval_guard_path)
+        except FileNotFoundError:
+            pass
+        self._exact_approval_guard = None
 
     def _provider_approval_amount(self, amount):
         """Return the allowance amount required by the active provider."""
@@ -2598,10 +2653,11 @@ class GridBot:
                 top = (top_id, top_pos) if top_id else None
             
             if top:
-                # Calculate what the P&L would be at the quoted price
-                tokens_at_quote = quote.buy_amount / self.token_unit
-                quote_buy_price = buy_amount_eth / tokens_at_quote if tokens_at_quote > 0 else 0
-                pnl_at_quote = calculate_pnl(top[1], quote_buy_price, self.token_decimals)
+                # Revalidate against the same market-price basis that triggered
+                # the strategy. A route returning more tokens for the principal
+                # is price improvement, not market recovery, and must not veto
+                # an otherwise valid buy.
+                pnl_at_trigger_price = calculate_pnl(top[1], price, self.token_decimals)
                 buy_threshold = getattr(self.config, 'gridless_buy_threshold', -10.0)
                 
                 # Calculate block threshold as percentage of threshold distance from 0
@@ -2611,15 +2667,15 @@ class GridBot:
                 block_threshold = buy_threshold + max_recovery
                 
                 # Block if price recovered too much (quote P&L above block threshold)
-                if pnl_at_quote > block_threshold:
+                if pnl_at_trigger_price > block_threshold:
                     self._mark_buy_tournament_aborted(
                         reason="buy_trigger_recovered",
-                        quoted_pnl_percent=pnl_at_quote,
+                        market_pnl_percent=pnl_at_trigger_price,
                         block_threshold_percent=block_threshold,
                         trigger_threshold_percent=buy_threshold,
                     )
-                    logger.info(f"⏸️ Buy aborted: Quote P&L ({pnl_at_quote:.1f}%) recovered past {execution_margin_pct}% margin (block above {block_threshold:.1f}%)")
-                    logger.info(f"   Price moved from trigger. Buy price: {quote_buy_price:.10f}, Top position buy: {get_buy_price(top[1], self.token_decimals):.10f}")
+                    logger.info(f"⏸️ Buy aborted: Market P&L ({pnl_at_trigger_price:.1f}%) recovered past {execution_margin_pct}% margin (block above {block_threshold:.1f}%)")
+                    logger.info(f"   Market price moved from trigger. Current: {price:.10f}, Top position buy: {get_buy_price(top[1], self.token_decimals):.10f}")
                     return
 
         initial_gas_limit, initial_gas_price = self._swap_gas_fields(
@@ -2688,6 +2744,10 @@ class GridBot:
                 else self.wallet.check_allowance(self.config.weth_address, spender, use_permit2=False)
             )
             if allowance < buy_amount_wei:
+                if self._exact_approval_fuse_blocks(
+                    operation="buy", spender=spender, amount=buy_amount_wei,
+                ):
+                    return
                 logger.info(f"Approving WETH to {spender[:20]}...")
                 result = self.wallet.approve_token(self.config.weth_address, spender, buy_amount_wei)
                 if not result.success:
@@ -2695,6 +2755,9 @@ class GridBot:
                     return
                 buy_setup_gas_wei += self._receipt_gas_cost_wei(result)
                 self._seal_provider_fallback()
+                self._record_exact_approval_guard(
+                    result, operation="buy", spender=spender, amount=buy_amount_wei,
+                )
                 # Refresh quote after approval for LI.FI
                 if self.provider.capabilities.refresh_after_approval:
                     quote = self.api_client.refresh_quote(
@@ -2771,6 +2834,7 @@ class GridBot:
             logger.debug(f"Quote buy_amount: {quote.buy_amount}, sell_amount: {quote.sell_amount}")
             
             pos_id = add_position(cost_wei, tokens_received)
+            self._clear_exact_approval_guard()
             if weth_fallback:
                 self._clear_settlement_guard()
             
@@ -3309,6 +3373,11 @@ class GridBot:
                     self.config.token_address, spender, use_permit2=False,
                 )
             if token_allowance < sell_amount:
+                if self._exact_approval_fuse_blocks(
+                    operation="sell", spender=spender, amount=sell_amount,
+                    position_id=pos_id,
+                ):
+                    return
                 logger.info(f"Approving {self.config.token_symbol} to {spender[:20]}...")
                 result = self.wallet.approve_token(
                     self.config.token_address, spender,
@@ -3319,6 +3388,10 @@ class GridBot:
                     return
                 sell_setup_gas_wei += self._receipt_gas_cost_wei(result)
                 self._seal_provider_fallback()
+                self._record_exact_approval_guard(
+                    result, operation="sell", spender=spender, amount=sell_amount,
+                    position_id=pos_id,
+                )
             
                 # Refresh provider routes after approval when required.
                 if self.provider.capabilities.refresh_after_approval:
@@ -3423,6 +3496,7 @@ class GridBot:
             
             # Remove position
             remove_position(pos_id)
+            self._clear_exact_approval_guard()
             
             if moonbag_tokens > 0:
                 logger.info(f"   Moonbag: {moonbag_tokens/self.token_unit:.4f} tokens to wallet")
@@ -3859,6 +3933,11 @@ class GridBot:
                 self.config.token_address, spender, use_permit2=False,
             )
         if token_allowance < sell_amount:
+            if self._exact_approval_fuse_blocks(
+                operation="sell", spender=spender, amount=sell_amount,
+                position_id=pos_id,
+            ):
+                return
             logger.info(f"Approving {self.config.token_symbol} to {spender[:20]}...")
             approval_amount = self._provider_approval_amount(sell_amount)
             result = self.wallet.approve_token(
@@ -3871,6 +3950,10 @@ class GridBot:
                 return
             sell_setup_gas_wei += self._receipt_gas_cost_wei(result)
             self._seal_provider_fallback()
+            self._record_exact_approval_guard(
+                result, operation="sell", spender=spender, amount=sell_amount,
+                position_id=pos_id,
+            )
             
             # Refresh provider routes after approval when required.
             # Gas prices, calldata, and routes may have changed
@@ -4009,6 +4092,7 @@ class GridBot:
             self.positions[pos_id]['balance'] = 0
             self.positions[pos_id]['cost'] = 0
             self.save_positions()
+            self._clear_exact_approval_guard()
             
             if moonbag_tokens > 0:
                 logger.info(f"   Moonbag: {moonbag_tokens / self.token_unit:.4f} tokens added to wallet balance")

@@ -767,7 +767,7 @@ def test_buy_strategy_veto_marks_selected_tournament_terminal():
 
     b._mark_buy_tournament_aborted(
         reason="buy_trigger_recovered",
-        quoted_pnl_percent=-3.5,
+        market_pnl_percent=-3.5,
         block_threshold_percent=-9.6,
         trigger_threshold_percent=-10.0,
     )
@@ -776,11 +776,35 @@ def test_buy_strategy_veto_marks_selected_tournament_terminal():
     assert comparison["status"] == "execution_aborted"
     assert comparison["execution_abort"] == {
         "reason": "buy_trigger_recovered",
-        "quoted_pnl_percent": -3.5,
+        "market_pnl_percent": -3.5,
         "block_threshold_percent": -9.6,
         "trigger_threshold_percent": -10.0,
     }
     assert b._buy_attempt["status"] == "buy_trigger_recovered"
+
+
+def test_exact_approval_fuse_persists_and_blocks_a_second_approval(tmp_path):
+    b = bot("gate")
+    b.provider = SimpleNamespace(
+        name="umbra", capabilities=SimpleNamespace(exact_amount_approval=True),
+    )
+    b._exact_approval_guard_path = str(tmp_path / "pending.json")
+    b._exact_approval_guard = None
+    result = SimpleNamespace(tx_hash="0xapproval")
+
+    b._record_exact_approval_guard(
+        result, operation="sell", spender="0xRouter", amount=123, position_id=7,
+    )
+
+    assert json.loads((tmp_path / "pending.json").read_text())["amount"] == "123"
+    assert b._exact_approval_fuse_blocks(
+        operation="sell", spender="0xRouter", amount=123, position_id=7,
+    ) is True
+    assert b._safety_halted is True
+
+    b._clear_exact_approval_guard()
+    assert not (tmp_path / "pending.json").exists()
+    assert b._exact_approval_guard is None
 
 
 @pytest.mark.parametrize("mode", ["execute", "invalid"])
