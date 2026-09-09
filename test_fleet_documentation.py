@@ -43,7 +43,7 @@ class FleetDocumentationTests(unittest.TestCase):
 
     def test_lifecycle_commands_have_home_bin_install_links(self):
         guide = (FLEET / "README.md").read_text()
-        for command in ("start-fleet", "stop-fleet", "restart-fleet", "stop-bot", "restart-bot"):
+        for command in ("start-fleet", "stop-fleet", "restart-fleet", "stop-bot", "restart-bot", "update-bot"):
             with self.subTest(command=command):
                 self.assertIn(
                     f'ln -sf "$PWD/ops/fleet/{command}" "$HOME/bin/{command}"',

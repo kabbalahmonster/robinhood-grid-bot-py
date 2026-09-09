@@ -106,7 +106,7 @@ sudo apt install tmux git python3 python3-venv
    nano ops/fleet/fleet.conf
    chmod +x ops/fleet/start-fleet ops/fleet/stop-fleet \
      ops/fleet/restart-fleet ops/fleet/update-fleet \
-     ops/fleet/update-this-checkout ops/fleet/update-all \
+     ops/fleet/update-this-checkout ops/fleet/update-all ops/fleet/update-bot \
      ops/fleet/usdg-sweep \
      ops/fleet/treasury-transfer ops/fleet/fund-bots ops/fleet/update-variable \
      ops/fleet/adjust-positions ops/fleet/fleet-membership \
@@ -137,6 +137,7 @@ sudo apt install tmux git python3 python3-venv
    ln -sf "$PWD/ops/fleet/restart-fleet" "$HOME/bin/restart-fleet"
    ln -sf "$PWD/ops/fleet/stop-bot" "$HOME/bin/stop-bot"
    ln -sf "$PWD/ops/fleet/restart-bot" "$HOME/bin/restart-bot"
+   ln -sf "$PWD/ops/fleet/update-bot" "$HOME/bin/update-bot"
    ln -sf "$PWD/ops/fleet/update-fleet" "$HOME/bin/update-fleet"
    ln -sf "$PWD/ops/fleet/update-this-checkout" "$HOME/bin/update-this-checkout"
    ln -sf "$PWD/ops/fleet/update-all" "$HOME/bin/update-all"
@@ -280,6 +281,7 @@ unless their section explicitly says otherwise.
 | `start-fleet` / `stop-fleet` / `restart-fleet` | Manage the configured tmux fleet | Processes only |
 | `stop-bot NAME` / `restart-bot NAME` | Stop or cleanly restart one bot pane and its complete old process tree | Processes only |
 | `update-this-checkout` | Fast-forward the dedicated operations clone | Yes, Git |
+| `update-bot NAME` | Inspect, switch, fast-forward, and conditionally restart one bot checkout | Yes, Git/processes |
 | `update-fleet` / `update-all` | Fast-forward bot clones; full wrapper can restart | Yes, Git/processes |
 | `initialize-bots` | Create bot clones, wallets, configs, and optional membership | `--apply` only |
 | `fleet-membership` | Add/remove explicit configured bot names | `--apply` only |
@@ -364,6 +366,60 @@ Update all checkouts and restart only after every update succeeds:
 ```bash
 ops/fleet/update-fleet --restart
 ```
+
+### Update or switch one bot
+
+`update-bot` is the single-checkout counterpart to `update-fleet`. It resolves
+the bot through `fleet.conf`, fetches its configured Git remote, preserves
+untracked runtime/data files, and refuses tracked edits, detached HEADs,
+missing branches, or divergent history. With no branch option it fast-forwards
+the branch the checkout already tracks:
+
+```bash
+update-bot ROBINVAULT
+```
+
+After a successful update, it restarts only that bot when the bot already has a
+pane in the configured running fleet. It never starts a stopped fleet or creates
+a missing pane. Suppress even that conditional restart when inspecting or
+staging code for later activation:
+
+```bash
+update-bot ROBINVAULT --no-restart
+```
+
+Fetch and list the bot's local and remote branches, including its current branch
+and upstream tracking state:
+
+```bash
+update-bot ROBINVAULT --list-branches
+```
+
+Preview a branch switch without moving `HEAD` or restarting anything:
+
+```bash
+update-bot ROBINVAULT --branch nullfox/umbra-provider-integration --check
+```
+
+Switch to that canary branch, fast-forward it, and restart ROBINVAULT if it is
+currently running:
+
+```bash
+update-bot ROBINVAULT --branch nullfox/umbra-provider-integration
+```
+
+Return the canary to `main` the same way:
+
+```bash
+update-bot ROBINVAULT --branch main
+```
+
+The default remote is `origin`; use `--remote NAME` only when the checkout
+intentionally tracks another configured remote. If a remote branch exists but
+its local branch does not, the command creates a normal local tracking branch.
+It never force-resets, rebases, deletes branches, stashes changes, or discards
+files. A local branch that is ahead of its upstream is preserved; a diverged
+branch is refused for manual review.
 
 ### Update the operations checkout only
 
