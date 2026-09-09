@@ -1284,11 +1284,12 @@ class GridBot:
                 gas_estimate_provider=gas_estimate_provider,
                 conversion_gas_estimate_provider=conversion_gas_estimate_provider,
                 approval_gas_estimate_provider=approval_gas_estimate_provider,
-                # Gate-only collection gets six seconds: Uniswap indicative
-                # routes require read-only swap preparation before local gas
-                # simulation, while shadow remains on its observation budget.
+                # Gate-only collection gets twelve seconds: Uniswap indicative
+                # routes require both /quote and read-only /swap preparation
+                # before local gas simulation. Candidates run in parallel, so
+                # this does not give one provider another provider's budget.
                 max_seconds=float(getattr(
-                    self.config, "route_tournament_gate_timeout_seconds", 6
+                    self.config, "route_tournament_gate_timeout_seconds", 12
                 )),
             )
             selection = select_execution_candidate(comparison, direction)

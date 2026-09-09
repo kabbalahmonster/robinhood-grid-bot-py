@@ -114,7 +114,7 @@ python grid_bot.py
 | `ROUTE_TOURNAMENT_PROVIDERS` | No | uniswap,sushiswap | Comma-separated non-empty subset of implemented tournament providers |
 | `ROUTE_TOURNAMENT_SETTLEMENTS` | No | native,weth | Comma-separated non-empty subset; `native` skips WETH candidates |
 | `ROUTE_TOURNAMENT_SHADOW_TIMEOUT_SECONDS` | No | 4 | Absolute shadow round deadline, bounded to 1-15 seconds |
-| `ROUTE_TOURNAMENT_GATE_TIMEOUT_SECONDS` | No | 6 | Absolute execution-preflight deadline, bounded to 1-15 seconds |
+| `ROUTE_TOURNAMENT_GATE_TIMEOUT_SECONDS` | No | 12 | Absolute execution-preflight deadline, bounded to 1-15 seconds |
 | `USE_LI_FI` | No | false | Use LI.FI instead of 0x for swaps |
 | `USE_UNISWAP_API` | No | true | Legacy Uniswap selection used when `SWAP_PROVIDER` is empty |
 | **Token Configuration** ||||
@@ -1640,7 +1640,7 @@ observations still apply that floor, without affecting actual stoploss behavior.
 `ROUTE_TOURNAMENT_MODE=gate` enables guarded execution and additionally
 requires `ROUTE_TOURNAMENT_CANARY=true`. Tournament providers must be available
 through the configured primary/fallback pair; an included Uniswap provider
-requires `UNISWAP_API_KEY`. The gate uses a six-second default preflight budget,
+requires `UNISWAP_API_KEY`. The gate uses a twelve-second default preflight budget,
 collects every configured identity, and
 permits only prepared calldata with fresh local `eth_estimateGas` at final
 authorization, and refreshes the RPC gas price again at the broadcast boundary.
@@ -1677,10 +1677,12 @@ fresh quote economics; if the cached protocol stops quoting it is discarded.
 The shadow and gate deadlines are configurable through
 `ROUTE_TOURNAMENT_SHADOW_TIMEOUT_SECONDS` and
 `ROUTE_TOURNAMENT_GATE_TIMEOUT_SECONDS`; both are startup-validated between 1
-and 15 seconds. A longer deadline improves slow-provider completion but also
+and 15 seconds. The 12-second gate default gives Uniswap's separate quote and
+swap-preparation requests roughly six seconds each; candidates run in parallel,
+so a slow provider cannot consume another provider's opportunity. A longer deadline improves slow-provider completion but also
 keeps more requests in flight and delays the trading round. For roughly 30 bots
 in gate mode, use `POLL_INTERVAL_SECONDS=12-20` with startup jitter rather than
-the six-second single-bot default. Twelve seconds is the practical first step;
+the twelve-second default. Move toward 15 seconds only if deadlines persist;
 move toward 15-20 seconds if 429s or overlapping tournament rounds appear.
 
 For a ROBINVAULT canary, record the current revision/config and baseline

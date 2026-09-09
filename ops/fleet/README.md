@@ -1330,7 +1330,7 @@ monitored window confirms acceptable provider quota and execution behavior.
 
 Tournament shape is independently configurable: providers are a non-empty
 subset of `uniswap,sushiswap,umbra,lifi`; settlements are a non-empty subset of
-`native,weth`; shadow/gate deadlines default to 4/6 seconds and accept 1-15.
+`native,weth`; shadow/gate deadlines default to 4/12 seconds and accept 1-15.
 For about 30 gate-enabled bots, start at `POLL_INTERVAL_SECONDS=12` and increase
 toward 15-20 if 429s or overlapping rounds occur. Using only `native` halves
 candidate traffic, but it also removes WETH fallback liquidity and potential

@@ -188,7 +188,7 @@ class BotConfig:
     route_tournament_providers: tuple[str, ...] = ("uniswap", "sushiswap")
     route_tournament_settlements: tuple[str, ...] = ("native", "weth")
     route_tournament_shadow_timeout_seconds: float = 4.0
-    route_tournament_gate_timeout_seconds: float = 6.0
+    route_tournament_gate_timeout_seconds: float = 12.0
     
     # Derived properties
     @property
@@ -223,7 +223,7 @@ class BotConfig:
         if "lifi" in providers and not self.li_fi_api_key:
             raise ValueError("LI_FI_API_KEY is required when LI.FI participates in the route tournament")
         for name in ("route_tournament_shadow_timeout_seconds", "route_tournament_gate_timeout_seconds"):
-            value = float(getattr(self, name, 4 if "shadow" in name else 6))
+            value = float(getattr(self, name, 4 if "shadow" in name else 12))
             if not 1 <= value <= 15:
                 raise ValueError(f"{name.upper()} must be between 1 and 15 seconds")
         # Check required fields
@@ -468,7 +468,7 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
             os.getenv("ROUTE_TOURNAMENT_SHADOW_TIMEOUT_SECONDS", "4")
         ),
         route_tournament_gate_timeout_seconds=float(
-            os.getenv("ROUTE_TOURNAMENT_GATE_TIMEOUT_SECONDS", "6")
+            os.getenv("ROUTE_TOURNAMENT_GATE_TIMEOUT_SECONDS", "12")
         ),
         swap_fallback_provider=os.getenv("SWAP_FALLBACK_PROVIDER", "sushiswap"),
         sushi_api_key=os.getenv("SUSHI_API_KEY", ""),
