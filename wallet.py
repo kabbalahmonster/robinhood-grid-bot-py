@@ -235,6 +235,12 @@ class Wallet:
     def has_unresolved_broadcast(self) -> bool:
         return bool(getattr(self, "unresolved_broadcast", None))
 
+    @staticmethod
+    def _definitive_submission_rejection(error: Exception) -> bool:
+        """Return true only for RPC errors proving the signed tx was rejected."""
+        message = str(error).lower()
+        return "max fee per gas less than block base fee" in message
+
     def normal_gas_price(self, minimum_base_fee: int = 0) -> int:
         """Return dynamic Normal gas with a minimal anti-staleness margin."""
         multiplier = max(float(getattr(self.config, "gas_price_multiplier", 1.0)), 1.0)
@@ -730,6 +736,7 @@ class Wallet:
             TransactionResult: Transaction result.
         """
         tx_hash_hex = None
+        submission_accepted = False
         try:
             # Mandatory local preflight at the final broadcast boundary.  API
             # simulations are useful evidence, but the RPC that will accept the
@@ -787,6 +794,7 @@ class Wallet:
                 else Web3.keccak(raw_tx).hex()
             )
             tx_hash = self.w3.eth.send_raw_transaction(raw_tx)
+            submission_accepted = True
             returned_hash = tx_hash.hex()
             if returned_hash.lower() != tx_hash_hex.lower():
                 raise ValueError(
@@ -844,6 +852,11 @@ class Wallet:
                 )
 
         except Exception as e:
+            if (tx_hash_hex and not submission_accepted
+                    and self._definitive_submission_rejection(e)):
+                error = f"RPC definitively rejected signed transaction before broadcast: {e}"
+                self.logger.warning("%s tx=%s", error, tx_hash_hex)
+                return TransactionResult(success=False, tx_hash=tx_hash_hex, error=error)
             if tx_hash_hex:
                 error = (
                     "Signed transaction may have been broadcast but RPC submission/confirmation failed; outcome "
@@ -887,6 +900,7 @@ class Wallet:
             TransactionResult: Transaction result.
         """
         tx_hash_hex = None
+        submission_accepted = False
         try:
             # Handle both old and new eth-account versions
             raw_tx = getattr(signed_tx, 'raw_transaction', getattr(signed_tx, 'rawTransaction', None))
@@ -898,6 +912,7 @@ class Wallet:
                 else Web3.keccak(raw_tx).hex()
             )
             tx_hash = self.w3.eth.send_raw_transaction(raw_tx)
+            submission_accepted = True
             returned_hash = tx_hash.hex()
             if returned_hash.lower() != tx_hash_hex.lower():
                 raise ValueError(
@@ -926,6 +941,11 @@ class Wallet:
                 )
         
         except Exception as e:
+            if (tx_hash_hex and not submission_accepted
+                    and self._definitive_submission_rejection(e)):
+                error = f"RPC definitively rejected signed raw transaction before broadcast: {e}"
+                self.logger.warning("%s tx=%s", error, tx_hash_hex)
+                return TransactionResult(success=False, tx_hash=tx_hash_hex, error=error)
             if tx_hash_hex:
                 error = (
                     "Signed raw transaction may have been broadcast but RPC submission/confirmation failed; outcome "

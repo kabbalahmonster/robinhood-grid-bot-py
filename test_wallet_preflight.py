@@ -131,6 +131,36 @@ class TestWalletPreflight(unittest.TestCase):
         self.assertEqual(guard["tx_hash"], "0xlocalhash")
         self.assertEqual(guard["nonce"], 480)
 
+    def test_base_fee_rejection_is_retryable_and_never_creates_guard(self):
+        wallet = self.make_wallet()
+        wallet.w3.eth.call.return_value = b""
+        wallet.w3.eth.estimate_gas.return_value = 90_000
+        wallet.normal_gas_price = Mock(return_value=185_440_040)
+        signed_hash = Mock()
+        signed_hash.hex.return_value = "0xrejected"
+        wallet.account.sign_transaction.return_value = SimpleNamespace(
+            raw_transaction=b"signed", hash=signed_hash,
+        )
+        wallet.w3.eth.send_raw_transaction.side_effect = ValueError({
+            "code": -32000,
+            "message": "max fee per gas less than block base fee: maxFeePerGas: 185440040 baseFee: 186354000",
+        })
+
+        with tempfile.TemporaryDirectory() as directory:
+            wallet.config = SimpleNamespace(chain_id=4663)
+            wallet.address = "0x1"
+            wallet.unresolved_broadcast_path = os.path.join(directory, "guard.json")
+            result = wallet._send_transaction({
+                "from": "0x1", "to": "0x2", "data": "0x1234", "value": 7,
+                "gas": 100_000, "gasPrice": 185_440_040, "nonce": 128,
+            })
+            self.assertFalse(os.path.exists(wallet.unresolved_broadcast_path))
+
+        self.assertFalse(result.success)
+        self.assertFalse(result.outcome_unknown)
+        self.assertIn("definitively rejected", result.error)
+        self.assertFalse(wallet.has_unresolved_broadcast())
+
 
 if __name__ == "__main__":
     unittest.main()
