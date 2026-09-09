@@ -778,8 +778,20 @@ class Wallet:
             raw_tx = getattr(signed_tx, 'raw_transaction', getattr(signed_tx, 'rawTransaction', None))
             if raw_tx is None:
                 raise AttributeError("SignedTransaction has no raw_transaction attribute")
+            # The transaction hash is deterministic from the signed bytes. Set
+            # it before asking an RPC to broadcast so a connection/capability
+            # error cannot make an accepted transaction look safely retryable.
+            signed_hash = getattr(signed_tx, "hash", None)
+            tx_hash_hex = (
+                signed_hash.hex() if signed_hash is not None
+                else Web3.keccak(raw_tx).hex()
+            )
             tx_hash = self.w3.eth.send_raw_transaction(raw_tx)
-            tx_hash_hex = tx_hash.hex()
+            returned_hash = tx_hash.hex()
+            if returned_hash.lower() != tx_hash_hex.lower():
+                raise ValueError(
+                    f"RPC returned transaction hash {returned_hash} but signed payload hashes to {tx_hash_hex}"
+                )
             
             self.logger.debug(f"Transaction sent: {tx_hash_hex}")
             
@@ -834,7 +846,7 @@ class Wallet:
         except Exception as e:
             if tx_hash_hex:
                 error = (
-                    "Transaction was broadcast but confirmation failed; outcome "
+                    "Signed transaction may have been broadcast but RPC submission/confirmation failed; outcome "
                     f"is unknown and MUST NOT be retried automatically: {e}"
                 )
                 self.logger.critical("%s tx=%s", error, tx_hash_hex)
@@ -880,8 +892,17 @@ class Wallet:
             raw_tx = getattr(signed_tx, 'raw_transaction', getattr(signed_tx, 'rawTransaction', None))
             if raw_tx is None:
                 raise AttributeError("SignedTransaction has no raw_transaction attribute")
+            signed_hash = getattr(signed_tx, "hash", None)
+            tx_hash_hex = (
+                signed_hash.hex() if signed_hash is not None
+                else Web3.keccak(raw_tx).hex()
+            )
             tx_hash = self.w3.eth.send_raw_transaction(raw_tx)
-            tx_hash_hex = tx_hash.hex()
+            returned_hash = tx_hash.hex()
+            if returned_hash.lower() != tx_hash_hex.lower():
+                raise ValueError(
+                    f"RPC returned transaction hash {returned_hash} but signed payload hashes to {tx_hash_hex}"
+                )
             
             if not wait_for_receipt:
                 return TransactionResult(success=True, tx_hash=tx_hash_hex)
@@ -907,7 +928,7 @@ class Wallet:
         except Exception as e:
             if tx_hash_hex:
                 error = (
-                    "Raw transaction was broadcast but confirmation failed; outcome "
+                    "Signed raw transaction may have been broadcast but RPC submission/confirmation failed; outcome "
                     f"is unknown and MUST NOT be retried automatically: {e}"
                 )
                 self.logger.critical("%s tx=%s", error, tx_hash_hex)

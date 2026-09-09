@@ -52,7 +52,8 @@ class PositionBalanceGuardTests(unittest.TestCase):
             balance = bot._snapshot_sell_token_balance_or_halt("7", {"nonce": 42})
 
         self.assertIsNone(balance)
-        self.assertFalse(bot.running)
+        self.assertTrue(bot.running)
+        self.assertTrue(bot._safety_halted)
         bot.wallet._record_unresolved_broadcast.assert_called_once()
 
     def test_halts_and_journals_when_failed_sell_reduces_token_balance(self):
@@ -68,7 +69,8 @@ class PositionBalanceGuardTests(unittest.TestCase):
             )
 
         self.assertTrue(detected)
-        self.assertFalse(bot.running)
+        self.assertTrue(bot.running)
+        self.assertTrue(bot._safety_halted)
         bot.wallet._record_unresolved_broadcast.assert_called_once()
         record = bot.wallet._record_unresolved_broadcast.call_args
         self.assertEqual(record.args[0], "0xknown")

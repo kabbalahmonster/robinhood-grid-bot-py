@@ -703,6 +703,7 @@ class GridBot:
         self.positions_file = "data/positions.json"
         self.positions = {}
         self.running = True
+        self._safety_halted = False
         self.round_count = 0
         self.start_time = time.time()
         self.session_buys = 0
@@ -861,7 +862,7 @@ class GridBot:
         try:
             return self._raw_token_balance(self.config.token_address)
         except Exception as exc:
-            self.running = False
+            self._safety_halted = True
             reason = f"cannot snapshot token balance before sell for position {position_id}: {exc}"
             self._sell_attempt = {
                 "status": "pre_sell_balance_unavailable",
@@ -900,7 +901,7 @@ class GridBot:
                 f"units (attempted {int(sell_amount)}); outcome requires receipt audit"
             )
 
-        self.running = False
+        self._safety_halted = True
         existing = getattr(self.wallet, "unresolved_broadcast", None)
         journal_hash = (
             (existing or {}).get("tx_hash")
@@ -3975,12 +3976,13 @@ class GridBot:
         """Run one trading cycle."""
         if self.wallet.has_unresolved_broadcast():
             record = self.wallet.unresolved_broadcast
-            logger.critical(
-                "TRADING HALTED: unresolved broadcast tx=%s. Reconcile it on-chain "
-                "before clearing data/unresolved_broadcast.json.",
-                record.get("tx_hash", "unknown"),
-            )
-            self.running = False
+            if not getattr(self, "_safety_halted", False):
+                logger.critical(
+                    "TRADING HALTED: unresolved broadcast tx=%s. Reconcile it on-chain "
+                    "before clearing data/unresolved_broadcast.json.",
+                    record.get("tx_hash", "unknown"),
+                )
+            self._safety_halted = True
             return
         self.round_count += 1
         # Ephemeral by design: a sell attempt must be re-established by this
@@ -4019,7 +4021,7 @@ class GridBot:
             position_balance_raw = sum(p.get('balance', 0) for p in gridless_positions.values())
             if int(token_raw) < int(position_balance_raw):
                 deficit = int(position_balance_raw) - int(token_raw)
-                self.running = False
+                self._safety_halted = True
                 self._sell_attempt = {
                     "status": "position_balance_mismatch",
                     "tracked_total_raw": int(position_balance_raw),
@@ -4233,7 +4235,7 @@ class GridBot:
         # state; the durable wallet guard also prevents a restart from replaying.
         if self.wallet.has_unresolved_broadcast():
             logger.critical("TRADING HALTED after unresolved sell broadcast")
-            self.running = False
+            self._safety_halted = True
             return
 
         # Report to dashboard if configured (runs regardless of compact mode)
@@ -4385,7 +4387,8 @@ class GridBot:
         logger.info(f"Starting main loop (polling every {poll_interval}s)...")
         while self.running:
             try:
-                self.run_cycle()
+                if not getattr(self, "_safety_halted", False):
+                    self.run_cycle()
                 time.sleep(poll_interval)
             except KeyboardInterrupt:
                 logger.info("Stopping bot...")
