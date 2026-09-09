@@ -1441,13 +1441,13 @@ class GridBot:
         comparison = getattr(self, "_route_comparisons", {}).get(direction)
         return {**(attempt or {}), "route_comparison": comparison} if comparison else attempt
 
-    def _mark_buy_tournament_aborted(self, *, reason, quoted_pnl_percent,
+    def _mark_buy_tournament_aborted(self, *, reason, market_pnl_percent,
                                      block_threshold_percent, trigger_threshold_percent):
         """Close a selected buy tournament when a later strategy guard vetoes it."""
         comparison = getattr(self, "_route_comparisons", {}).get("buy")
         abort = {
             "reason": reason,
-            "quoted_pnl_percent": round(float(quoted_pnl_percent), 4),
+            "market_pnl_percent": round(float(market_pnl_percent), 4),
             "block_threshold_percent": round(float(block_threshold_percent), 4),
             "trigger_threshold_percent": round(float(trigger_threshold_percent), 4),
         }
@@ -2496,10 +2496,10 @@ class GridBot:
                 top = (top_id, top_pos) if top_id else None
             
             if top:
-                # Calculate what the P&L would be at the quoted price
-                tokens_at_quote = quote.buy_amount / self.token_unit
-                quote_buy_price = buy_amount_eth / tokens_at_quote if tokens_at_quote > 0 else 0
-                pnl_at_quote = calculate_pnl(top[1], quote_buy_price, self.token_decimals)
+                # Revalidate on the same market-price basis as the strategy
+                # trigger. Extra tokens from a better route are price
+                # improvement, not market recovery.
+                pnl_at_trigger_price = calculate_pnl(top[1], price, self.token_decimals)
                 buy_threshold = getattr(self.config, 'gridless_buy_threshold', -10.0)
                 
                 # Calculate block threshold as percentage of threshold distance from 0
@@ -2509,15 +2509,15 @@ class GridBot:
                 block_threshold = buy_threshold + max_recovery
                 
                 # Block if price recovered too much (quote P&L above block threshold)
-                if pnl_at_quote > block_threshold:
+                if pnl_at_trigger_price > block_threshold:
                     self._mark_buy_tournament_aborted(
                         reason="buy_trigger_recovered",
-                        quoted_pnl_percent=pnl_at_quote,
+                        market_pnl_percent=pnl_at_trigger_price,
                         block_threshold_percent=block_threshold,
                         trigger_threshold_percent=buy_threshold,
                     )
-                    logger.info(f"⏸️ Buy aborted: Quote P&L ({pnl_at_quote:.1f}%) recovered past {execution_margin_pct}% margin (block above {block_threshold:.1f}%)")
-                    logger.info(f"   Price moved from trigger. Buy price: {quote_buy_price:.10f}, Top position buy: {get_buy_price(top[1], self.token_decimals):.10f}")
+                    logger.info(f"⏸️ Buy aborted: Market P&L ({pnl_at_trigger_price:.1f}%) recovered past {execution_margin_pct}% margin (block above {block_threshold:.1f}%)")
+                    logger.info(f"   Market price moved from trigger. Current: {price:.10f}, Top position buy: {get_buy_price(top[1], self.token_decimals):.10f}")
                     return
 
         initial_gas_limit, initial_gas_price = self._swap_gas_fields(

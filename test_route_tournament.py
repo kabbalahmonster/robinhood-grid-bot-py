@@ -716,7 +716,7 @@ def test_buy_strategy_veto_marks_selected_tournament_terminal():
 
     b._mark_buy_tournament_aborted(
         reason="buy_trigger_recovered",
-        quoted_pnl_percent=-3.5,
+        market_pnl_percent=-3.5,
         block_threshold_percent=-9.6,
         trigger_threshold_percent=-10.0,
     )
@@ -725,7 +725,7 @@ def test_buy_strategy_veto_marks_selected_tournament_terminal():
     assert comparison["status"] == "execution_aborted"
     assert comparison["execution_abort"] == {
         "reason": "buy_trigger_recovered",
-        "quoted_pnl_percent": -3.5,
+        "market_pnl_percent": -3.5,
         "block_threshold_percent": -9.6,
         "trigger_threshold_percent": -10.0,
     }
