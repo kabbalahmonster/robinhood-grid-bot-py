@@ -198,6 +198,19 @@ class Wallet:
         try:
             with open(self.unresolved_broadcast_path, "r", encoding="utf-8") as handle:
                 record = json.load(handle)
+            if (isinstance(record, dict)
+                    and self._definitive_submission_rejection(record.get("error", ""))):
+                archived = (
+                    f"{self.unresolved_broadcast_path}.definitive-rejection."
+                    f"{int(time.time())}"
+                )
+                os.replace(self.unresolved_broadcast_path, archived)
+                self.logger.warning(
+                    "Archived obsolete unresolved-broadcast guard after definitive "
+                    "pre-broadcast rejection: %s",
+                    archived,
+                )
+                return None
             return record if isinstance(record, dict) else None
         except FileNotFoundError:
             return None
