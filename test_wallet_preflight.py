@@ -45,7 +45,11 @@ class TestWalletPreflight(unittest.TestCase):
         wallet.normal_gas_price = Mock(return_value=500)
         wallet.w3.eth.call.return_value = b""
         wallet.w3.eth.estimate_gas.return_value = 90_000
-        wallet.account.sign_transaction.return_value = SimpleNamespace(raw_transaction=b"signed")
+        signed_hash = Mock()
+        signed_hash.hex.return_value = "0xabc"
+        wallet.account.sign_transaction.return_value = SimpleNamespace(
+            raw_transaction=b"signed", hash=signed_hash,
+        )
         tx_hash = Mock()
         tx_hash.hex.return_value = "0xabc"
         wallet.w3.eth.send_raw_transaction.return_value = tx_hash
@@ -65,7 +69,9 @@ class TestWalletPreflight(unittest.TestCase):
         wallet = self.make_wallet()
         wallet.w3.eth.call.return_value = b""
         wallet.w3.eth.estimate_gas.return_value = 90000
-        signed = SimpleNamespace(raw_transaction=b"signed")
+        signed_hash = Mock()
+        signed_hash.hex.return_value = "0xabc123"
+        signed = SimpleNamespace(raw_transaction=b"signed", hash=signed_hash)
         wallet.account.sign_transaction.return_value = signed
         tx_hash = Mock()
         tx_hash.hex.return_value = "0xabc123"
@@ -94,6 +100,36 @@ class TestWalletPreflight(unittest.TestCase):
         self.assertEqual(guard["nonce"], 9)
         self.assertEqual(guard["value_wei"], 7)
         self.assertTrue(wallet.has_unresolved_broadcast())
+
+    def test_submission_error_uses_local_signed_hash_and_marks_unknown(self):
+        wallet = self.make_wallet()
+        wallet.w3.eth.call.return_value = b""
+        wallet.w3.eth.estimate_gas.return_value = 90_000
+        signed_hash = Mock()
+        signed_hash.hex.return_value = "0xlocalhash"
+        wallet.account.sign_transaction.return_value = SimpleNamespace(
+            raw_transaction=b"signed", hash=signed_hash,
+        )
+        wallet.w3.eth.send_raw_transaction.side_effect = ValueError(
+            {"code": -32601, "message": "Method not found"}
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            wallet.config = SimpleNamespace(chain_id=4663)
+            wallet.address = "0x1"
+            wallet.unresolved_broadcast_path = os.path.join(directory, "guard.json")
+            result = wallet._send_transaction({
+                "from": "0x1", "to": "0x2", "data": "0x1234",
+                "value": 0, "gas": 100_000, "nonce": 480,
+            })
+            with open(wallet.unresolved_broadcast_path, encoding="utf-8") as handle:
+                guard = json.load(handle)
+
+        self.assertFalse(result.success)
+        self.assertTrue(result.outcome_unknown)
+        self.assertEqual(result.tx_hash, "0xlocalhash")
+        self.assertEqual(guard["tx_hash"], "0xlocalhash")
+        self.assertEqual(guard["nonce"], 480)
 
 
 if __name__ == "__main__":
