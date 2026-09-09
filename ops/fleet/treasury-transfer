@@ -36,8 +36,9 @@ Guards:
 
 Execution is refused while the configured tmux fleet session exists. Native
 Exact transfers retain each bot's ETH_GAS_RESERVE. ETH "available" additionally
-retains TREASURY_POSITION_RESERVE_ETH for every open position, after the maximum
-transfer fee; --position-reserve-eth overrides that setting for one run. ETH
+retains TREASURY_POSITION_RESERVE_ETH for every available buy slot
+(configured capacity minus filled positions), after the maximum transfer fee;
+--position-reserve-eth overrides that setting for one run. ETH
 "all" intentionally bypasses both reserves and requires --confirm-liquidate.
 When --recipient is omitted, FLEET_TREASURY_RECIPIENT from fleet.conf is used.
 EOF
