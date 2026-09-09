@@ -150,9 +150,11 @@ builds pin UmbraRH and use local gas estimation.
 Unapproved LI.FI/Umbra sell rows appear as `approval required`, not as a local
 simulation failure. They are provisionally ranked with estimated approval gas;
 only the provisional winner is approved, refreshed, and required to pass exact
-local simulation. LI.FI approval is normally reusable; Umbra approval is exact
-and paid on each Umbra sell win. If the refreshed route fails its guards, the
-swap aborts and only the winner's approval gas is spent.
+local simulation. LI.FI approval is normally reusable; Umbra approval is exact.
+A confirmed Umbra approval creates a durable one-approval fuse until its swap
+settles: the existing allowance may finish the operation, but a second approval
+is blocked and trading halts for review rather than entering an approval-gas
+loop.
 To canary LI.FI, set `LI_FI_API_KEY` and use
 `ROUTE_TOURNAMENT_PROVIDERS=uniswap,sushiswap,lifi`, initially with
 `ROUTE_TOURNAMENT_SETTLEMENTS=native` and `ROUTE_TOURNAMENT_MODE=shadow`.
@@ -177,6 +179,10 @@ reconcile-position-balances --only BOTNAME --apply --confirm-bot-stopped
 fleet-inventory --only BOTNAME
 restart-bot BOTNAME
 ```
+
+`stop-bot` is durable. Guardian checks, fleet restarts, and `update-bot` keep
+that bot stopped. Use `start-bot BOTNAME` or the explicit `restart-bot` above
+to return it to desired-running state.
 
 The tool proportionally reduces position balances to wallet reality, preserves
 cost basis, backs up changed ledgers, and writes a reconciliation audit record.

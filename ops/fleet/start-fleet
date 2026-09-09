@@ -10,9 +10,9 @@ usage() {
   cat <<'EOF'
 Usage: start-fleet [--detach] [--only NAMES] [--exclude NAMES] [--config PATH]
 
-Create the configured tmux session and start every bot in its own tiled pane.
-By default, attach to the session after startup. --detach leaves it running in
-the background.
+Create the configured tmux session and start desired-running bots. Per-bot
+stopped state survives fleet restarts. --only/--exclude explicitly redefine
+which bots should run. By default, attach; --detach leaves it in the background.
 EOF
 }
 
@@ -39,7 +39,6 @@ fleet_load_config "$config_path"
 fleet_require_tmux
 
 if fleet_session_exists; then
-  fleet_record_running
   fleet_die "tmux session already exists: $FLEET_SESSION
 Attach with: tmux attach-session -t '$FLEET_SESSION'"
 fi
@@ -47,7 +46,20 @@ fi
 # Startup is a transaction: suppress guardian resurrection until every pane is
 # created, then commit running intent only after the complete session exists.
 fleet_record_stopped
-fleet_apply_selection "$only" "$exclude"
+configured_dirs=("${FLEET_BOT_DIRS[@]}")
+if [[ -n "$only" || -n "$exclude" ]]; then
+  fleet_apply_selection "$only" "$exclude"
+  selected_dirs=("${FLEET_BOT_DIRS[@]}")
+  for bot_dir in "${configured_dirs[@]}"; do fleet_record_bot_stopped "$bot_dir"; done
+  FLEET_BOT_DIRS=("${selected_dirs[@]}")
+else
+  selected_dirs=()
+  for bot_dir in "${configured_dirs[@]}"; do
+    fleet_bot_should_run "$bot_dir" && selected_dirs+=("$bot_dir")
+  done
+  ((${#selected_dirs[@]} > 0)) || fleet_die "Every configured bot is intentionally stopped; use start-bot NAME"
+  FLEET_BOT_DIRS=("${selected_dirs[@]}")
+fi
 fleet_validate_bots
 fleet_sort_targets_by_name
 
@@ -95,6 +107,7 @@ tmux select-layout -t "$FLEET_SESSION:$FLEET_WINDOW" tiled >/dev/null
 trap - EXIT
 # Running intent is committed only after the complete session exists. A failed
 # validation or partial launch therefore preserves an earlier stopped intent.
+for bot_dir in "${FLEET_BOT_DIRS[@]}"; do fleet_record_bot_running "$bot_dir"; done
 fleet_record_running
 printf 'Started %d bots in tmux session %s.\n' "${#FLEET_BOT_DIRS[@]}" "$FLEET_SESSION"
 

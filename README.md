@@ -356,7 +356,7 @@ option and safety invariant.
 | Command | Purpose | Mutates/broadcasts? |
 |---|---|---|
 | `start-fleet` / `stop-fleet` / `restart-fleet` | Tmux lifecycle plus durable guardian intent | Processes/state marker |
-| `stop-bot NAME` / `restart-bot NAME` | Safely stop or cleanly restart one tmux bot without disturbing the fleet | Processes only |
+| `start-bot NAME` / `stop-bot NAME` / `restart-bot NAME` | Durably start, stop, or restart one bot without disturbing the fleet | Processes/state marker |
 | `update-bot NAME` | List/switch branches, fast-forward one checkout, and restart it only when already running | Git/processes |
 | `update-fleet` | Preflight and fast-forward checkouts without tracked changes; optional restart | Git/processes |
 | `update-all` | Update operations and bots, then restart; `--leave-stopped` preserves downtime | Git/processes/state marker |

@@ -155,6 +155,8 @@ fi
 printf 'Revision: %s (%s)\n' "$(git -C "$bot_dir" rev-parse --short HEAD)" "$(git -C "$bot_dir" branch --show-current)"
 if ((no_restart)); then
   printf 'Bot was not restarted (--no-restart).\n'
+elif ! fleet_bot_should_run "$bot_dir"; then
+  printf 'Bot is intentionally stopped; checkout updated and stopped state preserved.\n'
 elif fleet_session_exists && pane_id="$(fleet_pane_for_bot_dir "$bot_dir" 2>/dev/null)"; then
   "$SCRIPT_DIR/restart-bot" "$bot_name" --config "$FLEET_CONFIG_PATH"
 else

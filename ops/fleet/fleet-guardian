@@ -41,10 +41,17 @@ state_dir="$(fleet_desired_state_file).guardian"
 mkdir -p "$state_dir"
 
 check_fleet() {
-  local now bot_dir name snapshot snapshot_mtime age failures_file failures=0
+  local now bot_dir name snapshot snapshot_mtime age failures_file failures=0 desired_bots=0
   if ! fleet_should_run; then
     # Intentionally stopped is healthy service state. Staying alive avoids a
     # noisy systemd restart loop and lets this process notice a later start.
+    find "$state_dir" -maxdepth 1 -type f -name '*.failures' -delete 2>/dev/null || true
+    return 0
+  fi
+  for bot_dir in "${FLEET_BOT_DIRS[@]}"; do
+    fleet_bot_should_run "$bot_dir" && desired_bots=$((desired_bots + 1))
+  done
+  if ((desired_bots == 0)); then
     find "$state_dir" -maxdepth 1 -type f -name '*.failures' -delete 2>/dev/null || true
     return 0
   fi
@@ -57,6 +64,10 @@ check_fleet() {
     name="$(fleet_bot_name "$bot_dir")"
     snapshot="$bot_dir/data/fleet_status.json"
     failures_file="$state_dir/$name.failures"
+    if ! fleet_bot_should_run "$bot_dir"; then
+      rm -f -- "$failures_file"
+      continue
+    fi
     if [[ -f "$snapshot" ]]; then
       # The bot replaces this snapshot atomically. It can disappear between the
       # existence check and stat, which must not crash the whole guardian.
@@ -77,7 +88,7 @@ check_fleet() {
     printf '%s\n' "$failures" > "$failures_file"
     if ((failures >= FLEET_GUARDIAN_CONFIRMATIONS)); then
       printf 'Guardian restarting %s: local status stale for %ss across %s checks\n' "$name" "$age" "$failures" >&2
-      "$SCRIPT_DIR/restart-bot" "$name" --config "$FLEET_CONFIG_PATH"
+      "$SCRIPT_DIR/start-bot" "$name" --config "$FLEET_CONFIG_PATH"
       rm -f -- "$failures_file"
     fi
   done
