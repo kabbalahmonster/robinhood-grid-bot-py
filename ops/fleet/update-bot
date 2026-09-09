@@ -1,0 +1,162 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+SCRIPT_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)"
+# shellcheck source=fleet-common.sh
+source "$SCRIPT_DIR/fleet-common.sh"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  update-bot NAME [--branch BRANCH] [--remote REMOTE] [--check]
+                  [--no-restart] [--config PATH]
+  update-bot NAME --list-branches [--remote REMOTE] [--config PATH]
+
+Safely fetch and fast-forward one fleet bot checkout. With --branch, switch the
+bot to that branch first (creating a local tracking branch when only the remote
+branch exists). By default, restart the bot only if its fleet pane is running.
+
+  --branch BRANCH   Switch/update this branch instead of the current branch.
+  --remote REMOTE   Remote used for branch discovery (default: origin).
+  --list-branches   Fetch, then show current/local/remote branches and tracking.
+  --check           Report the planned switch/update without changing HEAD.
+  --no-restart      Update files but never restart the bot process.
+  --config PATH     Use a specific fleet configuration.
+
+Tracked modifications, detached HEAD, missing remotes/branches, and divergent
+history are refused. Untracked runtime/data files are preserved.
+EOF
+}
+
+name=""; branch=""; remote="origin"; config_path=""
+check_only=0; list_branches=0; no_restart=0
+while (($#)); do
+  case "$1" in
+    --branch) (($# >= 2)) || fleet_die "--branch requires a name"; branch="$2"; shift 2 ;;
+    --remote) (($# >= 2)) || fleet_die "--remote requires a name"; remote="$2"; shift 2 ;;
+    --config) (($# >= 2)) || fleet_die "--config requires a path"; config_path="$2"; shift 2 ;;
+    --check) check_only=1; shift ;;
+    --list-branches) list_branches=1; shift ;;
+    --no-restart) no_restart=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    -*) fleet_die "Unknown option: $1" ;;
+    *) [[ -z "$name" ]] || fleet_die "Provide exactly one bot name"; name="$1"; shift ;;
+  esac
+done
+
+[[ -n "$name" ]] || fleet_die "A bot name is required"
+[[ "$remote" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || fleet_die "Invalid remote name: $remote"
+if [[ -n "$branch" ]]; then
+  git check-ref-format --branch "$branch" >/dev/null 2>&1 || fleet_die "Invalid branch name: $branch"
+fi
+((list_branches == 0 || check_only == 0)) || fleet_die "--list-branches cannot be combined with --check"
+((list_branches == 0 || no_restart == 0)) || fleet_die "--list-branches cannot be combined with --no-restart"
+[[ -z "$branch" || $list_branches -eq 0 ]] || fleet_die "--list-branches cannot be combined with --branch"
+
+command -v git >/dev/null 2>&1 || fleet_die "git is required but was not found in PATH"
+fleet_load_config "$config_path"
+fleet_apply_selection "$name" ""
+((${#FLEET_BOT_DIRS[@]} == 1)) || fleet_die "Selection must resolve to one bot"
+fleet_validate_bots
+bot_dir="${FLEET_BOT_DIRS[0]}"
+bot_name="$(fleet_bot_name "$bot_dir")"
+
+git -C "$bot_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1 || \
+  fleet_die "Not a Git checkout: $bot_dir"
+top_level="$(git -C "$bot_dir" rev-parse --show-toplevel)"
+[[ "$(readlink -f -- "$top_level")" == "$(readlink -f -- "$bot_dir")" ]] || \
+  fleet_die "Expected repository root $bot_dir, but Git resolved $top_level"
+git -C "$bot_dir" remote get-url "$remote" >/dev/null 2>&1 || \
+  fleet_die "Remote '$remote' does not exist in $bot_dir"
+
+printf 'Bot:      %s\nCheckout: %s\nFetching: %s\n' "$bot_name" "$bot_dir" "$remote"
+git -C "$bot_dir" fetch --prune "$remote"
+
+if ((list_branches)); then
+  current="$(git -C "$bot_dir" symbolic-ref --quiet --short HEAD 2>/dev/null || printf '(detached)')"
+  printf 'Current:  %s\n\nLocal branches:\n' "$current"
+  git -C "$bot_dir" for-each-ref --sort=refname \
+    --format='  %(if)%(HEAD)%(then)*%(else) %(end) %(refname:short) -> %(upstream:short) [%(upstream:trackshort)]' \
+    refs/heads
+  printf '\nRemote branches (%s):\n' "$remote"
+  git -C "$bot_dir" for-each-ref --sort=refname --format='    %(refname:short)' \
+    "refs/remotes/$remote" | sed "/^    ${remote}\/HEAD$/d"
+  exit 0
+fi
+
+[[ -z "$(git -C "$bot_dir" status --porcelain --untracked-files=no)" ]] || \
+  fleet_die "Tracked modifications present; commit, stash, or restore them before updating: $bot_dir"
+current="$(git -C "$bot_dir" symbolic-ref --quiet --short HEAD)" || \
+  fleet_die "Detached HEAD; use --branch BRANCH to select a branch explicitly"
+
+target="$current"
+target_ref=""
+create_tracking=0
+if [[ -n "$branch" ]]; then
+  target="$branch"
+  remote_ref="refs/remotes/$remote/$target"
+  git -C "$bot_dir" show-ref --verify --quiet "$remote_ref" || \
+    fleet_die "Remote branch does not exist: $remote/$target (use --list-branches)"
+  target_ref="$remote/$target"
+  if ! git -C "$bot_dir" show-ref --verify --quiet "refs/heads/$target"; then
+    create_tracking=1
+  fi
+else
+  target_ref="$(git -C "$bot_dir" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null)" || \
+    fleet_die "Current branch has no upstream: $current (use --branch BRANCH)"
+fi
+
+if ((create_tracking)); then
+  ahead=0
+  behind=0
+else
+  counts="$(git -C "$bot_dir" rev-list --left-right --count "$target...$target_ref")"
+  read -r ahead behind <<<"$counts"
+  ((ahead == 0 || behind == 0)) || \
+    fleet_die "Local $target and $target_ref have diverged; refusing a non-fast-forward switch/update"
+fi
+
+printf 'Current:  %s\nTarget:   %s -> %s\n' "$current" "$target" "$target_ref"
+if ((check_only)); then
+  if ((create_tracking)); then
+    printf 'Check only: would create local tracking branch %s from %s.\n' "$target" "$target_ref"
+  else
+    printf 'Check only: local target is %s ahead and %s behind.\n' "$ahead" "$behind"
+    [[ "$current" == "$target" ]] || printf 'Check only: would switch %s -> %s.\n' "$current" "$target"
+  fi
+  exit 0
+fi
+
+if ((create_tracking)); then
+  git -C "$bot_dir" switch --track -c "$target" "$target_ref"
+elif [[ "$current" != "$target" ]]; then
+  git -C "$bot_dir" switch "$target"
+fi
+
+if [[ -n "$branch" ]]; then
+  upstream="$(git -C "$bot_dir" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null || true)"
+  if [[ "$upstream" != "$target_ref" ]]; then
+    git -C "$bot_dir" branch --set-upstream-to="$target_ref" "$target"
+  fi
+fi
+
+if ((create_tracking == 0 && behind > 0)); then
+  git -C "$bot_dir" merge --ff-only "$target_ref"
+  printf 'Updated %s by %s commit(s).\n' "$bot_name" "$behind"
+elif ((create_tracking)); then
+  printf 'Created %s tracking %s at %s.\n' "$target" "$target_ref" "$(git -C "$bot_dir" rev-parse --short HEAD)"
+elif ((ahead > 0)); then
+  printf 'No fast-forward needed; %s is %s commit(s) ahead of %s.\n' "$target" "$ahead" "$target_ref"
+else
+  printf '%s is already up to date.\n' "$bot_name"
+fi
+
+printf 'Revision: %s (%s)\n' "$(git -C "$bot_dir" rev-parse --short HEAD)" "$(git -C "$bot_dir" branch --show-current)"
+if ((no_restart)); then
+  printf 'Bot was not restarted (--no-restart).\n'
+elif fleet_session_exists && pane_id="$(fleet_pane_for_bot_dir "$bot_dir" 2>/dev/null)"; then
+  "$SCRIPT_DIR/restart-bot" "$bot_name" --config "$FLEET_CONFIG_PATH"
+else
+  printf 'Bot is not running in the configured fleet session; checkout updated without starting it.\n'
+fi

@@ -315,6 +315,7 @@ INITIAL_BUY_AMOUNT=0.01      # Higher amounts due to gas costs
 
 The repository includes aligned `start-fleet`, `stop-fleet`, `restart-fleet`,
 `update-fleet`, a safe updater for a standalone operations clone, a guarded
+single-bot branch/update command,
 multi-bot checkout initializer, treasury-transfer and managed-asset liquidation
 tools,
 read-only doctor/inventory/audit commands, shared `--only`/`--exclude`
@@ -356,6 +357,7 @@ option and safety invariant.
 |---|---|---|
 | `start-fleet` / `stop-fleet` / `restart-fleet` | Tmux lifecycle plus durable guardian intent | Processes/state marker |
 | `stop-bot NAME` / `restart-bot NAME` | Safely stop or cleanly restart one tmux bot without disturbing the fleet | Processes only |
+| `update-bot NAME` | List/switch branches, fast-forward one checkout, and restart it only when already running | Git/processes |
 | `update-fleet` | Preflight and fast-forward checkouts without tracked changes; optional restart | Git/processes |
 | `update-all` | Update operations and bots, then restart; `--leave-stopped` preserves downtime | Git/processes/state marker |
 | `update-this-checkout` | Fast-forward only the clone containing the script; ignores fleet membership | Git only |

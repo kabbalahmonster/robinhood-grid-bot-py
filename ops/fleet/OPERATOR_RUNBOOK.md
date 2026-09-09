@@ -40,6 +40,27 @@ ops/fleet/update-fleet
 ops/fleet/fleet-doctor
 ```
 
+For one canary, use the guarded single-bot updater. It conditionally restarts
+only an already-running bot:
+
+```bash
+update-bot ROBINVAULT --list-branches
+update-bot ROBINVAULT --branch nullfox/umbra-provider-integration --check
+update-bot ROBINVAULT --branch nullfox/umbra-provider-integration
+```
+
+Rollback uses the same reviewed path; it is a fast-forward branch switch, not a
+reset:
+
+```bash
+update-bot ROBINVAULT --branch main --check
+update-bot ROBINVAULT --branch main
+```
+
+Use `--no-restart` to change only files/branch state. The command refuses
+tracked modifications and divergence and preserves untracked `.env`/`data`
+files. A stopped bot or absent fleet remains stopped.
+
 ## Freeze, consolidate, and redistribute
 
 ```bash
