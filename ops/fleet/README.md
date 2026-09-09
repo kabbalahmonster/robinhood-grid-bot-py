@@ -1329,29 +1329,12 @@ without tournament route authority. Promote beyond one bot only after a
 monitored window confirms acceptable provider quota and execution behavior.
 
 Tournament shape is independently configurable: providers are a non-empty
-subset of `uniswap,sushiswap,umbra,lifi`; settlements are a non-empty subset of
+subset of `uniswap,sushiswap`; settlements are a non-empty subset of
 `native,weth`; shadow/gate deadlines default to 4/12 seconds and accept 1-15.
 For about 30 gate-enabled bots, start at `POLL_INTERVAL_SECONDS=12` and increase
 toward 15-20 if 429s or overlapping rounds occur. Using only `native` halves
 candidate traffic, but it also removes WETH fallback liquidity and potential
 WETH winners.
-Umbra adds one public-API candidate per configured settlement. Canary
-`ROUTE_TOURNAMENT_PROVIDERS=uniswap,sushiswap,umbra` on one bot before fleet
-use, watching 429s and deadlines. Umbra's fee/tax-adjusted output is not
-haircut twice; execution pins UmbraRH and uses local gas estimation instead of
-the provider's flat 3M recommendation.
-For an unapproved sell, LI.FI and Umbra remain in contention using an all-in
-provisional score: a provider/conservative swap budget plus locally estimated
-approval gas. Only the provisional winner is approved. LI.FI normally receives
-a reusable allowance; Umbra receives its required exact-amount allowance. The
-winner is refreshed and must pass exact local gas simulation and all final
-guards. Losing candidates never cost approval gas; a winner that deteriorates
-after approval aborts safely, with only the approval fee spent.
-LI.FI is enabled with `ROUTE_TOURNAMENT_PROVIDERS=uniswap,sushiswap,lifi`
-(`lofi` is accepted as an alias) and requires `LI_FI_API_KEY`. Canary it with
-native-only shadow comparisons before gate mode; every returned transaction is
-checked for exact amount, chain, native value, target, calldata, and local gas.
-
 ## Backing up fleet private keys
 
 `backup-private-keys` reads `PRIVATE_KEY` and `TOKEN_SYMBOL` from every
