@@ -974,7 +974,7 @@ def test_execution_preflight_gives_all_four_candidates_independent_time_budgets(
     assert all(row["rejections"] != ["observation_timeout"] for row in result["candidates"])
 
 
-def test_execution_preflight_uses_six_second_gate_budget():
+def test_execution_preflight_uses_twelve_second_gate_budget():
     b = bot("gate")
     b.config.token_address = "token"
     b.config.weth_address = "weth"
@@ -989,7 +989,7 @@ def test_execution_preflight_uses_six_second_gate_budget():
          patch("route_tournament.collect_execution_preflight", return_value=incomplete) as collect:
         assert b._collect_route_execution_preflight("sell", 10**15) is None
 
-    assert collect.call_args.kwargs["max_seconds"] == 6
+    assert collect.call_args.kwargs["max_seconds"] == 12
 
 
 def test_execution_preflight_local_gas_estimate_checksums_api_addresses():
@@ -1067,7 +1067,7 @@ def test_bot_execution_preflight_is_read_only_and_returns_only_complete_winner()
         assert b._collect_route_execution_preflight("buy", 10**15) == {
             "provider": "sushiswap", "settlement": "native",
         }
-    assert collect_preflight.call_args.kwargs["max_seconds"] == 6
+    assert collect_preflight.call_args.kwargs["max_seconds"] == 12
     # Buy/WETH now reads the real allowance so staged setup can be priced.
     assert collect_preflight.call_args.kwargs["allowance_probe"]("weth", "router") == 0
     assert callable(collect_preflight.call_args.kwargs["approval_gas_estimate_provider"])
