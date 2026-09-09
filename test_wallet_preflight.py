@@ -161,6 +161,24 @@ class TestWalletPreflight(unittest.TestCase):
         self.assertIn("definitively rejected", result.error)
         self.assertFalse(wallet.has_unresolved_broadcast())
 
+    def test_legacy_base_fee_guard_is_archived_and_does_not_halt_startup(self):
+        wallet = self.make_wallet()
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "unresolved_broadcast.json")
+            wallet.unresolved_broadcast_path = path
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump({
+                    "tx_hash": "0xrejected",
+                    "error": "Signed transaction may have been broadcast: max fee per gas less than block base fee",
+                }, handle)
+
+            self.assertIsNone(wallet._load_unresolved_broadcast())
+            self.assertFalse(os.path.exists(path))
+            self.assertEqual(len([
+                name for name in os.listdir(directory)
+                if name.startswith("unresolved_broadcast.json.definitive-rejection.")
+            ]), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
