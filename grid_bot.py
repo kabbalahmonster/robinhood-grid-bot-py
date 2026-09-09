@@ -263,13 +263,22 @@ def run_native_treasury_transfer(args):
         ) if sweep_available else Decimal(0)
         if not reserve_per_position.is_finite() or reserve_per_position < 0:
             raise ValueError("Position reserve must be a non-negative ETH amount")
-        position_count = 0
+        filled_position_count = 0
+        position_capacity = 0
+        available_position_slots = 0
         if sweep_available and reserve_per_position > 0:
-            position_path = (
-                "data/gridless_positions.json"
-                if getattr(config, "use_gridless", False)
-                else "data/positions.json"
+            use_gridless = getattr(config, "use_gridless", False)
+            position_path = "data/gridless_positions.json" if use_gridless else "data/positions.json"
+            capacity_name = "MAX_ACTIVE_POSITIONS" if use_gridless else "MAX_POSITIONS"
+            capacity_value = getattr(
+                config, "max_active_positions" if use_gridless else "max_positions", None
             )
+            if (isinstance(capacity_value, bool)
+                    or not isinstance(capacity_value, int) or capacity_value < 0):
+                raise ValueError(
+                    f"Cannot calculate position reserve: {capacity_name} must be a non-negative integer"
+                )
+            position_capacity = capacity_value
             try:
                 with open(position_path, "r") as handle:
                     positions = json.load(handle)
@@ -287,9 +296,15 @@ def run_native_treasury_transfer(args):
                 if isinstance(balance, bool) or not isinstance(balance, (int, float)) or balance < 0:
                     raise ValueError(f"Position state in {position_path} contains an invalid balance")
                 if balance > 0:
-                    position_count += 1
+                    filled_position_count += 1
+            if filled_position_count > position_capacity:
+                raise ValueError(
+                    f"Cannot calculate position reserve: {filled_position_count} filled positions "
+                    f"exceed configured capacity {position_capacity}"
+                )
+            available_position_slots = position_capacity - filled_position_count
         position_reserve_wei = int(
-            reserve_per_position * Decimal(position_count) * Decimal(10**18)
+            reserve_per_position * Decimal(available_position_slots) * Decimal(10**18)
         )
         if liquidate and not args.confirm_liquidate:
             raise ValueError("Native ETH 'all' requires --confirm-liquidate")
@@ -349,7 +364,8 @@ def run_native_treasury_transfer(args):
             print(
                 "NATIVE ETH TREASURY TRANSFER SKIPPED: balance does not exceed "
                 "the estimated maximum transfer fee plus "
-                f"ETH_GAS_RESERVE={config.eth_gas_reserve} and position reserve={reserve_per_position} × {position_count}"
+                f"ETH_GAS_RESERVE={config.eth_gas_reserve} and position reserve="
+                f"{reserve_per_position} × {available_position_slots} available slots"
             )
             return 0
         tx, balance_wei, amount_wei, fee_wei, reserve_wei = plan
@@ -364,8 +380,14 @@ def run_native_treasury_transfer(args):
         print(f"Send:         {amount} ETH")
         print(f"Max gas cost: {fee} ETH")
         print(f"Gas reserve:  {config.eth_gas_reserve if not liquidate else 0} ETH")
-        print(f"Positions:    {position_count} open")
-        print(f"Position reserve: {reserve_per_position} ETH each ({Decimal(position_reserve_wei) / Decimal(10**18)} ETH total)")
+        print(
+            f"Position slots: {filled_position_count} filled / {position_capacity} capacity "
+            f"({available_position_slots} available)"
+        )
+        print(
+            f"Position reserve: {reserve_per_position} ETH × {available_position_slots} "
+            f"available slots ({Decimal(position_reserve_wei) / Decimal(10**18)} ETH total)"
+        )
         print(f"Min remaining after gas: {remaining} ETH")
         print(f"Liquidation:  {'YES — configured reserve intentionally bypassed' if liquidate else 'no'}")
         print(f"Sweep mode:   {'all unreserved ETH' if sweep_available else 'no'}")
@@ -412,7 +434,12 @@ def run_native_treasury_transfer(args):
             "recipient": recipient,
             "estimated_max_gas_eth": str(fee),
             "gas_reserve_eth": str(config.eth_gas_reserve if not liquidate else 0),
-            "position_count": position_count,
+            # Retain the legacy field as the reserve multiplier for older audit
+            # readers; the explicit fields remove its former ambiguity.
+            "position_count": available_position_slots,
+            "filled_position_count": filled_position_count,
+            "position_capacity": position_capacity,
+            "available_position_slots": available_position_slots,
             "position_reserve_eth_each": str(reserve_per_position),
             "position_reserve_eth_total": str(Decimal(position_reserve_wei) / Decimal(10**18)),
             "liquidation": liquidate,

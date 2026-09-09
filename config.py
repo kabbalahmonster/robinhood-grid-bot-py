@@ -154,7 +154,7 @@ class BotConfig:
     # ETH Trading Mode
     use_eth_trading: bool  # If True, trade native ETH instead of WETH
     eth_gas_reserve: float  # ETH amount to reserve for gas (default: 0.0005)
-    treasury_position_reserve_eth: float  # ETH retained per open position by treasury available sweeps
+    treasury_position_reserve_eth: float  # ETH retained per available buy slot by treasury available sweeps
     
     # Gas Settings
     gas_limit_multiplier: float  # Multiplier for gas limit (default: 1.05)

@@ -276,7 +276,7 @@ class TestCliCommands(unittest.TestCase):
     @patch("grid_bot._append_treasury_receipt")
     @patch("grid_bot.Wallet")
     @patch("grid_bot.load_config")
-    def test_native_eth_available_retains_configured_reserve_per_open_position(
+    def test_native_eth_available_retains_configured_reserve_per_available_slot(
         self, load_config, wallet_class, append_receipt
     ):
         load_config.return_value = SimpleNamespace(
@@ -284,6 +284,7 @@ class TestCliCommands(unittest.TestCase):
             eth_gas_reserve=0.0006,
             treasury_position_reserve_eth=0.0003,
             use_gridless=True,
+            max_active_positions=5,
         )
         wallet = wallet_class.return_value
         wallet.address = "0x0000000000000000000000000000000000000002"
@@ -304,7 +305,7 @@ class TestCliCommands(unittest.TestCase):
 
         self.assertEqual(
             wallet.build_eth_transfer_transaction.return_value["value"],
-            779_000_000_000_000,
+            479_000_000_000_000,
         )
         wallet.transfer_eth.assert_not_called()
         append_receipt.assert_not_called()
@@ -319,6 +320,7 @@ class TestCliCommands(unittest.TestCase):
             eth_gas_reserve=0.0005,
             treasury_position_reserve_eth=0.0001,
             use_gridless=True,
+            max_active_positions=5,
         )
         wallet = wallet_class.return_value
         wallet.address = "0x0000000000000000000000000000000000000002"
@@ -339,8 +341,67 @@ class TestCliCommands(unittest.TestCase):
 
         self.assertEqual(
             wallet.build_eth_transfer_transaction.return_value["value"],
-            1_279_000_000_000_000,
+            1_679_000_000_000_000,
         )
+
+    @patch("grid_bot.Wallet")
+    @patch("grid_bot.load_config")
+    def test_native_eth_available_uses_classic_empty_capacity(
+        self, load_config, wallet_class
+    ):
+        load_config.return_value = SimpleNamespace(
+            treasury_allowed_recipients=["0x0000000000000000000000000000000000000004"],
+            eth_gas_reserve=0.0005,
+            treasury_position_reserve_eth=0.0002,
+            use_gridless=False,
+            max_positions=4,
+        )
+        wallet = wallet_class.return_value
+        wallet.address = "0x0000000000000000000000000000000000000002"
+        wallet.get_eth_balance_wei.return_value = 2_000_000_000_000_000
+        wallet.address_has_code.return_value = False
+        wallet.build_eth_transfer_transaction.return_value = {
+            "gas": 21_000, "gasPrice": 1_000_000_000, "value": 1,
+        }
+        args = SimpleNamespace(
+            recipient="0x0000000000000000000000000000000000000004",
+            amount="available", position_reserve_eth=None,
+            confirm_recipient=None, confirm_liquidate=False,
+            execute=False, confirm_bot_stopped=False,
+        )
+
+        with patch("builtins.open", mock_open(read_data='[{"balance": 1}, {"balance": 0}]')):
+            self.assertEqual(run_native_treasury_transfer(args), 0)
+
+        # Four-position capacity minus one filled position reserves three slots.
+        self.assertEqual(
+            wallet.build_eth_transfer_transaction.return_value["value"],
+            879_000_000_000_000,
+        )
+
+    @patch("grid_bot.Wallet")
+    @patch("grid_bot.load_config")
+    def test_native_eth_available_refuses_missing_position_capacity(
+        self, load_config, wallet_class
+    ):
+        load_config.return_value = SimpleNamespace(
+            treasury_allowed_recipients=["0x0000000000000000000000000000000000000004"],
+            eth_gas_reserve=0.0005,
+            treasury_position_reserve_eth=0.0002,
+            use_gridless=True,
+        )
+        wallet = wallet_class.return_value
+        wallet.address = "0x0000000000000000000000000000000000000002"
+        wallet.address_has_code.return_value = False
+        args = SimpleNamespace(
+            recipient="0x0000000000000000000000000000000000000004",
+            amount="available", position_reserve_eth=None,
+            confirm_recipient=None, confirm_liquidate=False,
+            execute=False, confirm_bot_stopped=False,
+        )
+
+        self.assertEqual(run_native_treasury_transfer(args), 2)
+        wallet.build_eth_transfer_transaction.assert_not_called()
 
     @patch("grid_bot._append_treasury_receipt")
     @patch("grid_bot.Wallet")
