@@ -8,6 +8,10 @@ source "$SCRIPT_DIR/fleet-common.sh"
 
 config_path=""
 if (($#)); then
+  if [[ "$1" == "-h" || "$1" == "--help" ]]; then
+    printf 'Usage: fleet-discover [--config PATH]\n'
+    exit 0
+  fi
   [[ "$1" == "--config" && $# == 2 ]] || fleet_die "Usage: fleet-discover [--config PATH]"
   config_path="$2"
 fi

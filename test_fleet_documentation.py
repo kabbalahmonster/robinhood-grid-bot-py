@@ -1,4 +1,5 @@
 import re
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -37,6 +38,9 @@ class FleetDocumentationTests(unittest.TestCase):
             "--send-to-treasury",
             "quote-provider",
             "projected gas",
+            "cleanup-logs --older-than",
+            "--confirm-delete-logs",
+            "--keep-latest",
         ):
             with self.subTest(term=required):
                 self.assertIn(required, docs)
@@ -64,11 +68,37 @@ class FleetDocumentationTests(unittest.TestCase):
                 "--production --rounds 3",
                 "can consume shared quota",
             ),
+            "cleanup-logs": (
+                "## Log retention and disk cleanup",
+                "--apply --confirm-delete-logs",
+                "--older-than all --keep-latest 0",
+            ),
         }
         for command, requirements in required_workflows.items():
             with self.subTest(command=command):
                 for requirement in requirements:
                     self.assertIn(requirement, guide)
+
+    def test_every_shell_entrypoint_has_successful_help(self):
+        for path in FLEET.iterdir():
+            if (
+                not path.is_file()
+                or path.suffix in {".py", ".sh", ".service", ".md"}
+                or not bool(path.stat().st_mode & 0o100)
+            ):
+                continue
+            with self.subTest(command=path.name):
+                result = subprocess.run(
+                    [str(path), "--help"],
+                    cwd=ROOT,
+                    text=True,
+                    capture_output=True,
+                    timeout=10,
+                    check=False,
+                )
+                output = result.stdout + result.stderr
+                self.assertEqual(result.returncode, 0, output)
+                self.assertIn("Usage", output)
 
 
 if __name__ == "__main__":

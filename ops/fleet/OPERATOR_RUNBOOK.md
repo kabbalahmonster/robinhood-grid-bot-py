@@ -61,6 +61,21 @@ Use `--no-restart` to change only files/branch state. The command refuses
 tracked modifications and divergence and preserves untracked `.env`/`data`
 files. A stopped bot or absent fleet remains stopped.
 
+## Reclaim log disk space
+
+Cleanup is preview-first and safe while the fleet runs. A normal monthly
+retention pass is:
+
+```bash
+cleanup-logs --older-than "1 month"
+cleanup-logs --older-than "1 month" --apply --confirm-delete-logs
+```
+
+Use `--only A,B` or `--exclude A,B` for partial fleets. The newest log per bot
+is retained unless `--keep-latest 0` is explicit. `--older-than all` means all
+matching logs after newest-file retention; it does not mean all bot files. See
+the fleet README for every accepted age format and live-process caveat.
+
 ## Freeze, consolidate, and redistribute
 
 ```bash
@@ -140,7 +155,7 @@ details.
 For a larger rollout, begin with `POLL_INTERVAL_SECONDS=12` and the defaults
 `ROUTE_TOURNAMENT_PROVIDERS=uniswap,sushiswap`,
 `ROUTE_TOURNAMENT_SETTLEMENTS=native,weth`, shadow timeout `4`, and gate timeout
-`6`. Increase polling toward 15-20 seconds if provider 429s or overlapping
+`12`. Increase polling toward 15-20 seconds if provider 429s or overlapping
 rounds appear. Native-only settlement halves tournament candidates but removes
 WETH fallback and should be an intentional liquidity tradeoff.
 To canary Umbra, append it on one bot with
