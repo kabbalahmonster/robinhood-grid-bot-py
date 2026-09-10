@@ -144,6 +144,30 @@ class FleetDesiredStateTests(unittest.TestCase):
         self.assertTrue(self.session.exists())
         self.assertEqual(self.bot_markers(), [])
 
+    def test_stop_and_restart_bot_accept_multiple_names(self):
+        beta = self.root / "bots" / "beta" / "repo-beta"
+        beta.mkdir(parents=True)
+        (beta / "grid_bot.py").write_text("pass\n")
+        self.config.write_text(
+            'FLEET_SESSION="test_fleet"\nFLEET_WINDOW="fleet"\n'
+            f'FLEET_BOT_DIRS=("{self.bot}" "{beta}")\nFLEET_START_STAGGER=0\n'
+        )
+
+        stopped = self.run_command("stop-bot", "repo", "repo-beta")
+        self.assertEqual(stopped.returncode, 0, stopped.stderr)
+        self.assertEqual(len(self.bot_markers()), 2)
+
+        restarted = self.run_command("restart-bot", "repo,repo-beta")
+        self.assertEqual(restarted.returncode, 0, restarted.stderr)
+        self.assertTrue(self.session.exists())
+        self.assertEqual(self.bot_markers(), [])
+
+    def test_multi_bot_command_rejects_unknown_name_before_changes(self):
+        result = self.run_command("stop-bot", "repo", "TYPO")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Unknown bot in --only: TYPO", result.stderr)
+        self.assertEqual(self.bot_markers(), [])
+
     def test_lifecycle_commands_declare_individual_desired_state(self):
         common = (self.scripts / "fleet-common.sh").read_text()
         guardian = (self.scripts / "fleet-guardian").read_text()

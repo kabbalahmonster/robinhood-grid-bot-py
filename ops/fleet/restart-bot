@@ -8,41 +8,46 @@ source "$SCRIPT_DIR/fleet-common.sh"
 
 usage() {
   cat <<'EOF'
-Usage: restart-bot NAME [--config PATH]
+Usage: restart-bot NAME [NAME ...] [--config PATH]
 
-Cleanly restart one bot inside the running fleet tmux session. This kills the
-pane's entire old process tree first, including suspended Ctrl+Z jobs, then
-launches exactly one supervised bot process without disturbing other bots.
+Cleanly restart one or more bots inside the running fleet tmux session. Names
+may be space- or comma-separated. Each target's entire old process tree is
+killed first, including suspended Ctrl+Z jobs, then exactly one supervised bot
+process is launched without disturbing unselected bots.
 EOF
 }
 
-name=""; config_path=""
+names=(); config_path=""
 while (($#)); do
   case "$1" in
     --config) (($# >= 2)) || fleet_die "--config requires a path"; config_path="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     -*) fleet_die "Unknown option: $1" ;;
-    *) [[ -z "$name" ]] || fleet_die "Provide exactly one bot name"; name="$1"; shift ;;
+    *) names+=("$1"); shift ;;
   esac
 done
-[[ -n "$name" ]] || fleet_die "A bot name is required"
+(( ${#names[@]} > 0 )) || fleet_die "At least one bot name is required"
+names_csv="$(IFS=,; printf '%s' "${names[*]}")"
 
 fleet_load_config "$config_path"
-fleet_apply_selection "$name" ""
-((${#FLEET_BOT_DIRS[@]} == 1)) || fleet_die "Selection must resolve to one bot"
+fleet_apply_selection "$names_csv" ""
 fleet_require_tmux
 fleet_validate_bots
-bot_dir="${FLEET_BOT_DIRS[0]}"
 if ! fleet_session_exists; then
-  exec "$SCRIPT_DIR/start-bot" "$name" --config "$FLEET_CONFIG_PATH"
+  exec "$SCRIPT_DIR/start-fleet" --detach --only "$names_csv" --config "$FLEET_CONFIG_PATH"
 fi
-pane_id="$(fleet_pane_for_bot_dir "$bot_dir" 2>/dev/null || true)"
-if [[ -z "$pane_id" ]]; then
-  exec "$SCRIPT_DIR/start-bot" "$name" --config "$FLEET_CONFIG_PATH"
-fi
-tmux respawn-pane -k -t "$pane_id" -c "$bot_dir"
-tmux select-pane -t "$pane_id" -T "$(fleet_bot_name "$bot_dir")"
-fleet_send_command "$pane_id" "$(fleet_bot_command "$bot_dir")"
-fleet_record_bot_running "$bot_dir"
+for bot_dir in "${FLEET_BOT_DIRS[@]}"; do
+  pane_id="$(fleet_pane_for_bot_dir "$bot_dir" 2>/dev/null || true)"
+  if [[ -n "$pane_id" ]]; then
+    tmux respawn-pane -k -t "$pane_id" -c "$bot_dir"
+  else
+    pane_id="$(tmux split-window -d -P -F '#{pane_id}' -t "$FLEET_SESSION:$FLEET_WINDOW" -c "$bot_dir")"
+  fi
+  tmux select-pane -t "$pane_id" -T "$(fleet_bot_name "$bot_dir")"
+  fleet_send_command "$pane_id" "$(fleet_bot_command "$bot_dir")"
+  fleet_record_bot_running "$bot_dir"
+  printf 'Restarted %s cleanly in pane %s.\n' "$(fleet_bot_name "$bot_dir")" "$pane_id"
+done
 fleet_record_running
-printf 'Restarted %s cleanly in pane %s.\n' "$(fleet_bot_name "$bot_dir")" "$pane_id"
+tmux select-layout -t "$FLEET_SESSION:$FLEET_WINDOW" tiled >/dev/null
+printf 'Restarted %d bot(s).\n' "${#FLEET_BOT_DIRS[@]}"
