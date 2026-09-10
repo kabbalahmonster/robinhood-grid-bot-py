@@ -28,13 +28,18 @@ Guards:
   --confirm-recipient ADDRESS Exact repeat for a non-allowlisted recipient
   --confirm-liquidate         Required for native ETH --amount all
   --execute                   Broadcast after reviewing the complete dry run
-  --confirm-fleet-stopped     Required with --execute
+  --confirm-fleet-stopped     Required with fleet-wide --execute
+  --confirm-bot-stopped       With exactly one --only target, acknowledge that
+                              bot is stopped while the rest of the fleet runs
   --config PATH               Use an alternate fleet configuration
   --only NAMES                Target comma-separated bot names
   --exclude NAMES             Omit comma-separated bot names
   -h, --help                  Show this help
 
-Execution is refused while the configured tmux fleet session exists. Native
+Execution with --confirm-fleet-stopped is refused while the configured tmux
+fleet session exists. A single --only target may execute while the fleet is
+live when --confirm-bot-stopped is supplied and stop-bot has recorded that bot
+as durably stopped. Native
 Exact transfers retain each bot's ETH_GAS_RESERVE. ETH "available" additionally
 retains TREASURY_POSITION_RESERVE_ETH for every available buy slot
 (configured capacity minus filled positions), after the maximum transfer fee;
@@ -53,6 +58,7 @@ recipient=""
 confirmed_recipient=""
 execute=0
 fleet_stopped=0
+bot_stopped=0
 confirm_liquidate=0
 only=""
 exclude=""
@@ -68,6 +74,7 @@ while (($#)); do
     --confirm-liquidate) confirm_liquidate=1; shift ;;
     --execute) execute=1; shift ;;
     --confirm-fleet-stopped) fleet_stopped=1; shift ;;
+    --confirm-bot-stopped) bot_stopped=1; shift ;;
     --only) (($# >= 2)) || fleet_die "--only requires comma-separated names"; only="$2"; shift 2 ;;
     --exclude) (($# >= 2)) || fleet_die "--exclude requires comma-separated names"; exclude="$2"; shift 2 ;;
     --position-reserve-eth) (($# >= 2)) || fleet_die "--position-reserve-eth requires an ETH amount"; position_reserve_eth="$2"; shift 2 ;;
@@ -87,8 +94,16 @@ recipient="${recipient:-$FLEET_TREASURY_RECIPIENT}"
 if [[ -n "$confirmed_recipient" && "$confirmed_recipient" != "$recipient" ]]; then
   fleet_die "--confirm-recipient must exactly match --recipient"
 fi
-if ((execute && !fleet_stopped)); then
-  fleet_die "--execute requires --confirm-fleet-stopped"
+if ((fleet_stopped && bot_stopped)); then
+  fleet_die "Use only one stopped-state confirmation"
+fi
+if ((bot_stopped)); then
+  [[ -n "$only" ]] || fleet_die "--confirm-bot-stopped requires exactly one --only target"
+  ((${#FLEET_BOT_DIRS[@]} == 1)) || fleet_die "--confirm-bot-stopped requires exactly one resolved --only target"
+  fleet_bot_should_run "${FLEET_BOT_DIRS[0]}" && fleet_die "Selected bot is not durably stopped; run stop-bot first"
+fi
+if ((execute && !fleet_stopped && !bot_stopped)); then
+  fleet_die "--execute requires --confirm-fleet-stopped, or --only NAME with --confirm-bot-stopped"
 fi
 
 asset_upper="${asset^^}"
@@ -118,7 +133,7 @@ fi
 fleet_validate_bots
 if ((execute)); then
   fleet_require_tmux
-  if fleet_session_exists; then
+  if ((bot_stopped == 0)) && fleet_session_exists; then
     fleet_die "Refusing to broadcast while tmux session '$FLEET_SESSION' is running. Stop the fleet first."
   fi
 fi
