@@ -1593,7 +1593,10 @@ limiter, so subsequent operation timing/fallback can still be affected.
 Dashboard `buy_attempt.route_comparison` and `sell_attempt.route_comparison`
 contain candidates, fixed rejection codes, provider, settlement, raw quoted
 output, gas components, projected score, hypothetical winner, runner-up score
-delta and elapsed time. Sell data expires next round; buy data is shown in the
+delta, elapsed time, and an `updated_at` timestamp used to order overlapping
+buy and sell cards by the actual tournament event. A confirmed gate-mode swap
+marks either direction `completed` and includes a sanitized `final` settlement
+summary; route selection alone never implies transaction confirmation. Sell data expires next round; buy data is shown in the
 following report because buys run after reporting, then expires unless a new
 buy tournament occurs. No raw provider response,
 exception text, address, calldata or credential is included in this payload.
