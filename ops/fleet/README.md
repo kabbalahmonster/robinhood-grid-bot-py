@@ -948,6 +948,21 @@ ops/fleet/treasury-transfer \
   --confirm-fleet-stopped
 ```
 
+To execute against one stopped bot while the rest of the fleet remains live,
+stop that bot durably and use the single-bot acknowledgement:
+
+```bash
+stop-bot ROBINVAULT
+treasury-transfer --only ROBINVAULT \
+  --asset ETH --amount 0.0005 \
+  --execute --confirm-bot-stopped
+```
+
+This form requires exactly one resolved `--only` target and verifies the
+durable stopped marker written by `stop-bot`. It does not require or accept a
+fleet-wide shutdown assertion. Fleet-wide execution remains protected by
+`--confirm-fleet-stopped` and still refuses to run while the tmux fleet exists.
+
 To consolidate every wallet's currently unreserved native ETH, preview first:
 
 ```bash
