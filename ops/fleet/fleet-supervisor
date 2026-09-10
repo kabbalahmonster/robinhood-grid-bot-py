@@ -9,6 +9,11 @@ config_path=""
 while (($#)); do
   case "$1" in
     --config) (($# >= 2)) || fleet_die "--config requires a path"; config_path="$2"; shift 2 ;;
+    -h|--help)
+      printf '%s\n' 'Usage: fleet-supervisor [--config PATH]' \
+        'Compatibility entrypoint that runs fleet-guardian continuously.'
+      exit 0
+      ;;
     *) fleet_die "Unknown option: $1" ;;
   esac
 done

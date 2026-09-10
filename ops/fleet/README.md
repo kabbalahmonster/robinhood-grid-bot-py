@@ -109,7 +109,7 @@ sudo apt install tmux git python3 python3-venv
      ops/fleet/restart-fleet ops/fleet/start-bot ops/fleet/stop-bot \
      ops/fleet/restart-bot ops/fleet/update-fleet \
      ops/fleet/update-this-checkout ops/fleet/update-all ops/fleet/update-bot \
-     ops/fleet/usdg-sweep \
+     ops/fleet/usdg-sweep ops/fleet/cleanup-logs ops/fleet/cleanup-logs.py \
      ops/fleet/treasury-transfer ops/fleet/fund-bots ops/fleet/update-variable \
      ops/fleet/adjust-positions ops/fleet/fleet-membership \
      ops/fleet/position-capacity.py \
@@ -146,6 +146,7 @@ sudo apt install tmux git python3 python3-venv
    ln -sf "$PWD/ops/fleet/update-all" "$HOME/bin/update-all"
    ln -sf "$PWD/ops/fleet/usdg-sweep" "$HOME/bin/usdg-sweep"
    ln -sf "$PWD/ops/fleet/treasury-transfer" "$HOME/bin/treasury-transfer"
+   ln -sf "$PWD/ops/fleet/cleanup-logs" "$HOME/bin/cleanup-logs"
    ln -sf "$PWD/ops/fleet/fund-bots" "$HOME/bin/fund-bots"
    ln -sf "$PWD/ops/fleet/update-variable" "$HOME/bin/update-variable"
    ln -sf "$PWD/ops/fleet/adjust-positions" "$HOME/bin/adjust-positions"
@@ -265,6 +266,65 @@ bot count before acting. Root discovery is convenient, but it also means any
 valid checkout placed beneath that root can join future financial operations;
 use the explicit array whenever that is not desirable.
 
+## Log retention and disk cleanup
+
+`cleanup-logs` operates only on regular `*.log` and rotated `*.log.*` files
+directly inside each selected checkout's `logs/` directory. It never follows
+symlinks, traverses subdirectories, touches JSON/data/audit files, or requires
+the fleet to stop. It prints every candidate and an aggregate byte count before
+doing anything; preview is the default.
+
+Common fleet-wide previews:
+
+```bash
+cleanup-logs --older-than "1 month"
+cleanup-logs --older-than 1w
+cleanup-logs --older-than 1d
+cleanup-logs --older-than 12h
+cleanup-logs --older-than 6h
+cleanup-logs --older-than 1h
+```
+
+The parser accepts singular/plural words and compact units: `1 month`/`1mo`,
+`1 week`/`1w`, `1 day`/`1d`, `12 hours`/`12h`, and
+`90 minutes`/`90min`. A month is a fixed 30-day retention period and a week is
+7 days.
+
+Target or omit bots with the same selectors as other fleet commands:
+
+```bash
+cleanup-logs --older-than 7d --only ROBINVAULT,HOOKR
+cleanup-logs --older-than 24h --exclude ROBINVAULT,ASTRO
+```
+
+After reviewing the exact filenames and total size, repeat with both mutation
+guards:
+
+```bash
+cleanup-logs --older-than 7d --apply --confirm-delete-logs
+```
+
+The newest log in each selected bot is preserved by default, even with
+`--older-than all`. Change the retention count explicitly when needed:
+
+```bash
+# Preserve the three newest logs per selected bot.
+cleanup-logs --older-than 1d --keep-latest 3
+
+# Preview absolutely every matching log filename.
+cleanup-logs --older-than all --keep-latest 0
+
+# Delete that reviewed all-files selection.
+cleanup-logs --older-than all --keep-latest 0 \
+  --apply --confirm-delete-logs
+```
+
+Deleting an open current log may not immediately release its disk blocks;
+Linux keeps the unlinked file open until that bot restarts. For a live fleet,
+keep the default newest-log protection. The command rechecks each file's type
+and inode immediately before deletion to prevent a preview/delete race from
+replacing a reviewed target.
+
 ## Commands
 
 ### Operator command index
@@ -281,8 +341,9 @@ unless their section explicitly says otherwise.
 | `fleet-inventory` | Read balances, positions, reserves, Git, and audit timestamps | No |
 | `fleet-watch` | Phone-friendly live view from local status snapshots | No |
 | `fleet-audit` | Reconcile local treasury/liquidation audit records | No |
+| `cleanup-logs` | Preview or delete aged bot log files by fleet selection | `--apply` only |
 | `start-fleet` / `stop-fleet` / `restart-fleet` | Manage the configured tmux fleet | Processes only |
-| `start-bot NAME` / `stop-bot NAME` / `restart-bot NAME` | Durably start, stop, or cleanly restart one bot | Processes/state marker |
+| `start-bot NAME` / `stop-bot NAMES...` / `restart-bot NAMES...` | Durably start, stop, or cleanly restart selected bots | Processes/state marker |
 | `update-this-checkout` | Fast-forward the dedicated operations clone | Yes, Git |
 | `update-bot NAME` | Inspect, switch, fast-forward, and conditionally restart one bot checkout | Yes, Git/processes |
 | `update-fleet` / `update-all` | Fast-forward bot clones; full wrapper can restart | Yes, Git/processes |

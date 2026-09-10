@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+SCRIPT_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)"
+# shellcheck source=fleet-common.sh
+source "$SCRIPT_DIR/fleet-common.sh"
+
+usage() { cat <<'EOF'
+Usage: cleanup-logs --older-than AGE [options]
+
+Preview or delete old *.log and rotated *.log.* files from each selected bot's
+logs/ directory. Preview is the default. Running bots do not need to be stopped.
+
+Required:
+  --older-than AGE           all, or a number plus unit: 30d, "1 month", 1w,
+                             1d, 12h, 6h, 1h, or 90min
+
+Selection:
+  --only NAMES               Target comma-separated bot names
+  --exclude NAMES            Omit comma-separated bot names
+  --config PATH              Use an alternate fleet configuration
+
+Safety:
+  --keep-latest COUNT        Preserve newest COUNT logs per bot (default: 1)
+  --apply                    Delete the files shown by the preview
+  --confirm-delete-logs      Required with --apply
+  -h, --help                 Show this help
+
+AGE uses fixed operational durations: month=30 days and week=7 days. Use
+--older-than all --keep-latest 0 to select every matching log, including the
+current log filename. An open deleted log may keep consuming disk until its bot
+restarts, so preserving the newest log is recommended for a live fleet.
+EOF
+}
+
+config_path=""; only=""; exclude=""; older_than=""; keep_latest=1; apply=0; confirmed=0
+while (($#)); do
+  case "$1" in
+    --config) (($# >= 2)) || fleet_die "--config requires a path"; config_path="$2"; shift 2 ;;
+    --only) (($# >= 2)) || fleet_die "--only requires names"; only="$2"; shift 2 ;;
+    --exclude) (($# >= 2)) || fleet_die "--exclude requires names"; exclude="$2"; shift 2 ;;
+    --older-than) (($# >= 2)) || fleet_die "--older-than requires an age"; older_than="$2"; shift 2 ;;
+    --keep-latest) (($# >= 2)) || fleet_die "--keep-latest requires a count"; keep_latest="$2"; shift 2 ;;
+    --apply) apply=1; shift ;;
+    --confirm-delete-logs) confirmed=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) fleet_die "Unknown option: $1" ;;
+  esac
+done
+
+[[ -n "$older_than" ]] || fleet_die "--older-than is required"
+[[ "$keep_latest" =~ ^[0-9]+$ ]] || fleet_die "--keep-latest must be a non-negative integer"
+((apply == 0 || confirmed == 1)) || fleet_die "--apply requires --confirm-delete-logs"
+((confirmed == 0 || apply == 1)) || fleet_die "--confirm-delete-logs is valid only with --apply"
+
+fleet_load_config "$config_path"
+fleet_apply_selection "$only" "$exclude"
+fleet_validate_bots
+python_bin="$(fleet_python_for "${FLEET_BOT_DIRS[0]}")"
+age_seconds="$("$python_bin" - "$older_than" <<'PY'
+import re, sys
+raw = re.sub(r"\s+", "", sys.argv[1].strip().lower())
+if raw == "all":
+    print(-1)
+    raise SystemExit
+match = re.fullmatch(r"([1-9][0-9]*)(minutes?|mins?|min|hours?|hrs?|hr|h|days?|d|weeks?|w|months?|mos?|mo)", raw)
+if not match:
+    raise SystemExit("invalid AGE; use all, 30d, '1 month', 1w, 12h, or 90min")
+number, unit = int(match.group(1)), match.group(2)
+if unit.startswith("mo"):
+    multiplier = 30 * 86400
+elif unit.startswith("w"):
+    multiplier = 7 * 86400
+elif unit.startswith("d"):
+    multiplier = 86400
+elif unit.startswith("h"):
+    multiplier = 3600
+else:
+    multiplier = 60
+print(number * multiplier)
+PY
+)" || fleet_die "Invalid --older-than value: $older_than"
+
+mode="PREVIEW"; ((apply == 0)) || mode="APPLY"
+printf 'Fleet log cleanup: %s\nAge: %s\nKeep latest per bot: %s\n\n' "$mode" "$older_than" "$keep_latest"
+args=(--older-seconds "$age_seconds" --keep-latest "$keep_latest")
+((apply == 0)) || args+=(--apply)
+for bot_dir in "${FLEET_BOT_DIRS[@]}"; do
+  args+=("$(fleet_bot_name "$bot_dir")" "$bot_dir")
+done
+"$python_bin" "$SCRIPT_DIR/cleanup-logs.py" "${args[@]}"
+if ((apply == 0)); then
+  printf '\nPREVIEW ONLY: repeat with --apply --confirm-delete-logs after review.\n'
+fi
