@@ -1298,6 +1298,7 @@ class GridBot:
             comparison = {"mode": "execution_preflight", "direction": direction,
                           "status": "preflight_failed", "candidates": []}
             selection = None
+        comparison["updated_at"] = datetime.now().astimezone().isoformat()
         self._route_execution_preflight = comparison
         comparisons = getattr(self, "_route_comparisons", {})
         comparisons[direction] = comparison
@@ -1475,6 +1476,7 @@ class GridBot:
                               "failures": ["snapshot_failed" if context.get("snapshot_failed") else "collection_failed"],
                               "selected_hypothetical_winner": None, "runner_up_delta": None}
                 logger.warning("Route shadow observation failed; execution unchanged")
+            comparison["updated_at"] = datetime.now().astimezone().isoformat()
             comparisons = getattr(self, "_route_comparisons", {})
             comparisons[direction] = comparison
             self._route_comparisons = comparisons
@@ -1499,6 +1501,7 @@ class GridBot:
         if isinstance(comparison, dict):
             comparison["status"] = "execution_aborted"
             comparison["execution_abort"] = abort
+            comparison["updated_at"] = datetime.now().astimezone().isoformat()
         self._buy_attempt = {"status": reason, **abort}
 
     def _expire_reported_buy_state(self):
@@ -2323,22 +2326,29 @@ class GridBot:
             trade["profit_eth"] = float(profit_eth)
         if gas_fee_eth is not None:
             trade["gas_fee_eth"] = float(gas_fee_eth)
-        if side == "sell" and getattr(self.config, "route_tournament_mode", "off") == "gate":
-            comparison = getattr(self, "_route_comparisons", {}).get("sell")
+        if side in {"buy", "sell"} and getattr(self.config, "route_tournament_mode", "off") == "gate":
+            comparison = getattr(self, "_route_comparisons", {}).get(side)
             if isinstance(comparison, dict):
-                cost_eth = (
-                    float(eth_amount) - float(gas_fee_eth or 0) - float(profit_eth or 0)
-                )
                 comparison["status"] = "completed"
                 comparison["final"] = {
                     "tx_hash": str(tx_hash),
-                    "received_eth": float(eth_amount),
                     "gas_fee_eth": float(gas_fee_eth or 0),
-                    "profit_eth": float(profit_eth or 0),
-                    "profit_percent": (
-                        float(profit_eth or 0) * 100 / cost_eth if cost_eth > 0 else 0
-                    ),
+                    "side": side,
+                    "eth_amount": float(eth_amount),
+                    "token_amount": float(token_amount),
                 }
+                if side == "sell":
+                    cost_eth = (
+                        float(eth_amount) - float(gas_fee_eth or 0) - float(profit_eth or 0)
+                    )
+                    comparison["final"].update({
+                        "received_eth": float(eth_amount),
+                        "profit_eth": float(profit_eth or 0),
+                        "profit_percent": (
+                            float(profit_eth or 0) * 100 / cost_eth if cost_eth > 0 else 0
+                        ),
+                    })
+                comparison["updated_at"] = trade["timestamp"]
         self.dashboard_trades = (self.dashboard_trades + [trade])[-50:]
         try:
             os.makedirs(os.path.dirname(self.dashboard_trades_file), exist_ok=True)

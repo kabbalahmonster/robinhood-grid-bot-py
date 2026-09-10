@@ -121,6 +121,28 @@ class TestDashboardEvents(unittest.TestCase):
         self.assertFalse(self.bot.route_incident["active"])
         self.assertEqual(self.bot.dashboard_events[-1]["code"], "route_recovered")
 
+    def test_confirmed_buy_marks_tournament_complete_with_timestamp(self):
+        self.bot.dashboard_trades = []
+        self.bot.dashboard_trades_file = os.path.join(self.temp_dir.name, "trades.json")
+        self.bot.wallet = type("Wallet", (), {"address": "0xwallet"})()
+        self.bot.config.route_tournament_mode = "gate"
+        self.bot.config.max_active_positions = 5
+        self.bot._route_comparisons = {
+            "buy": {"mode": "execution_preflight", "direction": "buy",
+                    "status": "preflight_candidate_selected"}
+        }
+
+        self.bot._record_dashboard_trade(
+            "buy", 0.003, 12345, 0.000000243, "0x" + "a" * 64,
+            gas_fee_eth=0.00004,
+        )
+
+        comparison = self.bot._route_comparisons["buy"]
+        self.assertEqual(comparison["status"], "completed")
+        self.assertEqual(comparison["updated_at"], self.bot.dashboard_trades[-1]["timestamp"])
+        self.assertEqual(comparison["final"]["side"], "buy")
+        self.assertEqual(comparison["final"]["token_amount"], 12345.0)
+
 
 if __name__ == "__main__":
     unittest.main()
