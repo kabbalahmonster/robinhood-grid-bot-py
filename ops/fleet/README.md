@@ -310,10 +310,11 @@ Start and attach:
 ops/fleet/start-fleet
 ```
 
-Restart one bot without touching the rest of the fleet:
+Restart one or several bots without touching the rest of the fleet:
 
 ```bash
 ops/fleet/restart-bot hookr
+ops/fleet/restart-bot hookr EARN ROBINVAULT
 ```
 
 Start an intentionally stopped bot:
@@ -322,10 +323,11 @@ Start an intentionally stopped bot:
 ops/fleet/start-bot hookr
 ```
 
-Stop one bot durably and leave its pane at a clean shell prompt:
+Stop one or several bots durably and leave their panes at clean shell prompts:
 
 ```bash
 ops/fleet/stop-bot hookr
+ops/fleet/stop-bot hookr,EARN,ROBINVAULT
 ```
 
 Do not use `Ctrl+Z` followed by Up-arrow to restart a bot. `Ctrl+Z` suspends
@@ -335,7 +337,8 @@ can freeze the host. Both per-bot commands use `tmux respawn-pane -k`, which
 terminates the pane's entire prior process tree—including suspended jobs—before
 stopping or launching exactly one bot. The stopped marker is written before
 the process is killed, so guardian checks, updates, and fleet restarts preserve
-the stop. Bot selectors are case-insensitive.
+the stop. Bot selectors are case-insensitive; multiple names may be separated
+by spaces or commas.
 
 Start without attaching:
 
