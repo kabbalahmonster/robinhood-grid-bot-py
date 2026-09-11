@@ -31,6 +31,21 @@ an independent ceiling and never overrides the minimum-profit check. The fee
 cap covers a separate post-sale transfer. `ETH_GAS_RESERVE` is excluded from
 position sizing and reserve-preserving sweeps.
 
+Compare the baseline against alternative trigger geometry before changing live
+configuration:
+
+```bash
+strategy-model --positions 8 --buy-triggers 10,15,20 \
+  --sell-triggers 5,10,15 --min-profit 5 \
+  --output reports/strategy-comparison.html
+```
+
+Open the HTML report and compare capacity-boundary coverage against the rebound
+required for the newest position to exit. The matching CSV and JSON are created
+beside it. Add `--fleet` to include current bot settings. This is a read-only
+geometric model, not a backtest; do not treat its normalized prices as expected
+returns.
+
 ## Update and verify
 
 ```bash

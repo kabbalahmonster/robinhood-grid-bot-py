@@ -119,7 +119,7 @@ sudo apt install tmux git python3 python3-venv
      ops/fleet/dashboard-remove ops/fleet/initialize-bots \
      ops/fleet/reconcile-position-balances ops/fleet/reconcile-position-balances.py \
      ops/fleet/initialize-bot-env.py ops/fleet/fleet-watch \
-     ops/fleet/fleet-watch.py
+     ops/fleet/fleet-watch.py ops/fleet/strategy-model
    ```
 
    Set `FLEET_BOT_ROOT` to the directory containing your bot checkouts. The
@@ -161,10 +161,75 @@ sudo apt install tmux git python3 python3-venv
    ln -sf "$PWD/ops/fleet/dashboard-remove" "$HOME/bin/dashboard-remove"
    ln -sf "$PWD/ops/fleet/initialize-bots" "$HOME/bin/initialize-bots"
    ln -sf "$PWD/ops/fleet/fleet-watch" "$HOME/bin/fleet-watch"
+   ln -sf "$PWD/ops/fleet/strategy-model" "$HOME/bin/strategy-model"
    ln -sf "$PWD/ops/fleet/reconcile-position-balances" "$HOME/bin/reconcile-position-balances"
    ```
 
    Ensure `~/bin` is in `PATH`, or invoke the scripts by their repository paths.
+
+## Gridless strategy coverage modeling
+
+`strategy-model` is a read-only planning tool for comparing
+`GRIDLESS_BUY_THRESHOLD`, `GRIDLESS_SELL_THRESHOLD`,
+`MIN_PROFIT_PERCENT`, and position capacity. It produces three adjacent files:
+
+- a standalone `.html` visual report that opens locally in any browser;
+- `.csv` combination data for spreadsheets;
+- `.json` data with explicit assumptions for further analysis.
+
+No API, RPC, wallet, live price, or bot process is touched. The model normalizes
+the first entry price to `1.0` and follows the production gridless rule: the next
+buy occurs when the current lowest-cost position reaches the configured negative
+P&L threshold. Successive entry points are therefore geometric. With a 10% buy
+trigger they are `1.0`, `0.9`, `0.81`, `0.729`, not evenly spaced percentage
+points.
+
+Generate a useful baseline matrix:
+
+```bash
+strategy-model \
+  --positions 8 \
+  --buy-triggers 5,10,15,20 \
+  --sell-triggers 3,5,10,15 \
+  --min-profit 5 \
+  --output reports/gridless-8-slot.html
+```
+
+`--min-profit` models the effective sell target as the greater of the requested
+sell trigger and the minimum-profit floor. This is still pre-fee trigger
+geometry: actual execution also includes measured position cost, projected gas,
+slippage, token taxes, moonbag sizing, liquidity, and route validation.
+
+The visual matrix reports three values for each buy/sell combination:
+
+- **cover**: total drawdown at the next desired buy after every slot is full;
+- **bounce**: price recovery from that capacity boundary until the newest
+  funded position reaches its effective sell target;
+- **exit vs start**: that newest position's exit price relative to the initial
+  normalized entry.
+
+The coverage curve shows how each additional slot changes the geometric
+drawdown boundary. The report also stores the last funded entry separately from
+the capacity boundary: these differ by one full buy interval and must not be
+treated as the same risk point.
+
+Include current settings for all configured bots, or a selection, beneath the
+custom matrix:
+
+```bash
+strategy-model --fleet --output reports/current-fleet.html
+strategy-model --fleet --only EARN,URMOM --output reports/two-bots.html
+strategy-model --fleet --exclude ARCHIVE --config /path/to/fleet.conf \
+  --output reports/active-fleet.html
+```
+
+Fleet values come only from each selected checkout's `.env`. Invalid bot values
+are omitted from the fleet table; the custom comparison is still generated.
+Use `--help` for validation ranges and defaults. Existing output files are
+replaced deliberately, so choose a new report name when preserving an older
+scenario. This utility is not a historical backtest or profit forecast: it
+models deterministic trigger coverage and recovery burden for comparing strategy
+shapes.
 
 ### Phone-friendly live view
 
@@ -340,6 +405,7 @@ unless their section explicitly says otherwise.
 | `fleet-doctor` | Validate Git, config, RPC, contracts, providers, and dashboard | No |
 | `fleet-inventory` | Read balances, positions, reserves, Git, and audit timestamps | No |
 | `fleet-watch` | Phone-friendly live view from local status snapshots | No |
+| `strategy-model` | Compare gridless trigger geometry and generate HTML/CSV/JSON reports | Writes report files only |
 | `fleet-audit` | Reconcile local treasury/liquidation audit records | No |
 | `cleanup-logs` | Preview or delete aged bot log files by fleet selection | `--apply` only |
 | `start-fleet` / `stop-fleet` / `restart-fleet` | Manage the configured tmux fleet | Processes only |

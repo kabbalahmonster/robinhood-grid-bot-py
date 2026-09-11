@@ -368,6 +368,7 @@ option and safety invariant.
 | `fleet-doctor` | Check config, Git, RPC, contracts, provider route, and dashboard | No |
 | `fleet-inventory` | Read addresses, reserves, managed balances, positions, and audit ages | No |
 | `fleet-watch` | Phone-friendly live view using local bot status snapshots | No |
+| `strategy-model` | Generate comparative gridless buy/sell coverage charts, CSV, and JSON | Report files only |
 | `reconcile-position-balances` | Preview/apply an audited proportional haircut when tracked tokens exceed wallet reality | Yes |
 | `fleet-audit` | Reconcile local treasury/liquidation receipts | No |
 | `update-variable` | Preview/atomically change selected `.env` variables | Config only; `--apply` required |
