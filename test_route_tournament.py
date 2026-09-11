@@ -473,6 +473,24 @@ def test_provider_quote_failure_has_structured_actionable_reason():
     assert row["gas_price_currentness"] == "unknown"
 
 
+def test_candidate_log_includes_sanitized_quote_failure_kind(caplog):
+    """Operator logs distinguish a no-route quote from generic provider failure."""
+    import logging
+    clients = {name: Mock() for name in ("uniswap", "sushiswap")}
+    clients["uniswap"].get_quote.return_value = quote(gas=180000, gas_price=10**6)
+    clients["sushiswap"].get_quote.return_value = QuoteResult(
+        success=False, error="Sushi API returned status 404: NoRouteFoundError"
+    )
+    cfg = SimpleNamespace(uniswap_api_key="key", weth_address="weth", token_address="token")
+    with caplog.at_level(logging.INFO, logger="grid_bot.route_tournament"):
+        collect(cfg, "wallet", context("buy"), clients.__getitem__)
+    sushi_lines = [record.getMessage() for record in caplog.records
+                   if "Route tournament candidate" in record.getMessage()
+                   and "sushiswap/" in record.getMessage()]
+    assert sushi_lines
+    assert all("no_route_or_liquidity" in line for line in sushi_lines)
+
+
 def test_quote_deadline_is_exposed_as_an_observation_timeout():
     row = score_candidate(
         QuoteResult(success=False, error="shadow quote deadline elapsed"),

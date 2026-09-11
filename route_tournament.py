@@ -726,20 +726,29 @@ def collect(config, address, context, client_factory=None,
                 # Emit one structured per-candidate log line for observability.
                 result_label = "eligible" if row["validation_level"] == "quote_only" else "rejected"
                 rejection = "+".join(row["rejections"]) if row["rejections"] else "-"
+                # Quote errors are intentionally sanitized when collected.  Surface the
+                # resulting stable classification here: a client initializing is not
+                # evidence that it found liquidity, and operators need to distinguish
+                # no-route from a transient/provider configuration failure.
+                quote_failure_kind = row.get("quote_failure_kind")
+                failure_suffix = (
+                    " · " + quote_failure_kind
+                    if rejection != "-" and quote_failure_kind else ""
+                )
                 if context["direction"] == "sell" and row.get("projected_profit_percent") is not None:
                     LOG.info(
-                        "Route tournament candidate ⚔️ %s/%s: net %.6f ETH (%+.2f%%) · minimum %.6f ETH (%.2f%%) · gas %.6f ETH · %s%s",
+                        "Route tournament candidate ⚔️ %s/%s: net %.6f ETH (%+.2f%%) · minimum %.6f ETH (%.2f%%) · gas %.6f ETH · %s%s%s",
                         name, settlement, Decimal(row["projected_net_score"]) / Decimal(10**18),
                         row["projected_profit_percent"], row["minimum_return_eth"],
                         row["minimum_profit_percent"], row.get("gas_total_eth", 0.0) or 0.0,
-                        result_label, " · " + rejection if rejection != "-" else "",
+                        result_label, " · " + rejection if rejection != "-" else "", failure_suffix,
                     )
                 else:
                     LOG.info(
-                        "Route tournament candidate ⚔️ %s/%s: output %s · gas %.6f ETH · %s%s",
+                        "Route tournament candidate ⚔️ %s/%s: output %s · gas %.6f ETH · %s%s%s",
                         name, settlement, row.get("quoted_output_human", "-"),
                         row.get("gas_total_eth", 0.0) or 0.0, result_label,
-                        " · " + rejection if rejection != "-" else "",
+                        " · " + rejection if rejection != "-" else "", failure_suffix,
                     )
                 if row["validation_level"] == "quote_only":
                     provider_outputs.append(row)
