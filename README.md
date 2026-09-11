@@ -1396,7 +1396,17 @@ terminals without hyperlink support simply show the same readable hash.
 Receipt lookup rotates across configured RPC endpoints when an endpoint lacks
 the required method or temporarily fails. Once an RPC has accepted a signed
 transaction, the bot never treats an uncertain receipt as permission to send
-the operation again. If the outcome cannot be resolved, it atomically writes
+the operation again. A definitive `-32601 Method not found` capability response
+from `eth_sendRawTransaction` is the narrow exception: that endpoint did not
+execute the method, so the exact same signed bytes may be submitted to the next
+RPC. Because the nonce, payload, signature, and hash are identical, this cannot
+create a distinct second transaction. Timeouts, disconnects, rate limits, and
+server errors remain outcome-unknown and are never replayed automatically.
+If submission reports `nonce too low`, `already known`,
+or `known transaction`, the bot searches every configured RPC for the exact
+deterministic signed hash. A mined receipt is handled normally—success records
+the trade and a status-0 receipt records a terminal failure—without
+rebroadcasting. If the exact outcome still cannot be resolved, it atomically writes
 `data/unresolved_broadcast.json`; all trading loops and later restarts then
 halt before another trade.
 

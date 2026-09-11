@@ -33,12 +33,39 @@ class TestRPCReceiptFailover(unittest.TestCase):
         self.assertEqual(result, receipt)
         resilient._refresh_connection.assert_called_once()
 
-    def test_method_not_found_does_not_replay_broadcast(self):
+    @patch("rpc_rotator.time.sleep", return_value=None)
+    def test_method_not_found_retries_identical_broadcast_on_next_endpoint(self, _sleep):
         first = Mock()
         first.provider.endpoint_uri = "https://first.invalid"
         first.eth.send_raw_transaction.side_effect = ValueError(
             {"code": -32601, "message": "Method not found"}
         )
+        second = Mock()
+        second.provider.endpoint_uri = "https://second.invalid"
+        second.eth.send_raw_transaction.return_value = "0xabc"
+
+        resilient = ResilientWeb3.__new__(ResilientWeb3)
+        resilient.rotator = Mock()
+        resilient._w3 = first
+        resilient._current_url = first.provider.endpoint_uri
+        resilient._refresh_connection = Mock(side_effect=lambda: (
+            setattr(resilient, "_w3", second),
+            setattr(resilient, "_current_url", second.provider.endpoint_uri),
+        ))
+
+        result = resilient._execute_with_failover(
+            "eth.send_raw_transaction", b"identical-signed-bytes",
+        )
+
+        self.assertEqual(result, "0xabc")
+        first.eth.send_raw_transaction.assert_called_once_with(b"identical-signed-bytes")
+        second.eth.send_raw_transaction.assert_called_once_with(b"identical-signed-bytes")
+        resilient._refresh_connection.assert_called_once()
+
+    def test_ambiguous_timeout_does_not_replay_broadcast(self):
+        first = Mock()
+        first.provider.endpoint_uri = "https://first.invalid"
+        first.eth.send_raw_transaction.side_effect = TimeoutError("request timeout")
 
         resilient = ResilientWeb3.__new__(ResilientWeb3)
         resilient.rotator = Mock()
@@ -46,7 +73,7 @@ class TestRPCReceiptFailover(unittest.TestCase):
         resilient._current_url = first.provider.endpoint_uri
         resilient._refresh_connection = Mock()
 
-        with self.assertRaises(ValueError):
+        with self.assertRaises(TimeoutError):
             resilient._execute_with_failover("eth.send_raw_transaction", b"signed")
         resilient._refresh_connection.assert_not_called()
 

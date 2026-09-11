@@ -344,7 +344,14 @@ class ResilientWeb3:
                 last_error = e
                 error_str = str(e).lower()
                 
-                # Check if it's a connection/rate-limit error worth failing over on.
+                # Check if it's an error worth failing over on. Signed
+                # broadcasts need stricter handling than reads: an ambiguous
+                # timeout/connection failure may follow acceptance, so replaying
+                # it automatically would violate the wallet's fail-closed
+                # outcome guard. A JSON-RPC capability rejection, however,
+                # proves that endpoint did not execute eth_sendRawTransaction;
+                # the identical signed bytes can safely be offered to the next
+                # endpoint (same nonce, signature, payload, and hash).
                 # Some public endpoints accept transaction broadcasts but do not
                 # implement receipt polling.  A post-broadcast receipt lookup is
                 # read-only and must be allowed to continue on another endpoint;
@@ -355,16 +362,22 @@ class ResilientWeb3:
                     "eth.get_transaction_receipt",
                     "eth.get_transaction",
                 }
+                transaction_broadcast = func_name == "eth.send_raw_transaction"
                 capability_error = (
                     "method not found" in error_str
                     or "-32601" in error_str
                     or "not supported" in error_str
                 )
-                is_retryable = any(x in error_str for x in [
+                transient_error = any(x in error_str for x in [
                     "connection", "timeout", "429", "rate limit",
                     "too many requests", "503", "502", "500",
                     "internal error", "server error",
-                ]) or (receipt_lookup and capability_error)
+                ])
+                is_retryable = (
+                    (transient_error and not transaction_broadcast)
+                    or (receipt_lookup and capability_error)
+                    or (transaction_broadcast and capability_error)
+                )
                 
                 if self._current_url:
                     self.rotator.report_failure(self._current_url, e)

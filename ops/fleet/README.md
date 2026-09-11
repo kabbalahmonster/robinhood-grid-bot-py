@@ -1512,6 +1512,21 @@ returns `Method not found`. If a broadcast still has an uncertain outcome,
 `data/unresolved_broadcast.json` blocks subsequent trading across loops and
 restarts.
 
+An RPC may accept a signed transaction, lose its response, and then report
+`nonce too low` after another node observes the consumed nonce. The wallet now
+queries every configured RPC for the exact deterministic signed hash on
+`nonce too low`, `already known`, and `known transaction`. A mined receipt is
+processed normally and the signed payload is never replayed. The unresolved
+guard remains mandatory when no endpoint can prove a terminal receipt.
+
+If `eth_sendRawTransaction` itself returns the definitive capability error
+`-32601 Method not found`, the endpoint did not execute the broadcast method.
+The RPC rotator therefore offers the identical signed bytes to the next
+endpoint. This is hash-identical propagation, not a newly signed transaction;
+it cannot create another nonce or order. Ambiguous timeouts, disconnects, rate
+limits, and server errors never use this path and still create the unresolved
+broadcast guard.
+
 Native-mode regular buys and sells also use this guard during direct-WETH
 fallback settlement. A confirmed wrap is guarded until its buy swap and
 position write complete. A confirmed token-to-WETH sale retains its position
