@@ -182,7 +182,21 @@ the first entry price to `1.0` and follows the production gridless rule: the nex
 buy occurs when the current lowest-cost position reaches the configured negative
 P&L threshold. Successive entry points are therefore geometric. With a 10% buy
 trigger they are `1.0`, `0.9`, `0.81`, `0.729`, not evenly spaced percentage
-points.
+points. Pass buy triggers as positive drawdown magnitudes (`15`, not `-15`);
+fleet mode converts negative `.env` thresholds automatically.
+
+| Option | Default | Meaning and validation |
+| --- | --- | --- |
+| `--buy-triggers LIST` | `5,10,15,20` | Comma-separated unique positive magnitudes, each greater than 0 and less than 100 |
+| `--sell-triggers LIST` | `3,5,10,15` | Comma-separated unique positive targets, each greater than 0 and less than 100 |
+| `--positions COUNT` | `8` | Integer position capacity from 1 through 100 |
+| `--min-profit PCT` | `0` | Non-negative effective sell floor below 100 |
+| `--output PATH` | `strategy-model.html` | Required `.html` suffix; parent directories are created and the matching stem is used for CSV/JSON |
+| `--fleet` | off | Add a table calculated from selected bot `.env` files |
+| `--only NAMES` | all configured bots | Comma-separated fleet selection; requires `--fleet` |
+| `--exclude NAMES` | none | Comma-separated fleet exclusion; requires `--fleet` |
+| `--config PATH` | normal fleet config search | Alternate fleet membership/configuration; requires `--fleet` |
+| `-h`, `--help` | — | Print the complete inline command reference without loading fleet configuration |
 
 Generate a useful baseline matrix:
 
@@ -211,7 +225,11 @@ The visual matrix reports three values for each buy/sell combination:
 The coverage curve shows how each additional slot changes the geometric
 drawdown boundary. The report also stores the last funded entry separately from
 the capacity boundary: these differ by one full buy interval and must not be
-treated as the same risk point.
+treated as the same risk point. CSV and JSON rows additionally expose the
+effective sell target, normalized equal-ETH average entry price, portfolio
+break-even rebound from the capacity boundary, and newest-position exit versus
+the initial price. Percent fields are numeric rather than preformatted strings,
+so spreadsheet formulas and later simulations do not need to strip `%` signs.
 
 Include current settings for all configured bots, or a selection, beneath the
 custom matrix:
@@ -225,11 +243,20 @@ strategy-model --fleet --exclude ARCHIVE --config /path/to/fleet.conf \
 
 Fleet values come only from each selected checkout's `.env`. Invalid bot values
 are omitted from the fleet table; the custom comparison is still generated.
-Use `--help` for validation ranges and defaults. Existing output files are
-replaced deliberately, so choose a new report name when preserving an older
-scenario. This utility is not a historical backtest or profit forecast: it
-models deterministic trigger coverage and recovery burden for comparing strategy
-shapes.
+`MAX_ACTIVE_POSITIONS` is used when present, otherwise legacy `MAX_POSITIONS`;
+missing buy/sell/minimum-profit values use production defaults of `-10`, `5`,
+and `5`. Selection and membership validation use the same fleet helpers as the
+other operator commands. Existing HTML, CSV, and JSON files with the requested
+stem are replaced deliberately, so choose a new report name when preserving an
+older scenario.
+
+This utility is not a historical backtest or profit forecast. It assumes exact
+threshold fills, equal ETH allocated per modeled slot, no leading-edge buys, no
+intermediate sells before the modeled drawdown path completes, and no stoploss.
+It deliberately excludes fees, gas, slippage, token taxes, liquidity movement,
+moonbag retention, execution margin, cooldown timing, and gaps between polls.
+Those exclusions make it a deterministic comparison of strategy shapes, not a
+claim about realized performance.
 
 ### Phone-friendly live view
 

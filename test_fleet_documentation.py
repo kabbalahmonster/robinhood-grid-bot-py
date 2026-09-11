@@ -41,6 +41,10 @@ class FleetDocumentationTests(unittest.TestCase):
             "cleanup-logs --older-than",
             "--confirm-delete-logs",
             "--keep-latest",
+            "--buy-triggers LIST",
+            "--sell-triggers LIST",
+            "positive drawdown magnitudes",
+            "break-even rebound",
         ):
             with self.subTest(term=required):
                 self.assertIn(required, docs)
