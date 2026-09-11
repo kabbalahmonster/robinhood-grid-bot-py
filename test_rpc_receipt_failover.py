@@ -77,6 +77,37 @@ class TestRPCReceiptFailover(unittest.TestCase):
             resilient._execute_with_failover("eth.send_raw_transaction", b"signed")
         resilient._refresh_connection.assert_not_called()
 
+    @patch("rpc_rotator.time.sleep", return_value=None)
+    def test_timeout_after_capability_failover_does_not_reach_third_endpoint(self, _sleep):
+        first = Mock()
+        first.provider.endpoint_uri = "https://first.invalid"
+        first.eth.send_raw_transaction.side_effect = ValueError(
+            {"code": -32601, "message": "Method not found"}
+        )
+        second = Mock()
+        second.provider.endpoint_uri = "https://second.invalid"
+        second.eth.send_raw_transaction.side_effect = TimeoutError("request timeout")
+        third = Mock()
+        third.provider.endpoint_uri = "https://third.invalid"
+
+        resilient = ResilientWeb3.__new__(ResilientWeb3)
+        resilient.rotator = Mock()
+        resilient._w3 = first
+        resilient._current_url = first.provider.endpoint_uri
+        endpoints = iter((second, third))
+
+        def refresh():
+            next_endpoint = next(endpoints)
+            resilient._w3 = next_endpoint
+            resilient._current_url = next_endpoint.provider.endpoint_uri
+
+        resilient._refresh_connection = Mock(side_effect=refresh)
+
+        with self.assertRaises(TimeoutError):
+            resilient._execute_with_failover("eth.send_raw_transaction", b"signed")
+        self.assertEqual(resilient._refresh_connection.call_count, 1)
+        third.eth.send_raw_transaction.assert_not_called()
+
     def test_exact_hash_receipt_searches_all_endpoints(self):
         first = Mock()
         first.eth.get_transaction_receipt.side_effect = ValueError("transaction not found")

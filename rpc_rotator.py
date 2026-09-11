@@ -382,8 +382,11 @@ class ResilientWeb3:
                 if self._current_url:
                     self.rotator.report_failure(self._current_url, e)
                 
-                if not is_retryable and attempt == 0:
-                    # Non-retryable error (e.g., invalid params) — don't retry
+                if not is_retryable:
+                    # Non-retryable errors stop at whichever endpoint returned
+                    # them. This matters after an earlier safe capability
+                    # failover: a later ambiguous broadcast timeout must not be
+                    # offered to yet another endpoint.
                     raise
                 
                 if attempt < self.MAX_RETRIES - 1:
