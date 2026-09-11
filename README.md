@@ -1677,10 +1677,14 @@ wallet owns the future wrapped principal: ranking includes the provider swap
 estimate plus locally estimated wrap and exact-amount approval gas, then the
 winner is wrapped/approved, refreshed, and locally simulated before swap
 broadcast. Selection never authorizes a stale observation: the chosen identity
-is freshly quoted and validated again before execution. The bot skips the trade
-if that refresh times out, disappears, fails simulation, or no longer clears the
-gas-aware sell floor. A crowned round winner is therefore not a promise that a
-transaction will be sent; the next polling round may try again.
+is freshly quoted and validated again before execution. If the tournament itself
+has no freshly valid candidate (deadline, provider/RPC failure, or its extra
+simulation cannot complete), the bot records `baseline_fallback` and runs the
+normal configured primary/fallback route instead. The baseline path still
+performs its own fresh quote, approval, gas-cap, profit-floor, simulation and
+broadcast checks; tournament failure never by itself suppresses an otherwise
+valid exit. A selected winner that later fails a normal final guard is still
+skipped, as it would be with tournament mode off.
 
 Gridless moonbag sells tournament only the exact amount that can execute after
 the configured moonbag retention is deducted. The gate does not crown a

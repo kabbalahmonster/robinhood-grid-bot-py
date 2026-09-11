@@ -1523,23 +1523,44 @@ class GridBot:
                 direction, sell_amount, sold_cost_wei,
             )
             validated = self._revalidate_selected_route(selection, direction, sell_amount) if selection else None
-            if validated is None:
-                from zero_x import QuoteResult
-                logger.warning("Tournament gate found no freshly valid %s route; execution skipped", direction)
-                return QuoteResult(success=False, error="tournament gate found no freshly valid route"), False
-            self.provider.active = validated["provider"]
-            self.api_client = self.provider
-            # The gate's fresh quote has already been prepared and locally
-            # estimated. Do not submit it to provider preparation a second time.
-            try:
-                if not validated.get("staged_weth_buy"):
-                    setattr(validated["quote"], "_tournament_gate_prepared", True)
-                setattr(validated["quote"], "weth_fallback", validated["weth_fallback"])
-            except Exception:
-                logger.warning("Tournament route preparation marker unavailable; execution skipped")
-                from zero_x import QuoteResult
-                return QuoteResult(success=False, error="tournament route preparation marker unavailable"), False
-            return validated["quote"], validated["weth_fallback"]
+            if validated is not None:
+                self.provider.active = validated["provider"]
+                self.api_client = self.provider
+                # The gate's fresh quote has already been prepared and locally
+                # estimated. Do not submit it to provider preparation a second time.
+                try:
+                    if not validated.get("staged_weth_buy"):
+                        setattr(validated["quote"], "_tournament_gate_prepared", True)
+                    setattr(validated["quote"], "weth_fallback", validated["weth_fallback"])
+                except Exception:
+                    logger.warning("Tournament route preparation marker unavailable; execution skipped")
+                    from zero_x import QuoteResult
+                    return QuoteResult(success=False, error="tournament route preparation marker unavailable"), False
+                return validated["quote"], validated["weth_fallback"]
+
+            # Tournament collection is an extra reliability layer, never a
+            # reason to make an otherwise normal sell impossible. Its worker
+            # deadline, local simulation, or a secondary provider can fail
+            # while the established primary route remains executable. Return
+            # to that baseline operation, which still performs every normal
+            # quote, approval, gas-cap, profit-floor, simulation and broadcast
+            # safeguard below. This is not post-gate quote shopping.
+            comparison = getattr(self, "_route_execution_preflight", None)
+            if isinstance(comparison, dict):
+                comparison["status"] = "baseline_fallback"
+                comparison["execution_fallback"] = {
+                    "reason": "no_fresh_tournament_candidate",
+                    "provider": getattr(getattr(self.provider, "primary", None), "name", None),
+                }
+                comparison["updated_at"] = datetime.now().astimezone().isoformat()
+            primary = getattr(self.provider, "primary", None)
+            if primary is not None:
+                self.provider.active = primary
+                self.api_client = self.provider
+            logger.warning(
+                "Tournament preflight found no freshly valid %s route; using baseline provider path",
+                direction,
+            )
         if direction == "buy":
             self._queue_route_shadow(direction, sell_amount)
         quote = self.api_client.build_swap_transaction(

@@ -1410,6 +1410,42 @@ def test_gate_mode_uses_only_a_freshly_revalidated_selected_route():
     original_api.build_swap_transaction.assert_not_called()
 
 
+def test_gate_preflight_failure_falls_back_to_normal_provider_path():
+    """A flaky comparison must not suppress a sell the normal path can execute."""
+    b = bot("gate")
+    b.config.use_eth_trading = True
+    b._swap_slippage_fraction = Mock(return_value=0.01)
+    classic_quote = QuoteResult(success=True, sell_amount=10**15, buy_amount=2 * 10**15)
+    primary = SimpleNamespace(name="uniswap")
+    router = SimpleNamespace(
+        primary=primary, active=SimpleNamespace(name="sushiswap"),
+        build_swap_transaction=Mock(return_value=classic_quote),
+    )
+    b.provider = router
+    b.api_client = router
+    b._route_execution_preflight = {
+        "mode": "execution_preflight", "direction": "sell",
+        "status": "preflight_no_authorized_candidate",
+    }
+    b._collect_route_execution_preflight = Mock(return_value=None)
+    b._revalidate_selected_route = Mock()
+
+    quote_result, weth_fallback = b._actionable_quote_with_weth_fallback(
+        sell_token="token", buy_token="native", sell_amount=10**15, direction="sell",
+    )
+
+    assert quote_result is classic_quote
+    assert weth_fallback is False
+    assert b.provider.active is primary
+    assert b.api_client is router
+    router.build_swap_transaction.assert_called_once()
+    b._revalidate_selected_route.assert_not_called()
+    assert b._route_execution_preflight["status"] == "baseline_fallback"
+    assert b._route_execution_preflight["execution_fallback"] == {
+        "reason": "no_fresh_tournament_candidate", "provider": "uniswap",
+    }
+
+
 def test_snapshot_failure_is_reported_without_candidate_requests():
     b = bot("shadow")
     with patch("route_tournament.snapshot", side_effect=RuntimeError("SECRET")), patch("route_tournament.collect") as collection:

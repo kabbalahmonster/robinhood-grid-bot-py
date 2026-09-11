@@ -1395,7 +1395,11 @@ restart-bot EARN
 Monitor quote latency, rate limits, rejection reasons, gas estimates, and buy
 and sell results. A displayed round winner can still be refused when its
 mandatory fresh execution quote times out, fails simulation, or falls below the
-gas-aware profit floor. Roll back only the canary with:
+gas-aware profit floor. If the tournament has no authorized candidate because
+its additional provider/RPC/simulation work fails, it records
+`baseline_fallback` and continues through the bot's ordinary configured route
+and its normal safeguards; tournament availability cannot alone block a valid
+classic exit. Roll back only the canary with:
 
 ```bash
 update-variable --apply --only earn \

@@ -145,8 +145,11 @@ restart-bot EARN
 
 `shadow` collects read-only comparison telemetry; `gate` gives route authority
 only to a freshly re-quoted and locally simulated winner. A displayed winner
-may still be safely skipped during revalidation. Watch latency, 429s, timeout
-rejections, gas, and successful buy/sell receipts before expanding the trial.
+may still be safely skipped during normal final guards. If gate preflight itself
+has no valid candidate, the dashboard records `baseline_fallback` and the bot
+uses its normal configured route with all usual safeguards, rather than losing
+an otherwise valid exit to tournament-only availability. Watch latency, 429s,
+timeout rejections, gas, and successful buy/sell receipts before expanding the trial.
 Rollback is `ROUTE_TOURNAMENT_MODE=off` and
 `ROUTE_TOURNAMENT_CANARY=false` on that same bot. See the route-tournament
 section of the main README and the fleet README for accounting and timeout
