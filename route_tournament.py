@@ -341,7 +341,7 @@ def score_candidate(quote, provider, settlement, context, *, allowance_probe=Non
     if approval_gas and approval_gas_limit:
         approval_gas = int(approval_gas_limit)
         approval_label = "dynamic_local_approval_estimate"
-    # LI.FI and Umbra sell calldata necessarily reverts during eth_estimateGas
+    # Sushi, LI.FI and Umbra sell calldata can necessarily revert during eth_estimateGas
     # until their spender can transfer the token. Keep such a route in the
     # tournament only as an explicitly staged candidate: its provisional score
     # uses the provider/conservative swap budget plus a *locally estimated*
@@ -350,13 +350,13 @@ def score_candidate(quote, provider, settlement, context, *, allowance_probe=Non
     # at the execution boundary.
     staged_approval = bool(
         require_local_gas and c["direction"] == "sell"
-        and provider in {"lifi", "umbra"} and spender
+        and provider in {"sushiswap", "lifi", "umbra"} and spender
         and allowance is not None and allowance < c["amount"]
         and approval_gas > 0
         and local_gas <= 0 and approval_gas_limit
     )
     if (require_dynamic_setup_gas and c["direction"] == "sell"
-            and provider in {"lifi", "umbra"} and spender
+            and provider in {"sushiswap", "lifi", "umbra"} and spender
             and allowance is not None and allowance < c["amount"]
             and approval_gas and not approval_gas_limit):
         row["rejections"] = ["approval_required_before_local_simulation"]

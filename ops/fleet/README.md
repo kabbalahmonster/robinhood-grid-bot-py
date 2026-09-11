@@ -1527,10 +1527,10 @@ Umbra adds one public-API candidate per configured settlement. Canary
 use, watching 429s and deadlines. Umbra's fee/tax-adjusted output is not
 haircut twice; execution pins UmbraRH and uses local gas estimation instead of
 the provider's flat 3M recommendation.
-For an unapproved sell, LI.FI and Umbra remain in contention using an all-in
+For an unapproved sell, Sushi, LI.FI, and Umbra remain in contention using an all-in
 provisional score: a provider/conservative swap budget plus locally estimated
-approval gas. Only the provisional winner is approved. LI.FI normally receives
-a reusable allowance; Umbra receives its required exact-amount allowance. The
+approval gas. Only the provisional winner is approved. Sushi and LI.FI normally
+receive reusable allowances; Umbra receives its required exact-amount allowance. The
 winner is refreshed and must pass exact local gas simulation and all final
 guards. Losing candidates never cost approval gas; a winner that deteriorates
 after approval aborts safely, with only the approval fee spent.

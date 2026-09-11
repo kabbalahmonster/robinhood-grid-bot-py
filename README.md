@@ -1667,7 +1667,7 @@ requires `UNISWAP_API_KEY`. The gate uses a twelve-second default preflight budg
 collects every configured identity, and
 permits only prepared calldata with fresh local `eth_estimateGas` at final
 authorization, and refreshes the RPC gas price again at the broadcast boundary.
-Unapproved LI.FI and Umbra sells are staged: provisional ranking includes a
+Unapproved Sushi, LI.FI, and Umbra sells are staged: provisional ranking includes a
 provider/conservative swap estimate plus dynamically estimated local approval
 gas. Only the provisional winner is approved, then refreshed and required to
 pass exact local simulation and every final guard. Losing candidates are never

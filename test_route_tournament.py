@@ -286,7 +286,7 @@ def test_execution_preflight_requires_local_gas_for_sushi_too():
                for row in sushi_rows)
 
 
-def test_execution_preflight_rejects_unsimulatable_sushi_approval_handshake():
+def test_execution_preflight_stages_unsimulatable_sushi_approval_handshake():
     clients = {name: Mock() for name in ("uniswap", "sushiswap")}
     prepared = quote(to="0x8e6fd69a77e88ee20ba4b4fbd59dfcda3ec0e98a", data="0xdead")
     clients["uniswap"].get_quote.return_value = quote()
@@ -299,13 +299,17 @@ def test_execution_preflight_rejects_unsimulatable_sushi_approval_handshake():
 
     result = collect_execution_preflight(
         cfg, "wallet", context("sell"), clients.__getitem__,
+        allowance_probe=lambda _token, _spender: 0,
         gas_estimate_provider=lambda candidate, _settlement: 180612 if candidate.data else 0,
+        approval_gas_estimate_provider=lambda _candidate, _settlement: 47000,
         max_seconds=4,
     )
 
     sushi_rows = [row for row in result["candidates"] if row["provider"] == "sushiswap"]
-    assert all(row["rejections"] == ["local_gas_simulation_failed"] for row in sushi_rows)
-    assert all(row["projected_total_gas_wei"] is None for row in sushi_rows)
+    native = next(row for row in sushi_rows if row["settlement"] == "native")
+    assert native["rejections"] == []
+    assert native["staged_approval_required"] is True
+    assert native["candidate_state"] == "approval_required"
 
 
 @pytest.mark.parametrize("provider_gas,expected_swap,expected_basis", [
@@ -1233,6 +1237,36 @@ def test_staged_sell_winner_is_handed_off_without_impossible_preapproval_simulat
     assert getattr(validated["quote"], "_tournament_staged_approval") is True
     b.wallet.w3.eth.estimate_gas.assert_not_called()
     b.wallet.approve_token.assert_not_called()
+
+
+def test_staged_sushi_handshake_is_handed_off_without_preapproval_calldata():
+    b = bot("gate")
+    b.wallet.address = "0x3d8c491b7fe2d43468b5e45162e374719003ef16"
+    b.config.token_address = "token"
+    b.config.weth_address = "weth"
+    b.config.use_eth_trading = True
+    b.trade_token_address = "native"
+    b._swap_slippage_fraction = Mock(return_value=0.01)
+    handshake = QuoteResult(
+        success=True, sell_amount=10**15, buy_amount=2 * 10**15,
+        allowance_target="0xfc830d7861c5cebeff0000000000000000000000",
+    )
+    selected = SimpleNamespace(
+        name="sushiswap", build_swap_transaction=Mock(return_value=handshake),
+        capabilities=SimpleNamespace(quote_requires_preparation=False),
+    )
+    b.provider = SimpleNamespace(provider_for_name=Mock(return_value=selected))
+
+    validated = b._revalidate_selected_route(
+        {"provider": "sushiswap", "settlement": "native",
+         "staged_approval_required": True},
+        "sell", 10**15,
+    )
+
+    assert validated["provider"] is selected
+    assert validated["staged_approval"] is True
+    assert getattr(validated["quote"], "_tournament_staged_approval") is True
+    b.wallet.w3.eth.estimate_gas.assert_not_called()
 
 
 def test_staged_lifi_approval_remains_reusable_but_umbra_is_exact():

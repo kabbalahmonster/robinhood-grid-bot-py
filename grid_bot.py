@@ -1370,9 +1370,16 @@ class GridBot:
             if (quote.success and getattr(getattr(provider, "capabilities", None),
                                           "quote_requires_preparation", False)):
                 quote = provider.prepare_swap(quote)
+            # Sushi's approval handshake intentionally has no executable
+            # calldata yet.  A staged winner is allowed through with its exact
+            # spender and amounts; execution approves, refreshes, and then
+            # requires local simulation of the rebuilt transaction.
+            has_executable_tx = bool(
+                getattr(quote, "to", None) and getattr(quote, "data", None)
+            )
             if (not quote.success or int(getattr(quote, "sell_amount", 0) or 0) != int(amount)
                     or int(getattr(quote, "buy_amount", 0) or 0) <= 0
-                    or not getattr(quote, "to", None) or not getattr(quote, "data", None)):
+                    or (not staged_approval and not has_executable_tx)):
                 return None
             if staged_approval:
                 setattr(quote, "_tournament_staged_approval", True)
