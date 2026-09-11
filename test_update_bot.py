@@ -106,6 +106,19 @@ class UpdateBotTests(unittest.TestCase):
         self.assertIn("would create local tracking branch canary", result.stdout)
         self.assertEqual(self.git("branch", "--show-current", cwd=self.bot).stdout.strip(), "main")
 
+    def test_explicit_branch_recovers_detached_head(self):
+        detached_revision = self.git("rev-parse", "HEAD", cwd=self.bot).stdout.strip()
+        self.git("checkout", "--detach", detached_revision, cwd=self.bot)
+
+        checked = self.run_script("--branch", "main", "--check", "--no-restart")
+        self.assertEqual(checked.returncode, 0, checked.stderr)
+        self.assertIn("Current:  (detached)", checked.stdout)
+        self.assertEqual(self.git("branch", "--show-current", cwd=self.bot).stdout.strip(), "")
+
+        switched = self.run_script("--branch", "main", "--no-restart")
+        self.assertEqual(switched.returncode, 0, switched.stderr)
+        self.assertEqual(self.git("branch", "--show-current", cwd=self.bot).stdout.strip(), "main")
+
     def test_tracked_changes_block_switch_but_untracked_files_survive(self):
         (self.bot / "grid_bot.py").write_text("dirty\n", encoding="utf-8")
         blocked = self.run_script("--branch", "canary", "--no-restart")

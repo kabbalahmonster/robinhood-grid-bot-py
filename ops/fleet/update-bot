@@ -87,8 +87,10 @@ fi
 
 [[ -z "$(git -C "$bot_dir" status --porcelain --untracked-files=no)" ]] || \
   fleet_die "Tracked modifications present; commit, stash, or restore them before updating: $bot_dir"
-current="$(git -C "$bot_dir" symbolic-ref --quiet --short HEAD)" || \
-  fleet_die "Detached HEAD; use --branch BRANCH to select a branch explicitly"
+if ! current="$(git -C "$bot_dir" symbolic-ref --quiet --short HEAD)"; then
+  [[ -n "$branch" ]] || fleet_die "Detached HEAD; use --branch BRANCH to select a branch explicitly"
+  current="(detached)"
+fi
 
 target="$current"
 target_ref=""
