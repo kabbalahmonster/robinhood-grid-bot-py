@@ -8,13 +8,14 @@ source "$SCRIPT_DIR/fleet-common.sh"
 
 usage() {
   cat <<'EOF'
-Usage: update-variable [--apply] [--restart] [--allow-add] [--skip-errors] [--only NAMES] [--exclude NAMES] [--config PATH] NAME=VALUE [NAME=VALUE ...]
+Usage: update-variable [--apply] [--restart] [--allow-add] [--deduplicate] [--skip-errors] [--only NAMES] [--exclude NAMES] [--config PATH] NAME=VALUE [NAME=VALUE ...]
 
 Preview or atomically update one or more variables in every configured bot's
 .env file. Preview is the default. Existing .env files are required, variables
 must already exist unless --allow-add is supplied, and --restart is available
 only with --apply. --skip-errors reports and excludes invalid targets while
-continuing with the rest of the fleet.
+continuing with the rest of the fleet. --deduplicate collapses repeated
+definitions only for variables explicitly assigned by this command.
 
 Examples:
   update-variable ETH_GAS_RESERVE=0.0005
@@ -26,6 +27,7 @@ config_path=""
 apply=0
 restart=0
 allow_add=0
+deduplicate=0
 skip_errors=0
 assignments=()
 only=""
@@ -36,6 +38,7 @@ while (($#)); do
     --apply) apply=1; shift ;;
     --restart) restart=1; shift ;;
     --allow-add) allow_add=1; shift ;;
+    --deduplicate) deduplicate=1; shift ;;
     --skip-errors) skip_errors=1; shift ;;
     --only) (($# >= 2)) || fleet_die "--only requires comma-separated names"; only="$2"; shift 2 ;;
     --exclude) (($# >= 2)) || fleet_die "--exclude requires comma-separated names"; exclude="$2"; shift 2 ;;
@@ -55,6 +58,7 @@ command -v python3 >/dev/null 2>&1 || fleet_die "python3 is required to update d
 
 helper_args=()
 ((allow_add == 0)) || helper_args+=(--allow-add)
+((deduplicate == 0)) || helper_args+=(--deduplicate)
 
 printf 'Fleet variable update: %s\nBots configured: %d\n\n' "$([[ $apply == 1 ]] && echo APPLY || echo PREVIEW)" "${#FLEET_BOT_DIRS[@]}"
 valid_bot_dirs=()

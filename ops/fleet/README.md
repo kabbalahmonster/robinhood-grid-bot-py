@@ -1429,6 +1429,17 @@ definitions and malformed names, writes atomically, preserves file permissions
 and inline comments, and creates timestamped `.env.bak.*` files before applying
 anything. If an apply step fails, it restores every `.env` from that run.
 
+Legacy files that repeat a variable can be repaired deliberately with
+`--deduplicate`. It applies only to variables named in that invocation: the
+first definition is updated in place, later definitions of the same assigned
+variable are removed, and unrelated duplicate variables still fail validation.
+Preview the operation before applying it:
+
+```bash
+ops/fleet/update-variable --deduplicate SWAP_PROVIDER=uniswap
+ops/fleet/update-variable --apply --deduplicate SWAP_PROVIDER=uniswap
+```
+
 Preview changing the fleet gas reserve:
 
 ```bash

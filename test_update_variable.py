@@ -51,6 +51,25 @@ class TestUpdateVariable(unittest.TestCase):
             self.assertFalse((checkouts[1] / ".env").exists())
             self.assertEqual((checkouts[2] / ".env").read_text(), "ETH_GAS_RESERVE=0.0005\n")
 
+    def test_deduplicate_collapses_only_assigned_variable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            checkouts, config = self._fixture(directory)
+            (checkouts[1] / ".env").write_text(
+                "SWAP_PROVIDER=0x\nKEEP=first\nSWAP_PROVIDER=lifi\nKEEP=second\n"
+            )
+            result = subprocess.run(
+                [
+                    SCRIPT, "--config", config, "--only", "broken", "--apply",
+                    "--deduplicate", "SWAP_PROVIDER=uniswap",
+                ],
+                text=True, capture_output=True, env={**os.environ, "HOME": directory},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                (checkouts[1] / ".env").read_text(),
+                "SWAP_PROVIDER=uniswap\nKEEP=first\nKEEP=second\n",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

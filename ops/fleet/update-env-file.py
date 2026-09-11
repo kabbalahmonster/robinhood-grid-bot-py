@@ -53,6 +53,7 @@ def main():
     parser.add_argument("--file", required=True)
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--allow-add", action="store_true")
+    parser.add_argument("--deduplicate", action="store_true")
     parser.add_argument("assignments", nargs="+")
     args = parser.parse_args()
 
@@ -75,13 +76,15 @@ def main():
                 found[name].append((index, match))
 
     for name, matches in found.items():
-        if len(matches) > 1:
+        if len(matches) > 1 and not args.deduplicate:
             raise ValueError(f"{args.file}: {name} is defined more than once")
         if not matches and not args.allow_add:
             raise ValueError(f"{args.file}: {name} is missing (use --allow-add to append it)")
 
     for name, new_value in assignments.items():
-        if found[name]:
+        if len(found[name]) > 1:
+            old_value = f"<duplicate definitions: {len(found[name])}>"
+        elif found[name]:
             _, match = found[name][0]
             old_value = match.group(2).strip()
         else:
@@ -91,6 +94,7 @@ def main():
     if not args.apply:
         return
 
+    duplicate_indexes = set()
     for name, new_value in assignments.items():
         if found[name]:
             index, match = found[name][0]
@@ -98,10 +102,14 @@ def main():
             suffix = f" {comment}" if comment else ""
             newline = match.group(3) or "\n"
             lines[index] = f"{match.group(1)}{new_value}{suffix}{newline}"
+            duplicate_indexes.update(index for index, _ in found[name][1:])
         else:
             if lines and not lines[-1].endswith(("\n", "\r")):
                 lines[-1] += "\n"
             lines.append(f"{name}={new_value}\n")
+
+    if duplicate_indexes:
+        lines = [line for index, line in enumerate(lines) if index not in duplicate_indexes]
 
     original_mode = stat.S_IMODE(os.stat(args.file).st_mode)
     directory = os.path.dirname(os.path.abspath(args.file))
