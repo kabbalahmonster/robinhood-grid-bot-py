@@ -406,6 +406,31 @@ class ResilientWeb3:
         """Log RPC endpoint status."""
         self.rotator.log_status()
 
+    def find_transaction_receipt(self, tx_hash):
+        """Look up an exact transaction receipt on every configured endpoint.
+
+        Broadcasts are deliberately never replayed across RPC endpoints. A
+        node can nevertheless accept a signed payload and lose its response,
+        leaving the next node to answer ``nonce too low``. This read-only
+        lookup proves whether the deterministic signed hash settled.
+        """
+        last_error = None
+        for endpoint in self.rotator._endpoints:
+            w3 = self.rotator._get_web3_for_url(endpoint.url)
+            try:
+                receipt = w3.eth.get_transaction_receipt(tx_hash)
+                if receipt is not None:
+                    endpoint.record_success()
+                    return receipt
+            except Exception as exc:
+                last_error = exc
+                # A lagging endpoint commonly reports TransactionNotFound.
+                # Continue through independent views without replaying bytes.
+                continue
+        if last_error:
+            logger.debug("Exact-hash receipt not found across RPCs: %s", last_error)
+        return None
+
 
 class _ResilientNamespace:
     """Proxy for Web3 namespaces (eth, net, etc.) with failover."""

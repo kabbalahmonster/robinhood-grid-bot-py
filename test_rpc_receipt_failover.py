@@ -50,6 +50,26 @@ class TestRPCReceiptFailover(unittest.TestCase):
             resilient._execute_with_failover("eth.send_raw_transaction", b"signed")
         resilient._refresh_connection.assert_not_called()
 
+    def test_exact_hash_receipt_searches_all_endpoints(self):
+        first = Mock()
+        first.eth.get_transaction_receipt.side_effect = ValueError("transaction not found")
+        second = Mock()
+        receipt = {"status": 1, "transactionHash": "0xabc"}
+        second.eth.get_transaction_receipt.return_value = receipt
+
+        resilient = ResilientWeb3.__new__(ResilientWeb3)
+        endpoint_one = Mock(url="https://first.invalid")
+        endpoint_two = Mock(url="https://second.invalid")
+        resilient.rotator = Mock()
+        resilient.rotator._endpoints = [endpoint_one, endpoint_two]
+        resilient.rotator._get_web3_for_url.side_effect = [first, second]
+
+        result = resilient.find_transaction_receipt("0xabc")
+
+        self.assertEqual(result, receipt)
+        second.eth.get_transaction_receipt.assert_called_once_with("0xabc")
+        endpoint_two.record_success.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()
