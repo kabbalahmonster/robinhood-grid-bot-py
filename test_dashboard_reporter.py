@@ -72,6 +72,26 @@ class TestDashboardReporter(unittest.TestCase):
         self.assertIsNone(reporter._queue[1]["sell_attempt"])
 
     @patch("dashboard_reporter.threading.Thread.start")
+    def test_trade_confirmation_update_preserves_full_snapshot(self, _start):
+        reporter = DashboardReporter("https://doomdash.ca/api/status")
+        reporter.report(token_symbol="MANY", positions=[{"id": 9}], sells=0)
+        completed = {"route_comparison": {"status": "completed"}}
+
+        queued = reporter.report_update(
+            sells=1,
+            sell_attempt=completed,
+            trades_history=[{"side": "sell", "tx_hash": "0xconfirmed"}],
+        )
+
+        self.assertTrue(queued)
+        payload = reporter._queue[-1]
+        self.assertEqual(payload["token_symbol"], "MANY")
+        self.assertEqual(payload["positions"], [{"id": 9}])
+        self.assertEqual(payload["sells"], 1)
+        self.assertEqual(payload["sell_attempt"], completed)
+        self.assertEqual(payload["trades_history"][-1]["tx_hash"], "0xconfirmed")
+
+    @patch("dashboard_reporter.threading.Thread.start")
     def test_buy_attempt_is_round_scoped_payload_field(self, _start):
         reporter = DashboardReporter("https://doomdash.ca/api/status")
         attempt = {

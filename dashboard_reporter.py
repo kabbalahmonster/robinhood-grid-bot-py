@@ -7,6 +7,7 @@ The bot must never crash because of dashboard connectivity issues.
 """
 
 import json
+import copy
 import logging
 import os
 import threading
@@ -62,6 +63,7 @@ class DashboardReporter:
 
         # Internal queue + worker thread
         self._queue: List[Dict[str, Any]] = []
+        self._latest_payload: Optional[Dict[str, Any]] = None
         self._lock = threading.Lock()
         self._event = threading.Event()
         self._shutdown = False
@@ -213,6 +215,7 @@ class DashboardReporter:
                 logger.debug("Local fleet status snapshot failed: %s", exc)
 
         with self._lock:
+            self._latest_payload = copy.deepcopy(payload)
             if len(self._queue) >= _MAX_QUEUE_SIZE:
                 # Drop oldest to make room — fire-and-forget semantics
                 self._queue.pop(0)
@@ -220,6 +223,28 @@ class DashboardReporter:
 
         # Wake the worker thread
         self._event.set()
+
+    def report_update(self, **updates: Any) -> bool:
+        """Immediately enqueue an update based on the last complete snapshot.
+
+        Trade confirmation happens inside the sell path, before the next full
+        status snapshot can be assembled.  Cloning the last snapshot avoids
+        sending a destructive partial payload while making the confirmed trade
+        visible before slower fee/banking follow-up work completes.
+        """
+        with self._lock:
+            if self._latest_payload is None:
+                return False
+            payload = copy.deepcopy(self._latest_payload)
+            payload.update(updates)
+            payload["timestamp"] = datetime.now(timezone.utc).isoformat()
+            payload["uptime_seconds"] = round(self.uptime_seconds, 1)
+            self._latest_payload = copy.deepcopy(payload)
+            if len(self._queue) >= _MAX_QUEUE_SIZE:
+                self._queue.pop(0)
+            self._queue.append(payload)
+        self._event.set()
+        return True
 
     def report_status(
         self,
@@ -326,11 +351,16 @@ class DashboardReporter:
                         break
                     payload = self._queue.pop(0)
 
-                try:
-                    self._post(payload)
-                except Exception:
-                    # Silent fail — never let dashboard issues propagate
-                    pass
+                for attempt in range(3):
+                    try:
+                        self._post(payload)
+                        break
+                    except Exception:
+                        # Dashboard delivery must never affect trading, but a
+                        # one-off timeout/5xx should not permanently discard a
+                        # transaction confirmation.
+                        if attempt < 2:
+                            time.sleep(0.5 * (2 ** attempt))
 
     def _post(self, payload: Dict[str, Any]) -> None:
         """
@@ -361,6 +391,7 @@ class DashboardReporter:
                 self._bot_id,
                 response.text[:200],
             )
+            response.raise_for_status()
 
 
 # ------------------------------------------------------------------

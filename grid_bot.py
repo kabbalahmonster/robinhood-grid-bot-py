@@ -2415,6 +2415,28 @@ class GridBot:
             os.replace(temp_file, self.dashboard_trades_file)
         except OSError as exc:
             logger.warning(f"Could not persist dashboard trade history: {exc}")
+        # Publish the confirmed state immediately. Profit-fee forwarding and
+        # optional banking happen after this method and can otherwise delay the
+        # next ordinary status snapshot by a minute or more.
+        reporter = getattr(self, "_reporter", None)
+        if reporter:
+            try:
+                reporter.report_update(
+                    buys=getattr(self, "session_buys", 0),
+                    sells=getattr(self, "session_sells", 0),
+                    session_profit_eth=getattr(self, "session_profit_weth", 0.0),
+                    realized_profit_eth=self.profit_tracker.realized_profit_eth,
+                    realized_profit_periods=self.profit_tracker.period_profits_eth(),
+                    realized_sales=self.profit_tracker.realized_sales,
+                    trades_history=self.dashboard_trades,
+                    events=self.dashboard_events,
+                    buy_attempt=(self._attempt_with_route_comparison("buy")
+                                 if side == "buy" else None),
+                    sell_attempt=(self._attempt_with_route_comparison("sell")
+                                  if side == "sell" else None),
+                )
+            except Exception as exc:
+                logger.debug("Immediate dashboard trade confirmation failed: %s", exc)
         logger.info(f"Wallet: {self.wallet.address}")
         logger.info(f"Trading: {self.config.token_symbol}")
         logger.info(f"Max active positions: {self.config.max_active_positions}")
@@ -4432,7 +4454,22 @@ class GridBot:
         self._sell_attempt = None
         elapsed = time.time() - self.start_time
         if getattr(self.config, "route_tournament_mode", "off") in {"shadow", "gate"}:
-            getattr(self, "_route_comparisons", {}).pop("sell", None)
+            comparisons = getattr(self, "_route_comparisons", {})
+            previous_sell = comparisons.get("sell")
+            # A completed sell is repeated in ordinary snapshots briefly so a
+            # transient failed POST cannot make confirmation disappear forever.
+            # A fresh tournament naturally replaces it.
+            keep_completed = False
+            if isinstance(previous_sell, dict) and previous_sell.get("status") == "completed":
+                try:
+                    completed_at = datetime.fromisoformat(previous_sell["updated_at"])
+                    keep_completed = (
+                        datetime.now().astimezone() - completed_at
+                    ).total_seconds() < 300
+                except (KeyError, TypeError, ValueError):
+                    keep_completed = False
+            if not keep_completed:
+                comparisons.pop("sell", None)
         
         # Get balances
         if getattr(self.config, 'use_eth_trading', False):
