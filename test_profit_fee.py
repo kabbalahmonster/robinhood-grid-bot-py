@@ -120,21 +120,27 @@ class ProfitFeeTests(unittest.TestCase):
         self.assertEqual(bot.wallet.build_eth_transfer_transaction.call_args_list[1].args[2], 376_461_600)
         self.assertEqual(bot.wallet.transfer_eth.call_args_list[1].args[0], rebuilt)
 
-    def test_native_fee_never_retries_after_hash_assignment(self):
+    def test_native_fee_retries_local_hash_after_definitive_rejection(self):
         bot = self.make_bot(native=True, percent=10)
         bot.wallet.build_eth_transfer_transaction.return_value = {"gas": 21_000, "gasPrice": 1}
         bot.wallet.get_eth_balance_wei.return_value = 10**18
-        bot.wallet.transfer_eth.return_value = TransactionResult(
-            success=False,
-            tx_hash="0xaccepted",
-            error="max fee per gas less than block base fee",
-        )
+        bot.wallet.transfer_eth.side_effect = [
+            TransactionResult(
+                success=False,
+                tx_hash="0xdeterministic-not-accepted",
+                error="RPC definitively rejected signed transaction before broadcast: "
+                      "max fee per gas less than block base fee: baseFee: 369080000",
+            ),
+            TransactionResult(success=True, tx_hash="0xfee"),
+        ]
         bot.wallet.is_base_fee_too_low_error.return_value = True
+        bot.wallet.is_definitive_prebroadcast_rejection.return_value = True
+        bot.wallet.base_fee_from_error.return_value = 369_080_000
 
         entry = bot._charge_profit_fee(10**17, "0xsale")
 
-        self.assertEqual(entry["status"], "failed")
-        bot.wallet.transfer_eth.assert_called_once()
+        self.assertEqual(entry["status"], "success")
+        self.assertEqual(bot.wallet.transfer_eth.call_count, 2)
 
     def test_native_fee_never_retries_when_broadcast_outcome_is_unknown(self):
         bot = self.make_bot(native=True, percent=10)

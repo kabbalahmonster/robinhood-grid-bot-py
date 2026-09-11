@@ -107,7 +107,7 @@ python grid_bot.py
 | `UNISWAP_PROTOCOL_CACHE_TTL_SECONDS` | No | 300 | Seconds to retain protocol-family discovery only; bounded to 30-3600 and never caches quote economics |
 | `UNISWAP_RATE_STATE_FILE` | No | automatic | Optional shared state path; blank derives an owner-only runtime file from the API-key hash |
 | `SUSHI_API_KEY` | No | empty | Optional Sushi portal API key; the public v7 API works without one |
-| `SWAP_PROVIDER` | No | empty | Explicit provider: `0x`, `lifi`, `uniswap`, or `sushiswap`; empty uses legacy flags |
+| `SWAP_PROVIDER` | No | empty | Explicit provider: `0x`, `lifi`, `uniswap`, `sushiswap`, or `umbra`; empty uses legacy flags |
 | `SWAP_FALLBACK_PROVIDER` | No | sushiswap | Immediate per-operation fallback after retryable pre-broadcast failures; empty disables fallback |
 | `ROUTE_TOURNAMENT_MODE` | No | off | Route comparison mode: `off`, read-only `shadow`, or guarded one-bot `gate` |
 | `ROUTE_TOURNAMENT_CANARY` | No | false | Explicit safety acknowledgement required by `gate`; not permission for fleet-wide rollout |
@@ -368,6 +368,7 @@ option and safety invariant.
 | `fleet-doctor` | Check config, Git, RPC, contracts, provider route, and dashboard | No |
 | `fleet-inventory` | Read addresses, reserves, managed balances, positions, and audit ages | No |
 | `fleet-watch` | Phone-friendly live view using local bot status snapshots | No |
+| `strategy-model` | Generate comparative gridless buy/sell coverage charts, CSV, and JSON | Report files only |
 | `reconcile-position-balances` | Preview/apply an audited proportional haircut when tracked tokens exceed wallet reality | Yes |
 | `fleet-audit` | Reconcile local treasury/liquidation receipts | No |
 | `update-variable` | Preview/atomically change selected `.env` variables | Config only; `--apply` required |
@@ -850,7 +851,7 @@ robinhood-grid-bot-py/
 Prefer the explicit provider setting:
 
 ```dotenv
-SWAP_PROVIDER=sushiswap  # 0x, lifi, uniswap, or sushiswap
+SWAP_PROVIDER=sushiswap  # 0x, lifi, uniswap, sushiswap, or umbra
 ```
 
 The older `USE_UNISWAP_API` and `USE_LI_FI` flags remain backward compatible when `SWAP_PROVIDER` is empty. Explicit `SWAP_PROVIDER` takes precedence. Sushi currently supports exact-input swaps, which is the only execution mode used by this bot. Each provider keeps its own quote, approval, slippage, and transaction behavior behind the common capability layer.
@@ -1396,9 +1397,27 @@ terminals without hyperlink support simply show the same readable hash.
 Receipt lookup rotates across configured RPC endpoints when an endpoint lacks
 the required method or temporarily fails. Once an RPC has accepted a signed
 transaction, the bot never treats an uncertain receipt as permission to send
-the operation again. If the outcome cannot be resolved, it atomically writes
+the operation again. A definitive `-32601 Method not found` capability response
+from `eth_sendRawTransaction` is the narrow exception: that endpoint did not
+execute the method, so the exact same signed bytes may be submitted to the next
+RPC. Because the nonce, payload, signature, and hash are identical, this cannot
+create a distinct second transaction. Timeouts, disconnects, rate limits, and
+server errors remain outcome-unknown and are never replayed automatically.
+If submission reports `nonce too low`, `already known`,
+or `known transaction`, the bot searches every configured RPC for the exact
+deterministic signed hash. A mined receipt is handled normally—success records
+the trade and a status-0 receipt records a terminal failure—without
+rebroadcasting. If the exact outcome still cannot be resolved, it atomically writes
 `data/unresolved_broadcast.json`; all trading loops and later restarts then
 halt before another trade.
+
+If a buy or sell is definitively rejected before broadcast because its legacy
+gas price fell below the block base fee, the bot extracts the rejecting node's
+base fee and rebuilds once with fresh headroom and a pending nonce. Before that
+single retry it repeats the operation gas cap and buy-reserve check; sells also
+repeat the gas-aware profit floor at the repriced fee. Any ambiguous outcome,
+missing base-fee evidence, failed safety check, or second rejection is not
+retried.
 
 The same durable guard protects multi-transaction WETH settlement. It is
 created after a buy wrap confirms and cleared only after the swap and position
@@ -1569,9 +1588,10 @@ The existing same-provider WETH recovery/replay safeguards remain in place.
 
 Each configured provider gets one `get_quote` call per configured settlement,
 with price jitter disabled. `ROUTE_TOURNAMENT_PROVIDERS` accepts a non-empty
-comma-separated subset of `uniswap,sushiswap`, while
+comma-separated subset of `uniswap,sushiswap,umbra,lifi` (`lofi` is accepted
+as an alias), while
 `ROUTE_TOURNAMENT_SETTLEMENTS` accepts `native,weth`. The defaults compare all
-four combinations. Setting settlements to `native` halves candidate count and
+four combinations by default; adding Umbra produces six. Setting settlements to `native` halves candidate count and
 usually shortens rounds, but deliberately gives up WETH fallback liquidity and
 any WETH route whose net result would have won.
 Uniswap uses one routing attempt; its internal explicit AMM fallback and known
@@ -1590,6 +1610,28 @@ rather than zero-impact infrastructure. `elapsed_ms`
 measures total collection time. Independent observer clients do not modify
 execution-client state, but traffic consumes upstream quota and Uniswap's shared
 limiter, so subsequent operation timing/fallback can still be affected.
+
+Umbra is Robinhood-only. It uses `/api/rh/quote` and `/api/rh/build` and pins
+every build to UmbraRH `0xfC830D7861C5ceBefF2272a03aacEf9baC8A7603`.
+Only `ExecuteSim` or `Verified` quotes are admitted; malformed calldata,
+unexpected routers/native value, or missing output floors fail closed. Its 1%
+fee is already in output. The flat 3M provider gas recommendation is never
+final execution authority. An unapproved sell is provisionally scored with a
+conservative 300k swap budget plus locally estimated exact-approval gas; only
+the provisional winner is approved, rebuilt, and required to pass exact local
+`eth_estimateGas`. Because the public API is
+rate-limited and the router lacks a completed external audit, canary it first:
+`ROUTE_TOURNAMENT_PROVIDERS=uniswap,sushiswap,umbra`.
+
+LI.FI can likewise participate as a fully executable contestant with
+`ROUTE_TOURNAMENT_PROVIDERS=uniswap,sushiswap,lifi`. Its API key is mandatory.
+The adapter applies the tournament's absolute socket deadline, requires exact
+input amount, chain, native value, target and calldata, and then uses local gas
+simulation like every other gate candidate. An unapproved sell is provisionally
+scored with locally estimated reusable-approval gas; only a winning LI.FI route
+is approved, refreshed, and exactly simulated. Begin with `native` settlement in
+shadow mode: LI.FI adds routing breadth but overlaps underlying DEX liquidity
+and increases provider/RPC traffic.
 
 Dashboard `buy_attempt.route_comparison` and `sell_attempt.route_comparison`
 contain candidates, fixed rejection codes, provider, settlement, raw quoted
@@ -1623,19 +1665,27 @@ requires `ROUTE_TOURNAMENT_CANARY=true`. Tournament providers must be available
 through the configured primary/fallback pair; an included Uniswap provider
 requires `UNISWAP_API_KEY`. The gate uses a twelve-second default preflight budget,
 collects every configured identity, and
-permits only prepared calldata with fresh local
-`eth_estimateGas`, and refreshes the RPC gas price again at the final broadcast
-boundary. A candidate needing an unproven approval, or a WETH conversion that
-cannot be locally estimated, is rejected instead of receiving a preset gas
-budget. WETH buys are staged because their swap cannot be simulated before the
+permits only prepared calldata with fresh local `eth_estimateGas` at final
+authorization, and refreshes the RPC gas price again at the broadcast boundary.
+Unapproved LI.FI and Umbra sells are staged: provisional ranking includes a
+provider/conservative swap estimate plus dynamically estimated local approval
+gas. Only the provisional winner is approved, then refreshed and required to
+pass exact local simulation and every final guard. Losing candidates are never
+approved. If a refreshed winner deteriorates, its swap is aborted and only the
+approval gas is spent. A WETH conversion that cannot be locally estimated is
+rejected. WETH buys are staged because their swap cannot be simulated before the
 wallet owns the future wrapped principal: ranking includes the provider swap
 estimate plus locally estimated wrap and exact-amount approval gas, then the
 winner is wrapped/approved, refreshed, and locally simulated before swap
 broadcast. Selection never authorizes a stale observation: the chosen identity
-is freshly quoted and validated again before execution. The bot skips the trade
-if that refresh times out, disappears, fails simulation, or no longer clears the
-gas-aware sell floor. A crowned round winner is therefore not a promise that a
-transaction will be sent; the next polling round may try again.
+is freshly quoted and validated again before execution. If the tournament itself
+has no freshly valid candidate (deadline, provider/RPC failure, or its extra
+simulation cannot complete), the bot records `baseline_fallback` and runs the
+normal configured primary/fallback route instead. The baseline path still
+performs its own fresh quote, approval, gas-cap, profit-floor, simulation and
+broadcast checks; tournament failure never by itself suppresses an otherwise
+valid exit. A selected winner that later fails a normal final guard is still
+skipped, as it would be with tournament mode off.
 
 Gridless moonbag sells tournament only the exact amount that can execute after
 the configured moonbag retention is deducted. The gate does not crown a

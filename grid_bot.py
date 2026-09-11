@@ -704,6 +704,8 @@ class GridBot:
         self.positions = {}
         self.running = True
         self._safety_halted = False
+        self._exact_approval_guard_path = "data/pending_exact_approval.json"
+        self._exact_approval_guard = self._load_exact_approval_guard()
         self.round_count = 0
         self.start_time = time.time()
         self.session_buys = 0
@@ -1245,10 +1247,25 @@ class GridBot:
                 return int(tx["gas"])
 
             def approval_gas_estimate_provider(quote, settlement):
-                if direction != "buy" or settlement != "weth":
-                    return 0
                 spender = getattr(quote, "allowance_target", None)
                 if not spender:
+                    return 0
+                if direction == "sell":
+                    allowance = int(self.wallet.check_allowance(
+                        self.config.token_address, spender, use_permit2=False,
+                    ))
+                    if allowance >= int(amount):
+                        return 0
+                    approval_amount = (
+                        int(amount)
+                        if getattr(quote, "_tournament_provider", None) == "umbra"
+                        else 2**256 - 1
+                    )
+                    tx = self.wallet.build_token_approval_transaction(
+                        self.config.token_address, spender, approval_amount,
+                    )
+                    return int(tx["gas"])
+                if settlement != "weth":
                     return 0
                 allowance = int(self.wallet.check_allowance(
                     self.config.weth_address, spender, use_permit2=False,
@@ -1299,11 +1316,20 @@ class GridBot:
                 or selection.get("settlement") not in {"native", "weth"}):
             return None
         selected_name = selection.get("provider")
-        candidates = (getattr(self.provider, "primary", None),
-                      getattr(self.provider, "fallback", None))
-        provider = next((item for item in candidates
-                         if getattr(item, "name", None) == selected_name), None)
+        provider_lookup = getattr(self.provider, "provider_for_name", None)
+        if callable(provider_lookup):
+            provider = provider_lookup(selected_name)
+        else:
+            candidates = (self.provider, getattr(self.provider, "primary", None),
+                          getattr(self.provider, "fallback", None))
+            provider = next((item for item in candidates
+                             if getattr(item, "name", None) == selected_name), None)
         if provider is None:
+            logger.warning(
+                "Selected tournament route revalidation failed: provider=%s is not "
+                "available in the execution registry; refusing route authority",
+                selected_name,
+            )
             return None
         settlement_token = (self.trade_token_address if selection["settlement"] == "native"
                             else self.config.weth_address)
@@ -1321,6 +1347,11 @@ class GridBot:
                 quote_kwargs["preferred_protocol"] = protocol
             staged_weth_buy = bool(
                 direction == "buy" and selection.get("staged_weth_buy") is True
+            )
+            staged_approval = bool(
+                direction == "sell"
+                and (selection.get("staged_approval_required") is True
+                     or selection.get("staged_approval") is True)
             )
             quote = (provider.get_quote(**quote_kwargs)
                      if staged_weth_buy else provider.build_swap_transaction(**quote_kwargs))
@@ -1343,6 +1374,14 @@ class GridBot:
                     or int(getattr(quote, "buy_amount", 0) or 0) <= 0
                     or not getattr(quote, "to", None) or not getattr(quote, "data", None)):
                 return None
+            if staged_approval:
+                setattr(quote, "_tournament_staged_approval", True)
+                return {
+                    "provider": provider, "quote": quote,
+                    "weth_fallback": bool(getattr(self.config, "use_eth_trading", False)
+                                          and selection["settlement"] == "weth"),
+                    "gas_estimate": 0, "staged_approval": True,
+                }
             gas_estimate = int(self.wallet.w3.eth.estimate_gas({
                 "from": Web3.to_checksum_address(self.wallet.address),
                 "to": Web3.to_checksum_address(quote.to), "data": quote.data,
@@ -1354,8 +1393,12 @@ class GridBot:
                 return None
             if selected_name == "uniswap" and protocol in {"V4", "V3", "V2"}:
                 setattr(quote, "_tournament_protocol", protocol)
-        except Exception:
-            logger.warning("Selected tournament route revalidation failed; refusing route authority")
+        except Exception as exc:
+            logger.warning(
+                "Selected tournament route revalidation failed at fresh build/simulation "
+                "for provider=%s settlement=%s error_type=%s; refusing route authority",
+                selected_name, selection.get("settlement"), type(exc).__name__,
+            )
             return None
         return {
             "provider": provider, "quote": quote,
@@ -1480,23 +1523,44 @@ class GridBot:
                 direction, sell_amount, sold_cost_wei,
             )
             validated = self._revalidate_selected_route(selection, direction, sell_amount) if selection else None
-            if validated is None:
-                from zero_x import QuoteResult
-                logger.warning("Tournament gate found no freshly valid %s route; execution skipped", direction)
-                return QuoteResult(success=False, error="tournament gate found no freshly valid route"), False
-            self.provider.active = validated["provider"]
-            self.api_client = self.provider
-            # The gate's fresh quote has already been prepared and locally
-            # estimated. Do not submit it to provider preparation a second time.
-            try:
-                if not validated.get("staged_weth_buy"):
-                    setattr(validated["quote"], "_tournament_gate_prepared", True)
-                setattr(validated["quote"], "weth_fallback", validated["weth_fallback"])
-            except Exception:
-                logger.warning("Tournament route preparation marker unavailable; execution skipped")
-                from zero_x import QuoteResult
-                return QuoteResult(success=False, error="tournament route preparation marker unavailable"), False
-            return validated["quote"], validated["weth_fallback"]
+            if validated is not None:
+                self.provider.active = validated["provider"]
+                self.api_client = self.provider
+                # The gate's fresh quote has already been prepared and locally
+                # estimated. Do not submit it to provider preparation a second time.
+                try:
+                    if not validated.get("staged_weth_buy"):
+                        setattr(validated["quote"], "_tournament_gate_prepared", True)
+                    setattr(validated["quote"], "weth_fallback", validated["weth_fallback"])
+                except Exception:
+                    logger.warning("Tournament route preparation marker unavailable; execution skipped")
+                    from zero_x import QuoteResult
+                    return QuoteResult(success=False, error="tournament route preparation marker unavailable"), False
+                return validated["quote"], validated["weth_fallback"]
+
+            # Tournament collection is an extra reliability layer, never a
+            # reason to make an otherwise normal sell impossible. Its worker
+            # deadline, local simulation, or a secondary provider can fail
+            # while the established primary route remains executable. Return
+            # to that baseline operation, which still performs every normal
+            # quote, approval, gas-cap, profit-floor, simulation and broadcast
+            # safeguard below. This is not post-gate quote shopping.
+            comparison = getattr(self, "_route_execution_preflight", None)
+            if isinstance(comparison, dict):
+                comparison["status"] = "baseline_fallback"
+                comparison["execution_fallback"] = {
+                    "reason": "no_fresh_tournament_candidate",
+                    "provider": getattr(getattr(self.provider, "primary", None), "name", None),
+                }
+                comparison["updated_at"] = datetime.now().astimezone().isoformat()
+            primary = getattr(self.provider, "primary", None)
+            if primary is not None:
+                self.provider.active = primary
+                self.api_client = self.provider
+            logger.warning(
+                "Tournament preflight found no freshly valid %s route; using baseline provider path",
+                direction,
+            )
         if direction == "buy":
             self._queue_route_shadow(direction, sell_amount)
         quote = self.api_client.build_swap_transaction(
@@ -1625,7 +1689,8 @@ class GridBot:
         return gas_limit * gas_price
 
     def _swap_gas_fields(
-        self, quote, default_gas=300000, *, native_buy_principal_wei=0, force_zero_native_value=False
+        self, quote, default_gas=300000, *, native_buy_principal_wei=0,
+        force_zero_native_value=False, require_simulation=False,
     ):
         """Return the exact gas limit/price used for economics and broadcast.
 
@@ -1636,28 +1701,45 @@ class GridBot:
         """
         gas_limit_mult = getattr(self.config, 'gas_limit_multiplier', 1.05)
         provider_gas = int(quote.gas or default_gas)
-        estimated_gas = None
+        simulation_key = (
+            str(getattr(quote, "to", "") or "").lower(),
+            str(getattr(quote, "data", "") or ""),
+            0 if force_zero_native_value else int(
+                getattr(quote, "value", 0) or native_buy_principal_wei
+            ),
+        )
+        estimated_gas = (
+            getattr(quote, "_local_gas_estimate", None)
+            if getattr(quote, "_local_gas_estimate_key", None) == simulation_key
+            else None
+        )
         if getattr(quote, "to", None) and getattr(quote, "data", None):
             try:
                 # Simulate the exact executable transaction returned by the quote.
                 # Route-level provider estimates can include chain-inappropriate
                 # padding and have historically overstated Robinhood Chain sells.
-                estimated_gas = int(self.wallet.w3.eth.estimate_gas({
-                    "from": Web3.to_checksum_address(self.wallet.address),
-                    "to": Web3.to_checksum_address(quote.to),
-                    "data": quote.data,
-                    "value": (
-                        0 if force_zero_native_value
-                        else int(getattr(quote, "value", 0) or native_buy_principal_wei)
-                    ),
-                }))
+                if estimated_gas is None:
+                    estimated_gas = int(self.wallet.w3.eth.estimate_gas({
+                        "from": Web3.to_checksum_address(self.wallet.address),
+                        "to": Web3.to_checksum_address(quote.to),
+                        "data": quote.data,
+                        "value": (
+                            0 if force_zero_native_value
+                            else int(getattr(quote, "value", 0) or native_buy_principal_wei)
+                        ),
+                    }))
                 if estimated_gas <= 0:
                     raise ValueError("non-positive local gas estimate")
+                setattr(quote, "_local_gas_estimate", estimated_gas)
+                setattr(quote, "_local_gas_estimate_key", simulation_key)
             except Exception as exc:
-                if getattr(self.config, "route_tournament_mode", "off") == "gate":
+                if (require_simulation
+                        or getattr(self.config, "route_tournament_mode", "off") == "gate"):
                     # A post-approval/refreshed gate route has no authority
                     # without a local simulation of the exact final calldata.
-                    raise RuntimeError("Tournament gate final gas simulation failed") from exc
+                    raise RuntimeError(
+                        f"{getattr(self.provider, 'name', 'provider')} final gas simulation failed"
+                    ) from exc
                 logger.warning(
                     "Executable quote gas simulation failed; using provider estimate: %s",
                     exc,
@@ -1693,6 +1775,36 @@ class GridBot:
         if weth_fallback:
             return 0
         return int(getattr(quote, "value", 0) or requested_principal_wei)
+
+    def _rebuild_after_stale_base_fee_rejection(self, tx, result):
+        """Return one safely repriced retry after a proven pre-broadcast rejection.
+
+        A signed hash alone does not mean an RPC accepted the transaction. The
+        wallet's explicit ``definitively rejected ... before broadcast`` result
+        is the authority here. Ambiguous outcomes, accepted broadcasts, and
+        errors without the rejecting node's base fee must never enter this path.
+        The caller still owns its economic and hard-gas-cap checks before send.
+        """
+        error = str(getattr(result, "error", "") or "")
+        if (
+            getattr(result, "success", False)
+            or getattr(result, "outcome_unknown", False)
+            or not self.wallet.is_definitive_prebroadcast_rejection(result)
+            or not self.wallet.is_base_fee_too_low_error(error)
+        ):
+            return None
+        reported_base_fee = int(self.wallet.base_fee_from_error(error))
+        if reported_base_fee <= 0:
+            return None
+        # Give the rejecting node's observation another 2% surge margin, then
+        # let normal_gas_price apply configured freshness policy as usual.
+        minimum_base_fee = (reported_base_fee * 102 + 99) // 100
+        retry_tx = dict(tx)
+        retry_tx["gasPrice"] = int(self.wallet.normal_gas_price(minimum_base_fee))
+        retry_tx["nonce"] = self.wallet.w3.eth.get_transaction_count(
+            self.wallet.address, "pending",
+        )
+        return retry_tx
 
     def _final_buy_reserve_ok(
         self, quote, gas_limit, gas_price, weth_fallback, requested_principal_wei=0
@@ -1750,6 +1862,100 @@ class GridBot:
         seal = getattr(self.provider, "seal_current_operation", None)
         if seal is not None:
             seal()
+
+    def _load_exact_approval_guard(self):
+        """Load the durable one-approval fuse for exact-allowance providers."""
+        try:
+            with open(self._exact_approval_guard_path, "r", encoding="utf-8") as handle:
+                value = json.load(handle)
+            return value if isinstance(value, dict) else None
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError) as exc:
+            logger.critical("Could not read exact-approval safety guard: %s", exc)
+            self._safety_halted = True
+            return {"invalid": True}
+
+    def _record_exact_approval_guard(self, result, *, operation, spender, amount, position_id=None):
+        """Persist a fuse before continuing beyond a confirmed exact approval."""
+        if not self._provider_requires_exact_approval():
+            return
+        record = {
+            "operation": str(operation), "provider": str(self.provider.name),
+            "spender": str(spender).lower(), "amount": str(int(amount)),
+            "position_id": str(position_id) if position_id is not None else None,
+            "approval_tx_hash": str(getattr(result, "tx_hash", "") or ""),
+            "created_at": datetime.now().isoformat(),
+        }
+        os.makedirs(os.path.dirname(self._exact_approval_guard_path), exist_ok=True)
+        temporary = self._exact_approval_guard_path + ".tmp"
+        with open(temporary, "w", encoding="utf-8") as handle:
+            json.dump(record, handle, sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, self._exact_approval_guard_path)
+        self._exact_approval_guard = record
+
+    def _exact_approval_fuse_blocks(self, *, operation, spender, amount, position_id=None):
+        """Refuse a second exact approval until the first operation settles."""
+        guard = self._exact_approval_guard
+        if not self._provider_requires_exact_approval() or not guard:
+            return False
+        logger.critical(
+            "TRADING HALTED: refusing repeated %s approval for %s; confirmed approval %s "
+            "is still awaiting its swap outcome",
+            operation, spender, guard.get("approval_tx_hash", "unknown"),
+        )
+        self._safety_halted = True
+        return True
+
+    def _clear_exact_approval_guard(self):
+        try:
+            os.remove(self._exact_approval_guard_path)
+        except FileNotFoundError:
+            pass
+        self._exact_approval_guard = None
+
+    def _provider_approval_amount(self, amount):
+        """Return the allowance amount required by the active provider."""
+        if self._provider_requires_exact_approval():
+            return int(amount)
+        return 2**256 - 1
+
+    def _quote_requires_dynamic_gas(self, quote):
+        """Require exact local gas for provider policy or a staged gate winner."""
+        return bool(
+            self._provider_requires_dynamic_gas()
+            or getattr(quote, "_tournament_staged_approval", False)
+        )
+
+    def _staged_approval_needed(self, quote, sell_amount):
+        """Return allowance state for a sell selected provisionally by the gate."""
+        if not getattr(quote, "_tournament_staged_approval", False):
+            return False, None
+        spender = quote.allowance_target or self.config.zero_x_proxy
+        allowance = int(self.wallet.check_allowance(
+            self.config.token_address, spender, use_permit2=False,
+        ))
+        return allowance < int(sell_amount), allowance
+
+    def _provisional_swap_gas_cost_wei(self, quote, default_gas=300000):
+        """Conservatively price a swap that cannot yet be locally simulated."""
+        gas_units = int(getattr(quote, "gas", 0) or default_gas)
+        gas_limit = int(gas_units * float(getattr(self.config, "gas_limit_multiplier", 1.05)))
+        return gas_limit * int(self.wallet.normal_gas_price())
+
+    def _provider_requires_exact_approval(self):
+        return getattr(
+            getattr(self.provider, "capabilities", None),
+            "exact_amount_approval", False,
+        ) is True
+
+    def _provider_requires_dynamic_gas(self):
+        return getattr(
+            getattr(self.provider, "capabilities", None),
+            "requires_dynamic_gas", False,
+        ) is True
 
     def _net_sale_profit_wei(self, received_wei, sold_cost_wei, result, setup_gas_wei=0):
         """Economic profit after position cost basis and confirmed sell gas."""
@@ -1833,7 +2039,8 @@ class GridBot:
     def _taxed_quote_return_wei(self, quote):
         """Conservatively fee-adjust a sell quote before the pre-trade guard."""
         quoted = int(quote.buy_amount or 0)
-        if not self._taxed_token_active():
+        if (not self._taxed_token_active()
+                or getattr(quote, "output_includes_transfer_tax", False)):
             return quoted
         fee_fraction = self._effective_token_transfer_fee_percent() / 100.0
         return int(quoted * (1.0 - fee_fraction))
@@ -1947,8 +2154,7 @@ class GridBot:
                 result = self.wallet.transfer_eth(tx, wait_for_receipt=True)
                 if (
                     not result.success
-                    and not result.tx_hash
-                    and not getattr(result, "outcome_unknown", False)
+                    and self.wallet.is_definitive_prebroadcast_rejection(result)
                     and self.wallet.is_base_fee_too_low_error(result.error)
                     and (reported_base_fee := int(self.wallet.base_fee_from_error(result.error))) > 0
                 ):
@@ -2508,9 +2714,10 @@ class GridBot:
                 top = (top_id, top_pos) if top_id else None
             
             if top:
-                # Revalidate on the same market-price basis as the strategy
-                # trigger. Extra tokens from a better route are price
-                # improvement, not market recovery.
+                # Revalidate against the same market-price basis that triggered
+                # the strategy. A route returning more tokens for the principal
+                # is price improvement, not market recovery, and must not veto
+                # an otherwise valid buy.
                 pnl_at_trigger_price = calculate_pnl(top[1], price, self.token_decimals)
                 buy_threshold = getattr(self.config, 'gridless_buy_threshold', -10.0)
                 
@@ -2598,6 +2805,10 @@ class GridBot:
                 else self.wallet.check_allowance(self.config.weth_address, spender, use_permit2=False)
             )
             if allowance < buy_amount_wei:
+                if self._exact_approval_fuse_blocks(
+                    operation="buy", spender=spender, amount=buy_amount_wei,
+                ):
+                    return
                 logger.info(f"Approving WETH to {spender[:20]}...")
                 result = self.wallet.approve_token(self.config.weth_address, spender, buy_amount_wei)
                 if not result.success:
@@ -2605,6 +2816,9 @@ class GridBot:
                     return
                 buy_setup_gas_wei += self._receipt_gas_cost_wei(result)
                 self._seal_provider_fallback()
+                self._record_exact_approval_guard(
+                    result, operation="buy", spender=spender, amount=buy_amount_wei,
+                )
                 # Refresh quote after approval for LI.FI
                 if self.provider.capabilities.refresh_after_approval:
                     quote = self.api_client.refresh_quote(
@@ -2631,7 +2845,8 @@ class GridBot:
         # Use API's gas price estimate if available (more accurate than network average)
         gas_limit, gas_price = self._swap_gas_fields(
             quote, 350000, native_buy_principal_wei=(0 if weth_fallback else buy_amount_wei),
-            force_zero_native_value=weth_fallback
+            force_zero_native_value=weth_fallback,
+            require_simulation=self._provider_requires_dynamic_gas(),
         )
         buy_attempt_context["phase"] = "prepared_quote"
         if not self._gas_within_hard_cap(
@@ -2660,6 +2875,21 @@ class GridBot:
             return
         token_balance_before = self._raw_token_balance(self.config.token_address)
         result = self.wallet._send_transaction(tx_params)
+        retry_tx = self._rebuild_after_stale_base_fee_rejection(tx_params, result)
+        if retry_tx is not None:
+            retry_gas_price = int(retry_tx["gasPrice"])
+            retry_allowed = self._gas_within_hard_cap(
+                gas_limit, retry_gas_price, "buy", buy_attempt_context,
+            ) and self._final_buy_reserve_ok(
+                quote, gas_limit, retry_gas_price, weth_fallback,
+                requested_principal_wei=buy_amount_wei,
+            )
+            if retry_allowed:
+                logger.warning(
+                    "Buy rejected before broadcast because gas became stale; "
+                    "rebuilding once with rejecting-node base fee"
+                )
+                result = self.wallet._send_transaction(retry_tx)
         
         if result.success:
             # Record position in gridless format
@@ -2680,6 +2910,7 @@ class GridBot:
             logger.debug(f"Quote buy_amount: {quote.buy_amount}, sell_amount: {quote.sell_amount}")
             
             pos_id = add_position(cost_wei, tokens_received)
+            self._clear_exact_approval_guard()
             if weth_fallback:
                 self._clear_settlement_guard()
             
@@ -2774,6 +3005,13 @@ class GridBot:
 
         quote_provider = self.api_client.name
         quote_return_wei = self._taxed_quote_return_wei(quote)
+        exact_spender = quote.allowance_target or self.config.zero_x_proxy
+        needs_exact_approval = bool(
+            self._provider_requires_exact_approval()
+            and self.wallet.check_allowance(
+                self.config.token_address, exact_spender, use_permit2=False,
+            ) < sell_amount
+        )
         consistency_block = self._sell_quote_consistency_guard(
             pos_id, quote_provider, quote_return_wei,
         )
@@ -2818,12 +3056,14 @@ class GridBot:
         # provider and allow the route selector to retain only cap-compliant
         # simulated transactions.  This is sell-only and event-driven, never a
         # second quote on ordinary polling.
-        probe_gas_limit, probe_gas_price = self._swap_gas_fields(quote, 300000)
+        probe_gas_limit = probe_gas_price = None
+        if not needs_exact_approval:
+            probe_gas_limit, probe_gas_price = self._swap_gas_fields(quote, 300000)
         sell_cap_wei = int(float(getattr(
             self.config, "max_sell_gas_eth",
             getattr(self.config, "max_swap_gas_eth", 0.00004),
         )) * 10**18)
-        if (not weth_fallback and sell_cap_wei > 0
+        if (not needs_exact_approval and not weth_fallback and sell_cap_wei > 0
                 and probe_gas_limit * probe_gas_price > sell_cap_wei):
             selected_provider, selected_quote, selection = self._alternate_route_for_gas_cap(
                 self.provider.active, quote,
@@ -2858,7 +3098,18 @@ class GridBot:
         unwrap_projected_wei = 0
         if weth_fallback:
             unwrap_projected_wei = self._project_future_weth_unwrap_gas_wei()
-        projected_gas_eth = (self._projected_gas_cost_wei(quote) + unwrap_projected_wei) / 10**18
+        if needs_exact_approval:
+            approval_tx = self.wallet.build_token_approval_transaction(
+                self.config.token_address, exact_spender, int(sell_amount),
+            )
+            projected_gas_eth = (
+                int(approval_tx["gas"]) * int(self.wallet.normal_gas_price())
+                + unwrap_projected_wei
+            ) / 10**18
+        else:
+            projected_gas_eth = (
+                self._projected_gas_cost_wei(quote) + unwrap_projected_wei
+            ) / 10**18
         projected_net_profit_eth = quote_profit_eth - projected_gas_eth
         
         if projected_net_profit_eth < min_profit_eth:
@@ -2968,10 +3219,34 @@ class GridBot:
         unwrap_projected_wei = 0
         if weth_fallback:
             unwrap_projected_wei = self._project_future_weth_unwrap_gas_wei()
-        min_return_eth = self._minimum_gas_aware_return_wei(
-            int(round(sold_cost_eth * 10**18)), quote, min_profit,
-            setup_gas_wei=unwrap_projected_wei,
-        ) / 10**18
+        spender = quote.allowance_target or self.config.zero_x_proxy
+        token_allowance = None
+        staged_approval = bool(getattr(quote, "_tournament_staged_approval", False))
+        needs_exact_approval = False
+        projected_approval_gas_wei = 0
+        if self._provider_requires_exact_approval() or staged_approval:
+            token_allowance = self.wallet.check_allowance(
+                self.config.token_address, spender, use_permit2=False,
+            )
+            needs_exact_approval = token_allowance < sell_amount
+        if needs_exact_approval:
+            approval_tx = self.wallet.build_token_approval_transaction(
+                self.config.token_address, spender,
+                self._provider_approval_amount(sell_amount),
+            )
+            projected_approval_gas_wei = (
+                int(approval_tx["gas"]) * int(self.wallet.normal_gas_price())
+            )
+            min_return_eth = (
+                int(round(sold_cost_eth * 10**18)) + int(min_profit_eth * 10**18)
+                + unwrap_projected_wei + projected_approval_gas_wei
+                + self._provisional_swap_gas_cost_wei(quote)
+            ) / 10**18
+        else:
+            min_return_eth = self._minimum_gas_aware_return_wei(
+                int(round(sold_cost_eth * 10**18)), quote, min_profit,
+                setup_gas_wei=unwrap_projected_wei,
+            ) / 10**18
         quote_return_eth = self._taxed_quote_return_wei(quote) / 10**18
         
         # Skip min_profit check for stoploss
@@ -2983,8 +3258,13 @@ class GridBot:
             logger.warning(f"❌ Sell aborted: Quote ({quote_return_eth:.6f}) < min ({min_return_eth:.6f})")
             return
 
-        initial_gas_limit, initial_gas_price = self._swap_gas_fields(quote, 300000)
-        if (not weth_fallback
+        initial_gas_limit = initial_gas_price = None
+        if not needs_exact_approval:
+            initial_gas_limit, initial_gas_price = self._swap_gas_fields(
+                quote, 300000,
+                require_simulation=self._quote_requires_dynamic_gas(quote),
+            )
+        if (not needs_exact_approval and not weth_fallback
                 and not self._gas_within_hard_cap(initial_gas_limit, initial_gas_price, "sell")):
             selected_provider, selected_quote, selection = self._alternate_route_for_gas_cap(
                 self.provider.active, quote,
@@ -3003,7 +3283,7 @@ class GridBot:
             # satisfy the pre-approval gas-aware profit floor.
             preapproval_return_wei = self._taxed_quote_return_wei(quote)
             preapproval_minimum_wei = self._minimum_gas_aware_return_wei(
-                int(round(sold_cost_eth * 10**18)), quote, min_profit_percent
+                int(round(sold_cost_eth * 10**18)), quote, min_profit
             )
             if preapproval_return_wei < preapproval_minimum_wei:
                 logger.warning("❌ Alternate sell route failed gas-aware profit floor")
@@ -3164,15 +3444,30 @@ class GridBot:
         else:
             # Providers without API-managed approvals use standard ERC-20 approval.
             spender = quote.allowance_target or self.config.zero_x_proxy
-            token_allowance = self.wallet.check_allowance(self.config.token_address, spender, use_permit2=False)
+            if token_allowance is None:
+                token_allowance = self.wallet.check_allowance(
+                    self.config.token_address, spender, use_permit2=False,
+                )
             if token_allowance < sell_amount:
+                if self._exact_approval_fuse_blocks(
+                    operation="sell", spender=spender, amount=sell_amount,
+                    position_id=pos_id,
+                ):
+                    return
                 logger.info(f"Approving {self.config.token_symbol} to {spender[:20]}...")
-                result = self.wallet.approve_token(self.config.token_address, spender, 2**256 - 1)
+                result = self.wallet.approve_token(
+                    self.config.token_address, spender,
+                    self._provider_approval_amount(sell_amount),
+                )
                 if not result.success:
                     logger.error(f"Approval failed: {result.error}")
                     return
                 sell_setup_gas_wei += self._receipt_gas_cost_wei(result)
                 self._seal_provider_fallback()
+                self._record_exact_approval_guard(
+                    result, operation="sell", spender=spender, amount=sell_amount,
+                    position_id=pos_id,
+                )
             
                 # Refresh provider routes after approval when required.
                 if self.provider.capabilities.refresh_after_approval:
@@ -3186,13 +3481,18 @@ class GridBot:
                     if not quote.success:
                         logger.error(f"Refreshed quote failed: {quote.error}")
                         return
+                    if staged_approval:
+                        setattr(quote, "_tournament_staged_approval", True)
 
         # Approval/refresh can replace both route calldata and gas estimate.
         # Re-run the economic guard against the final transaction immediately
         # before broadcast; only an explicit stop-loss may bypass profitability.
         # Fetch Normal gas at the final broadcast boundary. The same exact
         # price is used for both the economic guard and the signed transaction.
-        gas_limit, gas_price = self._swap_gas_fields(quote, 300000)
+        gas_limit, gas_price = self._swap_gas_fields(
+            quote, 300000,
+            require_simulation=self._quote_requires_dynamic_gas(quote),
+        )
         if not is_stoploss:
             final_return_wei = self._taxed_quote_return_wei(quote)
             final_minimum_wei = self._minimum_gas_aware_return_wei(
@@ -3231,6 +3531,31 @@ class GridBot:
         if attempted_token_balance_before is None:
             return
         result = self.wallet._send_transaction(sell_tx)
+        retry_tx = self._rebuild_after_stale_base_fee_rejection(sell_tx, result)
+        if retry_tx is not None:
+            retry_gas_price = int(retry_tx["gasPrice"])
+            retry_allowed = self._gas_within_hard_cap(
+                gas_limit, retry_gas_price, "sell",
+            )
+            if retry_allowed and not is_stoploss:
+                retry_minimum_wei = self._minimum_gas_aware_return_wei(
+                    int(round(sold_cost_eth * 10**18)), quote, min_profit,
+                    setup_gas_wei=sell_setup_gas_wei,
+                    projected_gas_cost_wei=gas_limit * retry_gas_price,
+                )
+                retry_allowed = final_return_wei >= retry_minimum_wei
+                if not retry_allowed:
+                    logger.warning(
+                        "Stale-fee sell retry skipped: return %.8f ETH < repriced "
+                        "gas-aware minimum %.8f ETH",
+                        final_return_wei / 10**18, retry_minimum_wei / 10**18,
+                    )
+            if retry_allowed:
+                logger.warning(
+                    "Sell rejected before broadcast because gas became stale; "
+                    "rebuilding once with rejecting-node base fee"
+                )
+                result = self.wallet._send_transaction(retry_tx)
         
         if result.success:
             if weth_fallback:
@@ -3272,6 +3597,7 @@ class GridBot:
             
             # Remove position
             remove_position(pos_id)
+            self._clear_exact_approval_guard()
             
             if moonbag_tokens > 0:
                 logger.info(f"   Moonbag: {moonbag_tokens/self.token_unit:.4f} tokens to wallet")
@@ -3460,7 +3786,8 @@ class GridBot:
         # Use API's gas price estimate if available (more accurate than network average)
         gas_limit, gas_price = self._swap_gas_fields(
             quote, 350000, native_buy_principal_wei=(0 if weth_fallback else buy_amount_wei),
-            force_zero_native_value=weth_fallback
+            force_zero_native_value=weth_fallback,
+            require_simulation=self._provider_requires_dynamic_gas(),
         )
         buy_attempt_context["phase"] = "prepared_quote"
         if not self._gas_within_hard_cap(
@@ -3490,6 +3817,21 @@ class GridBot:
             return
         token_balance_before = self._raw_token_balance(self.config.token_address)
         result = self.wallet._send_transaction(tx_params)
+        retry_tx = self._rebuild_after_stale_base_fee_rejection(tx_params, result)
+        if retry_tx is not None:
+            retry_gas_price = int(retry_tx["gasPrice"])
+            retry_allowed = self._gas_within_hard_cap(
+                gas_limit, retry_gas_price, "buy", buy_attempt_context,
+            ) and self._final_buy_reserve_ok(
+                quote, gas_limit, retry_gas_price, weth_fallback,
+                requested_principal_wei=buy_amount_wei,
+            )
+            if retry_allowed:
+                logger.warning(
+                    "Buy rejected before broadcast because gas became stale; "
+                    "rebuilding once with rejecting-node base fee"
+                )
+                result = self.wallet._send_transaction(retry_tx)
         
         if result.success:
             # Update position - store actual WETH cost (not price) in nano-WETH
@@ -3600,6 +3942,32 @@ class GridBot:
             self._observe_token_tax_failure(quote, direction="sell", position_id=pos_id)
             return
 
+        # Umbra executable sells cannot be simulated until its router has the
+        # required allowance. Inspect that state first so an expected allowance
+        # revert is not mislabeled as an RPC failure. Its approval is deliberately
+        # exact-amount; full swap authorization still waits for the refreshed
+        # calldata's mandatory local simulation below.
+        spender = quote.allowance_target or self.config.zero_x_proxy
+        token_allowance = None
+        exact_amount_provider = self._provider_requires_exact_approval()
+        staged_approval = bool(getattr(quote, "_tournament_staged_approval", False))
+        if exact_amount_provider or staged_approval:
+            token_allowance = self.wallet.check_allowance(
+                self.config.token_address, spender, use_permit2=False,
+            )
+        needs_exact_approval = bool(
+            (exact_amount_provider or staged_approval) and token_allowance < sell_amount
+        )
+        projected_approval_gas_wei = 0
+        if needs_exact_approval:
+            approval_tx = self.wallet.build_token_approval_transaction(
+                self.config.token_address, spender,
+                self._provider_approval_amount(sell_amount),
+            )
+            projected_approval_gas_wei = (
+                int(approval_tx["gas"]) * int(self.wallet.normal_gas_price())
+            )
+
         # No approval may be broadcast until the quoted sale can repay its
         # economic cost, projected swap gas, and configured minimum profit.
         # This first guard deliberately runs before allowance inspection.
@@ -3608,14 +3976,23 @@ class GridBot:
         unwrap_projected_wei = 0
         if weth_fallback:
             unwrap_projected_wei = self._project_future_weth_unwrap_gas_wei()
-        preapproval_minimum_wei = self._minimum_gas_aware_return_wei(
-            int(round(sold_cost_eth * 10**18)), quote, min_profit_percent,
-            setup_gas_wei=unwrap_projected_wei,
-        )
+        if needs_exact_approval:
+            sold_cost_wei = int(round(sold_cost_eth * 10**18))
+            preapproval_minimum_wei = (
+                sold_cost_wei
+                + int(sold_cost_wei * (float(min_profit_percent) / 100.0))
+                + unwrap_projected_wei + projected_approval_gas_wei
+                + self._provisional_swap_gas_cost_wei(quote)
+            )
+        else:
+            preapproval_minimum_wei = self._minimum_gas_aware_return_wei(
+                int(round(sold_cost_eth * 10**18)), quote, min_profit_percent,
+                setup_gas_wei=unwrap_projected_wei,
+            )
         if preapproval_return_wei < preapproval_minimum_wei:
             logger.warning("Primary sell route misses profit floor; checking configured alternate")
             alternate, alternate_quote = (None, None)
-            if not weth_fallback:
+            if not weth_fallback and not staged_approval:
                 alternate, alternate_quote = self._alternate_sell_route_for_profit_floor(
                     self.provider.active,
                     sell_amount=sell_amount,
@@ -3631,10 +4008,18 @@ class GridBot:
             self.provider.active = alternate
             self.api_client = self.provider
             quote = alternate_quote
+            spender = quote.allowance_target or self.config.zero_x_proxy
+            token_allowance = None
+            needs_exact_approval = False
             logger.info("✅ Alternate %s route clears gas-aware profit floor", alternate.name)
 
-        initial_gas_limit, initial_gas_price = self._swap_gas_fields(quote, 300000)
-        if (not weth_fallback
+        initial_gas_limit = initial_gas_price = None
+        if not needs_exact_approval:
+            initial_gas_limit, initial_gas_price = self._swap_gas_fields(
+                quote, 300000,
+                require_simulation=self._quote_requires_dynamic_gas(quote),
+            )
+        if (not needs_exact_approval and not weth_fallback
                 and not self._gas_within_hard_cap(initial_gas_limit, initial_gas_price, "sell")):
             selected_provider, selected_quote, selection = self._alternate_route_for_gas_cap(
                 self.provider.active, quote,
@@ -3657,29 +4042,34 @@ class GridBot:
                 logger.warning("❌ Alternate sell route failed gas-aware profit floor")
                 return
         
-        # Determine approval spender - use quote's allowance_target if available (LI.FI)
-        # otherwise fall back to zero_x_proxy (0x Protocol)
-        spender = quote.allowance_target or self.config.zero_x_proxy
-        
         sell_setup_gas_wei = unwrap_projected_wei
-        # Check/approve token for selling
-        token_allowance = self.wallet.check_allowance(
-            self.config.token_address,
-            spender,
-            use_permit2=False
-        )
+        if token_allowance is None:
+            spender = quote.allowance_target or self.config.zero_x_proxy
+            token_allowance = self.wallet.check_allowance(
+                self.config.token_address, spender, use_permit2=False,
+            )
         if token_allowance < sell_amount:
+            if self._exact_approval_fuse_blocks(
+                operation="sell", spender=spender, amount=sell_amount,
+                position_id=pos_id,
+            ):
+                return
             logger.info(f"Approving {self.config.token_symbol} to {spender[:20]}...")
+            approval_amount = self._provider_approval_amount(sell_amount)
             result = self.wallet.approve_token(
                 self.config.token_address,
                 spender,
-                2**256 - 1
+                approval_amount,
             )
             if not result.success:
                 logger.error(f"Token approval failed: {result.error}")
                 return
             sell_setup_gas_wei += self._receipt_gas_cost_wei(result)
             self._seal_provider_fallback()
+            self._record_exact_approval_guard(
+                result, operation="sell", spender=spender, amount=sell_amount,
+                position_id=pos_id,
+            )
             
             # Refresh provider routes after approval when required.
             # Gas prices, calldata, and routes may have changed
@@ -3695,6 +4085,8 @@ class GridBot:
                 if not quote.success:
                     logger.error(f"Refreshed quote failed: {quote.error}")
                     return
+                if staged_approval:
+                    setattr(quote, "_tournament_staged_approval", True)
         
         # Validate quote meets minimum profit requirement after projected gas.
         min_profit_eth = sold_cost_eth * (min_profit_percent / 100)
@@ -3724,7 +4116,10 @@ class GridBot:
 
         # Fetch Normal gas at the final broadcast boundary. The same exact
         # price is used for both the economic guard and the signed transaction.
-        gas_limit, gas_price = self._swap_gas_fields(quote, 300000)
+        gas_limit, gas_price = self._swap_gas_fields(
+            quote, 300000,
+            require_simulation=self._quote_requires_dynamic_gas(quote),
+        )
         final_return_wei = self._taxed_quote_return_wei(quote)
         final_minimum_wei = self._minimum_gas_aware_return_wei(
             int(round(sold_cost_eth * 10**18)), quote, min_profit_percent,
@@ -3762,6 +4157,31 @@ class GridBot:
         if attempted_token_balance_before is None:
             return
         result = self.wallet._send_transaction(sell_tx)
+        retry_tx = self._rebuild_after_stale_base_fee_rejection(sell_tx, result)
+        if retry_tx is not None:
+            retry_gas_price = int(retry_tx["gasPrice"])
+            retry_allowed = self._gas_within_hard_cap(
+                gas_limit, retry_gas_price, "sell",
+            )
+            if retry_allowed:
+                retry_minimum_wei = self._minimum_gas_aware_return_wei(
+                    int(round(sold_cost_eth * 10**18)), quote, min_profit_percent,
+                    setup_gas_wei=sell_setup_gas_wei,
+                    projected_gas_cost_wei=gas_limit * retry_gas_price,
+                )
+                retry_allowed = final_return_wei >= retry_minimum_wei
+                if not retry_allowed:
+                    logger.warning(
+                        "Stale-fee sell retry skipped: return %.8f ETH < repriced "
+                        "gas-aware minimum %.8f ETH",
+                        final_return_wei / 10**18, retry_minimum_wei / 10**18,
+                    )
+            if retry_allowed:
+                logger.warning(
+                    "Sell rejected before broadcast because gas became stale; "
+                    "rebuilding once with rejecting-node base fee"
+                )
+                result = self.wallet._send_transaction(retry_tx)
         
         if result.success:
             # Get actual ETH/WETH received from transaction
@@ -3813,6 +4233,7 @@ class GridBot:
             self.positions[pos_id]['balance'] = 0
             self.positions[pos_id]['cost'] = 0
             self.save_positions()
+            self._clear_exact_approval_guard()
             
             if moonbag_tokens > 0:
                 logger.info(f"   Moonbag: {moonbag_tokens / self.token_unit:.4f} tokens added to wallet balance")
@@ -3893,7 +4314,7 @@ class GridBot:
                 result = self.wallet.approve_token(
                     self.config.weth_address,
                     spender,
-                    2**256 - 1
+                    self._provider_approval_amount(eth_wei),
                 )
                 if not result.success:
                     logger.error(f"WETH approval for banking failed: {result.error}")
@@ -3923,7 +4344,10 @@ class GridBot:
         
         # Execute banking swap with configurable gas multipliers
         # Use API's gas price estimate if available (more accurate than network average)
-        gas_limit, gas_price = self._swap_gas_fields(quote, 300000)
+        gas_limit, gas_price = self._swap_gas_fields(
+            quote, 300000,
+            require_simulation=self._provider_requires_dynamic_gas(),
+        )
         if not self._gas_within_hard_cap(gas_limit, gas_price, "banking"):
             return
 

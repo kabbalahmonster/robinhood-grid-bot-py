@@ -33,11 +33,15 @@ _FALLBACK_SWAP_GAS = {"buy": 350000, "sell": 300000}
 # Legacy approval budget when allowance is unknown or insufficient.
 _RESET_AND_APPROVAL_GAS = 200000
 _WRAP_UNWRAP_GAS = 60000
-_EXECUTION_CANDIDATES = frozenset({
+_DEFAULT_EXECUTION_CANDIDATES = frozenset({
     ("uniswap", "native"),
     ("uniswap", "weth"),
     ("sushiswap", "native"),
     ("sushiswap", "weth"),
+})
+_SUPPORTED_EXECUTION_CANDIDATES = _DEFAULT_EXECUTION_CANDIDATES | frozenset({
+    ("umbra", "native"), ("umbra", "weth"),
+    ("lifi", "native"), ("lifi", "weth"),
 })
 
 
@@ -50,13 +54,13 @@ def _configured_identities(config):
 def _comparison_identities(comparison):
     configured = comparison.get("expected_candidates") if isinstance(comparison, dict) else None
     if not isinstance(configured, list) or not configured:
-        return _EXECUTION_CANDIDATES
+        return _DEFAULT_EXECUTION_CANDIDATES
     identities = set()
     for item in configured:
         if not isinstance(item, dict):
             return frozenset()
         identity = (item.get("provider"), item.get("settlement"))
-        if identity not in _EXECUTION_CANDIDATES or identity in identities:
+        if identity not in _SUPPORTED_EXECUTION_CANDIDATES or identity in identities:
             return frozenset()
         identities.add(identity)
     return frozenset(identities)
@@ -119,6 +123,11 @@ def select_execution_candidate(comparison, direction):
         selection["protocol"] = protocol
     if eligible[(provider, settlement)][1].get("staged_weth_buy") is True:
         selection["staged_weth_buy"] = True
+        target = eligible[(provider, settlement)][1].get("allowance_target")
+        if target:
+            selection["allowance_target"] = target
+    if eligible[(provider, settlement)][1].get("staged_approval_required") is True:
+        selection["staged_approval_required"] = True
         target = eligible[(provider, settlement)][1].get("allowance_target")
         if target:
             selection["allowance_target"] = target
@@ -307,13 +316,6 @@ def score_candidate(quote, provider, settlement, context, *, allowance_probe=Non
         row["rejections"] = ["provider_swap_gas_estimate_missing"]
         row["gas_basis"] = "staged_setup_requires_provider_swap_estimate"
         return row
-    if require_local_gas and local_gas <= 0 and not staged_weth_buy:
-        row["rejections"] = ["local_gas_simulation_failed"]
-        row["provider_gas_estimate"] = provider_gas
-        row["gas_basis"] = "local_simulation_required"
-        return row
-    swap_gas = local_gas or provider_gas or _FALLBACK_SWAP_GAS[c["direction"]]
-
     # Allowance lookup is for the actual asset being sold. Settlement only
     # determines wrap/unwrap economics; it is never the sell-token approval.
     token_for_allowance = c.get("token_address") if c["direction"] == "sell" else c.get("token_address")
@@ -339,11 +341,39 @@ def score_candidate(quote, provider, settlement, context, *, allowance_probe=Non
     if approval_gas and approval_gas_limit:
         approval_gas = int(approval_gas_limit)
         approval_label = "dynamic_local_approval_estimate"
+    # LI.FI and Umbra sell calldata necessarily reverts during eth_estimateGas
+    # until their spender can transfer the token. Keep such a route in the
+    # tournament only as an explicitly staged candidate: its provisional score
+    # uses the provider/conservative swap budget plus a *locally estimated*
+    # approval transaction. Provider gas can rank it, but can never authorize
+    # the eventual swap; the winner is approved, rebuilt and locally simulated
+    # at the execution boundary.
+    staged_approval = bool(
+        require_local_gas and c["direction"] == "sell"
+        and provider in {"lifi", "umbra"} and spender
+        and allowance is not None and allowance < c["amount"]
+        and approval_gas > 0
+        and local_gas <= 0 and approval_gas_limit
+    )
+    if (require_dynamic_setup_gas and c["direction"] == "sell"
+            and provider in {"lifi", "umbra"} and spender
+            and allowance is not None and allowance < c["amount"]
+            and approval_gas and not approval_gas_limit):
+        row["rejections"] = ["approval_required_before_local_simulation"]
+        row["approval_assumption"] = approval_label
+        row["gas_basis"] = "dynamic_setup_required"
+        return row
+    if require_local_gas and local_gas <= 0 and not staged_weth_buy and not staged_approval:
+        row["rejections"] = ["local_gas_simulation_failed"]
+        row["provider_gas_estimate"] = provider_gas
+        row["gas_basis"] = "local_simulation_required"
+        return row
     if require_dynamic_setup_gas and approval_gas and not approval_gas_limit:
         row["rejections"] = ["approval_required_before_local_simulation"]
         row["approval_assumption"] = approval_label
         row["gas_basis"] = "dynamic_setup_required"
         return row
+    swap_gas = local_gas or provider_gas or _FALLBACK_SWAP_GAS[c["direction"]]
 
     # Wrap/unwrap accounting for native <-> WETH conversion.
     conversion = settlement == "weth" if c["native_trading"] else settlement == "native"
@@ -397,16 +427,18 @@ def score_candidate(quote, provider, settlement, context, *, allowance_probe=Non
     # For taxed sells it already contains the transfer fee plus market buffer;
     # the live sell guard applies the transfer fee exactly once to a fresh quote.
     # Mirror that economic guard so shadow does not reject executable trades.
+    effective_tax = 0 if getattr(quote, "output_includes_transfer_tax", False) else c["tax"]
     if c["direction"] == "sell":
         if c.get("execution_preflight") is True:
             # Match _taxed_quote_return_wei() exactly at the authorization
             # boundary, including its established float-to-int rounding.
-            floor = int(output * (1.0 - float(c["tax"])))
+            floor = int(output * (1.0 - float(effective_tax)))
         else:
-            floor = int(Decimal(output) * (1 - Decimal(str(c["tax"]))))
+            floor = int(Decimal(output) * (1 - Decimal(str(effective_tax))))
     else:
-        floor = int(Decimal(output) * (1 - Decimal(str(c["slippage"]))) *
-                    (1 - Decimal(str(c["tax"]))))
+        effective_slippage = 0 if getattr(quote, "output_is_execution_floor", False) else c["slippage"]
+        floor = int(Decimal(output) * (1 - Decimal(str(effective_slippage))) *
+                    (1 - Decimal(str(effective_tax))))
     row.update(validation_level="quote_only", preparation_dependent=True,
                gas_components_wei={key: str(value) for key, value in costs.items()},
                approval_budget_wei=str(costs["approval"]),
@@ -420,7 +452,7 @@ def score_candidate(quote, provider, settlement, context, *, allowance_probe=Non
                    _wei_to_eth(floor) if c["direction"] == "sell"
                    else _raw_to_human(floor, output_decimals)
                ),
-               slippage_fraction=c["slippage"], tax_fraction=c["tax"],
+               slippage_fraction=c["slippage"], tax_fraction=effective_tax,
                approval_assumption=approval_label,
                provider_gas_estimate=provider_gas,
                effective_gas_price_wei=gas_price,
@@ -429,6 +461,15 @@ def score_candidate(quote, provider, settlement, context, *, allowance_probe=Non
         row["staged_weth_buy"] = True
         row["allowance_target"] = getattr(quote, "allowance_target", None)
         row["gas_basis"] = "provider_estimate_pending_post_setup_local_simulation"
+    if staged_approval:
+        row["staged_approval_required"] = True
+        row["allowance_target"] = spender
+        row["candidate_state"] = "approval_required"
+        row["gas_basis"] = (
+            "provisional_provider_gas_pending_post_approval_local_simulation"
+            if provider_gas > 0
+            else "provisional_conservative_gas_pending_post_approval_local_simulation"
+        )
     protocol = getattr(quote, "protocol_hint", None)
     if provider == "uniswap" and protocol in {"V4", "V3", "V2"}:
         row["protocol"] = protocol
@@ -657,6 +698,10 @@ def collect(config, address, context, client_factory=None,
                         except Exception:
                             conversion_gas = 0
                         try:
+                            # Internal-only identity used to build the same
+                            # approval amount execution will send (Umbra exact,
+                            # LI.FI reusable). It is never exposed in telemetry.
+                            setattr(quote, "_tournament_provider", name)
                             approval_gas = int(approval_gas_estimate_provider(
                                 quote, settlement
                             )) if approval_gas_estimate_provider else 0
@@ -681,20 +726,29 @@ def collect(config, address, context, client_factory=None,
                 # Emit one structured per-candidate log line for observability.
                 result_label = "eligible" if row["validation_level"] == "quote_only" else "rejected"
                 rejection = "+".join(row["rejections"]) if row["rejections"] else "-"
+                # Quote errors are intentionally sanitized when collected.  Surface the
+                # resulting stable classification here: a client initializing is not
+                # evidence that it found liquidity, and operators need to distinguish
+                # no-route from a transient/provider configuration failure.
+                quote_failure_kind = row.get("quote_failure_kind")
+                failure_suffix = (
+                    " · " + quote_failure_kind
+                    if rejection != "-" and quote_failure_kind else ""
+                )
                 if context["direction"] == "sell" and row.get("projected_profit_percent") is not None:
                     LOG.info(
-                        "Route tournament candidate ⚔️ %s/%s: net %.6f ETH (%+.2f%%) · minimum %.6f ETH (%.2f%%) · gas %.6f ETH · %s%s",
+                        "Route tournament candidate ⚔️ %s/%s: net %.6f ETH (%+.2f%%) · minimum %.6f ETH (%.2f%%) · gas %.6f ETH · %s%s%s",
                         name, settlement, Decimal(row["projected_net_score"]) / Decimal(10**18),
                         row["projected_profit_percent"], row["minimum_return_eth"],
                         row["minimum_profit_percent"], row.get("gas_total_eth", 0.0) or 0.0,
-                        result_label, " · " + rejection if rejection != "-" else "",
+                        result_label, " · " + rejection if rejection != "-" else "", failure_suffix,
                     )
                 else:
                     LOG.info(
-                        "Route tournament candidate ⚔️ %s/%s: output %s · gas %.6f ETH · %s%s",
+                        "Route tournament candidate ⚔️ %s/%s: output %s · gas %.6f ETH · %s%s%s",
                         name, settlement, row.get("quoted_output_human", "-"),
                         row.get("gas_total_eth", 0.0) or 0.0, result_label,
-                        " · " + rejection if rejection != "-" else "",
+                        " · " + rejection if rejection != "-" else "", failure_suffix,
                     )
                 if row["validation_level"] == "quote_only":
                     provider_outputs.append(row)
@@ -799,7 +853,7 @@ def collect_execution_preflight(config, address, context, client_factory=None,
             "mode": "execution_preflight", "direction": context.get("direction"),
             "candidates": [], "expected_candidates": [
                 {"provider": provider, "settlement": settlement}
-                for provider, settlement in sorted(_EXECUTION_CANDIDATES)
+                for provider, settlement in sorted(_DEFAULT_EXECUTION_CANDIDATES)
             ],
             "observed_candidates": [], "candidate_accounting_complete": False,
             "deadline_met": False, "selected_hypothetical_winner": None,
@@ -812,7 +866,7 @@ def collect_execution_preflight(config, address, context, client_factory=None,
             "mode": "execution_preflight", "direction": context.get("direction"),
             "candidates": [], "expected_candidates": [
                 {"provider": provider, "settlement": settlement}
-                for provider, settlement in sorted(_EXECUTION_CANDIDATES)
+                for provider, settlement in sorted(_DEFAULT_EXECUTION_CANDIDATES)
             ],
             "observed_candidates": [], "candidate_accounting_complete": False,
             "deadline_met": False, "selected_hypothetical_winner": None,

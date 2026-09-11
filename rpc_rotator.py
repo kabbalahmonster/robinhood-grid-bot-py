@@ -344,7 +344,14 @@ class ResilientWeb3:
                 last_error = e
                 error_str = str(e).lower()
                 
-                # Check if it's a connection/rate-limit error worth failing over on.
+                # Check if it's an error worth failing over on. Signed
+                # broadcasts need stricter handling than reads: an ambiguous
+                # timeout/connection failure may follow acceptance, so replaying
+                # it automatically would violate the wallet's fail-closed
+                # outcome guard. A JSON-RPC capability rejection, however,
+                # proves that endpoint did not execute eth_sendRawTransaction;
+                # the identical signed bytes can safely be offered to the next
+                # endpoint (same nonce, signature, payload, and hash).
                 # Some public endpoints accept transaction broadcasts but do not
                 # implement receipt polling.  A post-broadcast receipt lookup is
                 # read-only and must be allowed to continue on another endpoint;
@@ -355,22 +362,31 @@ class ResilientWeb3:
                     "eth.get_transaction_receipt",
                     "eth.get_transaction",
                 }
+                transaction_broadcast = func_name == "eth.send_raw_transaction"
                 capability_error = (
                     "method not found" in error_str
                     or "-32601" in error_str
                     or "not supported" in error_str
                 )
-                is_retryable = any(x in error_str for x in [
+                transient_error = any(x in error_str for x in [
                     "connection", "timeout", "429", "rate limit",
                     "too many requests", "503", "502", "500",
                     "internal error", "server error",
-                ]) or (receipt_lookup and capability_error)
+                ])
+                is_retryable = (
+                    (transient_error and not transaction_broadcast)
+                    or (receipt_lookup and capability_error)
+                    or (transaction_broadcast and capability_error)
+                )
                 
                 if self._current_url:
                     self.rotator.report_failure(self._current_url, e)
                 
-                if not is_retryable and attempt == 0:
-                    # Non-retryable error (e.g., invalid params) — don't retry
+                if not is_retryable:
+                    # Non-retryable errors stop at whichever endpoint returned
+                    # them. This matters after an earlier safe capability
+                    # failover: a later ambiguous broadcast timeout must not be
+                    # offered to yet another endpoint.
                     raise
                 
                 if attempt < self.MAX_RETRIES - 1:
@@ -405,6 +421,31 @@ class ResilientWeb3:
     def log_status(self):
         """Log RPC endpoint status."""
         self.rotator.log_status()
+
+    def find_transaction_receipt(self, tx_hash):
+        """Look up an exact transaction receipt on every configured endpoint.
+
+        Broadcasts are deliberately never replayed across RPC endpoints. A
+        node can nevertheless accept a signed payload and lose its response,
+        leaving the next node to answer ``nonce too low``. This read-only
+        lookup proves whether the deterministic signed hash settled.
+        """
+        last_error = None
+        for endpoint in self.rotator._endpoints:
+            w3 = self.rotator._get_web3_for_url(endpoint.url)
+            try:
+                receipt = w3.eth.get_transaction_receipt(tx_hash)
+                if receipt is not None:
+                    endpoint.record_success()
+                    return receipt
+            except Exception as exc:
+                last_error = exc
+                # A lagging endpoint commonly reports TransactionNotFound.
+                # Continue through independent views without replaying bytes.
+                continue
+        if last_error:
+            logger.debug("Exact-hash receipt not found across RPCs: %s", last_error)
+        return None
 
 
 class _ResilientNamespace:

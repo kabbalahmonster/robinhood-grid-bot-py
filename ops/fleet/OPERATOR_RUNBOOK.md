@@ -31,6 +31,21 @@ an independent ceiling and never overrides the minimum-profit check. The fee
 cap covers a separate post-sale transfer. `ETH_GAS_RESERVE` is excluded from
 position sizing and reserve-preserving sweeps.
 
+Compare the baseline against alternative trigger geometry before changing live
+configuration:
+
+```bash
+strategy-model --positions 8 --buy-triggers 10,15,20 \
+  --sell-triggers 5,10,15 --min-profit 5 \
+  --output reports/strategy-comparison.html
+```
+
+Open the HTML report and compare capacity-boundary coverage against the rebound
+required for the newest position to exit. The matching CSV and JSON are created
+beside it. Add `--fleet` to include current bot settings. This is a read-only
+geometric model, not a backtest; do not treat its normalized prices as expected
+returns.
+
 ## Update and verify
 
 ```bash
@@ -145,8 +160,11 @@ restart-bot EARN
 
 `shadow` collects read-only comparison telemetry; `gate` gives route authority
 only to a freshly re-quoted and locally simulated winner. A displayed winner
-may still be safely skipped during revalidation. Watch latency, 429s, timeout
-rejections, gas, and successful buy/sell receipts before expanding the trial.
+may still be safely skipped during normal final guards. If gate preflight itself
+has no valid candidate, the dashboard records `baseline_fallback` and the bot
+uses its normal configured route with all usual safeguards, rather than losing
+an otherwise valid exit to tournament-only availability. Watch latency, 429s,
+timeout rejections, gas, and successful buy/sell receipts before expanding the trial.
 Rollback is `ROUTE_TOURNAMENT_MODE=off` and
 `ROUTE_TOURNAMENT_CANARY=false` on that same bot. See the route-tournament
 section of the main README and the fleet README for accounting and timeout
@@ -158,6 +176,23 @@ For a larger rollout, begin with `POLL_INTERVAL_SECONDS=12` and the defaults
 `12`. Increase polling toward 15-20 seconds if provider 429s or overlapping
 rounds appear. Native-only settlement halves tournament candidates but removes
 WETH fallback and should be an intentional liquidity tradeoff.
+To canary Umbra, append it on one bot with
+`ROUTE_TOURNAMENT_PROVIDERS=uniswap,sushiswap,umbra`. It adds one public-API
+candidate per settlement. Watch 429s/timeouts before expanding; executable
+builds pin UmbraRH and use local gas estimation.
+Unapproved LI.FI/Umbra sell rows appear as `approval required`, not as a local
+simulation failure. They are provisionally ranked with estimated approval gas;
+only the provisional winner is approved, refreshed, and required to pass exact
+local simulation. LI.FI approval is normally reusable; Umbra approval is exact.
+A confirmed Umbra approval creates a durable one-approval fuse until its swap
+settles: the existing allowance may finish the operation, but a second approval
+is blocked and trading halts for review rather than entering an approval-gas
+loop.
+To canary LI.FI, set `LI_FI_API_KEY` and use
+`ROUTE_TOURNAMENT_PROVIDERS=uniswap,sushiswap,lifi`, initially with
+`ROUTE_TOURNAMENT_SETTLEMENTS=native` and `ROUTE_TOURNAMENT_MODE=shadow`.
+`lofi` is accepted as an input alias, though documentation uses `lifi`.
+
 ## Position-balance reconciliation
 
 When `fleet-doctor`, inventory, or bot logs show tracked managed-token balances

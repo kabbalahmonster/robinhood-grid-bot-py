@@ -35,6 +35,9 @@ def test_capabilities_are_provider_owned():
     assert PROVIDERS["uniswap"].capabilities.quote_requires_preparation is True
     assert PROVIDERS["sushiswap"].capabilities.refresh_after_approval is True
     assert PROVIDERS["sushiswap"].capabilities.api_managed_approval is False
+    assert PROVIDERS["umbra"].capabilities.refresh_after_approval is True
+    assert PROVIDERS["umbra"].capabilities.requires_dynamic_gas is True
+    assert PROVIDERS["umbra"].capabilities.exact_amount_approval is True
 
 
 class Result:
@@ -255,7 +258,8 @@ def test_sushi_primary_uses_uniswap_as_reverse_default_fallback():
     assert provider.fallback.name == "uniswap"
 
 
-def test_tournament_providers_remain_resolvable_without_fallback():
+def test_tournament_providers_remain_resolvable_when_fallback_is_disabled():
+    """A roster-only winner must survive the quote-to-execution handoff."""
     class DummyClient:
         def __init__(self, config):
             pass
@@ -274,19 +278,12 @@ def test_tournament_providers_remain_resolvable_without_fallback():
     assert provider.provider_for_name("uniswap").name == "uniswap"
     assert provider.provider_for_name("sushiswap").name == "sushiswap"
 
-
-def test_tournament_only_providers_never_become_automatic_fallbacks():
-    primary = SwapProvider(
-        "0x", Client([Result(False, "status 503")]), PROVIDERS["0x"].capabilities,
-    )
-    tournament_only = SwapProvider(
-        "sushiswap", Client([Result(True)]), PROVIDERS["sushiswap"].capabilities,
-    )
-    provider = FallbackSwapProvider(primary, None, (tournament_only,))
-
+    # A retryable primary failure still cannot silently grant tournament-only
+    # providers ordinary fallback authority.
+    attempts = []
     result = provider.run_with_fallback(
-        lambda: provider.build_swap_transaction(), "sell",
+        lambda: attempts.append(provider.name) or Result(False, "status 404"),
+        "sell",
     )
-
     assert result.success is False
-    assert len(tournament_only.client.results) == 1
+    assert attempts == ["0x"]

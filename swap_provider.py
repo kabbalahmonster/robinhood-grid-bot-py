@@ -18,6 +18,8 @@ class ProviderCapabilities:
     refresh_after_approval: bool = False
     api_managed_approval: bool = False
     quote_requires_preparation: bool = False
+    requires_dynamic_gas: bool = False
+    exact_amount_approval: bool = False
 
 
 class SwapProvider:
@@ -71,9 +73,7 @@ class FallbackSwapProvider:
         self.primary = primary
         self.fallback = fallback
         self.active = primary
-        self.providers = {
-            item.name: item for item in (primary, fallback, *additional) if item
-        }
+        self.providers = {item.name: item for item in (primary, fallback, *additional) if item}
         self._operation_retries = []
         self._operation_sealed = []
         self.logger = logging.getLogger("grid_bot.swap_provider")
@@ -92,7 +92,7 @@ class FallbackSwapProvider:
 
     @property
     def fallback_active(self):
-        return self.active is self.fallback
+        return self.fallback is not None and self.active is self.fallback
 
     def provider_for_name(self, name):
         """Resolve a configured tournament provider without granting fallback authority."""
@@ -234,6 +234,11 @@ PROVIDERS = {
     "sushiswap": ProviderDefinition("sushi_api", "SushiAPIClient", ProviderCapabilities(
         refresh_after_approval=True,
     )),
+    "umbra": ProviderDefinition("umbra_api", "UmbraAPIClient", ProviderCapabilities(
+        refresh_after_approval=True,
+        requires_dynamic_gas=True,
+        exact_amount_approval=True,
+    )),
 }
 
 
@@ -289,10 +294,11 @@ def create_swap_provider(config):
             continue
         extra_definition = PROVIDERS[extra_name]
         extras.append(SwapProvider(
-            extra_name,
-            extra_definition.load_client_class()(config),
+            extra_name, extra_definition.load_client_class()(config),
             extra_definition.capabilities,
         ))
+    # Tournament providers need to remain resolvable for the winner's fresh
+    # execution build even when ordinary provider fallback is disabled.
     if fallback is None and not extras:
         return primary
     return FallbackSwapProvider(primary, fallback, extras)

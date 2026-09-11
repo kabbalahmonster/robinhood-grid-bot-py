@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+SCRIPT_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  strategy-model [OPTIONS]
+  strategy-model --fleet [--only NAMES] [--exclude NAMES] [--config PATH] [OPTIONS]
+
+Model gridless drawdown coverage for combinations of buy and sell triggers.
+Writes a standalone HTML visual report plus adjacent CSV and JSON data. This is
+read-only analysis: it never edits bot configuration or restarts a bot.
+
+Options:
+  --buy-triggers LIST    Positive drawdown magnitudes (default: 5,10,15,20)
+  --sell-triggers LIST   Positive sell targets (default: 3,5,10,15)
+  --positions COUNT      Maximum active positions (default: 8)
+  --min-profit PCT       Effective minimum sell profit floor (default: 0)
+  --output PATH          HTML report path (default: strategy-model.html)
+  --fleet                Include current strategy values from selected fleet bots
+  --only NAMES           With --fleet, include only comma-separated bot names
+  --exclude NAMES        With --fleet, exclude comma-separated bot names
+  --config PATH          Alternate fleet.conf, with --fleet
+  -h, --help             Show this help
+
+Examples:
+  strategy-model --positions 8 --buy-triggers 5,10,15 --sell-triggers 3,5,10
+  strategy-model --positions 12 --min-profit 5 --output reports/deeper-grid.html
+  strategy-model --fleet --only EARN,URMOM --output reports/fleet-strategies.html
+EOF
+}
+
+fleet=0
+config_path=""
+only=""
+exclude=""
+args=()
+while (($#)); do
+  case "$1" in
+    --fleet) fleet=1; shift ;;
+    --config) (($# >= 2)) || { printf 'Error: --config requires a path\n' >&2; exit 1; }; config_path="$2"; shift 2 ;;
+    --only) (($# >= 2)) || { printf 'Error: --only requires names\n' >&2; exit 1; }; only="$2"; shift 2 ;;
+    --exclude) (($# >= 2)) || { printf 'Error: --exclude requires names\n' >&2; exit 1; }; exclude="$2"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) args+=("$1"); shift ;;
+  esac
+done
+
+if ((fleet == 0)); then
+  [[ -z "$config_path$only$exclude" ]] || { printf 'Error: --config/--only/--exclude require --fleet\n' >&2; exit 1; }
+else
+  # shellcheck source=fleet-common.sh
+  source "$SCRIPT_DIR/fleet-common.sh"
+  fleet_load_config "$config_path"
+  fleet_apply_selection "$only" "$exclude"
+  fleet_validate_bots
+  for bot_dir in "${FLEET_BOT_DIRS[@]}"; do
+    args+=(--bot "$(fleet_bot_name "$bot_dir")=$bot_dir")
+  done
+fi
+
+exec python3 "$SCRIPT_DIR/strategy-model.py" "${args[@]}"

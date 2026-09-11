@@ -308,6 +308,57 @@ def test_execution_preflight_rejects_unsimulatable_sushi_approval_handshake():
     assert all(row["projected_total_gas_wei"] is None for row in sushi_rows)
 
 
+@pytest.mark.parametrize("provider_gas,expected_swap,expected_basis", [
+    (275000, 275000, "provisional_provider_gas_pending_post_approval_local_simulation"),
+    (0, 300000, "provisional_conservative_gas_pending_post_approval_local_simulation"),
+])
+def test_execution_preflight_stages_unapproved_lifi_and_umbra_sells(
+        provider_gas, expected_swap, expected_basis):
+    q = quote(gas=provider_gas, allowance_target="spender", to="router", data="0xdead")
+    sell_context = context("sell", execution_preflight=True)
+    sell_context["min_profit"] = -100
+    row = score_candidate(
+        q, "umbra", "native", sell_context,
+        allowance_probe=lambda _token, _spender: 0,
+        gas_estimate=0, approval_gas_limit=47000,
+        require_local_gas=True, require_dynamic_setup_gas=True,
+    )
+
+    assert row["validation_level"] == "quote_only"
+    assert row["rejections"] == []
+    assert row["staged_approval_required"] is True
+    assert row["execution_eligible"] is False
+    assert row["gas_basis"] == expected_basis
+    assert row["approval_assumption"] == "dynamic_local_approval_estimate"
+    assert row["gas_components_wei"]["approval"] == str(47000 * 10**6)
+    assert row["gas_components_wei"]["swap"] == str(expected_swap * 10**6)
+
+
+def test_execution_preflight_does_not_stage_unknown_or_sufficient_allowance():
+    q = quote(allowance_target="spender", to="router", data="0xdead")
+    for allowance in (None, 10**15):
+        row = score_candidate(
+            q, "lifi", "native", context("sell", execution_preflight=True),
+            allowance_probe=lambda _token, _spender, value=allowance: value,
+            gas_estimate=0, approval_gas_limit=47000,
+            require_local_gas=True, require_dynamic_setup_gas=True,
+        )
+        assert row["validation_level"] == "rejected"
+        assert row["rejections"] == ["local_gas_simulation_failed"]
+        assert "staged_approval_required" not in row
+
+
+def test_execution_preflight_staging_requires_dynamic_approval_estimate():
+    q = quote(allowance_target="spender", to="router", data="0xdead")
+    row = score_candidate(
+        q, "lifi", "native", context("sell", execution_preflight=True),
+        allowance_probe=lambda _token, _spender: 0,
+        gas_estimate=0, require_local_gas=True, require_dynamic_setup_gas=True,
+    )
+    assert row["validation_level"] == "rejected"
+    assert row["rejections"] == ["approval_required_before_local_simulation"]
+
+
 def test_execution_preflight_rejects_failed_uniswap_preparation_without_gas_fallback():
     clients = {name: Mock() for name in ("uniswap", "sushiswap")}
     indicative = QuoteResult(success=True, buy_amount=2 * 10**15, sell_amount=10**15,
@@ -420,6 +471,24 @@ def test_provider_quote_failure_has_structured_actionable_reason():
     }
     assert row["quote_failure_kind"] == "no_route_or_liquidity"
     assert row["gas_price_currentness"] == "unknown"
+
+
+def test_candidate_log_includes_sanitized_quote_failure_kind(caplog):
+    """Operator logs distinguish a no-route quote from generic provider failure."""
+    import logging
+    clients = {name: Mock() for name in ("uniswap", "sushiswap")}
+    clients["uniswap"].get_quote.return_value = quote(gas=180000, gas_price=10**6)
+    clients["sushiswap"].get_quote.return_value = QuoteResult(
+        success=False, error="Sushi API returned status 404: NoRouteFoundError"
+    )
+    cfg = SimpleNamespace(uniswap_api_key="key", weth_address="weth", token_address="token")
+    with caplog.at_level(logging.INFO, logger="grid_bot.route_tournament"):
+        collect(cfg, "wallet", context("buy"), clients.__getitem__)
+    sushi_lines = [record.getMessage() for record in caplog.records
+                   if "Route tournament candidate" in record.getMessage()
+                   and "sushiswap/" in record.getMessage()]
+    assert sushi_lines
+    assert all("no_route_or_liquidity" in line for line in sushi_lines)
 
 
 def test_quote_deadline_is_exposed_as_an_observation_timeout():
@@ -732,6 +801,30 @@ def test_buy_strategy_veto_marks_selected_tournament_terminal():
     assert b._buy_attempt["status"] == "buy_trigger_recovered"
 
 
+def test_exact_approval_fuse_persists_and_blocks_a_second_approval(tmp_path):
+    b = bot("gate")
+    b.provider = SimpleNamespace(
+        name="umbra", capabilities=SimpleNamespace(exact_amount_approval=True),
+    )
+    b._exact_approval_guard_path = str(tmp_path / "pending.json")
+    b._exact_approval_guard = None
+    result = SimpleNamespace(tx_hash="0xapproval")
+
+    b._record_exact_approval_guard(
+        result, operation="sell", spender="0xRouter", amount=123, position_id=7,
+    )
+
+    assert json.loads((tmp_path / "pending.json").read_text())["amount"] == "123"
+    assert b._exact_approval_fuse_blocks(
+        operation="sell", spender="0xRouter", amount=123, position_id=7,
+    ) is True
+    assert b._safety_halted is True
+
+    b._clear_exact_approval_guard()
+    assert not (tmp_path / "pending.json").exists()
+    assert b._exact_approval_guard is None
+
+
 @pytest.mark.parametrize("mode", ["execute", "invalid"])
 def test_execute_and_unknown_modes_fail_closed(mode):
     cfg = BotConfig.__new__(BotConfig)
@@ -776,6 +869,11 @@ def test_mode_parsing_and_default(monkeypatch, tmp_path):
         assert configured.route_tournament_settlements == ("native",)
         assert configured.route_tournament_shadow_timeout_seconds == 5
         assert configured.route_tournament_gate_timeout_seconds == 7
+
+        monkeypatch.setenv("ROUTE_TOURNAMENT_PROVIDERS", "uniswap,sushiswap,umbra")
+        assert load_config().route_tournament_providers == ("uniswap", "sushiswap", "umbra")
+        monkeypatch.setenv("ROUTE_TOURNAMENT_PROVIDERS", "uniswap,lofi")
+        assert load_config().route_tournament_providers == ("uniswap", "lifi")
 
 
 def test_native_only_preflight_collects_and_selects_two_candidates():
@@ -1105,6 +1203,48 @@ def test_selected_route_is_freshly_requoted_and_locally_estimated_before_setup()
     b.wallet.approve_token.assert_not_called()
 
 
+def test_staged_sell_winner_is_handed_off_without_impossible_preapproval_simulation():
+    b = bot("gate")
+    b.wallet.address = "0x3d8c491b7fe2d43468b5e45162e374719003ef16"
+    b.config.token_address = "token"
+    b.config.weth_address = "weth"
+    b.config.use_eth_trading = True
+    b.trade_token_address = "native"
+    b._swap_slippage_fraction = Mock(return_value=0.01)
+    fresh_quote = QuoteResult(
+        success=True, sell_amount=10**15, buy_amount=2 * 10**15,
+        to="0x8e6fd69a77e88ee20ba4b4fbd59dfcda3ec0e98a", data="0xdead",
+        allowance_target="0xfc830d7861c5cebeff0000000000000000000000",
+    )
+    selected = SimpleNamespace(
+        name="umbra", build_swap_transaction=Mock(return_value=fresh_quote),
+        capabilities=SimpleNamespace(quote_requires_preparation=False),
+    )
+    b.provider = SimpleNamespace(provider_for_name=Mock(return_value=selected))
+
+    validated = b._revalidate_selected_route(
+        {"provider": "umbra", "settlement": "native",
+         "staged_approval_required": True},
+        "sell", 10**15,
+    )
+
+    assert validated["provider"] is selected
+    assert validated["staged_approval"] is True
+    assert getattr(validated["quote"], "_tournament_staged_approval") is True
+    b.wallet.w3.eth.estimate_gas.assert_not_called()
+    b.wallet.approve_token.assert_not_called()
+
+
+def test_staged_lifi_approval_remains_reusable_but_umbra_is_exact():
+    b = bot("gate")
+    b.provider = SimpleNamespace(
+        capabilities=SimpleNamespace(exact_amount_approval=False),
+    )
+    assert b._provider_approval_amount(123) == 2**256 - 1
+    b.provider.capabilities.exact_amount_approval = True
+    assert b._provider_approval_amount(123) == 123
+
+
 
 def test_selected_weth_buy_route_simulates_zero_native_value_even_when_provider_sets_value():
     b = bot("off")
@@ -1268,6 +1408,42 @@ def test_gate_mode_uses_only_a_freshly_revalidated_selected_route():
     assert b.provider.active is selected
     assert getattr(fresh_quote, "_tournament_gate_prepared") is True
     original_api.build_swap_transaction.assert_not_called()
+
+
+def test_gate_preflight_failure_falls_back_to_normal_provider_path():
+    """A flaky comparison must not suppress a sell the normal path can execute."""
+    b = bot("gate")
+    b.config.use_eth_trading = True
+    b._swap_slippage_fraction = Mock(return_value=0.01)
+    classic_quote = QuoteResult(success=True, sell_amount=10**15, buy_amount=2 * 10**15)
+    primary = SimpleNamespace(name="uniswap")
+    router = SimpleNamespace(
+        primary=primary, active=SimpleNamespace(name="sushiswap"),
+        build_swap_transaction=Mock(return_value=classic_quote),
+    )
+    b.provider = router
+    b.api_client = router
+    b._route_execution_preflight = {
+        "mode": "execution_preflight", "direction": "sell",
+        "status": "preflight_no_authorized_candidate",
+    }
+    b._collect_route_execution_preflight = Mock(return_value=None)
+    b._revalidate_selected_route = Mock()
+
+    quote_result, weth_fallback = b._actionable_quote_with_weth_fallback(
+        sell_token="token", buy_token="native", sell_amount=10**15, direction="sell",
+    )
+
+    assert quote_result is classic_quote
+    assert weth_fallback is False
+    assert b.provider.active is primary
+    assert b.api_client is router
+    router.build_swap_transaction.assert_called_once()
+    b._revalidate_selected_route.assert_not_called()
+    assert b._route_execution_preflight["status"] == "baseline_fallback"
+    assert b._route_execution_preflight["execution_fallback"] == {
+        "reason": "no_fresh_tournament_candidate", "provider": "uniswap",
+    }
 
 
 def test_snapshot_failure_is_reported_without_candidate_requests():

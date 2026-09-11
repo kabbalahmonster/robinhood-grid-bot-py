@@ -97,6 +97,8 @@ class LiFiClient:
         taker_address: Optional[str] = None,
         slippage_percentage: Optional[float] = None,
         apply_jitter_to_price: bool = True,
+        quote_timeout_seconds: Optional[float] = None,
+        **_kwargs,
     ) -> QuoteResult:
         """
         Get a quote from the LI.FI API.
@@ -164,7 +166,9 @@ class LiFiClient:
                 url,
                 headers=self.headers,
                 params=params,
-                timeout=30,
+                timeout=30 if quote_timeout_seconds is None else max(
+                    0.05, float(quote_timeout_seconds)
+                ),
             )
             
             self.logger.debug(f"LI.FI API response status: {response.status_code}")
@@ -240,6 +244,30 @@ class LiFiClient:
                 if isinstance(val, str) and val.startswith("0x"):
                     return int(val, 16)
                 return int(val)
+
+            tx_to = transaction_request.get("to")
+            tx_data = transaction_request.get("data")
+            tx_value = parse_hex_or_int(transaction_request.get("value"), 0)
+            native_input = str(sell_token).lower() in {
+                "0x0000000000000000000000000000000000000000",
+                "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            }
+            expected_value = int(sell_amount or from_amount) if native_input else 0
+            tx_chain = parse_hex_or_int(transaction_request.get("chainId"), self.chain_id)
+            if from_amount != int(sell_amount or from_amount):
+                return QuoteResult(success=False, raw_response=data,
+                                   error="LI.FI quote input amount mismatch")
+            if (not isinstance(tx_to, str) or not Web3.is_address(tx_to)
+                    or not isinstance(tx_data, str) or not tx_data.startswith("0x")
+                    or len(tx_data) < 10):
+                return QuoteResult(success=False, raw_response=data,
+                                   error="LI.FI quote omitted valid executable transaction data")
+            if tx_value != expected_value:
+                return QuoteResult(success=False, raw_response=data,
+                                   error="LI.FI quote returned an unexpected native value")
+            if tx_chain != self.chain_id:
+                return QuoteResult(success=False, raw_response=data,
+                                   error="LI.FI quote returned the wrong execution chain")
             
             return QuoteResult(
                 success=True,
@@ -247,9 +275,9 @@ class LiFiClient:
                 buy_amount=to_amount,
                 sell_amount=from_amount,
                 allowance_target=approval_address,  # Use estimate.approvalAddress
-                data=transaction_request.get("data"),
-                to=transaction_request.get("to"),
-                value=parse_hex_or_int(transaction_request.get("value"), 0),
+                data=tx_data,
+                to=tx_to,
+                value=tx_value,
                 gas=parse_hex_or_int(transaction_request.get("gasLimit"), 200000),
                 gas_price=parse_hex_or_int(transaction_request.get("gasPrice"), 0),
                 raw_response=data,
@@ -311,6 +339,7 @@ class LiFiClient:
         sell_amount: int,
         taker_address: str,
         slippage_percentage: float = 0.02,
+        quote_timeout_seconds: Optional[float] = None,
     ) -> QuoteResult:
         """
         Build a swap transaction using LI.FI API.
@@ -334,6 +363,7 @@ class LiFiClient:
             taker_address=taker_address,
             slippage_percentage=slippage_percentage,
             apply_jitter_to_price=True,
+            quote_timeout_seconds=quote_timeout_seconds,
         )
     
     def refresh_quote(

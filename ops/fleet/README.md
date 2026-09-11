@@ -119,7 +119,7 @@ sudo apt install tmux git python3 python3-venv
      ops/fleet/dashboard-remove ops/fleet/initialize-bots \
      ops/fleet/reconcile-position-balances ops/fleet/reconcile-position-balances.py \
      ops/fleet/initialize-bot-env.py ops/fleet/fleet-watch \
-     ops/fleet/fleet-watch.py
+     ops/fleet/fleet-watch.py ops/fleet/strategy-model
    ```
 
    Set `FLEET_BOT_ROOT` to the directory containing your bot checkouts. The
@@ -161,10 +161,102 @@ sudo apt install tmux git python3 python3-venv
    ln -sf "$PWD/ops/fleet/dashboard-remove" "$HOME/bin/dashboard-remove"
    ln -sf "$PWD/ops/fleet/initialize-bots" "$HOME/bin/initialize-bots"
    ln -sf "$PWD/ops/fleet/fleet-watch" "$HOME/bin/fleet-watch"
+   ln -sf "$PWD/ops/fleet/strategy-model" "$HOME/bin/strategy-model"
    ln -sf "$PWD/ops/fleet/reconcile-position-balances" "$HOME/bin/reconcile-position-balances"
    ```
 
    Ensure `~/bin` is in `PATH`, or invoke the scripts by their repository paths.
+
+## Gridless strategy coverage modeling
+
+`strategy-model` is a read-only planning tool for comparing
+`GRIDLESS_BUY_THRESHOLD`, `GRIDLESS_SELL_THRESHOLD`,
+`MIN_PROFIT_PERCENT`, and position capacity. It produces three adjacent files:
+
+- a standalone `.html` visual report that opens locally in any browser;
+- `.csv` combination data for spreadsheets;
+- `.json` data with explicit assumptions for further analysis.
+
+No API, RPC, wallet, live price, or bot process is touched. The model normalizes
+the first entry price to `1.0` and follows the production gridless rule: the next
+buy occurs when the current lowest-cost position reaches the configured negative
+P&L threshold. Successive entry points are therefore geometric. With a 10% buy
+trigger they are `1.0`, `0.9`, `0.81`, `0.729`, not evenly spaced percentage
+points. Pass buy triggers as positive drawdown magnitudes (`15`, not `-15`);
+fleet mode converts negative `.env` thresholds automatically.
+
+| Option | Default | Meaning and validation |
+| --- | --- | --- |
+| `--buy-triggers LIST` | `5,10,15,20` | Comma-separated unique positive magnitudes, each greater than 0 and less than 100 |
+| `--sell-triggers LIST` | `3,5,10,15` | Comma-separated unique positive targets, each greater than 0 and less than 100 |
+| `--positions COUNT` | `8` | Integer position capacity from 1 through 100 |
+| `--min-profit PCT` | `0` | Non-negative effective sell floor below 100 |
+| `--output PATH` | `strategy-model.html` | Required `.html` suffix; parent directories are created and the matching stem is used for CSV/JSON |
+| `--fleet` | off | Add a table calculated from selected bot `.env` files |
+| `--only NAMES` | all configured bots | Comma-separated fleet selection; requires `--fleet` |
+| `--exclude NAMES` | none | Comma-separated fleet exclusion; requires `--fleet` |
+| `--config PATH` | normal fleet config search | Alternate fleet membership/configuration; requires `--fleet` |
+| `-h`, `--help` | — | Print the complete inline command reference without loading fleet configuration |
+
+Generate a useful baseline matrix:
+
+```bash
+strategy-model \
+  --positions 8 \
+  --buy-triggers 5,10,15,20 \
+  --sell-triggers 3,5,10,15 \
+  --min-profit 5 \
+  --output reports/gridless-8-slot.html
+```
+
+`--min-profit` models the effective sell target as the greater of the requested
+sell trigger and the minimum-profit floor. This is still pre-fee trigger
+geometry: actual execution also includes measured position cost, projected gas,
+slippage, token taxes, moonbag sizing, liquidity, and route validation.
+
+The visual matrix reports three values for each buy/sell combination:
+
+- **cover**: total drawdown at the next desired buy after every slot is full;
+- **bounce**: price recovery from that capacity boundary until the newest
+  funded position reaches its effective sell target;
+- **exit vs start**: that newest position's exit price relative to the initial
+  normalized entry.
+
+The coverage curve shows how each additional slot changes the geometric
+drawdown boundary. The report also stores the last funded entry separately from
+the capacity boundary: these differ by one full buy interval and must not be
+treated as the same risk point. CSV and JSON rows additionally expose the
+effective sell target, normalized equal-ETH average entry price, portfolio
+break-even rebound from the capacity boundary, and newest-position exit versus
+the initial price. Percent fields are numeric rather than preformatted strings,
+so spreadsheet formulas and later simulations do not need to strip `%` signs.
+
+Include current settings for all configured bots, or a selection, beneath the
+custom matrix:
+
+```bash
+strategy-model --fleet --output reports/current-fleet.html
+strategy-model --fleet --only EARN,URMOM --output reports/two-bots.html
+strategy-model --fleet --exclude ARCHIVE --config /path/to/fleet.conf \
+  --output reports/active-fleet.html
+```
+
+Fleet values come only from each selected checkout's `.env`. Invalid bot values
+are omitted from the fleet table; the custom comparison is still generated.
+`MAX_ACTIVE_POSITIONS` is used when present, otherwise legacy `MAX_POSITIONS`;
+missing buy/sell/minimum-profit values use production defaults of `-10`, `5`,
+and `5`. Selection and membership validation use the same fleet helpers as the
+other operator commands. Existing HTML, CSV, and JSON files with the requested
+stem are replaced deliberately, so choose a new report name when preserving an
+older scenario.
+
+This utility is not a historical backtest or profit forecast. It assumes exact
+threshold fills, equal ETH allocated per modeled slot, no leading-edge buys, no
+intermediate sells before the modeled drawdown path completes, and no stoploss.
+It deliberately excludes fees, gas, slippage, token taxes, liquidity movement,
+moonbag retention, execution margin, cooldown timing, and gaps between polls.
+Those exclusions make it a deterministic comparison of strategy shapes, not a
+claim about realized performance.
 
 ### Phone-friendly live view
 
@@ -340,6 +432,7 @@ unless their section explicitly says otherwise.
 | `fleet-doctor` | Validate Git, config, RPC, contracts, providers, and dashboard | No |
 | `fleet-inventory` | Read balances, positions, reserves, Git, and audit timestamps | No |
 | `fleet-watch` | Phone-friendly live view from local status snapshots | No |
+| `strategy-model` | Compare gridless trigger geometry and generate HTML/CSV/JSON reports | Writes report files only |
 | `fleet-audit` | Reconcile local treasury/liquidation audit records | No |
 | `cleanup-logs` | Preview or delete aged bot log files by fleet selection | `--apply` only |
 | `start-fleet` / `stop-fleet` / `restart-fleet` | Manage the configured tmux fleet | Processes only |
@@ -1395,7 +1488,11 @@ restart-bot EARN
 Monitor quote latency, rate limits, rejection reasons, gas estimates, and buy
 and sell results. A displayed round winner can still be refused when its
 mandatory fresh execution quote times out, fails simulation, or falls below the
-gas-aware profit floor. Roll back only the canary with:
+gas-aware profit floor. If the tournament has no authorized candidate because
+its additional provider/RPC/simulation work fails, it records
+`baseline_fallback` and continues through the bot's ordinary configured route
+and its normal safeguards; tournament availability cannot alone block a valid
+classic exit. Roll back only the canary with:
 
 ```bash
 update-variable --apply --only earn \
@@ -1408,12 +1505,29 @@ without tournament route authority. Promote beyond one bot only after a
 monitored window confirms acceptable provider quota and execution behavior.
 
 Tournament shape is independently configurable: providers are a non-empty
-subset of `uniswap,sushiswap`; settlements are a non-empty subset of
+subset of `uniswap,sushiswap,umbra,lifi`; settlements are a non-empty subset of
 `native,weth`; shadow/gate deadlines default to 4/12 seconds and accept 1-15.
 For about 30 gate-enabled bots, start at `POLL_INTERVAL_SECONDS=12` and increase
 toward 15-20 if 429s or overlapping rounds occur. Using only `native` halves
 candidate traffic, but it also removes WETH fallback liquidity and potential
 WETH winners.
+Umbra adds one public-API candidate per configured settlement. Canary
+`ROUTE_TOURNAMENT_PROVIDERS=uniswap,sushiswap,umbra` on one bot before fleet
+use, watching 429s and deadlines. Umbra's fee/tax-adjusted output is not
+haircut twice; execution pins UmbraRH and uses local gas estimation instead of
+the provider's flat 3M recommendation.
+For an unapproved sell, LI.FI and Umbra remain in contention using an all-in
+provisional score: a provider/conservative swap budget plus locally estimated
+approval gas. Only the provisional winner is approved. LI.FI normally receives
+a reusable allowance; Umbra receives its required exact-amount allowance. The
+winner is refreshed and must pass exact local gas simulation and all final
+guards. Losing candidates never cost approval gas; a winner that deteriorates
+after approval aborts safely, with only the approval fee spent.
+LI.FI is enabled with `ROUTE_TOURNAMENT_PROVIDERS=uniswap,sushiswap,lifi`
+(`lofi` is accepted as an alias) and requires `LI_FI_API_KEY`. Canary it with
+native-only shadow comparisons before gate mode; every returned transaction is
+checked for exact amount, chain, native value, target, calldata, and local gas.
+
 ## Backing up fleet private keys
 
 `backup-private-keys` reads `PRIVATE_KEY` and `TOKEN_SYMBOL` from every
@@ -1494,6 +1608,28 @@ Every bot preflights final calldata locally with `eth_call` and
 returns `Method not found`. If a broadcast still has an uncertain outcome,
 `data/unresolved_broadcast.json` blocks subsequent trading across loops and
 restarts.
+
+An RPC may accept a signed transaction, lose its response, and then report
+`nonce too low` after another node observes the consumed nonce. The wallet now
+queries every configured RPC for the exact deterministic signed hash on
+`nonce too low`, `already known`, and `known transaction`. A mined receipt is
+processed normally and the signed payload is never replayed. The unresolved
+guard remains mandatory when no endpoint can prove a terminal receipt.
+
+If `eth_sendRawTransaction` itself returns the definitive capability error
+`-32601 Method not found`, the endpoint did not execute the broadcast method.
+The RPC rotator therefore offers the identical signed bytes to the next
+endpoint. This is hash-identical propagation, not a newly signed transaction;
+it cannot create another nonce or order. Ambiguous timeouts, disconnects, rate
+limits, and server errors never use this path and still create the unresolved
+broadcast guard.
+
+A separate safe retry handles a fast-moving block base fee. When the RPC
+explicitly rejects a buy or sell *before broadcast* because `gasPrice` is below
+its observed base fee, the bot extracts that base fee, adds fresh headroom, and
+rebuilds once with the pending nonce. The repriced transaction must still pass
+the operation gas cap and native-buy reserve; a sell must also still clear its
+gas-aware profit floor. Signed-but-ambiguous transactions never use this retry.
 
 Native-mode regular buys and sells also use this guard during direct-WETH
 fallback settlement. A confirmed wrap is guarded until its buy swap and

@@ -131,6 +131,66 @@ class TestWalletPreflight(unittest.TestCase):
         self.assertEqual(guard["tx_hash"], "0xlocalhash")
         self.assertEqual(guard["nonce"], 480)
 
+    def test_nonce_too_low_recovers_successful_exact_hash_without_guard(self):
+        wallet = self.make_wallet()
+        wallet.w3.eth.call.return_value = b""
+        wallet.w3.eth.estimate_gas.return_value = 90_000
+        signed_hash = Mock()
+        signed_hash.hex.return_value = "0xlanded"
+        wallet.account.sign_transaction.return_value = SimpleNamespace(
+            raw_transaction=b"signed", hash=signed_hash,
+        )
+        wallet.w3.eth.send_raw_transaction.side_effect = ValueError({
+            "code": -32000, "message": "nonce too low: tx: 506 state: 507",
+        })
+        receipt = {
+            "status": 1, "gasUsed": 143_626, "effectiveGasPrice": 189_718_000,
+        }
+        wallet.w3.eth.get_transaction_receipt.return_value = receipt
+
+        with tempfile.TemporaryDirectory() as directory:
+            wallet.config = SimpleNamespace(chain_id=4663)
+            wallet.address = "0x1"
+            wallet.unresolved_broadcast_path = os.path.join(directory, "guard.json")
+            result = wallet._send_transaction({
+                "from": "0x1", "to": "0x2", "data": "0x1234",
+                "value": 7, "gas": 100_000, "nonce": 506,
+            })
+            self.assertFalse(os.path.exists(wallet.unresolved_broadcast_path))
+
+        self.assertTrue(result.success)
+        self.assertFalse(result.outcome_unknown)
+        self.assertEqual(result.tx_hash, "0xlanded")
+        self.assertIs(result.receipt, receipt)
+        self.assertEqual(result.gas_used, 143_626)
+
+    def test_nonce_too_low_without_exact_receipt_still_halts(self):
+        wallet = self.make_wallet()
+        wallet.w3.eth.call.return_value = b""
+        wallet.w3.eth.estimate_gas.return_value = 90_000
+        signed_hash = Mock()
+        signed_hash.hex.return_value = "0xmissing"
+        wallet.account.sign_transaction.return_value = SimpleNamespace(
+            raw_transaction=b"signed", hash=signed_hash,
+        )
+        wallet.w3.eth.send_raw_transaction.side_effect = ValueError({
+            "code": -32000, "message": "nonce too low: tx: 506 state: 507",
+        })
+        wallet.w3.eth.get_transaction_receipt.side_effect = ValueError("not found")
+
+        with tempfile.TemporaryDirectory() as directory:
+            wallet.config = SimpleNamespace(chain_id=4663)
+            wallet.address = "0x1"
+            wallet.unresolved_broadcast_path = os.path.join(directory, "guard.json")
+            result = wallet._send_transaction({
+                "from": "0x1", "to": "0x2", "data": "0x1234",
+                "value": 7, "gas": 100_000, "nonce": 506,
+            })
+            self.assertTrue(os.path.exists(wallet.unresolved_broadcast_path))
+
+        self.assertFalse(result.success)
+        self.assertTrue(result.outcome_unknown)
+
     def test_base_fee_rejection_is_retryable_and_never_creates_guard(self):
         wallet = self.make_wallet()
         wallet.w3.eth.call.return_value = b""

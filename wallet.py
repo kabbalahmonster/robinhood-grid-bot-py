@@ -254,6 +254,48 @@ class Wallet:
         message = str(error).lower()
         return "max fee per gas less than block base fee" in message
 
+    @staticmethod
+    def _may_mean_already_broadcast(error: Exception) -> bool:
+        """Return true when an RPC rejection can race a prior acceptance."""
+        message = str(error).lower()
+        return any(fragment in message for fragment in (
+            "nonce too low", "already known", "known transaction",
+        ))
+
+    def _find_exact_receipt(self, tx_hash: str):
+        """Find the deterministic signed hash without rebroadcasting it."""
+        finder = getattr(self.w3, "find_transaction_receipt", None)
+        if callable(finder):
+            return finder(tx_hash)
+        try:
+            return self.w3.eth.get_transaction_receipt(tx_hash)
+        except Exception:
+            return None
+
+    def _result_from_recovered_receipt(self, tx_hash: str, receipt):
+        """Convert exact-hash chain evidence into a terminal result."""
+        status = int(receipt.get("status") or 0)
+        gas_used = int(receipt.get("gasUsed") or 0)
+        effective_gas_price = int(receipt.get("effectiveGasPrice") or 0)
+        if status == 1:
+            self.logger.warning(
+                "Recovered successful broadcast by exact signed hash after RPC submission error: "
+                "tx=%s gas_used=%s effective_gas_price=%s fee_wei=%s",
+                tx_hash, gas_used, effective_gas_price, gas_used * effective_gas_price,
+            )
+            return TransactionResult(
+                success=True, tx_hash=tx_hash, receipt=receipt,
+                gas_used=gas_used, effective_gas_price=effective_gas_price,
+            )
+        self.logger.error(
+            "Recovered reverted broadcast by exact signed hash: tx=%s status=%s",
+            tx_hash, status,
+        )
+        return TransactionResult(
+            success=False, tx_hash=tx_hash, receipt=receipt,
+            error="Transaction failed (status=0)", gas_used=gas_used,
+            effective_gas_price=effective_gas_price,
+        )
     def normal_gas_price(self, minimum_base_fee: int = 0) -> int:
         """Return dynamic Normal gas with a minimal anti-staleness margin."""
         multiplier = max(float(getattr(self.config, "gas_price_multiplier", 1.0)), 1.0)
@@ -278,6 +320,19 @@ class Wallet:
         return (
             "max fee per gas less than block base fee" in message
             or "fee cap less than block base fee" in message
+        )
+
+    @staticmethod
+    def is_definitive_prebroadcast_rejection(result: TransactionResult) -> bool:
+        """Distinguish a locally known hash from RPC broadcast acceptance."""
+        return (
+            not getattr(result, "success", False)
+            and not getattr(result, "outcome_unknown", False)
+            and (
+                not getattr(result, "tx_hash", None)
+                or "definitively rejected signed transaction before broadcast"
+                in str(getattr(result, "error", "") or "").lower()
+            )
         )
 
     @staticmethod
@@ -422,7 +477,7 @@ class Wallet:
             if (
                 attempt == 0
                 and not result.success
-                and not result.tx_hash
+                and self.is_definitive_prebroadcast_rejection(result)
                 and self.is_base_fee_too_low_error(result.error)
             ):
                 self.logger.warning(
@@ -870,6 +925,10 @@ class Wallet:
                 error = f"RPC definitively rejected signed transaction before broadcast: {e}"
                 self.logger.warning("%s tx=%s", error, tx_hash_hex)
                 return TransactionResult(success=False, tx_hash=tx_hash_hex, error=error)
+            if tx_hash_hex and self._may_mean_already_broadcast(e):
+                receipt = self._find_exact_receipt(tx_hash_hex)
+                if receipt is not None:
+                    return self._result_from_recovered_receipt(tx_hash_hex, receipt)
             if tx_hash_hex:
                 error = (
                     "Signed transaction may have been broadcast but RPC submission/confirmation failed; outcome "
@@ -959,6 +1018,10 @@ class Wallet:
                 error = f"RPC definitively rejected signed raw transaction before broadcast: {e}"
                 self.logger.warning("%s tx=%s", error, tx_hash_hex)
                 return TransactionResult(success=False, tx_hash=tx_hash_hex, error=error)
+            if tx_hash_hex and self._may_mean_already_broadcast(e):
+                receipt = self._find_exact_receipt(tx_hash_hex)
+                if receipt is not None:
+                    return self._result_from_recovered_receipt(tx_hash_hex, receipt)
             if tx_hash_hex:
                 error = (
                     "Signed raw transaction may have been broadcast but RPC submission/confirmation failed; outcome "
