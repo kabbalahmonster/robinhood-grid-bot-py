@@ -4551,7 +4551,6 @@ class GridBot:
         
         if compact_mode:
             # Compact output for tmux multi-pane view
-            from datetime import datetime
             time_str = datetime.now().strftime('%H:%M')
             
             # Positions are shown first so the bot identity and balances remain
