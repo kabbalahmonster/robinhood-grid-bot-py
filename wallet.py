@@ -296,7 +296,6 @@ class Wallet:
             error="Transaction failed (status=0)", gas_used=gas_used,
             effective_gas_price=effective_gas_price,
         )
-
     def normal_gas_price(self, minimum_base_fee: int = 0) -> int:
         """Return dynamic Normal gas with a minimal anti-staleness margin."""
         multiplier = max(float(getattr(self.config, "gas_price_multiplier", 1.0)), 1.0)

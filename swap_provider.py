@@ -95,6 +95,7 @@ class FallbackSwapProvider:
         return self.fallback is not None and self.active is self.fallback
 
     def provider_for_name(self, name):
+        """Resolve a configured tournament provider without granting fallback authority."""
         return self.providers.get(name)
 
     def run_with_fallback(self, operation, operation_name="swap operation"):
