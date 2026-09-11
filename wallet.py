@@ -324,6 +324,19 @@ class Wallet:
         )
 
     @staticmethod
+    def is_definitive_prebroadcast_rejection(result: TransactionResult) -> bool:
+        """Distinguish a locally known hash from RPC broadcast acceptance."""
+        return (
+            not getattr(result, "success", False)
+            and not getattr(result, "outcome_unknown", False)
+            and (
+                not getattr(result, "tx_hash", None)
+                or "definitively rejected signed transaction before broadcast"
+                in str(getattr(result, "error", "") or "").lower()
+            )
+        )
+
+    @staticmethod
     def base_fee_from_error(error: Optional[str]) -> int:
         """Extract the node's current base fee from an underpriced rejection."""
         matches = re.findall(r"basefee\s*:\s*(\d+)", str(error or ""), flags=re.IGNORECASE)
@@ -465,7 +478,7 @@ class Wallet:
             if (
                 attempt == 0
                 and not result.success
-                and not result.tx_hash
+                and self.is_definitive_prebroadcast_rejection(result)
                 and self.is_base_fee_too_low_error(result.error)
             ):
                 self.logger.warning(

@@ -1410,6 +1410,14 @@ rebroadcasting. If the exact outcome still cannot be resolved, it atomically wri
 `data/unresolved_broadcast.json`; all trading loops and later restarts then
 halt before another trade.
 
+If a buy or sell is definitively rejected before broadcast because its legacy
+gas price fell below the block base fee, the bot extracts the rejecting node's
+base fee and rebuilds once with fresh headroom and a pending nonce. Before that
+single retry it repeats the operation gas cap and buy-reserve check; sells also
+repeat the gas-aware profit floor at the repriced fee. Any ambiguous outcome,
+missing base-fee evidence, failed safety check, or second rejection is not
+retried.
+
 The same durable guard protects multi-transaction WETH settlement. It is
 created after a buy wrap confirms and cleared only after the swap and position
 write complete. If a token-to-WETH sale confirms but its required unwrap does

@@ -1755,6 +1755,36 @@ class GridBot:
             return 0
         return int(getattr(quote, "value", 0) or requested_principal_wei)
 
+    def _rebuild_after_stale_base_fee_rejection(self, tx, result):
+        """Return one safely repriced retry after a proven pre-broadcast rejection.
+
+        A signed hash alone does not mean an RPC accepted the transaction. The
+        wallet's explicit ``definitively rejected ... before broadcast`` result
+        is the authority here. Ambiguous outcomes, accepted broadcasts, and
+        errors without the rejecting node's base fee must never enter this path.
+        The caller still owns its economic and hard-gas-cap checks before send.
+        """
+        error = str(getattr(result, "error", "") or "")
+        if (
+            getattr(result, "success", False)
+            or getattr(result, "outcome_unknown", False)
+            or not self.wallet.is_definitive_prebroadcast_rejection(result)
+            or not self.wallet.is_base_fee_too_low_error(error)
+        ):
+            return None
+        reported_base_fee = int(self.wallet.base_fee_from_error(error))
+        if reported_base_fee <= 0:
+            return None
+        # Give the rejecting node's observation another 2% surge margin, then
+        # let normal_gas_price apply configured freshness policy as usual.
+        minimum_base_fee = (reported_base_fee * 102 + 99) // 100
+        retry_tx = dict(tx)
+        retry_tx["gasPrice"] = int(self.wallet.normal_gas_price(minimum_base_fee))
+        retry_tx["nonce"] = self.wallet.w3.eth.get_transaction_count(
+            self.wallet.address, "pending",
+        )
+        return retry_tx
+
     def _final_buy_reserve_ok(
         self, quote, gas_limit, gas_price, weth_fallback, requested_principal_wei=0
     ):
@@ -2103,8 +2133,7 @@ class GridBot:
                 result = self.wallet.transfer_eth(tx, wait_for_receipt=True)
                 if (
                     not result.success
-                    and not result.tx_hash
-                    and not getattr(result, "outcome_unknown", False)
+                    and self.wallet.is_definitive_prebroadcast_rejection(result)
                     and self.wallet.is_base_fee_too_low_error(result.error)
                     and (reported_base_fee := int(self.wallet.base_fee_from_error(result.error))) > 0
                 ):
@@ -2825,6 +2854,21 @@ class GridBot:
             return
         token_balance_before = self._raw_token_balance(self.config.token_address)
         result = self.wallet._send_transaction(tx_params)
+        retry_tx = self._rebuild_after_stale_base_fee_rejection(tx_params, result)
+        if retry_tx is not None:
+            retry_gas_price = int(retry_tx["gasPrice"])
+            retry_allowed = self._gas_within_hard_cap(
+                gas_limit, retry_gas_price, "buy", buy_attempt_context,
+            ) and self._final_buy_reserve_ok(
+                quote, gas_limit, retry_gas_price, weth_fallback,
+                requested_principal_wei=buy_amount_wei,
+            )
+            if retry_allowed:
+                logger.warning(
+                    "Buy rejected before broadcast because gas became stale; "
+                    "rebuilding once with rejecting-node base fee"
+                )
+                result = self.wallet._send_transaction(retry_tx)
         
         if result.success:
             # Record position in gridless format
@@ -3466,6 +3510,31 @@ class GridBot:
         if attempted_token_balance_before is None:
             return
         result = self.wallet._send_transaction(sell_tx)
+        retry_tx = self._rebuild_after_stale_base_fee_rejection(sell_tx, result)
+        if retry_tx is not None:
+            retry_gas_price = int(retry_tx["gasPrice"])
+            retry_allowed = self._gas_within_hard_cap(
+                gas_limit, retry_gas_price, "sell",
+            )
+            if retry_allowed and not is_stoploss:
+                retry_minimum_wei = self._minimum_gas_aware_return_wei(
+                    int(round(sold_cost_eth * 10**18)), quote, min_profit,
+                    setup_gas_wei=sell_setup_gas_wei,
+                    projected_gas_cost_wei=gas_limit * retry_gas_price,
+                )
+                retry_allowed = final_return_wei >= retry_minimum_wei
+                if not retry_allowed:
+                    logger.warning(
+                        "Stale-fee sell retry skipped: return %.8f ETH < repriced "
+                        "gas-aware minimum %.8f ETH",
+                        final_return_wei / 10**18, retry_minimum_wei / 10**18,
+                    )
+            if retry_allowed:
+                logger.warning(
+                    "Sell rejected before broadcast because gas became stale; "
+                    "rebuilding once with rejecting-node base fee"
+                )
+                result = self.wallet._send_transaction(retry_tx)
         
         if result.success:
             if weth_fallback:
@@ -3727,6 +3796,21 @@ class GridBot:
             return
         token_balance_before = self._raw_token_balance(self.config.token_address)
         result = self.wallet._send_transaction(tx_params)
+        retry_tx = self._rebuild_after_stale_base_fee_rejection(tx_params, result)
+        if retry_tx is not None:
+            retry_gas_price = int(retry_tx["gasPrice"])
+            retry_allowed = self._gas_within_hard_cap(
+                gas_limit, retry_gas_price, "buy", buy_attempt_context,
+            ) and self._final_buy_reserve_ok(
+                quote, gas_limit, retry_gas_price, weth_fallback,
+                requested_principal_wei=buy_amount_wei,
+            )
+            if retry_allowed:
+                logger.warning(
+                    "Buy rejected before broadcast because gas became stale; "
+                    "rebuilding once with rejecting-node base fee"
+                )
+                result = self.wallet._send_transaction(retry_tx)
         
         if result.success:
             # Update position - store actual WETH cost (not price) in nano-WETH
@@ -4052,6 +4136,31 @@ class GridBot:
         if attempted_token_balance_before is None:
             return
         result = self.wallet._send_transaction(sell_tx)
+        retry_tx = self._rebuild_after_stale_base_fee_rejection(sell_tx, result)
+        if retry_tx is not None:
+            retry_gas_price = int(retry_tx["gasPrice"])
+            retry_allowed = self._gas_within_hard_cap(
+                gas_limit, retry_gas_price, "sell",
+            )
+            if retry_allowed:
+                retry_minimum_wei = self._minimum_gas_aware_return_wei(
+                    int(round(sold_cost_eth * 10**18)), quote, min_profit_percent,
+                    setup_gas_wei=sell_setup_gas_wei,
+                    projected_gas_cost_wei=gas_limit * retry_gas_price,
+                )
+                retry_allowed = final_return_wei >= retry_minimum_wei
+                if not retry_allowed:
+                    logger.warning(
+                        "Stale-fee sell retry skipped: return %.8f ETH < repriced "
+                        "gas-aware minimum %.8f ETH",
+                        final_return_wei / 10**18, retry_minimum_wei / 10**18,
+                    )
+            if retry_allowed:
+                logger.warning(
+                    "Sell rejected before broadcast because gas became stale; "
+                    "rebuilding once with rejecting-node base fee"
+                )
+                result = self.wallet._send_transaction(retry_tx)
         
         if result.success:
             # Get actual ETH/WETH received from transaction

@@ -144,7 +144,7 @@ class TestWalletNativeTransfer(unittest.TestCase):
             (wallet.address, "pending"),
         )
 
-    def test_erc20_transfer_never_retries_after_hash_assignment(self):
+    def test_erc20_transfer_retries_deterministic_hash_after_definitive_rejection(self):
         wallet = Wallet.__new__(Wallet)
         wallet.logger = logging.getLogger("test.wallet")
         wallet.address = "0x0000000000000000000000000000000000000002"
@@ -152,11 +152,18 @@ class TestWalletNativeTransfer(unittest.TestCase):
         transfer = wallet.w3.eth.contract.return_value.functions.transfer.return_value
         transfer.build_transaction.side_effect = lambda params: dict(params)
         wallet.normal_gas_price = Mock(return_value=400_000_000)
-        wallet._send_transaction = Mock(return_value=TransactionResult(
-            success=False,
-            tx_hash="0xaccepted",
-            error="max fee per gas less than block base fee",
-        ))
+        wallet._send_transaction = Mock(side_effect=[
+            TransactionResult(
+                success=False,
+                tx_hash="0xdeterministic-not-accepted",
+                error=(
+                    "RPC definitively rejected signed transaction before broadcast: "
+                    "max fee per gas less than block base fee: baseFee: 369080000"
+                ),
+            ),
+            TransactionResult(success=True, tx_hash="0xaccepted"),
+        ])
+        wallet.base_fee_from_error = Mock(return_value=369_080_000)
 
         result = wallet.transfer_erc20(
             "0x0000000000000000000000000000000000000003",
@@ -164,8 +171,8 @@ class TestWalletNativeTransfer(unittest.TestCase):
             123,
         )
 
-        self.assertFalse(result.success)
-        wallet._send_transaction.assert_called_once()
+        self.assertTrue(result.success)
+        self.assertEqual(wallet._send_transaction.call_count, 2)
 
 
 if __name__ == "__main__":

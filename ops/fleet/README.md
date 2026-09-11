@@ -1527,6 +1527,13 @@ it cannot create another nonce or order. Ambiguous timeouts, disconnects, rate
 limits, and server errors never use this path and still create the unresolved
 broadcast guard.
 
+A separate safe retry handles a fast-moving block base fee. When the RPC
+explicitly rejects a buy or sell *before broadcast* because `gasPrice` is below
+its observed base fee, the bot extracts that base fee, adds fresh headroom, and
+rebuilds once with the pending nonce. The repriced transaction must still pass
+the operation gas cap and native-buy reserve; a sell must also still clear its
+gas-aware profit floor. Signed-but-ambiguous transactions never use this retry.
+
 Native-mode regular buys and sells also use this guard during direct-WETH
 fallback settlement. A confirmed wrap is guarded until its buy swap and
 position write complete. A confirmed token-to-WETH sale retains its position
