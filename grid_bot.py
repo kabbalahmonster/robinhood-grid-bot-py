@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import threading
+import uuid
 import sys
 import argparse
 import random
@@ -1184,6 +1185,10 @@ class GridBot:
         eligible; preparation, approval, signing, and broadcasting must perform
         their own fresh validation later in the execution path.
         """
+        lifecycle = self._publish_tournament_transition(
+            direction, "collecting_candidates", new_tournament=True,
+            amount_raw=str(int(amount))
+        )
         try:
             from route_tournament import (collect_execution_preflight, select_execution_candidate,
                                           snapshot)
@@ -1298,11 +1303,18 @@ class GridBot:
             comparison = {"mode": "execution_preflight", "direction": direction,
                           "status": "preflight_failed", "candidates": []}
             selection = None
+        comparison["tournament_id"] = lifecycle["tournament_id"]
+        comparison["started_at"] = lifecycle["started_at"]
+        comparison["revision"] = lifecycle["revision"]
         comparison["updated_at"] = datetime.now().astimezone().isoformat()
         self._route_execution_preflight = comparison
         comparisons = getattr(self, "_route_comparisons", {})
         comparisons[direction] = comparison
         self._route_comparisons = comparisons
+        self._publish_tournament_transition(
+            direction,
+            "preflight_candidate_selected" if selection else "baseline_fallback",
+        )
         return selection
 
     def _revalidate_selected_route(self, selection, direction, amount):
@@ -1495,6 +1507,59 @@ class GridBot:
         comparison = getattr(self, "_route_comparisons", {}).get(direction)
         return {**(attempt or {}), "route_comparison": comparison} if comparison else attempt
 
+    def _publish_tournament_transition(self, direction, status, *, new_tournament=False, **details):
+        """Advance and immediately publish one monotonic tournament lifecycle."""
+        comparisons = getattr(self, "_route_comparisons", {})
+        comparison = None if new_tournament else comparisons.get(direction)
+        now = datetime.now().astimezone().isoformat()
+        if not isinstance(comparison, dict):
+            comparison = {
+                "mode": "execution_preflight",
+                "direction": direction,
+                "tournament_id": uuid.uuid4().hex,
+                "started_at": now,
+                "revision": 0,
+                "candidates": [],
+            }
+        comparison.setdefault("tournament_id", uuid.uuid4().hex)
+        comparison.setdefault("started_at", now)
+        comparison["revision"] = int(comparison.get("revision") or 0) + 1
+        comparison["status"] = status
+        comparison["updated_at"] = now
+        comparison.update(details)
+        comparisons[direction] = comparison
+        self._route_comparisons = comparisons
+        if comparison.get("mode") == "execution_preflight":
+            self._route_execution_preflight = comparison
+        reporter = getattr(self, "_reporter", None)
+        if reporter:
+            reporter.report_update(**{
+                direction + "_attempt": self._attempt_with_route_comparison(direction)
+            })
+        return comparison
+
+    def _tournament_submission_callback(self, direction):
+        comparison = getattr(self, "_route_comparisons", {}).get(direction)
+        if (getattr(self.config, "route_tournament_mode", "off") != "gate"
+                or not isinstance(comparison, dict)
+                or comparison.get("status") not in {
+                    "preflight_candidate_selected", "baseline_fallback",
+                }):
+            return None
+
+        def submitted(tx_hash):
+            submitted_at = datetime.now().astimezone().isoformat()
+            self._publish_tournament_transition(
+                direction, "transaction_submitted",
+                pending_transaction={
+                    "tx_hash": str(tx_hash),
+                    "side": direction,
+                    "submitted_at": submitted_at,
+                },
+                submitted_at=submitted_at,
+            )
+        return submitted
+
     def _mark_buy_tournament_aborted(self, *, reason, market_pnl_percent,
                                      block_threshold_percent, trigger_threshold_percent):
         """Close a selected buy tournament when a later strategy guard vetoes it."""
@@ -1506,9 +1571,9 @@ class GridBot:
             "trigger_threshold_percent": round(float(trigger_threshold_percent), 4),
         }
         if isinstance(comparison, dict):
-            comparison["status"] = "execution_aborted"
-            comparison["execution_abort"] = abort
-            comparison["updated_at"] = datetime.now().astimezone().isoformat()
+            self._publish_tournament_transition(
+                "buy", "execution_aborted", execution_abort=abort,
+            )
         self._buy_attempt = {"status": reason, **abort}
 
     def _expire_reported_buy_state(self):
@@ -1554,12 +1619,15 @@ class GridBot:
             # safeguard below. This is not post-gate quote shopping.
             comparison = getattr(self, "_route_execution_preflight", None)
             if isinstance(comparison, dict):
-                comparison["status"] = "baseline_fallback"
-                comparison["execution_fallback"] = {
-                    "reason": "no_fresh_tournament_candidate",
-                    "provider": getattr(getattr(self.provider, "primary", None), "name", None),
-                }
-                comparison["updated_at"] = datetime.now().astimezone().isoformat()
+                self._publish_tournament_transition(
+                    direction, "baseline_fallback",
+                    execution_fallback={
+                        "reason": "no_fresh_tournament_candidate",
+                        "provider": getattr(
+                            getattr(self.provider, "primary", None), "name", None
+                        ),
+                    },
+                )
             primary = getattr(self.provider, "primary", None)
             if primary is not None:
                 self.provider.active = primary
@@ -2387,6 +2455,9 @@ class GridBot:
             comparison = getattr(self, "_route_comparisons", {}).get(side)
             if isinstance(comparison, dict):
                 comparison["status"] = "completed"
+                comparison["revision"] = int(comparison.get("revision") or 0) + 1
+                comparison["confirmed_at"] = trade["timestamp"]
+                comparison.pop("pending_transaction", None)
                 comparison["final"] = {
                     "tx_hash": str(tx_hash),
                     "gas_fee_eth": float(gas_fee_eth or 0),
@@ -2903,7 +2974,9 @@ class GridBot:
         ):
             return
         token_balance_before = self._raw_token_balance(self.config.token_address)
-        result = self.wallet._send_transaction(tx_params)
+        result = self.wallet._send_transaction(
+            tx_params, on_submitted=self._tournament_submission_callback("buy")
+        )
         retry_tx = self._rebuild_after_stale_base_fee_rejection(tx_params, result)
         if retry_tx is not None:
             retry_gas_price = int(retry_tx["gasPrice"])
@@ -2918,7 +2991,9 @@ class GridBot:
                     "Buy rejected before broadcast because gas became stale; "
                     "rebuilding once with rejecting-node base fee"
                 )
-                result = self.wallet._send_transaction(retry_tx)
+                result = self.wallet._send_transaction(
+                    retry_tx, on_submitted=self._tournament_submission_callback("buy")
+                )
         
         if result.success:
             # Record position in gridless format
@@ -3559,7 +3634,9 @@ class GridBot:
         attempted_token_balance_before = self._snapshot_sell_token_balance_or_halt(pos_id, sell_tx)
         if attempted_token_balance_before is None:
             return
-        result = self.wallet._send_transaction(sell_tx)
+        result = self.wallet._send_transaction(
+            sell_tx, on_submitted=self._tournament_submission_callback("sell")
+        )
         retry_tx = self._rebuild_after_stale_base_fee_rejection(sell_tx, result)
         if retry_tx is not None:
             retry_gas_price = int(retry_tx["gasPrice"])
@@ -3584,7 +3661,9 @@ class GridBot:
                     "Sell rejected before broadcast because gas became stale; "
                     "rebuilding once with rejecting-node base fee"
                 )
-                result = self.wallet._send_transaction(retry_tx)
+                result = self.wallet._send_transaction(
+                    retry_tx, on_submitted=self._tournament_submission_callback("sell")
+                )
         
         if result.success:
             if weth_fallback:
@@ -3845,7 +3924,9 @@ class GridBot:
         ):
             return
         token_balance_before = self._raw_token_balance(self.config.token_address)
-        result = self.wallet._send_transaction(tx_params)
+        result = self.wallet._send_transaction(
+            tx_params, on_submitted=self._tournament_submission_callback("buy")
+        )
         retry_tx = self._rebuild_after_stale_base_fee_rejection(tx_params, result)
         if retry_tx is not None:
             retry_gas_price = int(retry_tx["gasPrice"])
@@ -3860,7 +3941,9 @@ class GridBot:
                     "Buy rejected before broadcast because gas became stale; "
                     "rebuilding once with rejecting-node base fee"
                 )
-                result = self.wallet._send_transaction(retry_tx)
+                result = self.wallet._send_transaction(
+                    retry_tx, on_submitted=self._tournament_submission_callback("buy")
+                )
         
         if result.success:
             # Update position - store actual WETH cost (not price) in nano-WETH
@@ -4185,7 +4268,9 @@ class GridBot:
         attempted_token_balance_before = self._snapshot_sell_token_balance_or_halt(pos_id, sell_tx)
         if attempted_token_balance_before is None:
             return
-        result = self.wallet._send_transaction(sell_tx)
+        result = self.wallet._send_transaction(
+            sell_tx, on_submitted=self._tournament_submission_callback("sell")
+        )
         retry_tx = self._rebuild_after_stale_base_fee_rejection(sell_tx, result)
         if retry_tx is not None:
             retry_gas_price = int(retry_tx["gasPrice"])
@@ -4210,7 +4295,9 @@ class GridBot:
                     "Sell rejected before broadcast because gas became stale; "
                     "rebuilding once with rejecting-node base fee"
                 )
-                result = self.wallet._send_transaction(retry_tx)
+                result = self.wallet._send_transaction(
+                    retry_tx, on_submitted=self._tournament_submission_callback("sell")
+                )
         
         if result.success:
             # Get actual ETH/WETH received from transaction

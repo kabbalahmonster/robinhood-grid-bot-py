@@ -90,6 +90,21 @@ class TestDashboardReporter(unittest.TestCase):
         self.assertEqual(payload["sells"], 1)
         self.assertEqual(payload["sell_attempt"], completed)
         self.assertEqual(payload["trades_history"][-1]["tx_hash"], "0xconfirmed")
+        self.assertEqual(payload["dashboard_schema_version"], 2)
+        self.assertEqual(payload["incarnation_id"], reporter._queue[0]["incarnation_id"])
+        self.assertGreater(payload["revision"], reporter._queue[0]["revision"])
+
+    @patch("dashboard_reporter.threading.Thread.start")
+    def test_reports_have_process_identity_and_strictly_increasing_revisions(self, _start):
+        reporter = DashboardReporter("https://doomdash.ca/api/status")
+        reporter.report(token_symbol="MANY")
+        reporter.report_update(sell_attempt={"status": "pending"})
+        reporter.report(token_symbol="MANY")
+
+        payloads = reporter._queue
+        self.assertEqual([item["revision"] for item in payloads], [1, 2, 3])
+        self.assertEqual(len({item["incarnation_id"] for item in payloads}), 1)
+        self.assertTrue(all(item["dashboard_schema_version"] == 2 for item in payloads))
 
     @patch("dashboard_reporter.threading.Thread.start")
     def test_buy_attempt_is_round_scoped_payload_field(self, _start):

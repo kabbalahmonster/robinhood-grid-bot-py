@@ -792,6 +792,7 @@ class Wallet:
         self,
         tx: TxParams,
         wait_for_receipt: bool = True,
+        on_submitted=None,
     ) -> TransactionResult:
         """
         Sign and send a transaction.
@@ -868,6 +869,11 @@ class Wallet:
                 raise ValueError(
                     f"RPC returned transaction hash {returned_hash} but signed payload hashes to {tx_hash_hex}"
                 )
+            if on_submitted is not None:
+                try:
+                    on_submitted(tx_hash_hex)
+                except Exception as exc:
+                    self.logger.debug("Transaction submission callback failed: %s", exc)
             
             self.logger.debug(f"Transaction sent: {tx_hash_hex}")
             

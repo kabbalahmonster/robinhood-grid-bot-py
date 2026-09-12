@@ -59,6 +59,8 @@ class DashboardReporter:
         self._bot_id = bot_id
         self._local_status_path = local_status_path
         self._start_time = time.monotonic()
+        self._incarnation_id = os.urandom(8).hex()
+        self._revision = 0
         self._sigil = create_sigil(bot_id)
 
         # Internal queue + worker thread
@@ -148,9 +150,14 @@ class DashboardReporter:
         All parameters are optional so callers can send partial updates
         without breaking the schema.
         """
+        with self._lock:
+            self._revision += 1
+            revision = self._revision
         payload: Dict[str, Any] = {
-            "dashboard_schema_version": 1,
+            "dashboard_schema_version": 2,
             "bot_id": self._bot_id,
+            "incarnation_id": self._incarnation_id,
+            "revision": revision,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "uptime_seconds": round(self.uptime_seconds, 1),
             "price": price,
@@ -215,6 +222,19 @@ class DashboardReporter:
                 logger.debug("Local fleet status snapshot failed: %s", exc)
 
         with self._lock:
+            # A lifecycle/trade update can race the comparatively expensive
+            # full snapshot assembly above. Never let that older snapshot
+            # become the source cloned by the next immediate update.
+            if revision < self._revision and self._latest_payload is not None:
+                for key in (
+                    "buy_attempt", "sell_attempt", "buys", "sells",
+                    "session_profit_eth", "realized_profit_eth",
+                    "realized_profit_periods", "realized_sales",
+                    "trades_history", "events",
+                ):
+                    payload[key] = copy.deepcopy(self._latest_payload.get(key))
+                self._revision += 1
+                payload["revision"] = self._revision
             self._latest_payload = copy.deepcopy(payload)
             if len(self._queue) >= _MAX_QUEUE_SIZE:
                 # Drop oldest to make room — fire-and-forget semantics
@@ -237,6 +257,10 @@ class DashboardReporter:
                 return False
             payload = copy.deepcopy(self._latest_payload)
             payload.update(updates)
+            self._revision += 1
+            payload["dashboard_schema_version"] = 2
+            payload["incarnation_id"] = self._incarnation_id
+            payload["revision"] = self._revision
             payload["timestamp"] = datetime.now(timezone.utc).isoformat()
             payload["uptime_seconds"] = round(self.uptime_seconds, 1)
             self._latest_payload = copy.deepcopy(payload)

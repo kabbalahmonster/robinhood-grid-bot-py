@@ -143,6 +143,28 @@ class TestDashboardEvents(unittest.TestCase):
         self.assertEqual(comparison["final"]["side"], "buy")
         self.assertEqual(comparison["final"]["token_amount"], 12345.0)
 
+    def test_tournament_submission_is_published_before_confirmation(self):
+        updates = []
+        self.bot.config.route_tournament_mode = "gate"
+        self.bot._reporter = type(
+            "Reporter", (), {"report_update": lambda _self, **value: updates.append(value)}
+        )()
+        self.bot._route_comparisons = {
+            "sell": {"mode": "execution_preflight", "direction": "sell",
+                     "status": "preflight_candidate_selected", "tournament_id": "round-1",
+                     "started_at": "2026-09-12T17:00:00+00:00", "revision": 2,
+                     "candidates": []}
+        }
+
+        callback = self.bot._tournament_submission_callback("sell")
+        callback("0x" + "c" * 64)
+
+        comparison = self.bot._route_comparisons["sell"]
+        self.assertEqual(comparison["status"], "transaction_submitted")
+        self.assertEqual(comparison["revision"], 3)
+        self.assertEqual(comparison["pending_transaction"]["side"], "sell")
+        self.assertEqual(updates[-1]["sell_attempt"]["route_comparison"], comparison)
+
 
 if __name__ == "__main__":
     unittest.main()

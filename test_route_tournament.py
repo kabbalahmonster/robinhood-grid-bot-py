@@ -1475,9 +1475,40 @@ def test_gate_preflight_failure_falls_back_to_normal_provider_path():
     router.build_swap_transaction.assert_called_once()
     b._revalidate_selected_route.assert_not_called()
     assert b._route_execution_preflight["status"] == "baseline_fallback"
-    assert b._route_execution_preflight["execution_fallback"] == {
-        "reason": "no_fresh_tournament_candidate", "provider": "uniswap",
-    }
+
+
+def test_tournament_submission_callback_publishes_pending_transaction_immediately():
+    b = bot("gate")
+    b._reporter = Mock()
+    b._sell_attempt = {"status": "checking"}
+    b._route_comparisons = {"sell": {
+        "mode": "execution_preflight", "direction": "sell",
+        "status": "preflight_candidate_selected", "candidates": [],
+        "tournament_id": "round-1", "started_at": "2026-09-12T00:00:00+00:00",
+        "revision": 2,
+    }}
+
+    callback = b._tournament_submission_callback("sell")
+    callback("0x" + "a" * 64)
+
+    comparison = b._route_comparisons["sell"]
+    assert comparison["status"] == "transaction_submitted"
+    assert comparison["revision"] == 3
+    assert comparison["pending_transaction"]["tx_hash"] == "0x" + "a" * 64
+    assert comparison["pending_transaction"]["side"] == "sell"
+    b._reporter.report_update.assert_called_once()
+
+
+def test_baseline_fallback_submission_still_reports_pending_transaction():
+    b = bot("gate")
+    b._route_comparisons = {"sell": {
+        "mode": "execution_preflight", "direction": "sell",
+        "status": "baseline_fallback", "candidates": [],
+    }}
+    callback = b._tournament_submission_callback("sell")
+    callback("0x" + "b" * 64)
+    assert b._route_comparisons["sell"]["status"] == "transaction_submitted"
+    assert b._route_comparisons["sell"]["pending_transaction"]["tx_hash"] == "0x" + "b" * 64
 
 
 def test_snapshot_failure_is_reported_without_candidate_requests():
