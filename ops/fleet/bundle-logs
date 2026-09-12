@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+SCRIPT_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)"
+# shellcheck source=fleet-common.sh
+source "$SCRIPT_DIR/fleet-common.sh"
+
+usage() { cat <<'EOF'
+Usage: bundle-logs [options]
+
+Combine the newest bot log from every selected fleet member into one
+chronological, analysis-ready text file. Source logs are never modified.
+
+Selection:
+  --all                      Include the whole fleet (default)
+  --only NAMES               Include comma-separated bot names
+  --exclude NAMES            Exclude comma-separated bot names
+  --config PATH              Use an alternate fleet configuration
+
+Output:
+  --output PATH              Destination (default: fleet-logs-UTC_TIMESTAMP.log)
+  --since AGE                Keep entries from the last AGE: 30min, 6h, 2d, 1w
+  --max-lines-per-bot COUNT  Keep at most the newest COUNT physical lines per bot
+  --force                    Atomically replace an existing output file
+  --no-redact                Disable default secret redaction (dangerous)
+  -h, --help                 Show this help
+
+Examples:
+  bundle-logs --all
+  bundle-logs --only MANY,ROBINVAULT --since 6h --output tournament.log
+EOF
+}
+
+config_path=""; only=""; exclude=""; output=""; since=""; max_lines=""; force=0; redact=1; saw_all=0
+while (($#)); do
+  case "$1" in
+    --config) (($# >= 2)) || fleet_die "--config requires a path"; config_path="$2"; shift 2 ;;
+    --only) (($# >= 2)) || fleet_die "--only requires names"; only="$2"; shift 2 ;;
+    --exclude) (($# >= 2)) || fleet_die "--exclude requires names"; exclude="$2"; shift 2 ;;
+    --all) saw_all=1; shift ;;
+    --output) (($# >= 2)) || fleet_die "--output requires a path"; output="$2"; shift 2 ;;
+    --since) (($# >= 2)) || fleet_die "--since requires an age"; since="$2"; shift 2 ;;
+    --max-lines-per-bot) (($# >= 2)) || fleet_die "--max-lines-per-bot requires a count"; max_lines="$2"; shift 2 ;;
+    --force) force=1; shift ;;
+    --no-redact) redact=0; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) fleet_die "Unknown option: $1" ;;
+  esac
+done
+
+((saw_all == 0 || ${#only} == 0)) || fleet_die "--all and --only cannot be combined"
+[[ -z "$max_lines" || "$max_lines" =~ ^[1-9][0-9]*$ ]] || fleet_die "--max-lines-per-bot must be a positive integer"
+fleet_load_config "$config_path"
+fleet_apply_selection "$only" "$exclude"
+fleet_validate_bots
+python_bin="$(fleet_python_for "${FLEET_BOT_DIRS[0]}")" || fleet_die "Python 3 is required"
+if [[ -z "$output" ]]; then
+  output="fleet-logs-$(date -u +%Y%m%dT%H%M%SZ).log"
+fi
+
+args=(--output "$output")
+[[ -z "$since" ]] || args+=(--since "$since")
+[[ -z "$max_lines" ]] || args+=(--max-lines-per-bot "$max_lines")
+((force == 0)) || args+=(--force)
+((redact == 1)) || args+=(--no-redact)
+for bot_dir in "${FLEET_BOT_DIRS[@]}"; do
+  args+=("$(fleet_bot_name "$bot_dir")" "$bot_dir")
+done
+
+if ((redact == 0)); then
+  printf 'WARNING: secret redaction is disabled; inspect the bundle before sharing it.\n' >&2
+fi
+exec "$python_bin" "$SCRIPT_DIR/bundle-logs.py" "${args[@]}"

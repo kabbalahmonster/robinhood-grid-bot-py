@@ -91,6 +91,21 @@ is retained unless `--keep-latest 0` is explicit. `--older-than all` means all
 matching logs after newest-file retention; it does not mean all bot files. See
 the fleet README for every accepted age format and live-process caveat.
 
+## Bundle current fleet logs for analysis
+
+Create one safely shareable file from every bot's newest log without stopping
+the fleet:
+
+```bash
+bundle-logs --all --since 6h --output fleet-tournament.log
+```
+
+For a focused comparison, use `--only MANY,ROBINVAULT`. The output is
+chronological and bot-labelled, with multiline errors preserved and secret
+redaction enabled by default. A nonzero exit with an output file means the
+manifest identifies one or more missing/unreadable bot logs; the partial
+evidence is usable, but its stated gaps matter.
+
 ## Freeze, consolidate, and redistribute
 
 ```bash

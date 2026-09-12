@@ -110,6 +110,7 @@ sudo apt install tmux git python3 python3-venv
      ops/fleet/restart-bot ops/fleet/update-fleet \
      ops/fleet/update-this-checkout ops/fleet/update-all ops/fleet/update-bot \
      ops/fleet/usdg-sweep ops/fleet/cleanup-logs ops/fleet/cleanup-logs.py \
+     ops/fleet/bundle-logs ops/fleet/bundle-logs.py \
      ops/fleet/treasury-transfer ops/fleet/fund-bots ops/fleet/update-variable \
      ops/fleet/adjust-positions ops/fleet/fleet-membership \
      ops/fleet/position-capacity.py \
@@ -147,6 +148,7 @@ sudo apt install tmux git python3 python3-venv
    ln -sf "$PWD/ops/fleet/usdg-sweep" "$HOME/bin/usdg-sweep"
    ln -sf "$PWD/ops/fleet/treasury-transfer" "$HOME/bin/treasury-transfer"
    ln -sf "$PWD/ops/fleet/cleanup-logs" "$HOME/bin/cleanup-logs"
+   ln -sf "$PWD/ops/fleet/bundle-logs" "$HOME/bin/bundle-logs"
    ln -sf "$PWD/ops/fleet/fund-bots" "$HOME/bin/fund-bots"
    ln -sf "$PWD/ops/fleet/update-variable" "$HOME/bin/update-variable"
    ln -sf "$PWD/ops/fleet/adjust-positions" "$HOME/bin/adjust-positions"
@@ -417,6 +419,36 @@ keep the default newest-log protection. The command rechecks each file's type
 and inode immediately before deletion to prevent a preview/delete race from
 replacing a reviewed target.
 
+## Analysis-ready fleet log bundles
+
+`bundle-logs` selects the newest regular `*.log` or rotated `*.log.*` file
+from each chosen bot, merges timestamped records in UTC order, prefixes every
+record with bot and source filename, and writes one portable text file.
+Untimestamped traceback and multiline lines remain attached to their preceding
+record. Source logs are never changed.
+
+The whole fleet is the default; `--all` is accepted when explicitness helps.
+Use the standard exact, case-insensitive selectors for a smaller set:
+
+```bash
+bundle-logs --all
+bundle-logs --only MANY,ROBINVAULT --output tournament.log
+bundle-logs --exclude ARCHIVE --since 6h --output recent-fleet.log
+bundle-logs --all --max-lines-per-bot 10000
+```
+
+The manifest records generation/cutoff time and, for every selected bot, the
+source filename, byte size, included record count, and any omission error.
+Missing logs produce a partial bundle and a nonzero exit status so useful
+evidence survives without hiding gaps. Existing output is protected unless
+`--force` is explicit, and the completed file is installed atomically.
+
+Secret redaction is enabled by default for key/token/password assignments,
+authorization headers, credential-like URL parameters, and unlabeled 32-byte
+hex values. Public transaction hashes labelled as a tx/hash remain visible.
+`--no-redact` is for private local debugging only and emits a warning; inspect
+such a file before sharing it.
+
 ## Commands
 
 ### Operator command index
@@ -435,6 +467,7 @@ unless their section explicitly says otherwise.
 | `strategy-model` | Compare gridless trigger geometry and generate HTML/CSV/JSON reports | Writes report files only |
 | `fleet-audit` | Reconcile local treasury/liquidation audit records | No |
 | `cleanup-logs` | Preview or delete aged bot log files by fleet selection | `--apply` only |
+| `bundle-logs` | Merge newest selected-bot logs into one redacted chronological report | Writes one report file |
 | `start-fleet` / `stop-fleet` / `restart-fleet` | Manage the configured tmux fleet | Processes only |
 | `start-bot NAME` / `stop-bot NAMES...` / `restart-bot NAMES...` | Durably start, stop, or cleanly restart selected bots | Processes/state marker |
 | `update-this-checkout` | Fast-forward the dedicated operations clone | Yes, Git |
