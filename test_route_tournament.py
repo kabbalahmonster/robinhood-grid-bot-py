@@ -1025,6 +1025,10 @@ def test_execution_preflight_collects_only_when_all_required_providers_exist():
     assert preflight["selected_execution_candidate"] == {
         "provider": "uniswap", "settlement": "native",
     }
+    assert preflight["tournament_id"]
+    assert all(row["tournament_id"] == preflight["tournament_id"]
+               for row in preflight["candidates"])
+    assert all(row["candidate_elapsed_ms"] >= 0 for row in preflight["candidates"])
 
     no_uniswap = SimpleNamespace(uniswap_api_key="", weth_address="weth", token_address="token")
     blocked = collect_execution_preflight(no_uniswap, "wallet", context("sell"), clients.__getitem__)
@@ -1042,6 +1046,73 @@ def test_execution_preflight_collects_only_when_all_required_providers_exist():
         "runner_up_delta": None, "status": "required_provider_unavailable",
         "failures": ["uniswap_unavailable"],
     }
+
+
+def test_execution_preflight_logs_one_ordered_correlated_record_per_candidate(caplog):
+    import logging
+    clients = {name: Mock() for name in ("uniswap", "sushiswap")}
+    prepared = quote(
+        to="0x8e6fd69a77e88ee20ba4b4fbd59dfcda3ec0e98a",
+        allowance_target="spender", data="0xdead",
+    )
+    for client in clients.values():
+        client.get_quote.return_value = prepared
+    cfg = SimpleNamespace(uniswap_api_key="key", weth_address="weth", token_address="token")
+    correlated = {**context("sell"), "tournament_id": "round-ordered"}
+
+    with caplog.at_level(logging.INFO, logger="grid_bot.route_tournament"):
+        result = collect_execution_preflight(
+            cfg, "wallet", correlated, clients.__getitem__,
+            allowance_probe=lambda _token, _spender: 10**15,
+            gas_estimate_provider=lambda _quote, _settlement: 100000,
+            conversion_gas_estimate_provider=lambda _quote, _settlement: 60000,
+        )
+
+    messages = [record.getMessage() for record in caplog.records
+                if "Route tournament" in record.getMessage()]
+    candidates = [message for message in messages
+                  if "Route tournament candidate" in message]
+    winner_index = next(i for i, message in enumerate(messages)
+                        if "Route tournament winner" in message)
+    assert result["tournament_id"] == "round-ordered"
+    assert len(candidates) == 4
+    assert all("tournament_id=round-ordered" in message for message in messages)
+    assert all("candidate_elapsed_ms=" in message for message in candidates)
+    assert all(messages.index(message) < winner_index for message in candidates)
+
+
+def test_timed_out_preflight_workers_cannot_log_candidates_after_winner(caplog):
+    import logging
+
+    def factory(_name):
+        client = Mock()
+
+        def ignore_socket_budget(**_kwargs):
+            time.sleep(0.65)
+            return quote()
+
+        client.get_quote.side_effect = ignore_socket_budget
+        return client
+
+    cfg = SimpleNamespace(uniswap_api_key="key", weth_address="weth", token_address="token")
+    correlated = {**context("sell"), "tournament_id": "round-timeout"}
+    with caplog.at_level(logging.INFO, logger="grid_bot.route_tournament"):
+        collect_execution_preflight(
+            cfg, "wallet", correlated, factory,
+            gas_estimate_provider=lambda _quote, _settlement: 100000,
+            max_seconds=0.01,
+        )
+        # Workers deliberately outlive the aggregate result. Their eventual
+        # completion must not append misleading candidate events.
+        time.sleep(0.2)
+
+    messages = [record.getMessage() for record in caplog.records
+                if "Route tournament" in record.getMessage()]
+    candidates = [message for message in messages
+                  if "Route tournament candidate" in message]
+    assert len(candidates) == 4
+    assert all("tournament_id=round-timeout" in message for message in candidates)
+    assert "Route tournament winner" in messages[-1]
 
 
 def test_execution_preflight_gives_all_four_candidates_independent_time_budgets():

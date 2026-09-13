@@ -449,10 +449,13 @@ Use `--tournament-only` to omit bot logs that have no route-tournament candidate
 or winner event after applying `--since` and `--max-lines-per-bot`. These logs
 remain listed as skipped in the manifest and do not make the command fail.
 Use `--tournament-rounds-only` for a smaller analysis file containing only each
-candidate-to-winner round and any provider diagnostics emitted between those
-boundaries. A final round interrupted before its winner is retained and labelled
-`incomplete=1` in the manifest instead of hiding likely failure evidence. The
-two tournament modes are mutually exclusive.
+correlated tournament lifecycle. New bot logs carry the same `tournament_id`
+on start, candidate, winner, submitted, completed, fallback, and abort events;
+the bundler groups those records by ID even if concurrent work finishes out of
+log order. It labels the manifest `correlation=id`. Older logs without IDs use
+the less reliable candidate-to-winner ordering fallback and are explicitly
+labelled `correlation=legacy_order`. A round interrupted before its winner is
+retained as `incomplete=1`. The two tournament modes are mutually exclusive.
 Missing logs produce a partial bundle and a nonzero exit status so useful
 evidence survives without hiding gaps. If the requested output exists, the
 command announces and uses the next available numbered sibling (`report.log`,
@@ -1534,6 +1537,13 @@ adds provider/RPC traffic. `gate` can select and execute a freshly revalidated
 Uniswap or Sushi native/WETH route; configuration validation requires the
 separate `ROUTE_TOURNAMENT_CANARY=true` acknowledgement. Start with exactly one
 monitored bot, never a fleet-wide gate rollout.
+
+Tournament telemetry is correlated end to end. Every round has a stable
+`tournament_id`; the aggregate collector emits exactly one record per expected
+candidate before its winner, with `candidate_elapsed_ms` and a sanitized
+failure class. Gate lifecycle records reuse the ID through baseline fallback,
+submission, confirmation, and abort. A provider worker that outlives the hard
+deadline cannot emit a late candidate record or influence route selection.
 
 Preview and then enable a single canary whose `.env` may predate the variables:
 

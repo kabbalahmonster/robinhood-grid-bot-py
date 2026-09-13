@@ -1196,6 +1196,7 @@ class GridBot:
             enriched = {
                 **context,
                 "execution_preflight": True,
+                "tournament_id": lifecycle["tournament_id"],
                 "token_address": getattr(self.config, "token_address", ""),
                 "trade_token_address": getattr(self, "trade_token_address", ""),
             }
@@ -1438,6 +1439,8 @@ class GridBot:
             if previous and previous["amount"] == int(amount):
                 return
             pending[direction] = snapshot(self, direction, amount, sold_cost_wei)
+            pending[direction]["tournament_id"] = uuid.uuid4().hex
+            pending[direction]["started_at"] = datetime.now().astimezone().isoformat()
             self._route_shadow_pending = pending
         except Exception:
             logger.warning("Route shadow snapshot unavailable; execution unchanged")
@@ -1531,6 +1534,18 @@ class GridBot:
         self._route_comparisons = comparisons
         if comparison.get("mode") == "execution_preflight":
             self._route_execution_preflight = comparison
+        tx_hash = None
+        pending_transaction = comparison.get("pending_transaction")
+        final = comparison.get("final")
+        if isinstance(pending_transaction, dict):
+            tx_hash = pending_transaction.get("tx_hash")
+        elif isinstance(final, dict):
+            tx_hash = final.get("tx_hash")
+        logger.info(
+            "Route tournament lifecycle tournament_id=%s direction=%s phase=%s revision=%d%s",
+            comparison["tournament_id"], direction, status, comparison["revision"],
+            f" tx_hash={tx_hash}" if tx_hash else "",
+        )
         reporter = getattr(self, "_reporter", None)
         if reporter:
             reporter.report_update(**{
@@ -2454,11 +2469,7 @@ class GridBot:
         if side in {"buy", "sell"} and getattr(self.config, "route_tournament_mode", "off") == "gate":
             comparison = getattr(self, "_route_comparisons", {}).get(side)
             if isinstance(comparison, dict):
-                comparison["status"] = "completed"
-                comparison["revision"] = int(comparison.get("revision") or 0) + 1
-                comparison["confirmed_at"] = trade["timestamp"]
-                comparison.pop("pending_transaction", None)
-                comparison["final"] = {
+                final = {
                     "tx_hash": str(tx_hash),
                     "gas_fee_eth": float(gas_fee_eth or 0),
                     "side": side,
@@ -2469,14 +2480,18 @@ class GridBot:
                     cost_eth = (
                         float(eth_amount) - float(gas_fee_eth or 0) - float(profit_eth or 0)
                     )
-                    comparison["final"].update({
+                    final.update({
                         "received_eth": float(eth_amount),
                         "profit_eth": float(profit_eth or 0),
                         "profit_percent": (
                             float(profit_eth or 0) * 100 / cost_eth if cost_eth > 0 else 0
                         ),
                     })
-                comparison["updated_at"] = trade["timestamp"]
+                comparison.pop("pending_transaction", None)
+                self._publish_tournament_transition(
+                    side, "completed", confirmed_at=trade["timestamp"],
+                    updated_at=trade["timestamp"], final=final,
+                )
         self.dashboard_trades = (self.dashboard_trades + [trade])[-50:]
         try:
             os.makedirs(os.path.dirname(self.dashboard_trades_file), exist_ok=True)

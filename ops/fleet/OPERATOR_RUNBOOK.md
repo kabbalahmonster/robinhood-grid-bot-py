@@ -112,9 +112,14 @@ uses the next numbered name. Pass `--force` only when replacing the exact path
 is intentional.
 `--tournament-only` lists bots without a tournament in the filtered time window
 as skipped in the manifest, while leaving them out of the merged records.
-Use `--tournament-rounds-only` when the analysis needs only complete
-candidate-to-winner slices plus any in-round errors. Interrupted final rounds
-are retained and clearly labelled in the manifest.
+Use `--tournament-rounds-only` when the analysis needs only correlated
+tournament lifecycle records, including each candidate's sanitized rejection
+class and elapsed time. Interrupted final rounds are retained and clearly
+labelled in the manifest.
+Prefer bundles from bots running the current correlated telemetry. Their
+manifest says `correlation=id`; `correlation=legacy_order` means the source log
+predates stable round IDs and concurrent provider completion may make its
+candidate-to-winner boundaries approximate.
 
 ## Freeze, consolidate, and redistribute
 

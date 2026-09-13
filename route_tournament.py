@@ -19,6 +19,7 @@ from decimal import Decimal, InvalidOperation, ROUND_CEILING
 import logging
 import re
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
 
 from swap_provider import PROVIDERS
@@ -43,6 +44,44 @@ _SUPPORTED_EXECUTION_CANDIDATES = _DEFAULT_EXECUTION_CANDIDATES | frozenset({
     ("umbra", "native"), ("umbra", "weth"),
     ("lifi", "native"), ("lifi", "weth"),
 })
+
+
+def _tournament_id(context):
+    """Return a safe stable correlation ID without exposing user input."""
+    value = str((context or {}).get("tournament_id") or "")
+    return value if re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", value) else uuid.uuid4().hex
+
+
+def _log_candidate(row, context, tournament_id):
+    """Emit one sanitized, correlated candidate outcome."""
+    name = row.get("provider", "unknown")
+    settlement = row.get("settlement", "unknown")
+    result_label = "eligible" if row.get("validation_level") == "quote_only" else "rejected"
+    rejection = "+".join(row.get("rejections") or []) or "-"
+    quote_failure_kind = row.get("quote_failure_kind")
+    failure_suffix = (
+        " · " + str(quote_failure_kind)
+        if rejection != "-" and quote_failure_kind else ""
+    )
+    suffix = " · tournament_id=%s candidate_elapsed_ms=%s" % (
+        tournament_id, row.get("candidate_elapsed_ms", "unknown")
+    )
+    if context.get("direction") == "sell" and row.get("projected_profit_percent") is not None:
+        LOG.info(
+            "Route tournament candidate ⚔️ %s/%s: net %.6f ETH (%+.2f%%) · minimum %.6f ETH (%.2f%%) · gas %.6f ETH · %s%s%s%s",
+            name, settlement, Decimal(row["projected_net_score"]) / Decimal(10**18),
+            row["projected_profit_percent"], row["minimum_return_eth"],
+            row["minimum_profit_percent"], row.get("gas_total_eth", 0.0) or 0.0,
+            result_label, " · " + rejection if rejection != "-" else "", failure_suffix,
+            suffix,
+        )
+    else:
+        LOG.info(
+            "Route tournament candidate ⚔️ %s/%s: output %s · gas %.6f ETH · %s%s%s%s",
+            name, settlement, row.get("quoted_output_human", "-"),
+            row.get("gas_total_eth", 0.0) or 0.0, result_label,
+            " · " + rejection if rejection != "-" else "", failure_suffix, suffix,
+        )
 
 
 def _configured_identities(config):
@@ -537,7 +576,7 @@ def collect(config, address, context, client_factory=None,
             conversion_gas_estimate_provider=None, approval_gas_estimate_provider=None,
             max_seconds=8,
             protocol_hints=None, mode="shadow", _candidate_filter=None,
-            _suppress_summary=False):
+            _suppress_summary=False, _suppress_candidate_logs=False):
     """One get_quote per provider/settlement; never prepare, approve, or send.
 
     Independent client instances avoid mutating execution clients. Uniswap's
@@ -554,11 +593,17 @@ def collect(config, address, context, client_factory=None,
     """
     started = time.monotonic()
     deadline = started + max(0, float(max_seconds))
+    tournament_id = _tournament_id(context)
     rows = []
     provider_outputs = []
     candidate_index = 0
     configured_identities = _configured_identities(config)
     total_candidates = 1 if _candidate_filter else len(configured_identities)
+    if not _candidate_filter:
+        LOG.info(
+            "Route tournament start tournament_id=%s direction=%s mode=%s expected_candidates=%d",
+            tournament_id, context.get("direction"), mode, len(configured_identities),
+        )
 
     def deadline_row(name, settlement):
         return score_candidate(
@@ -583,18 +628,24 @@ def collect(config, address, context, client_factory=None,
             token = NATIVE if settlement == "native" else config.weth_address
             if _candidate_filter and (name, settlement) != _candidate_filter:
                 continue
+            candidate_started = time.monotonic()
             remaining_seconds = deadline - time.monotonic()
             if remaining_seconds <= 0:
-                rows.append({"provider": name, "settlement": settlement,
-                             "validation_level": "rejected", "rejections": ["observation_deadline"],
-                             "candidate_outcome": "not_sampled",
-                             "quoted_output_raw": None, "quoted_output_human": None,
-                             "gas_components_wei": {}, "projected_total_gas_wei": None,
-                             "gas_total_eth": None, "output_floor_raw": None,
-                             "output_floor_human": None, "projected_net_score": None,
-                             "execution_eligible": False, "provider_gas_estimate": 0,
-                             "effective_gas_price_wei": 0,
-                             "approval_assumption": "none", "gas_basis": "skipped"})
+                row = {"provider": name, "settlement": settlement,
+                       "validation_level": "rejected", "rejections": ["observation_deadline"],
+                       "candidate_outcome": "not_sampled",
+                       "quoted_output_raw": None, "quoted_output_human": None,
+                       "gas_components_wei": {}, "projected_total_gas_wei": None,
+                       "gas_total_eth": None, "output_floor_raw": None,
+                       "output_floor_human": None, "projected_net_score": None,
+                       "execution_eligible": False, "provider_gas_estimate": 0,
+                       "effective_gas_price_wei": 0,
+                       "approval_assumption": "none", "gas_basis": "skipped"}
+                row["tournament_id"] = tournament_id
+                row["candidate_elapsed_ms"] = 0.0
+                rows.append(row)
+                if not _suppress_candidate_logs:
+                    _log_candidate(row, context, tournament_id)
                 candidate_index += 1
                 continue
             try:
@@ -722,60 +773,37 @@ def collect(config, address, context, client_factory=None,
                             )
                             if time.monotonic() >= deadline:
                                 row = deadline_row(name, settlement)
-                rows.append(row)
-                # Emit one structured per-candidate log line for observability.
-                result_label = "eligible" if row["validation_level"] == "quote_only" else "rejected"
-                rejection = "+".join(row["rejections"]) if row["rejections"] else "-"
-                # Quote errors are intentionally sanitized when collected.  Surface the
-                # resulting stable classification here: a client initializing is not
-                # evidence that it found liquidity, and operators need to distinguish
-                # no-route from a transient/provider configuration failure.
-                quote_failure_kind = row.get("quote_failure_kind")
-                failure_suffix = (
-                    " · " + quote_failure_kind
-                    if rejection != "-" and quote_failure_kind else ""
+                row["tournament_id"] = tournament_id
+                row["candidate_elapsed_ms"] = round(
+                    (time.monotonic() - candidate_started) * 1000, 1
                 )
-                if context["direction"] == "sell" and row.get("projected_profit_percent") is not None:
-                    LOG.info(
-                        "Route tournament candidate ⚔️ %s/%s: net %.6f ETH (%+.2f%%) · minimum %.6f ETH (%.2f%%) · gas %.6f ETH · %s%s%s",
-                        name, settlement, Decimal(row["projected_net_score"]) / Decimal(10**18),
-                        row["projected_profit_percent"], row["minimum_return_eth"],
-                        row["minimum_profit_percent"], row.get("gas_total_eth", 0.0) or 0.0,
-                        result_label, " · " + rejection if rejection != "-" else "", failure_suffix,
-                    )
-                else:
-                    LOG.info(
-                        "Route tournament candidate ⚔️ %s/%s: output %s · gas %.6f ETH · %s%s%s",
-                        name, settlement, row.get("quoted_output_human", "-"),
-                        row.get("gas_total_eth", 0.0) or 0.0, result_label,
-                        " · " + rejection if rejection != "-" else "", failure_suffix,
-                    )
+                rows.append(row)
+                if not _suppress_candidate_logs:
+                    _log_candidate(row, context, tournament_id)
                 if row["validation_level"] == "quote_only":
                     provider_outputs.append(row)
             except Exception:
                 # Never publish exception text, raw provider responses, addresses,
                 # calldata, request headers, or credentials in dashboard data.
                 if time.monotonic() >= deadline:
-                    rows.append(deadline_row(name, settlement))
-                    failure = "observation_timeout"
+                    row = deadline_row(name, settlement)
                 else:
-                    rows.append({"provider": name, "settlement": settlement,
-                                 "validation_level": "rejected", "rejections": ["candidate_failed"],
-                                 "quoted_output_raw": None, "quoted_output_human": None,
-                                 "gas_components_wei": {}, "projected_total_gas_wei": None,
-                                 "gas_total_eth": None, "output_floor_raw": None,
-                                 "output_floor_human": None, "projected_net_score": None,
-                                 "execution_eligible": False, "provider_gas_estimate": 0,
-                                 "effective_gas_price_wei": 0,
-                                 "approval_assumption": "none", "gas_basis": "skipped"})
-                    failure = "candidate_failed"
-                LOG.info(
-                    "Route tournament candidate provider=%s settlement=%s direction=%s "
-                    "quoted_output=- gas_estimate=0 gas_price_wei=0 approval_budget=0 "
-                    "total_cost_wei=0 total_cost_eth=0.000000 output_floor=- score=- "
-                    "result=rejected reason=%s",
-                    name, settlement, context["direction"], failure,
+                    row = {"provider": name, "settlement": settlement,
+                           "validation_level": "rejected", "rejections": ["candidate_failed"],
+                           "quoted_output_raw": None, "quoted_output_human": None,
+                           "gas_components_wei": {}, "projected_total_gas_wei": None,
+                           "gas_total_eth": None, "output_floor_raw": None,
+                           "output_floor_human": None, "projected_net_score": None,
+                           "execution_eligible": False, "provider_gas_estimate": 0,
+                           "effective_gas_price_wei": 0,
+                           "approval_assumption": "none", "gas_basis": "skipped"}
+                row["tournament_id"] = tournament_id
+                row["candidate_elapsed_ms"] = round(
+                    (time.monotonic() - candidate_started) * 1000, 1
                 )
+                rows.append(row)
+                if not _suppress_candidate_logs:
+                    _log_candidate(row, context, tournament_id)
             candidate_index += 1
     eligible = sorted((r for r in rows if r["validation_level"] == "quote_only"),
                       key=lambda r: Decimal(r["projected_net_score"]), reverse=True)
@@ -798,7 +826,8 @@ def collect(config, address, context, client_factory=None,
         and observed_identities == expected_identities
     )
     deadline_met = time.monotonic() < deadline
-    result = {"mode": mode, "direction": context["direction"], "candidates": rows,
+    result = {"mode": mode, "direction": context["direction"],
+              "tournament_id": tournament_id, "candidates": rows,
               "expected_candidates": [
                   {"provider": provider, "settlement": settlement}
                   for provider, settlement in sorted(expected_identities)
@@ -817,16 +846,16 @@ def collect(config, address, context, client_factory=None,
     if winner and not _suppress_summary:
         LOG.info(
             "Route tournament winner provider=%s settlement=%s direction=%s score=%s "
-            "runner_up_delta=%s eligible=%d rejected=%d elapsed_ms=%s",
+            "runner_up_delta=%s eligible=%d rejected=%d elapsed_ms=%s tournament_id=%s",
             winner["provider"], winner["settlement"], context["direction"],
             eligible[0]["projected_net_score"], runner_up_delta or "n/a",
-            len(eligible), len(rows) - len(eligible), elapsed_ms,
+            len(eligible), len(rows) - len(eligible), elapsed_ms, tournament_id,
         )
     elif not _suppress_summary:
         LOG.info(
             "Route tournament winner provider=none settlement=none direction=%s "
-            "score=- runner_up_delta=n/a eligible=0 rejected=%d elapsed_ms=%s",
-            context["direction"], len(rows), elapsed_ms,
+            "score=- runner_up_delta=n/a eligible=0 rejected=%d elapsed_ms=%s tournament_id=%s",
+            context["direction"], len(rows), elapsed_ms, tournament_id,
         )
     return result
 
@@ -847,6 +876,7 @@ def collect_execution_preflight(config, address, context, client_factory=None,
     estimation; approval and all state-changing work remain outside it.
     """
     identities = _configured_identities(config)
+    tournament_id = _tournament_id(context)
     configured_providers = {provider for provider, _ in identities}
     if "uniswap" in configured_providers and not getattr(config, "uniswap_api_key", ""):
         return {
@@ -879,6 +909,10 @@ def collect_execution_preflight(config, address, context, client_factory=None,
     # absolute-sized budget. A slow Uniswap preparation can therefore never
     # consume Sushi's opportunity to produce an executable candidate.
     started = time.monotonic()
+    LOG.info(
+        "Route tournament start tournament_id=%s direction=%s mode=execution_preflight expected_candidates=%d",
+        tournament_id, context.get("direction"), len(identities),
+    )
 
     def collect_one(identity):
         return collect(
@@ -889,6 +923,7 @@ def collect_execution_preflight(config, address, context, client_factory=None,
             approval_gas_estimate_provider=approval_gas_estimate_provider,
             protocol_hints=protocol_hints, mode="execution_preflight",
             _candidate_filter=identity, _suppress_summary=True,
+            _suppress_candidate_logs=True,
         )
 
     results = {}
@@ -916,7 +951,12 @@ def collect_execution_preflight(config, address, context, client_factory=None,
                 QuoteResult(success=False, error="observation deadline elapsed"),
                 provider, settlement, context,
             )
+            row["candidate_elapsed_ms"] = round(
+                (time.monotonic() - started) * 1000, 1
+            )
+        row["tournament_id"] = tournament_id
         rows.append(row)
+        _log_candidate(row, context, tournament_id)
     eligible = sorted(
         (row for row in rows if row.get("validation_level") == "quote_only"),
         key=lambda row: Decimal(row["projected_net_score"]), reverse=True,
@@ -929,6 +969,7 @@ def collect_execution_preflight(config, address, context, client_factory=None,
         )
     comparison = {
         "mode": "execution_preflight", "direction": context.get("direction"),
+        "tournament_id": tournament_id,
         "candidates": rows,
         "expected_candidates": [
             {"provider": provider, "settlement": settlement}
@@ -952,16 +993,17 @@ def collect_execution_preflight(config, address, context, client_factory=None,
     if eligible:
         LOG.info(
             "Route tournament winner provider=%s settlement=%s direction=%s score=%s "
-            "runner_up_delta=%s eligible=%d rejected=%d elapsed_ms=%s",
+            "runner_up_delta=%s eligible=%d rejected=%d elapsed_ms=%s tournament_id=%s",
             eligible[0]["provider"], eligible[0]["settlement"], context.get("direction"),
             eligible[0]["projected_net_score"], runner_up_delta or "n/a",
             len(eligible), len(rows) - len(eligible), comparison["elapsed_ms"],
+            tournament_id,
         )
     else:
         LOG.info(
             "Route tournament winner provider=none settlement=none direction=%s "
-            "score=- runner_up_delta=n/a eligible=0 rejected=%d elapsed_ms=%s",
-            context.get("direction"), len(rows), comparison["elapsed_ms"],
+            "score=- runner_up_delta=n/a eligible=0 rejected=%d elapsed_ms=%s tournament_id=%s",
+            context.get("direction"), len(rows), comparison["elapsed_ms"], tournament_id,
         )
     selection = select_execution_candidate(comparison, context.get("direction"))
     comparison["selected_execution_candidate"] = selection

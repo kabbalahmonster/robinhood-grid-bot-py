@@ -189,6 +189,26 @@ class BundleLogsTests(unittest.TestCase):
         self.assertIn("bot stopped before winner", body)
         self.assertIn("status=ok: rounds=0 incomplete=1", body)
 
+    def test_tournament_rounds_use_ids_not_log_order(self):
+        self.write_log(
+            "ALPHA", "alpha.log",
+            "2026-09-12 18:00:00 | INFO | Route tournament start tournament_id=round-a direction=sell\n"
+            "2026-09-12 18:00:01 | INFO | Route tournament candidate provider=uniswap tournament_id=round-a\n"
+            "2026-09-12 18:00:02 | INFO | Route tournament winner provider=none tournament_id=round-a\n"
+            "2026-09-12 18:00:03 | INFO | unrelated activity that must not leak\n"
+            "2026-09-12 18:00:04 | INFO | Route tournament candidate provider=lifi tournament_id=round-a\n"
+            "2026-09-12 18:00:05 | INFO | Route tournament lifecycle tournament_id=round-a phase=completed\n",
+        )
+        self.write_log("BETA", "beta.log", "2026-09-12 18:00:00 | INFO | no rounds\n")
+        output = self.root / "bundle.log"
+        result = self.run_bundle("--tournament-rounds-only", "--output", str(output))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        body = output.read_text()
+        self.assertIn("provider=lifi tournament_id=round-a", body)
+        self.assertIn("phase=completed", body)
+        self.assertIn("rounds=1 incomplete=0 correlation=id", body)
+        self.assertNotIn("unrelated activity", body)
+
     def test_tournament_modes_are_mutually_exclusive(self):
         result = self.run_bundle("--tournament-only", "--tournament-rounds-only")
         self.assertNotEqual(result.returncode, 0)

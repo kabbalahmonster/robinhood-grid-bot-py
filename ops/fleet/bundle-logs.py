@@ -23,6 +23,7 @@ HEX_PRIVATE = re.compile(r"(?<![0-9A-Fa-f])(?:0x)?[0-9A-Fa-f]{64}(?![0-9A-Fa-f])
 TOURNAMENT_EVENT = re.compile(r"\bRoute tournament (?:candidate|winner)\b", re.I)
 TOURNAMENT_CANDIDATE = re.compile(r"\bRoute tournament candidate\b", re.I)
 TOURNAMENT_WINNER = re.compile(r"\bRoute tournament winner\b", re.I)
+TOURNAMENT_ID = re.compile(r"\btournament_id=([A-Za-z0-9_.:-]{1,128})\b")
 
 
 def parse_age(raw):
@@ -119,7 +120,25 @@ def records(path, file_time, max_lines, cutoff):
 
 
 def tournament_rounds(items):
-    """Return candidate-to-winner slices, retaining diagnostics inside each round."""
+    """Return correlated events, with a legacy candidate-to-winner fallback."""
+    correlated = []
+    states = {}
+    for item in items:
+        body = "\n".join(item[2])
+        match = TOURNAMENT_ID.search(body)
+        if not match or "Route tournament" not in body:
+            continue
+        tournament_id = match.group(1)
+        correlated.append(item)
+        state = states.setdefault(tournament_id, {"winner": False})
+        if TOURNAMENT_WINNER.search(body):
+            state["winner"] = True
+    if correlated:
+        complete = sum(state["winner"] for state in states.values())
+        incomplete = len(states) - complete
+        return correlated, complete, incomplete, "id"
+
+    # Backward compatibility for logs produced before correlation IDs existed.
     selected, current = [], []
     complete = incomplete = 0
     for item in items:
@@ -141,7 +160,7 @@ def tournament_rounds(items):
         # and the manifest makes its incomplete state explicit.
         selected.extend(current)
         incomplete = 1
-    return selected, complete, incomplete
+    return selected, complete, incomplete, "legacy_order"
 
 
 def next_numbered_output(requested):
@@ -210,12 +229,13 @@ def main():
             manifest.append((name, filename, str(exc), 0, None))
             continue
         if args.tournament_rounds_only:
-            items, complete_rounds, incomplete_rounds = tournament_rounds(items)
+            items, complete_rounds, incomplete_rounds, correlation = tournament_rounds(items)
             if not items:
                 skipped += 1
                 manifest.append((name, filename, "skipped: no tournament in included records", 0, current.st_size))
                 continue
-            state = f"ok: rounds={complete_rounds} incomplete={incomplete_rounds}"
+            state = (f"ok: rounds={complete_rounds} incomplete={incomplete_rounds} "
+                     f"correlation={correlation}")
         elif args.tournament_only and not any(
                 TOURNAMENT_EVENT.search(line) for item in items for line in item[2]):
             skipped += 1
