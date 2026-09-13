@@ -260,3 +260,21 @@ receipt-verified reconciliation passes its ledger reload check, an
 the trading halt in place. For a reconciliation already applied by an older
 release, rerun the same applied command: it re-verifies the receipt and archives
 the matching guard without duplicating the position.
+
+## Thin-margin profit safety
+
+Before operating at `MIN_PROFIT_PERCENT=0.1`, update and restart every bot so
+all checkouts use the same audited arithmetic. A normal sell is authorized from
+integer wei only when minimum executable proceeds cover upward-rounded sold
+cost, upward-rounded target profit, confirmed setup gas, and the final signed
+transaction's maximum gas. Provider quotes are not treated as guaranteed
+proceeds: explicit minimum-output fields are preferred and otherwise configured
+slippage is deducted. Successful setup gas from an aborted sell is carried into
+the position for recovery on the next attempt. Unreconciled confirmed proceeds
+halt the bot and never become reported realized profit.
+
+Stoploss sells deliberately bypass profit protection. Thin-margin operation
+therefore requires stoploss policy to be reviewed separately, accurate token
+tax configuration, nonzero gas headroom, and healthy RPC receipt/balance reads.
+See **Profit-accounting invariants** in the main README for the equations,
+WETH-settlement behavior, and unavoidable on-chain risks.

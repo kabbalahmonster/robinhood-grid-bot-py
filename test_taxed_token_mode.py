@@ -75,6 +75,19 @@ class TaxedTokenModeTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "must not exceed 15 percent"):
                 load_config()
 
+    def test_config_accepts_point_one_percent_profit_floor(self):
+        with patch.dict(
+            os.environ, {**VALID_ENV, "MIN_PROFIT_PERCENT": "0.1"}, clear=True
+        ):
+            self.assertEqual(load_config().min_profit_percent, 0.1)
+
+    def test_config_rejects_profit_floor_below_point_one_percent(self):
+        with patch.dict(
+            os.environ, {**VALID_ENV, "MIN_PROFIT_PERCENT": "0.099"}, clear=True
+        ):
+            with self.assertRaisesRegex(ValueError, "between 0.1 and 100"):
+                load_config()
+
     def test_taxed_slippage_is_fee_plus_bounded_market_buffer(self):
         self.assertAlmostEqual(self.bot()._swap_slippage_fraction(), 0.07)
         self.assertAlmostEqual(self.bot(taxed=False)._swap_slippage_fraction(), 0.015)
@@ -85,7 +98,7 @@ class TaxedTokenModeTests(unittest.TestCase):
         quote = SimpleNamespace(buy_amount=1_000)
         self.assertTrue(bot._taxed_token_active())
         self.assertAlmostEqual(bot._swap_slippage_fraction(), 0.05)
-        self.assertEqual(bot._taxed_quote_return_wei(quote), 970)
+        self.assertEqual(bot._taxed_quote_return_wei(quote), 950)
 
     def test_buy_accounting_uses_actual_post_fee_wallet_delta(self):
         bot = self.bot(wallet=SequenceWallet(token_balances=[1_000, 1_950]))
@@ -134,12 +147,12 @@ class TaxedTokenModeTests(unittest.TestCase):
         bot.wallet.address = "0x" + "a" * 40
         before = bot._raw_trade_balance()
         result = SimpleNamespace(receipt={"gasUsed": 100, "effectiveGasPrice": 3, "logs": []})
-        self.assertEqual(bot._measured_trade_received_wei(before, result, 1_900), 1_900)
+        self.assertEqual(bot._measured_trade_received_wei(before, result, 1_900), 0)
 
     def test_sell_guard_conservatively_applies_declared_fee_to_quote(self):
         quote = SimpleNamespace(buy_amount=1_000)
-        self.assertEqual(self.bot()._taxed_quote_return_wei(quote), 950)
-        self.assertEqual(self.bot(taxed=False)._taxed_quote_return_wei(quote), 1_000)
+        self.assertEqual(self.bot()._taxed_quote_return_wei(quote), 930)
+        self.assertEqual(self.bot(taxed=False)._taxed_quote_return_wei(quote), 985)
 
     def test_recent_taxed_buy_failure_short_circuits_before_wallet_access(self):
         bot = self.bot(wallet=None)

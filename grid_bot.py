@@ -16,7 +16,7 @@ import argparse
 import random
 from functools import wraps
 from datetime import datetime
-from decimal import Decimal
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from urllib.parse import urlsplit
 
 from profit_tracker import ProfitTracker
@@ -1693,11 +1693,16 @@ class GridBot:
         gas_price = int(tx.get("gasPrice") or tx.get("maxFeePerGas") or 0)
         return tx, int(tx["gas"]) * gas_price
 
-    def _execute_weth_unwrap(self, amount_wei):
+    def _execute_weth_unwrap(self, amount_wei, maximum_economic_gas_wei=None):
         """Unwrap an exact confirmed WETH receipt and return (result, confirmed gas)."""
         tx, _ = self._project_weth_operation_gas("sell", amount_wei)
         reserve = int(float(getattr(self.config, "eth_gas_reserve", 0.001)) * 10**18)
         max_gas = int(tx["gas"]) * int(tx.get("gasPrice") or tx.get("maxFeePerGas") or 0)
+        if (maximum_economic_gas_wei is not None
+                and max_gas > max(0, int(maximum_economic_gas_wei))):
+            raise RuntimeError(
+                "WETH unwrap maximum gas would breach the guaranteed sell profit floor"
+            )
         if self.wallet.get_eth_balance_wei() - max_gas < reserve:
             raise RuntimeError("WETH unwrap would breach ETH_GAS_RESERVE")
         result = self.wallet.unwrap_weth(tx, wait_for_receipt=True)
@@ -2054,12 +2059,25 @@ class GridBot:
             - int(setup_gas_wei) - self._receipt_gas_cost_wei(result)
         )
 
+    @staticmethod
+    def _minimum_profit_wei(sold_cost_wei, min_profit_percent):
+        rate = Decimal(str(min_profit_percent)) / Decimal(100)
+        if not rate.is_finite() or rate < 0:
+            raise ValueError("minimum profit percentage must be finite and non-negative")
+        return int(
+            (Decimal(int(sold_cost_wei)) * rate).to_integral_value(
+                rounding=ROUND_CEILING
+            )
+        )
+
     def _minimum_gas_aware_return_wei(
         self, sold_cost_wei, quote, min_profit_percent, setup_gas_wei=0,
         projected_gas_cost_wei=None,
     ):
         """Return required to preserve principal, pay sell gas, and earn target profit."""
-        minimum_profit_wei = int(int(sold_cost_wei) * (float(min_profit_percent) / 100.0))
+        minimum_profit_wei = self._minimum_profit_wei(
+            sold_cost_wei, min_profit_percent
+        )
         return (
             int(sold_cost_wei) + minimum_profit_wei + int(setup_gas_wei)
             + (
@@ -2117,23 +2135,42 @@ class GridBot:
             )
             return receipt_amount
 
-        # A successful, validated swap must not be finalized as a fabricated loss.
-        # The router transaction enforces its quoted minimum, so preserve that
-        # conservative amount and surface the reconciliation failure loudly.
+        # Never convert an enforced lower bound into claimed realized proceeds.
+        # The successful transaction is safe on-chain, but accounting remains
+        # unresolved until wallet state or receipt logs prove the exact amount.
         logger.critical(
-            "Could not reconcile post-trade balance or receipt logs; using validated quote floor %s wei",
+            "Could not reconcile exact post-trade proceeds (validated floor %s wei)",
             expected_wei,
         )
-        return expected_wei
+        return 0
 
     def _taxed_quote_return_wei(self, quote):
-        """Conservatively fee-adjust a sell quote before the pre-trade guard."""
+        """Return the lowest proceeds authorized by executable slippage terms."""
         quoted = int(quote.buy_amount or 0)
-        if (not self._taxed_token_active()
-                or getattr(quote, "output_includes_transfer_tax", False)):
+        if quoted <= 0:
+            return 0
+        if getattr(quote, "output_is_execution_floor", False):
             return quoted
-        fee_fraction = self._effective_token_transfer_fee_percent() / 100.0
-        return int(quoted * (1.0 - fee_fraction))
+        explicit_floor = int(getattr(quote, "minimum_buy_amount", 0) or 0)
+        if explicit_floor > 0:
+            return min(quoted, explicit_floor)
+        slippage = Decimal(str(self._swap_slippage_fraction()))
+        if not slippage.is_finite() or slippage < 0 or slippage >= 1:
+            return 0
+        return int(
+            (Decimal(quoted) * (Decimal(1) - slippage)).to_integral_value(
+                rounding=ROUND_FLOOR
+            )
+        )
+
+    @staticmethod
+    def _quote_matches_exact_input(quote, expected_sell_amount):
+        """Fail closed unless executable quote spends the exact requested input."""
+        return (
+            int(expected_sell_amount) > 0
+            and int(getattr(quote, "sell_amount", 0) or 0) == int(expected_sell_amount)
+            and int(getattr(quote, "buy_amount", 0) or 0) > 0
+        )
 
     def _record_profit_fee(self, entry):
         """Append one fee attempt to the local audit trail atomically."""
@@ -2712,11 +2749,40 @@ class GridBot:
         cost_wei = int(position.get("cost_wei", 0) or 0)
         if cost_wei <= 0:
             cost_wei = int(position.get("cost", 0) or 0) * 10**9
+        cost_wei += int(position.get("deferred_sell_gas_wei", 0) or 0)
         moonbag_pct = float(getattr(self.config, "moonbag_percentage", 0) or 0)
         moonbag_amount = int(balance * moonbag_pct / 100) if moonbag_pct > 0 else 0
         sell_amount = max(0, balance - moonbag_amount)
-        sold_cost_wei = cost_wei * sell_amount // balance if balance > 0 else 0
+        sold_cost_wei = (
+            (cost_wei * sell_amount + balance - 1) // balance
+            if balance > 0 and sell_amount > 0 else 0
+        )
         return sell_amount, sold_cost_wei
+
+    def _defer_sell_gas_cost(self, position_id, gas_wei, *, gridless_position):
+        """Persist confirmed setup gas until a later successful sell recovers it."""
+        gas_wei = int(gas_wei)
+        if gas_wei <= 0:
+            return
+        position_id = str(position_id)
+        if gridless_position:
+            import gridless
+            positions = gridless.load_positions()
+            if position_id not in positions:
+                raise RuntimeError("cannot preserve sell setup gas: gridless position missing")
+            positions[position_id]["deferred_sell_gas_wei"] = (
+                int(positions[position_id].get("deferred_sell_gas_wei", 0) or 0)
+                + gas_wei
+            )
+            gridless.save_positions(positions)
+            return
+        if position_id not in self.positions:
+            raise RuntimeError("cannot preserve sell setup gas: position missing")
+        self.positions[position_id]["deferred_sell_gas_wei"] = (
+            int(self.positions[position_id].get("deferred_sell_gas_wei", 0) or 0)
+            + gas_wei
+        )
+        self.save_positions()
 
     def _check_buys_gridless(self, price):
         """Gridless buy logic - buy when no positions or top position P&L <= threshold."""
@@ -2956,6 +3022,10 @@ class GridBot:
                 return
             quote = swap_result
         
+        if not self._quote_matches_exact_input(quote, buy_amount_wei):
+            logger.error("Buy aborted: executable quote input/output amounts are not exact")
+            return
+
         # Execute swap with configurable gas multipliers
         # Use API's gas price estimate if available (more accurate than network average)
         gas_limit, gas_price = self._swap_gas_fields(
@@ -3289,7 +3359,7 @@ class GridBot:
         
         _, sold_cost_wei = self._gridless_sell_terms(pos)
         sold_cost_eth = sold_cost_wei / 10**18
-        self._queue_route_shadow("sell", sell_amount, int(round(sold_cost_eth * 10**18)))
+        self._queue_route_shadow("sell", sell_amount, sold_cost_wei)
         expected_eth = sell_tokens * price
         profit_eth = expected_eth - sold_cost_eth
         
@@ -3311,7 +3381,7 @@ class GridBot:
             quote, weth_fallback = self._actionable_quote_with_weth_fallback(
                 sell_token=self.config.token_address, buy_token=self.trade_token_address,
                 sell_amount=sell_amount, direction="sell",
-                sold_cost_wei=int(round(sold_cost_eth * 10**18)),
+                sold_cost_wei=sold_cost_wei,
             )
         elif pre_fetched_quote and moonbag_pct == 0 and sell_amount == balance:
             quote = pre_fetched_quote
@@ -3357,13 +3427,13 @@ class GridBot:
                 int(approval_tx["gas"]) * int(self.wallet.normal_gas_price())
             )
             min_return_eth = (
-                int(round(sold_cost_eth * 10**18)) + int(min_profit_eth * 10**18)
+                sold_cost_wei + self._minimum_profit_wei(sold_cost_wei, min_profit)
                 + unwrap_projected_wei + projected_approval_gas_wei
                 + self._provisional_swap_gas_cost_wei(quote)
             ) / 10**18
         else:
             min_return_eth = self._minimum_gas_aware_return_wei(
-                int(round(sold_cost_eth * 10**18)), quote, min_profit,
+                sold_cost_wei, quote, min_profit,
                 setup_gas_wei=unwrap_projected_wei,
             ) / 10**18
         quote_return_eth = self._taxed_quote_return_wei(quote) / 10**18
@@ -3402,7 +3472,7 @@ class GridBot:
             # satisfy the pre-approval gas-aware profit floor.
             preapproval_return_wei = self._taxed_quote_return_wei(quote)
             preapproval_minimum_wei = self._minimum_gas_aware_return_wei(
-                int(round(sold_cost_eth * 10**18)), quote, min_profit
+                sold_cost_wei, quote, min_profit
             )
             if preapproval_return_wei < preapproval_minimum_wei:
                 logger.warning("❌ Alternate sell route failed gas-aware profit floor")
@@ -3479,6 +3549,10 @@ class GridBot:
                         logger.error(f"Cancel transaction failed: {result.error}")
                         return
                     sell_setup_gas_wei += self._receipt_gas_cost_wei(result)
+                    self._defer_sell_gas_cost(
+                        pos_id, self._receipt_gas_cost_wei(result),
+                        gridless_position=True,
+                    )
                     self._seal_provider_fallback()
                     logger.info(f"Cancel transaction confirmed: {result.tx_hash}")
                     # Wait for confirmation
@@ -3494,6 +3568,10 @@ class GridBot:
                         logger.error(f"Approval transaction failed: {result.error}")
                         return
                     sell_setup_gas_wei += self._receipt_gas_cost_wei(result)
+                    self._defer_sell_gas_cost(
+                        pos_id, self._receipt_gas_cost_wei(result),
+                        gridless_position=True,
+                    )
                     self._seal_provider_fallback()
                     logger.info(f"Approval transaction confirmed: {result.tx_hash}")
                     # Wait for confirmation
@@ -3582,6 +3660,10 @@ class GridBot:
                     logger.error(f"Approval failed: {result.error}")
                     return
                 sell_setup_gas_wei += self._receipt_gas_cost_wei(result)
+                self._defer_sell_gas_cost(
+                    pos_id, self._receipt_gas_cost_wei(result),
+                    gridless_position=True,
+                )
                 self._seal_provider_fallback()
                 self._record_exact_approval_guard(
                     result, operation="sell", spender=spender, amount=sell_amount,
@@ -3603,6 +3685,10 @@ class GridBot:
                     if staged_approval:
                         setattr(quote, "_tournament_staged_approval", True)
 
+        if not self._quote_matches_exact_input(quote, sell_amount):
+            logger.error("Sell aborted: executable quote input/output amounts are not exact")
+            return
+
         # Approval/refresh can replace both route calldata and gas estimate.
         # Re-run the economic guard against the final transaction immediately
         # before broadcast; only an explicit stop-loss may bypass profitability.
@@ -3615,7 +3701,7 @@ class GridBot:
         if not is_stoploss:
             final_return_wei = self._taxed_quote_return_wei(quote)
             final_minimum_wei = self._minimum_gas_aware_return_wei(
-                int(round(sold_cost_eth * 10**18)), quote, min_profit,
+                sold_cost_wei, quote, min_profit,
                 setup_gas_wei=sell_setup_gas_wei,
                 projected_gas_cost_wei=gas_limit * gas_price,
             )
@@ -3660,7 +3746,7 @@ class GridBot:
             )
             if retry_allowed and not is_stoploss:
                 retry_minimum_wei = self._minimum_gas_aware_return_wei(
-                    int(round(sold_cost_eth * 10**18)), quote, min_profit,
+                    sold_cost_wei, quote, min_profit,
                     setup_gas_wei=sell_setup_gas_wei,
                     projected_gas_cost_wei=gas_limit * retry_gas_price,
                 )
@@ -3686,7 +3772,17 @@ class GridBot:
                     0, self._raw_token_balance(self.config.weth_address) - trade_balance_before
                 ) or self._taxed_quote_return_wei(quote)
                 try:
-                    unwrap_result, unwrap_gas_wei = self._execute_weth_unwrap(received_wei)
+                    unwrap_budget = None
+                    if not is_stoploss:
+                        unwrap_budget = (
+                            received_wei - sold_cost_wei
+                            - self._minimum_profit_wei(sold_cost_wei, min_profit)
+                            - (sell_setup_gas_wei - unwrap_projected_wei)
+                            - self._receipt_gas_cost_wei(result)
+                        )
+                    unwrap_result, unwrap_gas_wei = self._execute_weth_unwrap(
+                        received_wei, maximum_economic_gas_wei=unwrap_budget,
+                    )
                 except Exception as exc:
                     self.wallet._record_unresolved_broadcast(
                         result.tx_hash or "confirmed-weth-swap",
@@ -3703,9 +3799,18 @@ class GridBot:
                 received_wei = self._measured_trade_received_wei(
                     trade_balance_before, result, self._taxed_quote_return_wei(quote)
                 )
+                if received_wei <= 0:
+                    self.wallet._record_unresolved_broadcast(
+                        result.tx_hash or "confirmed-sell-unreconciled",
+                        sell_tx,
+                        f"confirmed sell proceeds could not be reconciled for position {pos_id}",
+                    )
+                    logger.critical(
+                        "Sell confirmed but exact proceeds are unresolved; position retained and trading halted"
+                    )
+                    return
             logger.info("Measured trade-token receipt: %s wei", received_wei)
             eth_received = received_wei / 10**18
-            sold_cost_wei = int(round(sold_cost_eth * 10**18))
             profit_wei = self._net_sale_profit_wei(
                 received_wei, sold_cost_wei, result, setup_gas_wei=sell_setup_gas_wei
             )
@@ -3907,6 +4012,9 @@ class GridBot:
 
         # Execute swap with checksummed addresses and configurable gas multipliers
         # Use API's gas price estimate if available (more accurate than network average)
+        if not self._quote_matches_exact_input(quote, buy_amount_wei):
+            logger.error("Buy aborted: executable quote input/output amounts are not exact")
+            return
         gas_limit, gas_price = self._swap_gas_fields(
             quote, 350000, native_buy_principal_wei=(0 if weth_fallback else buy_amount_wei),
             force_zero_native_value=weth_fallback,
@@ -4011,7 +4119,10 @@ class GridBot:
         total_tokens = total_balance / self.token_unit
         
         # Validate position has tokens and cost basis
-        cost_wei = pos.get('cost_wei', pos.get('cost', 0) * 10**9)
+        cost_wei = (
+            int(pos.get('cost_wei', pos.get('cost', 0) * 10**9))
+            + int(pos.get('deferred_sell_gas_wei', 0) or 0)
+        )
         if total_balance <= 0 or cost_wei <= 0:
             logger.warning(f"Skipping sell for position {pos_id}: balance={total_balance}, cost_wei={cost_wei}")
             return
@@ -4044,8 +4155,12 @@ class GridBot:
         # Calculate expected ETH/WETH return (proportional to sold amount)
         expected_eth = sell_tokens * price
         # Cost basis for sold portion only
-        sold_cost_eth = cost_eth * (sell_tokens / total_tokens) if total_tokens > 0 else 0
-        self._queue_route_shadow("sell", sell_amount, int(round(sold_cost_eth * 10**18)))
+        sold_cost_wei = (
+            (int(cost_wei) * int(sell_amount) + int(total_balance) - 1)
+            // int(total_balance)
+        )
+        sold_cost_eth = sold_cost_wei / 10**18
+        self._queue_route_shadow("sell", sell_amount, sold_cost_wei)
         profit_eth = expected_eth - sold_cost_eth
         
         logger.info(f"💰 Selling position {pos_id}:")
@@ -4061,7 +4176,7 @@ class GridBot:
         quote, weth_fallback = self._actionable_quote_with_weth_fallback(
             sell_token=self.config.token_address, buy_token=self.trade_token_address,
             sell_amount=sell_amount, direction="sell",
-            sold_cost_wei=int(round(sold_cost_eth * 10**18)),
+            sold_cost_wei=sold_cost_wei,
         )
         
         if not quote.success:
@@ -4104,16 +4219,15 @@ class GridBot:
         if weth_fallback:
             unwrap_projected_wei = self._project_future_weth_unwrap_gas_wei()
         if needs_exact_approval:
-            sold_cost_wei = int(round(sold_cost_eth * 10**18))
             preapproval_minimum_wei = (
                 sold_cost_wei
-                + int(sold_cost_wei * (float(min_profit_percent) / 100.0))
+                + self._minimum_profit_wei(sold_cost_wei, min_profit_percent)
                 + unwrap_projected_wei + projected_approval_gas_wei
                 + self._provisional_swap_gas_cost_wei(quote)
             )
         else:
             preapproval_minimum_wei = self._minimum_gas_aware_return_wei(
-                int(round(sold_cost_eth * 10**18)), quote, min_profit_percent,
+                sold_cost_wei, quote, min_profit_percent,
                 setup_gas_wei=unwrap_projected_wei,
             )
         if preapproval_return_wei < preapproval_minimum_wei:
@@ -4123,7 +4237,7 @@ class GridBot:
                 alternate, alternate_quote = self._alternate_sell_route_for_profit_floor(
                     self.provider.active,
                     sell_amount=sell_amount,
-                    sold_cost_wei=int(round(sold_cost_eth * 10**18)),
+                    sold_cost_wei=sold_cost_wei,
                     min_profit_percent=min_profit_percent,
                 )
             if alternate is None:
@@ -4163,7 +4277,7 @@ class GridBot:
             quote = selected_quote
             preapproval_return_wei = self._taxed_quote_return_wei(quote)
             preapproval_minimum_wei = self._minimum_gas_aware_return_wei(
-                int(round(sold_cost_eth * 10**18)), quote, min_profit_percent
+                sold_cost_wei, quote, min_profit_percent
             )
             if preapproval_return_wei < preapproval_minimum_wei:
                 logger.warning("❌ Alternate sell route failed gas-aware profit floor")
@@ -4192,6 +4306,10 @@ class GridBot:
                 logger.error(f"Token approval failed: {result.error}")
                 return
             sell_setup_gas_wei += self._receipt_gas_cost_wei(result)
+            self._defer_sell_gas_cost(
+                pos_id, self._receipt_gas_cost_wei(result),
+                gridless_position=False,
+            )
             self._seal_provider_fallback()
             self._record_exact_approval_guard(
                 result, operation="sell", spender=spender, amount=sell_amount,
@@ -4218,7 +4336,7 @@ class GridBot:
         # Validate quote meets minimum profit requirement after projected gas.
         min_profit_eth = sold_cost_eth * (min_profit_percent / 100)
         min_return_eth = self._minimum_gas_aware_return_wei(
-            int(round(sold_cost_eth * 10**18)), quote, min_profit_percent,
+            sold_cost_wei, quote, min_profit_percent,
             setup_gas_wei=sell_setup_gas_wei,
         ) / 10**18
         
@@ -4241,6 +4359,10 @@ class GridBot:
                 return
             quote = swap_result
 
+        if not self._quote_matches_exact_input(quote, sell_amount):
+            logger.error("Sell aborted: executable quote input/output amounts are not exact")
+            return
+
         # Fetch Normal gas at the final broadcast boundary. The same exact
         # price is used for both the economic guard and the signed transaction.
         gas_limit, gas_price = self._swap_gas_fields(
@@ -4249,7 +4371,7 @@ class GridBot:
         )
         final_return_wei = self._taxed_quote_return_wei(quote)
         final_minimum_wei = self._minimum_gas_aware_return_wei(
-            int(round(sold_cost_eth * 10**18)), quote, min_profit_percent,
+            sold_cost_wei, quote, min_profit_percent,
             setup_gas_wei=sell_setup_gas_wei,
             projected_gas_cost_wei=gas_limit * gas_price,
         )
@@ -4294,7 +4416,7 @@ class GridBot:
             )
             if retry_allowed:
                 retry_minimum_wei = self._minimum_gas_aware_return_wei(
-                    int(round(sold_cost_eth * 10**18)), quote, min_profit_percent,
+                    sold_cost_wei, quote, min_profit_percent,
                     setup_gas_wei=sell_setup_gas_wei,
                     projected_gas_cost_wei=gas_limit * retry_gas_price,
                 )
@@ -4321,7 +4443,15 @@ class GridBot:
                     0, self._raw_token_balance(self.config.weth_address) - trade_balance_before
                 ) or self._taxed_quote_return_wei(quote)
                 try:
-                    unwrap_result, actual_unwrap_gas = self._execute_weth_unwrap(received_wei)
+                    unwrap_budget = (
+                        received_wei - sold_cost_wei
+                        - self._minimum_profit_wei(sold_cost_wei, min_profit_percent)
+                        - (sell_setup_gas_wei - unwrap_projected_wei)
+                        - self._receipt_gas_cost_wei(result)
+                    )
+                    unwrap_result, actual_unwrap_gas = self._execute_weth_unwrap(
+                        received_wei, maximum_economic_gas_wei=unwrap_budget,
+                    )
                 except Exception as exc:
                     self.wallet._record_unresolved_broadcast(
                         result.tx_hash or "confirmed-weth-swap",
@@ -4338,9 +4468,18 @@ class GridBot:
                 received_wei = self._measured_trade_received_wei(
                     trade_balance_before, result, self._taxed_quote_return_wei(quote)
                 )
+                if received_wei <= 0:
+                    self.wallet._record_unresolved_broadcast(
+                        result.tx_hash or "confirmed-sell-unreconciled",
+                        sell_tx,
+                        f"confirmed sell proceeds could not be reconciled for position {pos_id}",
+                    )
+                    logger.critical(
+                        "Sell confirmed but exact proceeds are unresolved; position retained and trading halted"
+                    )
+                    return
             logger.info("Measured trade-token receipt: %s wei", received_wei)
             eth_received = received_wei / 10**18
-            sold_cost_wei = int(round(sold_cost_eth * 10**18))
             profit_wei = self._net_sale_profit_wei(
                 received_wei, sold_cost_wei, result, setup_gas_wei=sell_setup_gas_wei
             )
@@ -4363,6 +4502,8 @@ class GridBot:
             # Moonbag tokens go to wallet balance (not tracked in position)
             self.positions[pos_id]['balance'] = 0
             self.positions[pos_id]['cost'] = 0
+            self.positions[pos_id]['cost_wei'] = 0
+            self.positions[pos_id]['deferred_sell_gas_wei'] = 0
             self.save_positions()
             self._clear_exact_approval_guard()
             

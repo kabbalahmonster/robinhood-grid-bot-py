@@ -108,3 +108,14 @@ def test_unwrap_requires_reserve_and_returns_confirmed_gas(tmp_path):
     bot._receipt_gas_cost_wei = Mock(return_value=80_000)
     actual, gas = bot._execute_weth_unwrap(999)
     assert actual is result and gas == 80_000
+
+
+def test_unwrap_refuses_to_spend_guaranteed_profit(tmp_path):
+    bot = make_bot(tmp_path)
+    tx = {"gas": 50_000, "gasPrice": 2, "to": bot.config.weth_address}
+    bot._project_weth_operation_gas = Mock(return_value=(tx, 100_000))
+
+    with pytest.raises(RuntimeError, match="profit floor"):
+        bot._execute_weth_unwrap(999, maximum_economic_gas_wei=99_999)
+
+    bot.wallet.unwrap_weth.assert_not_called()

@@ -231,6 +231,10 @@ def load_positions() -> Dict[str, Dict[str, int]]:
                     positions[k]['reconciliation_tx_hash'] = str(
                         v['reconciliation_tx_hash']
                     ).lower()
+                if int(v.get('deferred_sell_gas_wei', 0) or 0) > 0:
+                    positions[k]['deferred_sell_gas_wei'] = int(
+                        v['deferred_sell_gas_wei']
+                    )
         return positions
     except (json.JSONDecodeError, IOError):
         return {}

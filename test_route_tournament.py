@@ -86,11 +86,11 @@ def test_buy_and_sell_scoring_tax_slippage_and_all_gas():
     assert buy["output_floor_human"] == pytest.approx(buy_floor / 10**18)
     c["direction"] = "sell"
     sell = score_candidate(quote(), "sushiswap", "weth", c)
-    sell_floor = 2 * 10**15 * 98 // 100
+    sell_floor = 2 * 10**15 * 99 // 100
     assert Decimal(sell["projected_net_score"]) == sell_floor - (300000 + 200000 + 60000) * 10**6
 
 
-def test_taxed_sell_does_not_charge_fee_twice_when_slippage_includes_fee():
+def test_taxed_sell_uses_combined_fee_and_market_slippage_once():
     # Taxed-token execution tolerance is fee + market buffer. Applying both
     # that total tolerance and tax again rejects a sell the live guard accepts.
     c = context("sell")
@@ -105,8 +105,8 @@ def test_taxed_sell_does_not_charge_fee_twice_when_slippage_includes_fee():
         "uniswap", "native", c, allowance_probe={"value": 1},
     )
 
-    assert int(observed["output_floor_raw"]) == 4_312_533_175_868_646 * 937 // 1000
-    assert "sell_profit_floor" not in observed["rejections"]
+    assert int(observed["output_floor_raw"]) == 4_312_533_175_868_646 * 917 // 1000
+    assert "sell_profit_floor" in observed["rejections"]
 
 
 def test_execution_preflight_sell_ranks_with_all_projected_gas():
@@ -132,7 +132,7 @@ def test_execution_preflight_sell_ranks_with_all_projected_gas():
     # Keep the staged pre-approval diagnostic, but rank the tournament using
     # approval plus swap gas so a setup-heavy route cannot win incorrectly.
     swap_gas_wei = int(90_300 * 1.05) * 373_114_200
-    output_floor = int(4_704_748_472_054_972 * (1.0 - 0.063))
+    output_floor = 4_704_748_472_054_972 * 917 // 1000
     assert int(observed["preapproval_total_gas_wei"]) == swap_gas_wei
     assert int(observed["approval_budget_wei"]) > 0
     assert int(observed["projected_total_gas_wei"]) > swap_gas_wei
@@ -197,17 +197,18 @@ def test_execution_preflight_gas_multiplier_keeps_normal_float_rounding():
     assert "total_gas_above_cap" not in observed["rejections"]
 
 
-def test_execution_preflight_tax_floor_matches_normal_execution_rounding():
+def test_execution_preflight_slippage_floor_matches_normal_execution_rounding():
     c = context("sell", execution_preflight=True)
-    c.update(tax=0.063, cap=10**18, sold_cost_wei=1)
+    c.update(tax=0.063, slippage=0.063, cap=10**18, sold_cost_wei=1)
     observed = score_candidate(
         QuoteResult(success=True, buy_amount=444_157_599_796_692_942,
                     sell_amount=10**15, gas=1),
         "sushiswap", "native", c, allowance_probe={"value": 10**15},
     )
 
-    # This is int(output * (1.0 - fee)), exactly as _taxed_quote_return_wei.
-    assert int(observed["output_floor_raw"]) == 416_175_671_009_501_312
+    assert int(observed["output_floor_raw"]) == int(
+        Decimal(444_157_599_796_692_942) * Decimal("0.937")
+    )
 
 
 @pytest.mark.parametrize("change,reason", [
@@ -852,7 +853,19 @@ def test_gridless_tournament_uses_exact_post_moonbag_amount_and_cost():
     amount, cost = b._gridless_sell_terms({"balance": 10_001, "cost_wei": 5_000})
 
     assert amount == 9_901
-    assert cost == 5_000 * 9_901 // 10_001
+    assert cost == (5_000 * 9_901 + 10_001 - 1) // 10_001
+
+
+def test_gridless_sell_terms_recover_deferred_setup_gas_and_round_up():
+    b = GridBot.__new__(GridBot)
+    b.config = SimpleNamespace(moonbag_percentage=50)
+
+    amount, cost = b._gridless_sell_terms({
+        "balance": 3, "cost_wei": 1_000, "deferred_sell_gas_wei": 2,
+    })
+
+    assert amount == 2
+    assert cost == 668
 
 
 def test_mode_parsing_and_default(monkeypatch, tmp_path):
@@ -1917,8 +1930,8 @@ def test_sell_candidate_exposes_projected_profit_and_minimum():
     )
     assert row["minimum_profit_percent"] == 5.0
     assert row["minimum_return_wei"] == "2100000000000000"
-    assert row["projected_profit_wei"] == "299999999700000"
-    assert row["projected_profit_percent"] > 14.99
+    assert row["projected_profit_wei"] == "276999999700000"
+    assert row["projected_profit_percent"] > 13.84
 
 
 def test_execute_mode_still_fails_closed():

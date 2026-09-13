@@ -462,18 +462,18 @@ def score_candidate(quote, provider, settlement, context, *, allowance_probe=Non
     preapproval_total = total
     if c["direction"] == "sell" and c.get("execution_preflight") is True:
         preapproval_total -= costs["approval"]
-    # ``slippage`` is transaction tolerance, not a second quoted-output fee.
-    # For taxed sells it already contains the transfer fee plus market buffer;
-    # the live sell guard applies the transfer fee exactly once to a fresh quote.
-    # Mirror that economic guard so shadow does not reject executable trades.
+    # Authorize sells against the executable minimum, never the optimistic
+    # quote. Taxed-token slippage already combines transfer fee and market
+    # buffer, so applying that tolerance once is conservative without charging
+    # the declared tax twice.
     effective_tax = 0 if getattr(quote, "output_includes_transfer_tax", False) else c["tax"]
     if c["direction"] == "sell":
-        if c.get("execution_preflight") is True:
-            # Match _taxed_quote_return_wei() exactly at the authorization
-            # boundary, including its established float-to-int rounding.
-            floor = int(output * (1.0 - float(effective_tax)))
+        if getattr(quote, "output_is_execution_floor", False):
+            floor = output
+        elif int(getattr(quote, "minimum_buy_amount", 0) or 0) > 0:
+            floor = min(output, int(quote.minimum_buy_amount))
         else:
-            floor = int(Decimal(output) * (1 - Decimal(str(effective_tax))))
+            floor = int(Decimal(output) * (1 - Decimal(str(c["slippage"]))))
     else:
         effective_slippage = 0 if getattr(quote, "output_is_execution_floor", False) else c["slippage"]
         floor = int(Decimal(output) * (1 - Decimal(str(effective_slippage))) *

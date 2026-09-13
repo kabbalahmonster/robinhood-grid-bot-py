@@ -124,7 +124,9 @@ class ZeroXClient:
             params["taker"] = taker_address
         
         if slippage_percentage:
-            params["slippageBps"] = int(slippage_percentage * 100)  # Convert to basis points
+            params["slippageBps"] = max(
+                1, int(round(float(slippage_percentage) * 10_000))
+            )
         
         # Add anti-MEV jitter if enabled
         if apply_jitter_to_price and self.config.anti_mev_jitter:
@@ -182,7 +184,7 @@ class ZeroXClient:
             # Log what we got
             self.logger.debug(f"0x quote: buy={buy_amount}, sell={sell_amount}, to={to_address}")
 
-            return QuoteResult(
+            result = QuoteResult(
                 success=True,
                 price=price,
                 buy_amount=buy_amount,
@@ -195,6 +197,8 @@ class ZeroXClient:
                 gas_price=int(transaction.get("gasPrice", 0)) if transaction else 0,
                 raw_response=data,
             )
+            result.minimum_buy_amount = int(data.get("minBuyAmount", 0) or 0)
+            return result
         
         except requests.exceptions.RequestException as e:
             error_msg = f"Request failed: {e}"

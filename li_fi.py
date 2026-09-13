@@ -138,6 +138,13 @@ class LiFiClient:
         if taker_address:
             params["fromAddress"] = taker_address
             params["toAddress"] = taker_address  # Same as fromAddress for single-chain swaps
+        if slippage_percentage is not None:
+            slippage = float(slippage_percentage)
+            if not 0 <= slippage < 1:
+                return QuoteResult(
+                    success=False, error="LI.FI slippage must be between 0 and 1"
+                )
+            params["slippage"] = str(slippage)
         
         # Note: integrator parameter may cause issues - only add if explicitly needed
         # if getattr(self.config, 'li_fi_integrator', None):
@@ -269,7 +276,7 @@ class LiFiClient:
                 return QuoteResult(success=False, raw_response=data,
                                    error="LI.FI quote returned the wrong execution chain")
             
-            return QuoteResult(
+            result = QuoteResult(
                 success=True,
                 price=price,
                 buy_amount=to_amount,
@@ -282,6 +289,10 @@ class LiFiClient:
                 gas_price=parse_hex_or_int(transaction_request.get("gasPrice"), 0),
                 raw_response=data,
             )
+            result.minimum_buy_amount = parse_hex_or_int(
+                estimate.get("toAmountMin"), 0
+            )
+            return result
         
         except requests.exceptions.RequestException as e:
             error_msg = f"LI.FI request failed: {e}"

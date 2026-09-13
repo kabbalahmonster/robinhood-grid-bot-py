@@ -7,6 +7,7 @@ for bot operation across different EVM chains.
 
 import os
 import re
+import math
 from dataclasses import dataclass
 from typing import Optional
 from dotenv import load_dotenv
@@ -284,6 +285,12 @@ class BotConfig:
         
         if self.max_positions <= 0:
             raise ValueError("MAX_POSITIONS must be positive")
+
+        if not math.isfinite(self.min_profit_percent) or not 0.1 <= self.min_profit_percent <= 100:
+            raise ValueError("MIN_PROFIT_PERCENT must be finite and between 0.1 and 100")
+
+        if not math.isfinite(self.slippage_tolerance) or not 0 <= self.slippage_tolerance < 100:
+            raise ValueError("SLIPPAGE_TOLERANCE must be finite and between 0 and less than 100")
         
         if not 0 <= self.bank_percentage <= 100:
             raise ValueError("BANK_PERCENTAGE must be between 0 and 100")

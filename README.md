@@ -128,7 +128,7 @@ python grid_bot.py
 | `MAX_POSITIONS` | No | Chain default | Total number of grid positions to create |
 | `MAX_ACTIVE_POSITIONS` | No | `MAX_POSITIONS` | Maximum positions that can be active at once |
 | **Trading Settings** ||||
-| `MIN_PROFIT_PERCENT` | No | 5.0 | Minimum profit % before selling |
+| `MIN_PROFIT_PERCENT` | No | 5.0 | Minimum net profit % before a normal sell; validated from 0.1 to 100 |
 | `INITIAL_BUY_AMOUNT` | No | 0.01 | Initial ETH/WETH amount for first buys |
 | `SLIPPAGE_TOLERANCE` | No | 2.0 | Slippage tolerance % for swaps |
 | `TAXED_TOKEN` | No | false | Enable fee-on-transfer accounting and bounded taxed-token execution |
@@ -719,7 +719,8 @@ python migrate_grid_mode.py to-grid
 
 3. **Sell Execution**:
    - Monitors positions for sell targets
-   - Requires profit ≥ `MIN_PROFIT_PERCENT` + 1.5% slippage buffer
+   - Requires executable minimum proceeds to cover proportional cost basis,
+     maximum signed sell gas, and `MIN_PROFIT_PERCENT`
    - Applies moonbag: keeps X% of tokens, sells rest
    - Native mode can settle directly to WETH and locally unwrap the measured receipt
    - Includes projected unwrap gas before selling and confirmed approval/swap/unwrap gas in realized profit
@@ -1015,13 +1016,58 @@ python -m unittest discover -v
 
 ## Safety Features
 
-1. **Profit Protection**: Only sells when profit ≥ `MIN_PROFIT_PERCENT` + slippage buffer
-2. **Slippage Protection**: Configurable slippage tolerance on all swaps
-3. **Gas Estimation**: 50% buffer on gas estimates for reliability
+1. **Profit Protection**: Non-stoploss sells require their executable minimum proceeds to cover cost basis, all sell gas, and `MIN_PROFIT_PERCENT`
+2. **Slippage Protection**: Sell authorization uses the provider-encoded minimum output when exposed, otherwise the configured on-chain slippage floor—not the optimistic quote
+3. **Gas Estimation**: Final calldata is locally estimated with configured headroom and the signed transaction's maximum gas cost is used at authorization
 4. **Atomic State Saves**: Position state saved after every trade
 5. **Approval Checks**: Verifies token approvals before trading
 6. **Error Handling**: Graceful failures with detailed logging
 7. **Session Tracking**: Monitors cumulative performance
+
+### Profit-accounting invariants
+
+All authorization and realized-profit arithmetic uses integer base units. These
+rules apply equally to grid and gridless execution and remain active when the
+route tournament falls back to the configured baseline route:
+
+1. A completed buy records `cost_wei = exact input principal + confirmed wrap
+   gas + confirmed approval gas + confirmed swap gas`. Token quantity is the
+   measured wallet delta, with receipt-log recovery when RPC balance state lags.
+2. A moonbag/partial sale is charged proportional cost basis rounded **up** to
+   the next wei. The configured profit is also rounded **up**, so a 0.1% target
+   cannot pass because floating-point truncation donated a wei to the trade.
+3. Sell proceeds are the executable minimum: a provider's explicit encoded
+   minimum when available, Umbra's verified `minOut`, or quoted output reduced
+   by the exact configured slippage tolerance. Taxed-token tolerance already
+   combines the declared/detected transfer fee and market buffer and is applied
+   once.
+4. Immediately before broadcast, the exact-input amount must match the position
+   sale amount, final calldata must pass required local simulation, and:
+
+   `minimum proceeds >= sold cost + ceil(sold cost * MIN_PROFIT_PERCENT / 100) + confirmed setup gas + gas limit * signed gas price`
+
+5. A stale-base-fee retry repeats that inequality with its higher signed gas
+   price. WETH settlement also limits the later unwrap's maximum signed fee to
+   the remaining profit budget; if it cannot preserve the target, settlement
+   halts with a durable recovery guard instead of spending the promised profit.
+6. Realized profit is recorded only from exact measured/receipt-proven proceeds:
+
+   `realized profit = confirmed proceeds - sold cost - confirmed approval/cancel/unwrap gas - confirmed swap gas`
+
+   If exact proceeds cannot be reconciled, the position is retained, an
+   unresolved-broadcast guard is written, and no profit is claimed. Confirmed
+   approval/cancel gas from an attempt that aborts before its swap is persisted
+   as `deferred_sell_gas_wei` and must be recovered by a later profitable sale.
+
+`MIN_PROFIT_PERCENT` is validated from 0.1 through 100. A stoploss is the one
+explicit exception: when enabled and triggered, it intentionally prioritizes
+loss containment over the profit floor. No software can guarantee that an
+attempt never spends gas—reverted transactions, approval-only attempts, chain
+reorganizations, malicious/nonstandard tokens, and RPC failures remain market
+and protocol risks. The invariant guaranteed here is narrower and auditable: a
+normal sell swap is never *authorized* unless its enforced minimum and maximum
+signed costs prove the configured profit floor, and uncertain settlement is
+never reported as exact profit.
 
 ## Troubleshooting
 

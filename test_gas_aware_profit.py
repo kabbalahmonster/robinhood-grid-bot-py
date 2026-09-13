@@ -212,6 +212,50 @@ class GasAwareProfitTests(unittest.TestCase):
 
         self.assertEqual(required, 1_110_000_000_000_000)
 
+    def test_point_one_percent_profit_is_rounded_up_not_down(self):
+        bot = self.make_bot()
+        quote = SimpleNamespace(gas=0, gas_price=0)
+
+        required = bot._minimum_gas_aware_return_wei(
+            sold_cost_wei=1_001,
+            quote=quote,
+            min_profit_percent=0.1,
+            projected_gas_cost_wei=0,
+        )
+
+        self.assertEqual(required, 1_003)
+
+    def test_sell_authorization_uses_slippage_floor(self):
+        bot = self.make_bot()
+        bot._swap_slippage_fraction = lambda: 0.01
+        quote = SimpleNamespace(buy_amount=1_000_000)
+
+        self.assertEqual(bot._taxed_quote_return_wei(quote), 990_000)
+
+    def test_provider_encoded_floor_takes_precedence(self):
+        bot = self.make_bot()
+        bot._swap_slippage_fraction = lambda: 0.01
+        quote = SimpleNamespace(buy_amount=1_000_000, minimum_buy_amount=987_654)
+
+        self.assertEqual(bot._taxed_quote_return_wei(quote), 987_654)
+
+    def test_exact_input_mismatch_fails_closed(self):
+        quote = SimpleNamespace(sell_amount=999, buy_amount=1_100)
+        self.assertFalse(GridBot._quote_matches_exact_input(quote, 1_000))
+        quote.sell_amount = 1_000
+        self.assertTrue(GridBot._quote_matches_exact_input(quote, 1_000))
+
+    def test_confirmed_sell_setup_gas_is_deferred_into_position(self):
+        bot = self.make_bot()
+        bot.positions = {"7": {"cost_wei": 1_000, "balance": 100}}
+        bot.save_positions = Mock()
+
+        bot._defer_sell_gas_cost("7", 25, gridless_position=False)
+        bot._defer_sell_gas_cost("7", 30, gridless_position=False)
+
+        self.assertEqual(bot.positions["7"]["deferred_sell_gas_wei"], 55)
+        self.assertEqual(bot.save_positions.call_count, 2)
+
     def test_setup_and_swap_gas_are_both_deducted_from_sale_profit(self):
         bot = self.make_bot()
         result = SimpleNamespace(

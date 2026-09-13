@@ -20,7 +20,8 @@ def payload(**tx_overrides):
           "data": "0x12345678", "value": "0", "gasLimit": "250000", "chainId": 4663}
     tx.update(tx_overrides)
     return {"action": {"fromAmount": "1000"},
-            "estimate": {"toAmount": "1900", "approvalAddress": tx["to"]},
+            "estimate": {"toAmount": "1900", "toAmountMin": "1850",
+                         "approvalAddress": tx["to"]},
             "transactionRequest": tx}
 
 
@@ -31,9 +32,12 @@ def test_tournament_timeout_and_executable_fields(get):
         "0x2222222222222222222222222222222222222222",
         "0x3333333333333333333333333333333333333333",
         sell_amount=1000, taker_address="0x4444444444444444444444444444444444444444",
-        quote_timeout_seconds=2.5, apply_jitter_to_price=False)
+        slippage_percentage=0.01, quote_timeout_seconds=2.5,
+        apply_jitter_to_price=False)
     assert result.success and result.buy_amount == 1900 and result.gas == 250000
+    assert result.minimum_buy_amount == 1850
     assert get.call_args.kwargs["timeout"] == 2.5
+    assert get.call_args.kwargs["params"]["slippage"] == "0.01"
 
 
 @patch("li_fi.requests.get")
