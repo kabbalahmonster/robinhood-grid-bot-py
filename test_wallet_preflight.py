@@ -239,6 +239,34 @@ class TestWalletPreflight(unittest.TestCase):
                 if name.startswith("unresolved_broadcast.json.definitive-rejection.")
             ]), 1)
 
+    def test_exact_reconciled_hash_archives_guard_and_clears_memory(self):
+        wallet = self.make_wallet()
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "unresolved_broadcast.json")
+            wallet.unresolved_broadcast_path = path
+            wallet.unresolved_broadcast = {"tx_hash": "0xABC123"}
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump(wallet.unresolved_broadcast, handle)
+
+            archived = wallet.archive_reconciled_broadcast("0xabc123")
+
+            self.assertFalse(os.path.exists(path))
+            self.assertTrue(os.path.exists(archived))
+            self.assertIsNone(wallet.unresolved_broadcast)
+
+    def test_nonmatching_reconciled_hash_preserves_guard(self):
+        wallet = self.make_wallet()
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "unresolved_broadcast.json")
+            wallet.unresolved_broadcast_path = path
+            wallet.unresolved_broadcast = {"tx_hash": "0xabc123"}
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump(wallet.unresolved_broadcast, handle)
+
+            self.assertIsNone(wallet.archive_reconciled_broadcast("0xdifferent"))
+            self.assertTrue(os.path.exists(path))
+            self.assertEqual(wallet.unresolved_broadcast["tx_hash"], "0xabc123")
+
 
 if __name__ == "__main__":
     unittest.main()

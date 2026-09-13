@@ -1668,8 +1668,14 @@ apply the exact same batch with `--apply-reconciliation
 --confirm-bot-stopped`. The command rejects wrong wallets/tokens, failed
 receipts, malformed logs, and duplicate transaction hashes. It creates a
 timestamped backup and reload-verifies the saved ledger before reporting
-success. Do not restart that bot until its wallet balance and tracked position
-allocation agree.
+success. If an unresolved-broadcast guard contains the exact same transaction
+hash, the successful applied reconciliation archives it as
+`data/unresolved_broadcast.json.reconciled.*`; a dry run, failed apply, missing
+guard, or different hash never clears it. A reconciliation applied before this
+behavior shipped can be rerun with the same hash and apply confirmations: its
+receipt is reverified, the matching stale guard is archived, and no duplicate
+position is created. Do not restart that bot until its wallet balance and
+tracked position allocation agree.
 
 ### Unresolved broadcasts and WETH settlement
 

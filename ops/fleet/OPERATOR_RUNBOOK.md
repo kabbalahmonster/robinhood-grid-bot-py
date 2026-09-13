@@ -251,3 +251,12 @@ The tool proportionally reduces position balances to wallet reality, preserves
 cost basis, backs up changed ledgers, and writes a reconciliation audit record.
 It never assigns wallet surplus or recovers an omitted buy. See the fleet README
 for multi-bot partial-failure behavior and backup restoration guidance.
+
+For an omitted gridless buy with a known transaction hash, use
+`--reconcile-gridless-buy` from that bot checkout instead. After an applied,
+receipt-verified reconciliation passes its ledger reload check, an
+`unresolved_broadcast.json` record with the exact same hash is archived as
+`unresolved_broadcast.json.reconciled.*`. Preview runs and hash mismatches leave
+the trading halt in place. For a reconciliation already applied by an older
+release, rerun the same applied command: it re-verifies the receipt and archives
+the matching guard without duplicating the position.

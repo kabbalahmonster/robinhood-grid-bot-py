@@ -1441,7 +1441,14 @@ python grid_bot.py \
 The verifier requires a successful receipt from the configured wallet, an
 exact configured-token transfer to that wallet, and recoverable principal plus
 actual gas. Review the proposed position IDs, raw token amounts, and all-in
-costs. Apply the same batch only while the bot remains stopped:
+costs. Apply the same batch only while the bot remains stopped. After the
+position and reconciliation journal pass post-write verification, a matching
+`data/unresolved_broadcast.json` transaction hash is archived as
+`data/unresolved_broadcast.json.reconciled.*`, allowing trading to resume on
+restart. If reconciliation was applied by an older release, rerunning the same
+applied command re-verifies its receipt and archives the matching stale guard
+without creating a duplicate position. A missing or nonmatching guard is never
+cleared:
 
 ```bash
 python grid_bot.py \

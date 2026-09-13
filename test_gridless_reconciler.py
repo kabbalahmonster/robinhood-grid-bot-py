@@ -52,12 +52,26 @@ class FakeEth:
 
 
 class FakeWallet:
+    archived = []
+    unresolved_hash = TX1
+
     def __init__(self, config):
         self.address = WALLET
         self.w3 = SimpleNamespace(eth=FakeEth())
+        self.unresolved_broadcast = (
+            {"tx_hash": self.unresolved_hash} if self.unresolved_hash else None
+        )
 
     def get_token_balance(self, token_address):
         return 0.0, 100_000
+
+    def archive_reconciled_broadcast(self, tx_hash):
+        if not self.unresolved_broadcast or tx_hash != self.unresolved_broadcast.get("tx_hash"):
+            return None
+        self.archived.append(tx_hash)
+        self.unresolved_broadcast = None
+        type(self).unresolved_hash = None
+        return f"guard.json.reconciled.{len(self.archived)}"
 
 
 @pytest.fixture
@@ -67,6 +81,8 @@ def recovery_env(tmp_path, monkeypatch):
     monkeypatch.setattr(gridless, "POSITIONS_FILE", str(positions_path))
     monkeypatch.setattr(reconciler, "JOURNAL_FILE", journal_path)
     monkeypatch.setattr(reconciler, "Wallet", FakeWallet)
+    FakeWallet.archived = []
+    FakeWallet.unresolved_hash = TX1
     monkeypatch.setattr(reconciler, "load_config", lambda: SimpleNamespace(
         token_address=TOKEN,
         max_active_positions=12,
@@ -98,6 +114,7 @@ def test_reconciliation_apply_is_exact_and_idempotent(recovery_env):
     assert positions["2"]["balance"] == 8_000
     assert journal_path.exists()
     assert list(positions_path.parent.glob("*.bak"))
+    assert FakeWallet.archived == [TX1]
     with pytest.raises(ValueError, match="already reconciled"):
         reconciler.run_gridless_reconciliation(
             [TX1], apply=True, confirm_bot_stopped=True
@@ -107,6 +124,27 @@ def test_reconciliation_apply_is_exact_and_idempotent(recovery_env):
 def test_reconciliation_apply_requires_stopped_ack(recovery_env):
     with pytest.raises(ValueError, match="confirm-bot-stopped"):
         reconciler.run_gridless_reconciliation([TX1], apply=True)
+    assert FakeWallet.archived == []
+
+
+def test_reconciliation_does_not_archive_nonmatching_broadcast(recovery_env):
+    FakeWallet.unresolved_hash = TX2
+    assert reconciler.run_gridless_reconciliation(
+        [TX1], apply=True, confirm_bot_stopped=True
+    ) == 0
+    assert FakeWallet.archived == []
+
+
+def test_existing_reconciliation_can_archive_matching_stale_guard(recovery_env):
+    _positions_path, journal_path = recovery_env
+    journal_path.write_text('{"' + TX1 + '": {"tx_hash": "' + TX1 + '"}}')
+
+    assert reconciler.run_gridless_reconciliation(
+        [TX1], apply=True, confirm_bot_stopped=True
+    ) == 0
+
+    assert FakeWallet.archived == [TX1]
+    assert len(gridless.load_positions()) == 1
 
 
 def test_receipt_must_pay_configured_token_to_wallet():

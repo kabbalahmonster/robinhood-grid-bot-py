@@ -248,6 +248,35 @@ class Wallet:
     def has_unresolved_broadcast(self) -> bool:
         return bool(getattr(self, "unresolved_broadcast", None))
 
+    def archive_reconciled_broadcast(self, tx_hash: str) -> Optional[str]:
+        """Archive a guard whose hash exactly matches verified recovery."""
+        record = getattr(self, "unresolved_broadcast", None)
+        if not isinstance(record, dict):
+            return None
+        recorded_hash = str(record.get("tx_hash") or "").strip().lower()
+        reconciled_hash = str(tx_hash or "").strip().lower()
+        if not recorded_hash or recorded_hash != reconciled_hash:
+            return None
+
+        path = getattr(
+            self, "unresolved_broadcast_path",
+            os.path.join("data", "unresolved_broadcast.json"),
+        )
+        timestamp = int(time.time())
+        archived = f"{path}.reconciled.{timestamp}"
+        suffix = 1
+        while os.path.exists(archived):
+            archived = f"{path}.reconciled.{timestamp}.{suffix}"
+            suffix += 1
+        os.replace(path, archived)
+        self.unresolved_broadcast = None
+        self.logger.warning(
+            "Archived receipt-reconciled unresolved broadcast tx=%s: %s",
+            reconciled_hash,
+            archived,
+        )
+        return archived
+
     @staticmethod
     def _definitive_submission_rejection(error: Exception) -> bool:
         """Return true only for RPC errors proving the signed tx was rejected."""

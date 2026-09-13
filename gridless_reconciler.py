@@ -116,6 +116,20 @@ def run_gridless_reconciliation(tx_hashes, apply=False, confirm_bot_stopped=Fals
     } | {str(value).lower() for value in journal}
     duplicates = [value for value in normalized if value in recorded]
     if duplicates:
+        if apply and len(duplicates) == len(normalized):
+            # Support an operator who successfully reconciled before automatic
+            # guard archival existed. Re-verify every receipt, then archive only
+            # an exact matching guard without adding another position.
+            for value in normalized:
+                inspect_buy(wallet.w3, value, config.token_address, wallet.address)
+            for value in normalized:
+                archived_guard = wallet.archive_reconciled_broadcast(value)
+                if archived_guard:
+                    print(
+                        "Reverified existing reconciliation and archived matching "
+                        f"unresolved broadcast guard: {archived_guard}"
+                    )
+                    return 0
         raise ValueError("already reconciled: " + ", ".join(duplicates))
 
     plans = [
@@ -175,5 +189,13 @@ def run_gridless_reconciliation(tx_hashes, apply=False, confirm_bot_stopped=Fals
         saved = reloaded.get(plan["position_id"], {})
         if saved.get("reconciliation_tx_hash") != plan["tx_hash"]:
             raise RuntimeError("post-write verification failed; keep bot stopped and restore backup")
+    for plan in plans:
+        archived_guard = wallet.archive_reconciled_broadcast(plan["tx_hash"])
+        if archived_guard:
+            print(
+                "Archived matching unresolved broadcast guard after receipt-verified "
+                f"reconciliation: {archived_guard}"
+            )
+            break
     print(f"Applied {len(plans)} position(s). Backup: {backup_path if backup_path.exists() else 'new file'}")
     return 0
