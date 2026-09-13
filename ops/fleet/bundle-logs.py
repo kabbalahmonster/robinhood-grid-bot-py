@@ -156,6 +156,17 @@ def next_numbered_output(requested):
         number += 1
 
 
+def write_record(handle, item, no_redact):
+    at, _, _, name, filename, lines = item
+    body = "\n".join(lines)
+    if not no_redact:
+        body = redact(body)
+    body_lines = body.split("\n")
+    handle.write(f"[{at.isoformat()}] [{name}] [{filename}] {body_lines[0]}\n")
+    for continuation in body_lines[1:]:
+        handle.write(f"[CONT] [{name}] [{filename}] {continuation}\n")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", required=True)
@@ -165,6 +176,7 @@ def main():
     parser.add_argument("--no-redact", action="store_true")
     parser.add_argument("--tournament-only", action="store_true")
     parser.add_argument("--tournament-rounds-only", action="store_true")
+    parser.add_argument("--chronological", action="store_true")
     parser.add_argument("targets", nargs="+")
     args = parser.parse_args()
     if len(args.targets) % 2:
@@ -215,6 +227,7 @@ def main():
         for item in items:
             merged.append((item[0], name.casefold(), item[1], name, filename, item[2]))
     merged.sort(key=lambda item: (item[0], item[1], item[2]))
+    included = len(manifest) - failures - skipped
     fd, temporary = tempfile.mkstemp(prefix=f".{output.name}.", dir=output.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -224,19 +237,41 @@ def main():
             handle.write(f"# cutoff_utc: {cutoff.isoformat() if cutoff else 'none'}\n")
             handle.write(f"# tournament_only: {'enabled' if args.tournament_only else 'disabled'}\n")
             handle.write(f"# tournament_rounds_only: {'enabled' if args.tournament_rounds_only else 'disabled'}\n")
+            handle.write(f"# layout: {'chronological' if args.chronological else 'grouped_by_bot'}\n")
             handle.write(f"# selected_bots: {len(manifest)}\n")
+            handle.write(f"# included_bots: {included}\n")
+            handle.write(f"# skipped_bots: {skipped}\n")
+            handle.write(f"# failed_bots: {failures}\n")
+            handle.write(f"# total_records: {len(merged)}\n")
+            handle.write("# timestamp_timezone: UTC\n")
+            handle.write("# continuation_format: [CONT] lines belong to the preceding record\n")
             handle.write("# manifest:\n")
             for name, filename, state, count, size in manifest:
                 handle.write(f"#   {name}: source={filename or '-'} bytes={size if size is not None else '-'} records={count} status={state}\n")
             handle.write("#\n")
-            for at, _, _, name, filename, lines in merged:
-                body = "\n".join(lines)
-                if not args.no_redact:
-                    body = redact(body)
-                body_lines = body.split("\n")
-                handle.write(f"[{at.isoformat()}] [{name}] [{filename}] {body_lines[0]}\n")
-                for continuation in body_lines[1:]:
-                    handle.write(f"[CONT] [{name}] [{filename}] {continuation}\n")
+            if args.chronological:
+                handle.write("# === FLEET-WIDE CHRONOLOGICAL RECORDS ===\n")
+                for item in merged:
+                    write_record(handle, item, args.no_redact)
+            else:
+                for name, filename, state, count, size in manifest:
+                    bot_records = [item for item in merged if item[3] == name]
+                    handle.write("#\n# ==============================================================================\n")
+                    handle.write(f"# BOT SECTION: {name}\n")
+                    handle.write(f"# source_file: {filename or '-'}\n")
+                    handle.write(f"# source_bytes: {size if size is not None else '-'}\n")
+                    handle.write(f"# status: {state}\n")
+                    handle.write(f"# included_records: {count}\n")
+                    handle.write(
+                        f"# time_range_utc: {bot_records[0][0].isoformat()} -> "
+                        f"{bot_records[-1][0].isoformat()}\n" if bot_records
+                        else "# time_range_utc: -\n"
+                    )
+                    handle.write("# ------------------------------------------------------------------------------\n")
+                    if not bot_records:
+                        handle.write("# No records included for this bot. See status above.\n")
+                    for item in bot_records:
+                        write_record(handle, item, args.no_redact)
             handle.flush()
             os.fsync(handle.fileno())
         if args.force:
@@ -258,7 +293,6 @@ def main():
         except OSError:
             pass
         raise
-    included = len(manifest) - failures - skipped
     print(f"Wrote {output} ({len(merged)} records from {included}/{len(manifest)} bots; "
           f"{skipped} skipped; {failures} failed)")
     return 1 if failures else 0

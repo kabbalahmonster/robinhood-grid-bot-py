@@ -100,9 +100,11 @@ the fleet:
 bundle-logs --all --tournament-rounds-only --since 6h --output fleet-tournament.log
 ```
 
-For a focused comparison, use `--only MANY,ROBINVAULT`. The output is
-chronological and bot-labelled, with multiline errors preserved and secret
-redaction enabled by default. A nonzero exit with an output file means the
+For a focused comparison, use `--only MANY,ROBINVAULT`. The default output is
+grouped into labelled per-bot sections with source, status, record count, and
+UTC time range; multiline errors stay intact and secret redaction is enabled.
+Use `--chronological` when a shared-provider or RPC incident requires one
+fleet-wide timeline. A nonzero exit with an output file means the
 manifest identifies one or more missing/unreadable bot logs; the partial
 evidence is usable, but its stated gaps matter.
 An existing output is never silently overwritten: the command announces and

@@ -24,6 +24,7 @@ Output:
   --max-lines-per-bot COUNT  Keep at most the newest COUNT physical lines per bot
   --tournament-only          Include only logs with a tournament in the kept records
   --tournament-rounds-only   Include only tournament round slices
+  --chronological            Interleave all bots by UTC time instead of grouping
   --force                    Atomically replace the exact existing output path
   --no-redact                Disable default secret redaction (dangerous)
   -h, --help                 Show this help
@@ -36,7 +37,7 @@ Examples:
 EOF
 }
 
-config_path=""; only=""; exclude=""; output=""; since=""; max_lines=""; force=0; redact=1; tournament_only=0; tournament_rounds_only=0; saw_all=0
+config_path=""; only=""; exclude=""; output=""; since=""; max_lines=""; force=0; redact=1; tournament_only=0; tournament_rounds_only=0; chronological=0; saw_all=0
 while (($#)); do
   case "$1" in
     --config) (($# >= 2)) || fleet_die "--config requires a path"; config_path="$2"; shift 2 ;;
@@ -48,6 +49,7 @@ while (($#)); do
     --max-lines-per-bot) (($# >= 2)) || fleet_die "--max-lines-per-bot requires a count"; max_lines="$2"; shift 2 ;;
     --tournament-only) tournament_only=1; shift ;;
     --tournament-rounds-only) tournament_rounds_only=1; shift ;;
+    --chronological) chronological=1; shift ;;
     --force) force=1; shift ;;
     --no-redact) redact=0; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -73,6 +75,7 @@ args=(--output "$output")
 ((redact == 1)) || args+=(--no-redact)
 ((tournament_only == 0)) || args+=(--tournament-only)
 ((tournament_rounds_only == 0)) || args+=(--tournament-rounds-only)
+((chronological == 0)) || args+=(--chronological)
 for bot_dir in "${FLEET_BOT_DIRS[@]}"; do
   args+=("$(fleet_bot_name "$bot_dir")" "$bot_dir")
 done

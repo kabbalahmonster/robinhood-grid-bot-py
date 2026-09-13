@@ -422,8 +422,11 @@ replacing a reviewed target.
 ## Analysis-ready fleet log bundles
 
 `bundle-logs` selects the newest regular `*.log` or rotated `*.log.*` file
-from each chosen bot, merges timestamped records in UTC order, prefixes every
-record with bot and source filename, and writes one portable text file.
+from each chosen bot, prefixes every record with bot and source filename, and
+writes one portable text file. The default analysis layout separates bots into
+clearly labelled sections, each with source, status, record count, and UTC time
+range. Use `--chronological` to interleave the entire fleet by UTC timestamp
+when investigating cross-bot timing or shared provider/RPC incidents.
 Untimestamped traceback and multiline lines remain attached to their preceding
 record. Source logs are never changed.
 
@@ -434,6 +437,7 @@ Use the standard exact, case-insensitive selectors for a smaller set:
 bundle-logs --all
 bundle-logs --all --tournament-only --since 6h --output tournament.log
 bundle-logs --all --tournament-rounds-only --since 6h --output rounds.log
+bundle-logs --all --tournament-rounds-only --chronological --output timeline.log
 bundle-logs --only MANY,ROBINVAULT --output tournament.log
 bundle-logs --exclude ARCHIVE --since 6h --output recent-fleet.log
 bundle-logs --all --max-lines-per-bot 10000

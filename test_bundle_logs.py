@@ -52,7 +52,7 @@ class BundleLogsTests(unittest.TestCase):
             "2026-09-12 18:00:01 | INFO | first tx=0x" + "b" * 64 + "\n",
         )
         output = self.root / "bundle.log"
-        result = self.run_bundle("--all", "--output", str(output))
+        result = self.run_bundle("--all", "--chronological", "--output", str(output))
         self.assertEqual(result.returncode, 0, result.stderr)
         body = output.read_text()
         self.assertIn("ALPHA: source=alpha.log", body)
@@ -64,6 +64,24 @@ class BundleLogsTests(unittest.TestCase):
         self.assertIn("https://eth-mainnet.g.alchemy.com/v2/[REDACTED]", body)
         self.assertIn("0x" + "b" * 64, body)
         self.assertIn("[CONT] [ALPHA] [alpha.log] trace line", body)
+
+    def test_default_layout_groups_records_into_descriptive_bot_sections(self):
+        self.write_log("ALPHA", "alpha.log", "2026-09-12 18:00:02 | INFO | alpha later\n")
+        self.write_log("BETA", "beta.log", "2026-09-12 18:00:01 | INFO | beta earlier\n")
+        output = self.root / "bundle.log"
+        result = self.run_bundle("--output", str(output))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        body = output.read_text()
+        self.assertIn("# layout: grouped_by_bot", body)
+        self.assertIn("# included_bots: 2", body)
+        self.assertIn("# total_records: 2", body)
+        self.assertIn("# BOT SECTION: ALPHA", body)
+        self.assertIn("# source_file: alpha.log", body)
+        self.assertIn("# status: ok", body)
+        self.assertIn("# included_records: 1", body)
+        self.assertIn("# time_range_utc:", body)
+        self.assertLess(body.index("alpha later"), body.index("# BOT SECTION: BETA"))
+        self.assertLess(body.index("# BOT SECTION: BETA"), body.index("beta earlier"))
 
     def test_only_since_and_line_cap(self):
         self.write_log(
@@ -81,7 +99,7 @@ class BundleLogsTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         body = output.read_text()
         self.assertIn("two", body)
-        self.assertNotIn("one", body)
+        self.assertNotIn("| one\n", body)
         self.assertNotIn("BETA:", body)
 
     def test_missing_log_is_partial_bundle_and_nonzero(self):
