@@ -97,7 +97,7 @@ Create one safely shareable file from every bot's newest log without stopping
 the fleet:
 
 ```bash
-bundle-logs --all --since 6h --output fleet-tournament.log
+bundle-logs --all --tournament-only --since 6h --output fleet-tournament.log
 ```
 
 For a focused comparison, use `--only MANY,ROBINVAULT`. The output is
@@ -105,6 +105,8 @@ chronological and bot-labelled, with multiline errors preserved and secret
 redaction enabled by default. A nonzero exit with an output file means the
 manifest identifies one or more missing/unreadable bot logs; the partial
 evidence is usable, but its stated gaps matter.
+`--tournament-only` lists bots without a tournament in the filtered time window
+as skipped in the manifest, while leaving them out of the merged records.
 
 ## Freeze, consolidate, and redistribute
 

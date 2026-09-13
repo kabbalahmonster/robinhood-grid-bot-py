@@ -358,7 +358,7 @@ option and safety invariant.
 | `start-fleet` / `stop-fleet` / `restart-fleet` | Tmux lifecycle plus durable guardian intent | Processes/state marker |
 | `start-bot NAME` / `stop-bot NAMES...` / `restart-bot NAMES...` | Durably start one bot or stop/restart multiple selected bots without disturbing the rest of the fleet | Processes/state marker |
 | `cleanup-logs --older-than AGE` | Preview or delete old logs for the whole fleet, selected bots, or all except selected bots | Log files only |
-| `bundle-logs` | Merge each selected bot's newest log into one redacted chronological analysis file | Writes one report file |
+| `bundle-logs` | Merge selected bots' newest logs into one redacted chronological analysis file, optionally requiring tournament activity | Writes one report file |
 | `update-bot NAME` | List/switch branches, fast-forward one checkout, and restart it only when already running | Git/processes |
 | `update-fleet` | Preflight and fast-forward checkouts without tracked changes; optional restart | Git/processes |
 | `update-all` | Update operations and bots, then restart; `--leave-stopped` preserves downtime | Git/processes/state marker |

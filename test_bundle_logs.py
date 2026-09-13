@@ -93,6 +93,44 @@ class BundleLogsTests(unittest.TestCase):
         self.assertIn("BETA: source=-", output.read_text())
         self.assertIn("1 failed", result.stdout)
 
+    def test_tournament_only_includes_logs_with_tournament_events(self):
+        self.write_log(
+            "ALPHA", "alpha.log",
+            "2026-09-12 18:00:00 | INFO | normal cycle\n"
+            "2026-09-12 18:00:01 | INFO | Route tournament winner provider=uniswap direction=buy\n",
+        )
+        self.write_log("BETA", "beta.log", "2026-09-12 18:00:00 | INFO | normal cycle\n")
+        output = self.root / "bundle.log"
+        result = self.run_bundle("--tournament-only", "--output", str(output))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        body = output.read_text()
+        self.assertIn("ALPHA: source=alpha.log", body)
+        self.assertIn("Route tournament winner", body)
+        self.assertIn("BETA: source=beta.log bytes=", body)
+        self.assertIn("status=skipped: no tournament in included records", body)
+        self.assertNotIn("[BETA]", body)
+        self.assertIn("1 skipped; 0 failed", result.stdout)
+
+    def test_tournament_only_respects_since_filter(self):
+        self.write_log(
+            "ALPHA", "alpha.log",
+            "2020-01-01 00:00:00 | INFO | Route tournament candidate provider=uniswap\n"
+            "2026-09-12 18:00:00 | INFO | normal recent cycle\n",
+        )
+        self.write_log(
+            "BETA", "beta.log",
+            "2026-09-12 18:00:00 | INFO | Route tournament winner provider=sushiswap\n",
+        )
+        output = self.root / "bundle.log"
+        result = self.run_bundle("--tournament-only", "--since", "1w", "--output", str(output))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        body = output.read_text()
+        self.assertIn("ALPHA: source=alpha.log", body)
+        self.assertIn("ALPHA: source=alpha.log bytes=", body)
+        self.assertIn("status=skipped: no tournament in included records", body)
+        self.assertIn("[BETA]", body)
+        self.assertNotIn("[ALPHA]", body)
+
     def test_refuses_existing_output_without_force(self):
         self.write_log("ALPHA", "alpha.log", "2026-09-12 18:00:00 | INFO | alpha\n")
         self.write_log("BETA", "beta.log", "2026-09-12 18:00:00 | INFO | beta\n")

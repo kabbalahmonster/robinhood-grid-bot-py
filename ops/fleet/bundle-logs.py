@@ -20,6 +20,7 @@ BEARER = re.compile(r"(?i)\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+")
 URL_SECRET = re.compile(r"(?i)([?&](?:api[_-]?key|token|secret|auth)=)[^&\s]+")
 URL_PATH_SECRET = re.compile(r"(?i)(https?://[^\s/]+/(?:v2|v3)/)[^/?#\s]+")
 HEX_PRIVATE = re.compile(r"(?<![0-9A-Fa-f])(?:0x)?[0-9A-Fa-f]{64}(?![0-9A-Fa-f])")
+TOURNAMENT_EVENT = re.compile(r"\bRoute tournament (?:candidate|winner)\b", re.I)
 
 
 def parse_age(raw):
@@ -122,6 +123,7 @@ def main():
     parser.add_argument("--max-lines-per-bot", type=int)
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--no-redact", action="store_true")
+    parser.add_argument("--tournament-only", action="store_true")
     parser.add_argument("targets", nargs="+")
     args = parser.parse_args()
     if len(args.targets) % 2:
@@ -132,7 +134,7 @@ def main():
     output.parent.mkdir(parents=True, exist_ok=True)
     generated = datetime.now(timezone.utc)
     cutoff = generated - args.since if args.since else None
-    manifest, merged, failures = [], [], 0
+    manifest, merged, failures, skipped = [], [], 0, 0
     for order in range(0, len(args.targets), 2):
         name, bot_dir = args.targets[order:order + 2]
         selected, error = newest_log(bot_dir)
@@ -152,6 +154,11 @@ def main():
             failures += 1
             manifest.append((name, filename, str(exc), 0, None))
             continue
+        if args.tournament_only and not any(
+                TOURNAMENT_EVENT.search(line) for item in items for line in item[2]):
+            skipped += 1
+            manifest.append((name, filename, "skipped: no tournament in included records", 0, current.st_size))
+            continue
         manifest.append((name, filename, "ok", len(items), current.st_size))
         for item in items:
             merged.append((item[0], name.casefold(), item[1], name, filename, item[2]))
@@ -163,6 +170,7 @@ def main():
             handle.write(f"# generated_utc: {generated.isoformat()}\n")
             handle.write(f"# redaction: {'disabled' if args.no_redact else 'enabled'}\n")
             handle.write(f"# cutoff_utc: {cutoff.isoformat() if cutoff else 'none'}\n")
+            handle.write(f"# tournament_only: {'enabled' if args.tournament_only else 'disabled'}\n")
             handle.write(f"# selected_bots: {len(manifest)}\n")
             handle.write("# manifest:\n")
             for name, filename, state, count, size in manifest:
@@ -187,7 +195,9 @@ def main():
         except OSError:
             pass
         raise
-    print(f"Wrote {output} ({len(merged)} records from {len(manifest) - failures}/{len(manifest)} bots; {failures} failed)")
+    included = len(manifest) - failures - skipped
+    print(f"Wrote {output} ({len(merged)} records from {included}/{len(manifest)} bots; "
+          f"{skipped} skipped; {failures} failed)")
     return 1 if failures else 0
 
 
