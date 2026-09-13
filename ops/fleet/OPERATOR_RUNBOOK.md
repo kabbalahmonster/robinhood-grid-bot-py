@@ -105,6 +105,9 @@ chronological and bot-labelled, with multiline errors preserved and secret
 redaction enabled by default. A nonzero exit with an output file means the
 manifest identifies one or more missing/unreadable bot logs; the partial
 evidence is usable, but its stated gaps matter.
+An existing output is never silently overwritten: the command announces and
+uses the next numbered name. Pass `--force` only when replacing the exact path
+is intentional.
 `--tournament-only` lists bots without a tournament in the filtered time window
 as skipped in the manifest, while leaving them out of the merged records.
 Use `--tournament-rounds-only` when the analysis needs only complete

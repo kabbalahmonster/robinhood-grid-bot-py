@@ -144,6 +144,18 @@ def tournament_rounds(items):
     return selected, complete, incomplete
 
 
+def next_numbered_output(requested):
+    """Return the first available NAME-NUMBER.SUFFIX sibling."""
+    number = 1
+    while True:
+        candidate = requested.with_name(
+            f"{requested.stem}-{number}{requested.suffix}"
+        )
+        if not candidate.exists():
+            return candidate
+        number += 1
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", required=True)
@@ -157,10 +169,12 @@ def main():
     args = parser.parse_args()
     if len(args.targets) % 2:
         parser.error("targets must be NAME PATH pairs")
-    output = Path(args.output).expanduser().resolve()
+    requested_output = Path(args.output).expanduser().resolve()
+    requested_output.parent.mkdir(parents=True, exist_ok=True)
+    output = requested_output
     if output.exists() and not args.force:
-        raise SystemExit(f"refusing to replace existing output without --force: {output}")
-    output.parent.mkdir(parents=True, exist_ok=True)
+        output = next_numbered_output(requested_output)
+        print(f"Output already exists: {requested_output}; writing {output} instead")
     generated = datetime.now(timezone.utc)
     cutoff = generated - args.since if args.since else None
     manifest, merged, failures, skipped = [], [], 0, 0
@@ -225,9 +239,19 @@ def main():
                     handle.write(f"[CONT] [{name}] [{filename}] {continuation}\n")
             handle.flush()
             os.fsync(handle.fileno())
-        if output.exists() and not args.force:
-            raise FileExistsError(output)
-        os.replace(temporary, output)
+        if args.force:
+            os.replace(temporary, output)
+        else:
+            # A hard link installs the synced file without any overwrite race.
+            # If another bundler claimed the name meanwhile, advance again.
+            while True:
+                try:
+                    os.link(temporary, output)
+                    os.unlink(temporary)
+                    break
+                except FileExistsError:
+                    output = next_numbered_output(requested_output)
+                    print(f"Output name was claimed; writing {output} instead")
     except Exception:
         try:
             os.unlink(temporary)

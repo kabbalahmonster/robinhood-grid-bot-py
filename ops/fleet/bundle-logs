@@ -24,7 +24,7 @@ Output:
   --max-lines-per-bot COUNT  Keep at most the newest COUNT physical lines per bot
   --tournament-only          Include only logs with a tournament in the kept records
   --tournament-rounds-only   Include only tournament round slices
-  --force                    Atomically replace an existing output file
+  --force                    Atomically replace the exact existing output path
   --no-redact                Disable default secret redaction (dangerous)
   -h, --help                 Show this help
 

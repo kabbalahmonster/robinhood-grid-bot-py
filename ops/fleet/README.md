@@ -450,8 +450,10 @@ boundaries. A final round interrupted before its winner is retained and labelled
 `incomplete=1` in the manifest instead of hiding likely failure evidence. The
 two tournament modes are mutually exclusive.
 Missing logs produce a partial bundle and a nonzero exit status so useful
-evidence survives without hiding gaps. Existing output is protected unless
-`--force` is explicit, and the completed file is installed atomically.
+evidence survives without hiding gaps. If the requested output exists, the
+command announces and uses the next available numbered sibling (`report.log`,
+`report-1.log`, `report-2.log`, and so on). `--force` explicitly replaces the
+exact requested path. Either way, the completed file is installed atomically.
 
 Secret redaction is enabled by default for key/token/password assignments,
 authorization headers, credential-like URL parameters, and unlabeled 32-byte

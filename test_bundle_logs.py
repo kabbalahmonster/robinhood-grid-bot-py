@@ -176,14 +176,19 @@ class BundleLogsTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("cannot be combined", result.stderr)
 
-    def test_refuses_existing_output_without_force(self):
+    def test_existing_output_uses_next_numbered_name_unless_forced(self):
         self.write_log("ALPHA", "alpha.log", "2026-09-12 18:00:00 | INFO | alpha\n")
         self.write_log("BETA", "beta.log", "2026-09-12 18:00:00 | INFO | beta\n")
         output = self.root / "bundle.log"
         output.write_text("keep")
-        refused = self.run_bundle("--output", str(output))
-        self.assertNotEqual(refused.returncode, 0)
+        (self.root / "bundle-1.log").write_text("also keep")
+        numbered = self.run_bundle("--output", str(output))
+        self.assertEqual(numbered.returncode, 0, numbered.stderr)
         self.assertEqual(output.read_text(), "keep")
+        self.assertEqual((self.root / "bundle-1.log").read_text(), "also keep")
+        self.assertIn("writing", numbered.stdout)
+        self.assertIn("bundle-2.log", numbered.stdout)
+        self.assertIn("RH GRID FLEET LOG BUNDLE", (self.root / "bundle-2.log").read_text())
         replaced = self.run_bundle("--output", str(output), "--force")
         self.assertEqual(replaced.returncode, 0, replaced.stderr)
         self.assertIn("RH GRID FLEET LOG BUNDLE", output.read_text())
