@@ -131,6 +131,51 @@ class BundleLogsTests(unittest.TestCase):
         self.assertIn("[BETA]", body)
         self.assertNotIn("[ALPHA]", body)
 
+    def test_tournament_rounds_only_keeps_each_round_and_intervening_diagnostics(self):
+        self.write_log(
+            "ALPHA", "alpha.log",
+            "2026-09-12 18:00:00 | INFO | unrelated before\n"
+            "2026-09-12 18:00:01 | INFO | Route tournament candidate provider=uniswap\n"
+            "2026-09-12 18:00:02 | WARNING | provider timeout during round\n"
+            "2026-09-12 18:00:03 | INFO | Route tournament candidate provider=sushiswap\n"
+            "2026-09-12 18:00:04 | INFO | Route tournament winner provider=uniswap\n"
+            "2026-09-12 18:00:05 | INFO | unrelated between\n"
+            "2026-09-12 18:00:06 | INFO | Route tournament candidate provider=umbra\n"
+            "2026-09-12 18:00:07 | INFO | Route tournament winner provider=umbra\n"
+            "2026-09-12 18:00:08 | INFO | unrelated after\n",
+        )
+        self.write_log("BETA", "beta.log", "2026-09-12 18:00:00 | INFO | no rounds\n")
+        output = self.root / "bundle.log"
+        result = self.run_bundle("--tournament-rounds-only", "--output", str(output))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        body = output.read_text()
+        self.assertIn("provider timeout during round", body)
+        self.assertIn("status=ok: rounds=2 incomplete=0", body)
+        self.assertIn("BETA: source=beta.log", body)
+        self.assertNotIn("unrelated before", body)
+        self.assertNotIn("unrelated between", body)
+        self.assertNotIn("unrelated after", body)
+        self.assertNotIn("[BETA]", body)
+
+    def test_tournament_rounds_only_keeps_and_labels_incomplete_final_round(self):
+        self.write_log(
+            "ALPHA", "alpha.log",
+            "2026-09-12 18:00:00 | INFO | Route tournament candidate provider=uniswap\n"
+            "2026-09-12 18:00:01 | ERROR | bot stopped before winner\n",
+        )
+        self.write_log("BETA", "beta.log", "2026-09-12 18:00:00 | INFO | no rounds\n")
+        output = self.root / "bundle.log"
+        result = self.run_bundle("--tournament-rounds-only", "--output", str(output))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        body = output.read_text()
+        self.assertIn("bot stopped before winner", body)
+        self.assertIn("status=ok: rounds=0 incomplete=1", body)
+
+    def test_tournament_modes_are_mutually_exclusive(self):
+        result = self.run_bundle("--tournament-only", "--tournament-rounds-only")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("cannot be combined", result.stderr)
+
     def test_refuses_existing_output_without_force(self):
         self.write_log("ALPHA", "alpha.log", "2026-09-12 18:00:00 | INFO | alpha\n")
         self.write_log("BETA", "beta.log", "2026-09-12 18:00:00 | INFO | beta\n")

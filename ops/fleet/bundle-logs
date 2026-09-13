@@ -23,6 +23,7 @@ Output:
   --since AGE                Keep entries from the last AGE: 30min, 6h, 2d, 1w
   --max-lines-per-bot COUNT  Keep at most the newest COUNT physical lines per bot
   --tournament-only          Include only logs with a tournament in the kept records
+  --tournament-rounds-only   Include only tournament round slices
   --force                    Atomically replace an existing output file
   --no-redact                Disable default secret redaction (dangerous)
   -h, --help                 Show this help
@@ -30,11 +31,12 @@ Output:
 Examples:
   bundle-logs --all
   bundle-logs --all --tournament-only --since 6h --output tournament.log
+  bundle-logs --all --tournament-rounds-only --since 6h --output rounds.log
   bundle-logs --only MANY,ROBINVAULT --since 6h --output tournament.log
 EOF
 }
 
-config_path=""; only=""; exclude=""; output=""; since=""; max_lines=""; force=0; redact=1; tournament_only=0; saw_all=0
+config_path=""; only=""; exclude=""; output=""; since=""; max_lines=""; force=0; redact=1; tournament_only=0; tournament_rounds_only=0; saw_all=0
 while (($#)); do
   case "$1" in
     --config) (($# >= 2)) || fleet_die "--config requires a path"; config_path="$2"; shift 2 ;;
@@ -45,6 +47,7 @@ while (($#)); do
     --since) (($# >= 2)) || fleet_die "--since requires an age"; since="$2"; shift 2 ;;
     --max-lines-per-bot) (($# >= 2)) || fleet_die "--max-lines-per-bot requires a count"; max_lines="$2"; shift 2 ;;
     --tournament-only) tournament_only=1; shift ;;
+    --tournament-rounds-only) tournament_rounds_only=1; shift ;;
     --force) force=1; shift ;;
     --no-redact) redact=0; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -54,6 +57,7 @@ done
 
 ((saw_all == 0 || ${#only} == 0)) || fleet_die "--all and --only cannot be combined"
 [[ -z "$max_lines" || "$max_lines" =~ ^[1-9][0-9]*$ ]] || fleet_die "--max-lines-per-bot must be a positive integer"
+((tournament_only == 0 || tournament_rounds_only == 0)) || fleet_die "--tournament-only and --tournament-rounds-only cannot be combined"
 fleet_load_config "$config_path"
 fleet_apply_selection "$only" "$exclude"
 fleet_validate_bots
@@ -68,6 +72,7 @@ args=(--output "$output")
 ((force == 0)) || args+=(--force)
 ((redact == 1)) || args+=(--no-redact)
 ((tournament_only == 0)) || args+=(--tournament-only)
+((tournament_rounds_only == 0)) || args+=(--tournament-rounds-only)
 for bot_dir in "${FLEET_BOT_DIRS[@]}"; do
   args+=("$(fleet_bot_name "$bot_dir")" "$bot_dir")
 done

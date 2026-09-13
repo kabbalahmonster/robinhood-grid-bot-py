@@ -21,6 +21,8 @@ URL_SECRET = re.compile(r"(?i)([?&](?:api[_-]?key|token|secret|auth)=)[^&\s]+")
 URL_PATH_SECRET = re.compile(r"(?i)(https?://[^\s/]+/(?:v2|v3)/)[^/?#\s]+")
 HEX_PRIVATE = re.compile(r"(?<![0-9A-Fa-f])(?:0x)?[0-9A-Fa-f]{64}(?![0-9A-Fa-f])")
 TOURNAMENT_EVENT = re.compile(r"\bRoute tournament (?:candidate|winner)\b", re.I)
+TOURNAMENT_CANDIDATE = re.compile(r"\bRoute tournament candidate\b", re.I)
+TOURNAMENT_WINNER = re.compile(r"\bRoute tournament winner\b", re.I)
 
 
 def parse_age(raw):
@@ -116,6 +118,32 @@ def records(path, file_time, max_lines, cutoff):
     return [item for item in result if cutoff is None or item[0] >= cutoff]
 
 
+def tournament_rounds(items):
+    """Return candidate-to-winner slices, retaining diagnostics inside each round."""
+    selected, current = [], []
+    complete = incomplete = 0
+    for item in items:
+        body = "\n".join(item[2])
+        starts = bool(TOURNAMENT_CANDIDATE.search(body))
+        ends = bool(TOURNAMENT_WINNER.search(body))
+        if current or starts:
+            current.append(item)
+        elif ends:
+            # Defensive support for a winner-only round (for example, zero
+            # configured candidates) even though normal rounds log candidates.
+            current = [item]
+        if ends and current:
+            selected.extend(current)
+            current = []
+            complete += 1
+    if current:
+        # Keep a truncated/crashed final round: it is valuable failure evidence,
+        # and the manifest makes its incomplete state explicit.
+        selected.extend(current)
+        incomplete = 1
+    return selected, complete, incomplete
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", required=True)
@@ -124,6 +152,7 @@ def main():
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--no-redact", action="store_true")
     parser.add_argument("--tournament-only", action="store_true")
+    parser.add_argument("--tournament-rounds-only", action="store_true")
     parser.add_argument("targets", nargs="+")
     args = parser.parse_args()
     if len(args.targets) % 2:
@@ -154,12 +183,21 @@ def main():
             failures += 1
             manifest.append((name, filename, str(exc), 0, None))
             continue
-        if args.tournament_only and not any(
+        if args.tournament_rounds_only:
+            items, complete_rounds, incomplete_rounds = tournament_rounds(items)
+            if not items:
+                skipped += 1
+                manifest.append((name, filename, "skipped: no tournament in included records", 0, current.st_size))
+                continue
+            state = f"ok: rounds={complete_rounds} incomplete={incomplete_rounds}"
+        elif args.tournament_only and not any(
                 TOURNAMENT_EVENT.search(line) for item in items for line in item[2]):
             skipped += 1
             manifest.append((name, filename, "skipped: no tournament in included records", 0, current.st_size))
             continue
-        manifest.append((name, filename, "ok", len(items), current.st_size))
+        else:
+            state = "ok"
+        manifest.append((name, filename, state, len(items), current.st_size))
         for item in items:
             merged.append((item[0], name.casefold(), item[1], name, filename, item[2]))
     merged.sort(key=lambda item: (item[0], item[1], item[2]))
@@ -171,6 +209,7 @@ def main():
             handle.write(f"# redaction: {'disabled' if args.no_redact else 'enabled'}\n")
             handle.write(f"# cutoff_utc: {cutoff.isoformat() if cutoff else 'none'}\n")
             handle.write(f"# tournament_only: {'enabled' if args.tournament_only else 'disabled'}\n")
+            handle.write(f"# tournament_rounds_only: {'enabled' if args.tournament_rounds_only else 'disabled'}\n")
             handle.write(f"# selected_bots: {len(manifest)}\n")
             handle.write("# manifest:\n")
             for name, filename, state, count, size in manifest:

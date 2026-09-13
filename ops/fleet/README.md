@@ -433,6 +433,7 @@ Use the standard exact, case-insensitive selectors for a smaller set:
 ```bash
 bundle-logs --all
 bundle-logs --all --tournament-only --since 6h --output tournament.log
+bundle-logs --all --tournament-rounds-only --since 6h --output rounds.log
 bundle-logs --only MANY,ROBINVAULT --output tournament.log
 bundle-logs --exclude ARCHIVE --since 6h --output recent-fleet.log
 bundle-logs --all --max-lines-per-bot 10000
@@ -443,6 +444,11 @@ source filename, byte size, included record count, and any omission error.
 Use `--tournament-only` to omit bot logs that have no route-tournament candidate
 or winner event after applying `--since` and `--max-lines-per-bot`. These logs
 remain listed as skipped in the manifest and do not make the command fail.
+Use `--tournament-rounds-only` for a smaller analysis file containing only each
+candidate-to-winner round and any provider diagnostics emitted between those
+boundaries. A final round interrupted before its winner is retained and labelled
+`incomplete=1` in the manifest instead of hiding likely failure evidence. The
+two tournament modes are mutually exclusive.
 Missing logs produce a partial bundle and a nonzero exit status so useful
 evidence survives without hiding gaps. Existing output is protected unless
 `--force` is explicit, and the completed file is installed atomically.
