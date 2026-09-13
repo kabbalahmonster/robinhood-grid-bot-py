@@ -69,6 +69,28 @@ def _with_swap_provider_fallback(method):
     return wrapped
 
 
+def _with_tournament_terminal(direction):
+    """Close every selected gate round even when execution returns early."""
+    def decorate(method):
+        @wraps(method)
+        def wrapped(self, *args, **kwargs):
+            try:
+                result = method(self, *args, **kwargs)
+            except Exception as exc:
+                self._close_incomplete_tournament(
+                    direction,
+                    reason="unhandled_" + type(exc).__name__.lower(),
+                    failed=True,
+                )
+                raise
+            self._close_incomplete_tournament(
+                direction, reason="post_selection_exit_without_broadcast",
+            )
+            return result
+        return wrapped
+    return decorate
+
+
 def _reset_json_history(path, label):
     """Atomically replace a bot-owned history file with an empty list."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -1197,6 +1219,7 @@ class GridBot:
                 **context,
                 "execution_preflight": True,
                 "tournament_id": lifecycle["tournament_id"],
+                "chain_id": getattr(self.config, "chain_id", ""),
                 "token_address": getattr(self.config, "token_address", ""),
                 "trade_token_address": getattr(self, "trade_token_address", ""),
             }
@@ -1541,10 +1564,27 @@ class GridBot:
             tx_hash = pending_transaction.get("tx_hash")
         elif isinstance(final, dict):
             tx_hash = final.get("tx_hash")
+        reason = comparison.get("terminal_reason")
+        receipt_status = comparison.get("receipt_status")
+        lifecycle_suffix = f" tx_hash={tx_hash}" if tx_hash else ""
+        lifecycle_suffix += f" reason={reason}" if reason else ""
+        lifecycle_suffix += (
+            f" receipt_status={receipt_status}"
+            if receipt_status is not None else ""
+        )
+        if isinstance(final, dict):
+            for key in (
+                "gas_used", "effective_gas_price_wei",
+                "measured_proceeds_wei", "measured_token_amount_raw",
+                "realized_profit_wei",
+            ):
+                value = final.get(key)
+                if value is not None and re.fullmatch(r"-?\d+", str(value)):
+                    lifecycle_suffix += f" {key}={value}"
         logger.info(
             "Route tournament lifecycle tournament_id=%s direction=%s phase=%s revision=%d%s",
             comparison["tournament_id"], direction, status, comparison["revision"],
-            f" tx_hash={tx_hash}" if tx_hash else "",
+            lifecycle_suffix,
         )
         reporter = getattr(self, "_reporter", None)
         if reporter:
@@ -1552,6 +1592,47 @@ class GridBot:
                 direction + "_attempt": self._attempt_with_route_comparison(direction)
             })
         return comparison
+
+    def _close_incomplete_tournament(self, direction, *, reason, failed=False):
+        """Emit one terminal state for a selected route left by an early exit."""
+        if getattr(self.config, "route_tournament_mode", "off") != "gate":
+            return None
+        comparison = getattr(self, "_route_comparisons", {}).get(direction)
+        if not isinstance(comparison, dict):
+            return None
+        status = comparison.get("status")
+        terminal = {
+            "completed", "execution_aborted", "execution_failed",
+            "settlement_unresolved",
+        }
+        if status in terminal or status not in {
+            "preflight_candidate_selected", "transaction_submitted",
+        }:
+            return comparison
+        safe_reason = re.sub(r"[^a-z0-9_.:-]+", "_", str(reason).lower()).strip("_")
+        safe_reason = (safe_reason or "unknown")[:96]
+        terminal_status = (
+            "execution_failed"
+            if failed or status == "transaction_submitted"
+            else "execution_aborted"
+        )
+        return self._publish_tournament_transition(
+            direction, terminal_status, terminal_reason=safe_reason,
+        )
+
+    def _mark_tournament_settlement_unresolved(self, direction, *, reason, tx_hash=None):
+        """Close a confirmed-but-unreconciled execution without claiming economics."""
+        if getattr(self.config, "route_tournament_mode", "off") != "gate":
+            return None
+        comparison = getattr(self, "_route_comparisons", {}).get(direction)
+        if not isinstance(comparison, dict):
+            return None
+        final = {"tx_hash": str(tx_hash)} if tx_hash else {}
+        return self._publish_tournament_transition(
+            direction, "settlement_unresolved",
+            terminal_reason=reason, receipt_status="confirmed",
+            final=final,
+        )
 
     def _tournament_submission_callback(self, direction):
         comparison = getattr(self, "_route_comparisons", {}).get(direction)
@@ -2486,7 +2567,8 @@ class GridBot:
 
     def _record_dashboard_trade(
         self, side, eth_amount, token_amount, price, tx_hash,
-        profit_eth=None, gas_fee_eth=None,
+        profit_eth=None, gas_fee_eth=None, *, receipt_result=None,
+        measured_amount_raw=None, realized_profit_wei=None,
     ):
         # A confirmed swap proves that executable calldata passed local RPC
         # preflight and landed on-chain, so close any routing incident.
@@ -2506,6 +2588,19 @@ class GridBot:
         if side in {"buy", "sell"} and getattr(self.config, "route_tournament_mode", "off") == "gate":
             comparison = getattr(self, "_route_comparisons", {}).get(side)
             if isinstance(comparison, dict):
+                if comparison.get("status") != "transaction_submitted":
+                    # A confirmed receipt proves broadcast even if a provider
+                    # adapter could not invoke the live submission callback.
+                    # Preserve lifecycle ordering and label the recovered timing.
+                    self._publish_tournament_transition(
+                        side, "transaction_submitted",
+                        pending_transaction={
+                            "tx_hash": str(tx_hash), "side": side,
+                            "submitted_at": trade["timestamp"],
+                        },
+                        submitted_at=trade["timestamp"],
+                        submission_observed_at_completion=True,
+                    )
                 final = {
                     "tx_hash": str(tx_hash),
                     "gas_fee_eth": float(gas_fee_eth or 0),
@@ -2513,6 +2608,32 @@ class GridBot:
                     "eth_amount": float(eth_amount),
                     "token_amount": float(token_amount),
                 }
+                if receipt_result is not None:
+                    receipt = getattr(receipt_result, "receipt", None) or {}
+                    gas_used = (
+                        getattr(receipt_result, "gas_used", None)
+                        or receipt.get("gasUsed")
+                    )
+                    effective_gas_price = (
+                        getattr(receipt_result, "effective_gas_price", None)
+                        or receipt.get("effectiveGasPrice")
+                    )
+                    receipt_status = receipt.get("status")
+                    final.update({
+                        "receipt_status": int(receipt_status) if receipt_status is not None else 1,
+                        "gas_used": str(int(gas_used)) if gas_used is not None else None,
+                        "effective_gas_price_wei": (
+                            str(int(effective_gas_price))
+                            if effective_gas_price is not None else None
+                        ),
+                    })
+                if measured_amount_raw is not None:
+                    final[
+                        "measured_proceeds_wei" if side == "sell"
+                        else "measured_token_amount_raw"
+                    ] = str(int(measured_amount_raw))
+                if realized_profit_wei is not None:
+                    final["realized_profit_wei"] = str(int(realized_profit_wei))
                 if side == "sell":
                     cost_eth = (
                         float(eth_amount) - float(gas_fee_eth or 0) - float(profit_eth or 0)
@@ -2528,6 +2649,7 @@ class GridBot:
                 self._publish_tournament_transition(
                     side, "completed", confirmed_at=trade["timestamp"],
                     updated_at=trade["timestamp"], final=final,
+                    receipt_status=final.get("receipt_status"),
                 )
         self.dashboard_trades = (self.dashboard_trades + [trade])[-50:]
         try:
@@ -2851,6 +2973,7 @@ class GridBot:
         is_leading_edge_buy = "Leading edge" in reason
         self._execute_buy_gridless(buy_amount_eth, buy_amount_wei, price, is_leading_edge_buy)
     
+    @_with_tournament_terminal("buy")
     @_with_swap_provider_fallback
     def _execute_buy_gridless(self, buy_amount_eth, buy_amount_wei, price, is_leading_edge_buy=False):
         """Execute a gridless buy order."""
@@ -3086,6 +3209,9 @@ class GridBot:
             logger.info("Measured post-buy token receipt: %s raw units", tokens_received)
             if tokens_received <= 0:
                 logger.error("Buy confirmed but no token balance increase could be reconciled")
+                self._mark_tournament_settlement_unresolved(
+                    "buy", reason="confirmed_tokens_unreconciled", tx_hash=result.tx_hash,
+                )
                 return
             # Use the actual sell amount from the quote in wei for precision
             principal_cost_wei = quote.sell_amount if quote.sell_amount else buy_amount_wei
@@ -3111,6 +3237,7 @@ class GridBot:
             self._record_dashboard_trade(
                 "buy", economic_cost_eth, tokens, buy_price, result.tx_hash,
                 gas_fee_eth=buy_gas_wei / 10**18,
+                receipt_result=result, measured_amount_raw=tokens_received,
             )
             
             logger.info(f"✅ Gridless buy successful! Position #{pos_id}")
@@ -3124,6 +3251,7 @@ class GridBot:
         else:
             logger.error(f"❌ Gridless buy failed: {result.error}")
     
+    @_with_tournament_terminal("sell")
     @_with_swap_provider_fallback
     def _check_sells_gridless(self, price):
         """Gridless sell logic - sell when P&L >= threshold or stoploss triggered."""
@@ -3324,6 +3452,7 @@ class GridBot:
         logger.info(f"🎯 Gridless sell trigger: Position #{pos_id} - {reason}")
         self._execute_sell_gridless(pos_id, pos, price, quote)
     
+    @_with_tournament_terminal("sell")
     def _execute_sell_gridless(self, pos_id, pos, price, pre_fetched_quote=None):
         """Execute a gridless sell order."""
         from gridless import remove_position, calculate_pnl
@@ -3792,6 +3921,9 @@ class GridBot:
                     logger.critical(
                         "Sell swap confirmed as WETH but unwrap did not complete; position retained and trading halted: %s", exc
                     )
+                    self._mark_tournament_settlement_unresolved(
+                        "sell", reason="weth_unwrap_incomplete", tx_hash=result.tx_hash,
+                    )
                     return
                 sell_setup_gas_wei += unwrap_gas_wei - unwrap_projected_wei
                 logger.info("WETH settlement unwrap confirmed: %s", unwrap_result.tx_hash)
@@ -3807,6 +3939,10 @@ class GridBot:
                     )
                     logger.critical(
                         "Sell confirmed but exact proceeds are unresolved; position retained and trading halted"
+                    )
+                    self._mark_tournament_settlement_unresolved(
+                        "sell", reason="confirmed_proceeds_unreconciled",
+                        tx_hash=result.tx_hash,
                     )
                     return
             logger.info("Measured trade-token receipt: %s wei", received_wei)
@@ -3835,6 +3971,8 @@ class GridBot:
             self._record_dashboard_trade(
                 "sell", eth_received, sell_tokens, price, result.tx_hash,
                 actual_profit, gas_fee_eth=total_sell_gas_wei / 10**18,
+                receipt_result=result, measured_amount_raw=received_wei,
+                realized_profit_wei=profit_wei,
             )
             logger.info(f"✅ Gridless sell successful! Profit: {actual_profit:.6f} {self.trade_token_name} ({profit_pct:+.2f}%)")
 
@@ -3862,6 +4000,7 @@ class GridBot:
                 tx_hash=getattr(result, "tx_hash", None),
             )
     
+    @_with_tournament_terminal("buy")
     @_with_swap_provider_fallback
     def execute_buy(self, pos_id, price):
         """Execute a buy order."""
@@ -4074,6 +4213,9 @@ class GridBot:
             logger.info("Measured post-buy token receipt: %s raw units", tokens_received)
             if tokens_received <= 0:
                 logger.error("Buy confirmed but no token balance increase could be reconciled")
+                self._mark_tournament_settlement_unresolved(
+                    "buy", reason="confirmed_tokens_unreconciled", tx_hash=result.tx_hash,
+                )
                 return
             tokens = tokens_received / self.token_unit
             self.positions[pos_id]['balance'] = tokens_received
@@ -4097,6 +4239,7 @@ class GridBot:
             self._record_dashboard_trade(
                 "buy", economic_cost_eth, tokens, buy_price, result.tx_hash,
                 gas_fee_eth=buy_gas_wei / 10**18,
+                receipt_result=result, measured_amount_raw=tokens_received,
             )
             
             logger.info(f"✅ Buy successful!")
@@ -4111,6 +4254,7 @@ class GridBot:
         else:
             logger.error(f"❌ Buy failed: {result.error}")
     
+    @_with_tournament_terminal("sell")
     @_with_swap_provider_fallback
     def execute_sell(self, pos_id, price):
         """Execute a sell order with moonbag and banking."""
@@ -4461,6 +4605,9 @@ class GridBot:
                     logger.critical(
                         "Sell swap confirmed as WETH but unwrap did not complete; position retained and trading halted: %s", exc
                     )
+                    self._mark_tournament_settlement_unresolved(
+                        "sell", reason="weth_unwrap_incomplete", tx_hash=result.tx_hash,
+                    )
                     return
                 sell_setup_gas_wei += actual_unwrap_gas - unwrap_projected_wei
                 logger.info("WETH settlement unwrap confirmed: %s", unwrap_result.tx_hash)
@@ -4476,6 +4623,10 @@ class GridBot:
                     )
                     logger.critical(
                         "Sell confirmed but exact proceeds are unresolved; position retained and trading halted"
+                    )
+                    self._mark_tournament_settlement_unresolved(
+                        "sell", reason="confirmed_proceeds_unreconciled",
+                        tx_hash=result.tx_hash,
                     )
                     return
             logger.info("Measured trade-token receipt: %s wei", received_wei)
@@ -4496,6 +4647,8 @@ class GridBot:
             self._record_dashboard_trade(
                 "sell", eth_received, sell_tokens, price, result.tx_hash,
                 actual_profit_eth, gas_fee_eth=total_sell_gas_wei / 10**18,
+                receipt_result=result, measured_amount_raw=received_wei,
+                realized_profit_wei=profit_wei,
             )
             
             # Position is always cleared to 0 after sell

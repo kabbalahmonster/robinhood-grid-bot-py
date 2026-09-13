@@ -165,6 +165,72 @@ class TestDashboardEvents(unittest.TestCase):
         self.assertEqual(comparison["pending_transaction"]["side"], "sell")
         self.assertEqual(updates[-1]["sell_attempt"]["route_comparison"], comparison)
 
+    def test_selected_tournament_early_exit_gets_one_terminal_abort(self):
+        self.bot.config.route_tournament_mode = "gate"
+        self.bot._route_comparisons = {
+            "sell": {"mode": "execution_preflight", "direction": "sell",
+                     "status": "preflight_candidate_selected", "tournament_id": "round-2",
+                     "revision": 2, "candidates": []}
+        }
+
+        first = self.bot._close_incomplete_tournament(
+            "sell", reason="post_selection_exit_without_broadcast"
+        )
+        first_revision = first["revision"]
+        second = self.bot._close_incomplete_tournament(
+            "sell", reason="must_not_duplicate"
+        )
+
+        self.assertEqual(first["status"], "execution_aborted")
+        self.assertEqual(first["terminal_reason"], "post_selection_exit_without_broadcast")
+        self.assertEqual(second["revision"], first_revision)
+
+    def test_submitted_tournament_early_exit_is_execution_failed(self):
+        self.bot.config.route_tournament_mode = "gate"
+        self.bot._route_comparisons = {
+            "buy": {"mode": "execution_preflight", "direction": "buy",
+                    "status": "transaction_submitted", "tournament_id": "round-3",
+                    "revision": 3, "candidates": []}
+        }
+
+        observed = self.bot._close_incomplete_tournament(
+            "buy", reason="broadcast_or_receipt_failed"
+        )
+
+        self.assertEqual(observed["status"], "execution_failed")
+
+    def test_completion_recovers_submission_order_and_records_exact_economics(self):
+        self.bot.dashboard_trades = []
+        self.bot.dashboard_trades_file = os.path.join(self.temp_dir.name, "trades.json")
+        self.bot.wallet = type("Wallet", (), {"address": "0xwallet"})()
+        self.bot.config.route_tournament_mode = "gate"
+        self.bot.config.max_active_positions = 5
+        self.bot._route_comparisons = {
+            "sell": {"mode": "execution_preflight", "direction": "sell",
+                     "status": "preflight_candidate_selected", "tournament_id": "round-4",
+                     "revision": 2, "candidates": []}
+        }
+        receipt_result = type("Result", (), {
+            "gas_used": 21000, "effective_gas_price": 123,
+            "receipt": {"status": 1},
+        })()
+
+        self.bot._record_dashboard_trade(
+            "sell", 1, 2, 0.5, "0x" + "d" * 64,
+            profit_eth=0.1, gas_fee_eth=0.01,
+            receipt_result=receipt_result, measured_amount_raw=999,
+            realized_profit_wei=77,
+        )
+
+        comparison = self.bot._route_comparisons["sell"]
+        self.assertEqual(comparison["status"], "completed")
+        self.assertEqual(comparison["revision"], 4)
+        self.assertEqual(comparison["final"]["receipt_status"], 1)
+        self.assertEqual(comparison["final"]["gas_used"], "21000")
+        self.assertEqual(comparison["final"]["effective_gas_price_wei"], "123")
+        self.assertEqual(comparison["final"]["measured_proceeds_wei"], "999")
+        self.assertEqual(comparison["final"]["realized_profit_wei"], "77")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -278,3 +278,28 @@ therefore requires stoploss policy to be reviewed separately, accurate token
 tax configuration, nonzero gas headroom, and healthy RPC receipt/balance reads.
 See **Profit-accounting invariants** in the main README for the equations,
 WETH-settlement behavior, and unavoidable on-chain risks.
+
+## Tournament terminal and provider diagnostics
+
+In gate mode every selected route now closes with exactly one terminal phase:
+`completed`, `execution_aborted`, `execution_failed`, or
+`settlement_unresolved`. A confirmed trade always has a preceding
+`transaction_submitted` lifecycle record; if the live callback was unavailable,
+confirmation reconstructs the submission record and labels that timing as
+observed-at-completion. `settlement_unresolved` is fail-closed: it means the
+transaction confirmed but exact tokens/proceeds or required WETH settlement
+could not be reconciled. Follow the unresolved-broadcast recovery procedure;
+never treat that state as realized profit.
+
+Failed tournament candidates expose only aggregation-safe fields:
+`failure_category`, `provider_error`, `http_status`, `retry_after_seconds`,
+`pair_fingerprint`, and `candidate_elapsed_ms`. The fingerprint is a stable,
+non-reversible chain/direction/pair/settlement key. Provider response bodies,
+request IDs, credentials, and calldata are not emitted. Use these fields to
+compare failures by provider and pair before considering a scoped cooldown;
+they do not themselves disable or penalize a provider.
+
+Completed lifecycle payloads include receipt status, gas used, effective gas
+price, measured token/proceeds base units, and reconciled realized profit when
+available. Missing exact settlement produces `settlement_unresolved`, not
+invented economics.

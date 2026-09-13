@@ -87,7 +87,10 @@ class SushiAPIClient:
         now = time.time()
         if now < self._rate_limit_until:
             remaining = max(1, int(self._rate_limit_until - now + 0.999))
-            return 429, {"detail": f"Sushi rate-limit cooldown active; retry in {remaining}s"}
+            return 429, {
+                "detail": f"Sushi rate-limit cooldown active; retry in {remaining}s",
+                "_telemetry_retry_after_seconds": remaining,
+            }
 
         try:
             response = requests.get(
@@ -112,7 +115,10 @@ class SushiAPIClient:
                 self._rate_limit_until = max(self._rate_limit_until, now + max(1, delay))
                 wait_seconds = max(1, int(self._rate_limit_until - now + 0.999))
                 self.logger.warning(f"Sushi rate limited; pausing API requests for {wait_seconds}s")
-                data = {"detail": f"Sushi rate limited; retry in {wait_seconds}s"}
+                data = {
+                    "detail": f"Sushi rate limited; retry in {wait_seconds}s",
+                    "_telemetry_retry_after_seconds": wait_seconds,
+                }
             elif 200 <= response.status_code < 300:
                 self._rate_limit_strikes = 0
                 self._rate_limit_until = 0.0

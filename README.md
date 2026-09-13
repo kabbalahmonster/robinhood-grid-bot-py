@@ -1069,6 +1069,16 @@ normal sell swap is never *authorized* unless its enforced minimum and maximum
 signed costs prove the configured profit floor, and uncertain settlement is
 never reported as exact profit.
 
+Route-tournament gate telemetry is terminally complete for selected routes.
+Every selection ends as `completed`, `execution_aborted`, `execution_failed`,
+or `settlement_unresolved`, and confirmed broadcasts have a preceding
+`transaction_submitted` phase. Completed payloads carry receipt gas and exact
+reconciled base-unit economics; unresolved settlement carries no claimed
+profit. Quote failures log only sanitized classifications, status/retry timing,
+and a non-reversible pair fingerprint so fleet bundles can diagnose provider-
+and pair-specific behavior without exposing provider bodies or secrets. These
+diagnostics do not change route selection, deadlines, cooldowns, or fallback.
+
 ## Troubleshooting
 
 ### Dashboard reporting

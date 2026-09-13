@@ -16,6 +16,7 @@ from the cost stack rather than pessimistically assuming a reset.
 """
 
 from decimal import Decimal, InvalidOperation, ROUND_CEILING
+import hashlib
 import logging
 import re
 import time
@@ -63,6 +64,19 @@ def _log_candidate(row, context, tournament_id):
         " · " + str(quote_failure_kind)
         if rejection != "-" and quote_failure_kind else ""
     )
+    failure_reason = row.get("failure_reason") or {}
+    diagnostic_suffix = ""
+    if rejection != "-":
+        diagnostic_suffix = (
+            " · failure_category=%s provider_error=%s http_status=%s "
+            "retry_after_seconds=%s pair_fingerprint=%s"
+        ) % (
+            failure_reason.get("category", "none"),
+            failure_reason.get("provider_error", "none"),
+            row.get("provider_http_status", "none"),
+            row.get("provider_retry_after_seconds", "none"),
+            row.get("pair_fingerprint", "unknown"),
+        )
     suffix = " · tournament_id=%s candidate_elapsed_ms=%s" % (
         tournament_id, row.get("candidate_elapsed_ms", "unknown")
     )
@@ -73,15 +87,28 @@ def _log_candidate(row, context, tournament_id):
             row["projected_profit_percent"], row["minimum_return_eth"],
             row["minimum_profit_percent"], row.get("gas_total_eth", 0.0) or 0.0,
             result_label, " · " + rejection if rejection != "-" else "", failure_suffix,
-            suffix,
+            diagnostic_suffix + suffix,
         )
     else:
         LOG.info(
             "Route tournament candidate ⚔️ %s/%s: output %s · gas %.6f ETH · %s%s%s%s",
             name, settlement, row.get("quoted_output_human", "-"),
             row.get("gas_total_eth", 0.0) or 0.0, result_label,
-            " · " + rejection if rejection != "-" else "", failure_suffix, suffix,
+            " · " + rejection if rejection != "-" else "", failure_suffix,
+            diagnostic_suffix + suffix,
         )
+
+
+def _pair_fingerprint(context, settlement):
+    """Return a stable, non-reversible fleet aggregation key for one pair."""
+    material = "|".join((
+        str(context.get("chain_id", "unknown")),
+        str(context.get("direction", "unknown")),
+        str(context.get("token_address", "")).lower(),
+        str(context.get("trade_token_address", "")).lower(),
+        str(settlement),
+    ))
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
 
 
 def _configured_identities(config):
@@ -321,12 +348,27 @@ def score_candidate(quote, provider, settlement, context, *, allowance_probe=Non
            "quoted_output_human": None, "gas_components_wei": {},
            "projected_total_gas_wei": None, "gas_total_eth": None,
            "output_floor_raw": None, "output_floor_human": None,
-           "projected_net_score": None, "rejections": [], "execution_eligible": False}
+           "projected_net_score": None, "rejections": [], "execution_eligible": False,
+           "pair_fingerprint": _pair_fingerprint(c, settlement)}
     if not quote.success:
         failure_reason = _quote_failure_reason(provider, getattr(quote, "error", None))
         row["rejections"] = ["observation_timeout" if failure_reason["category"] == "observation_timeout"
                              else "provider_quote_failed"]
         row["failure_reason"] = failure_reason
+        provider_error = str(failure_reason.get("provider_error") or "")
+        status_match = re.fullmatch(r"http_(\d{3})", provider_error)
+        row["provider_http_status"] = (
+            int(status_match.group(1)) if status_match else None
+        )
+        raw_response = getattr(quote, "raw_response", None)
+        retry_after = (
+            raw_response.get("_telemetry_retry_after_seconds")
+            if isinstance(raw_response, dict) else None
+        )
+        row["provider_retry_after_seconds"] = (
+            round(max(0.0, float(retry_after)), 3)
+            if isinstance(retry_after, (int, float)) else None
+        )
         row["quote_failure_kind"] = {
             "no_liquidity": "no_route_or_liquidity",
             "invalid_request": "invalid_quote",

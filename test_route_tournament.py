@@ -7,7 +7,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 from config import BotConfig, load_config
-from grid_bot import GridBot, _with_swap_provider_fallback
+from grid_bot import GridBot, _with_swap_provider_fallback, _with_tournament_terminal
 from route_tournament import (collect, collect_execution_preflight, score_candidate,
                               snapshot, select_execution_candidate)
 from swap_provider import FallbackSwapProvider
@@ -20,6 +20,32 @@ def context(direction="buy", **overrides):
                 gas_price=10**6, gas_multiplier=1, price_multiplier=1,
                 reserve=10**15, cap=10**14, slippage=0.01, tax=0.02,
                 min_profit=2, **overrides)
+
+
+def test_terminal_wrapper_closes_early_return_and_exception():
+    bot = SimpleNamespace()
+    bot._close_incomplete_tournament = Mock()
+
+    @_with_tournament_terminal("sell")
+    def early(_self):
+        return None
+
+    early(bot)
+    bot._close_incomplete_tournament.assert_called_once_with(
+        "sell", reason="post_selection_exit_without_broadcast"
+    )
+
+    bot._close_incomplete_tournament.reset_mock()
+
+    @_with_tournament_terminal("sell")
+    def failed(_self):
+        raise RuntimeError("private provider body")
+
+    with pytest.raises(RuntimeError):
+        failed(bot)
+    bot._close_incomplete_tournament.assert_called_once_with(
+        "sell", reason="unhandled_runtimeerror", failed=True
+    )
 
 
 def quote(output=2 * 10**15, gas=300000, **kwargs):
@@ -494,6 +520,38 @@ def test_candidate_log_includes_sanitized_quote_failure_kind(caplog):
                    and "sushiswap/" in record.getMessage()]
     assert sushi_lines
     assert all("no_route_or_liquidity" in line for line in sushi_lines)
+
+
+def test_failed_candidate_exposes_only_sanitized_pair_and_http_diagnostics(caplog):
+    import logging
+    secret = "super-secret-provider-body"
+    q = QuoteResult(
+        success=False,
+        error=f"Sushi API returned status 429: {secret}",
+        raw_response={"detail": secret, "_telemetry_retry_after_seconds": 30},
+    )
+    c = context(
+        "sell", chain_id=4663,
+        token_address="0x1111111111111111111111111111111111111111",
+        trade_token_address="0x2222222222222222222222222222222222222222",
+    )
+    row = score_candidate(q, "sushiswap", "native", c)
+
+    assert row["provider_http_status"] == 429
+    assert row["provider_retry_after_seconds"] == 30
+    assert len(row["pair_fingerprint"]) == 16
+    assert secret not in json.dumps(row)
+
+    with caplog.at_level(logging.INFO, logger="grid_bot.route_tournament"):
+        import route_tournament
+        route_tournament._log_candidate(row, c, "safe-round")
+    message = caplog.records[-1].getMessage()
+    assert "failure_category=transient" in message
+    assert "provider_error=http_429" in message
+    assert "http_status=429" in message
+    assert "retry_after_seconds=30" in message
+    assert "pair_fingerprint=" in message
+    assert secret not in message
 
 
 def test_quote_deadline_is_exposed_as_an_observation_timeout():
