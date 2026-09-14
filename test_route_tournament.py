@@ -1,4 +1,5 @@
 import json
+import threading
 import time
 from decimal import Decimal
 from types import SimpleNamespace
@@ -926,6 +927,22 @@ def test_gate_mode_requires_explicit_canary_flag():
         cfg.validate()
 
 
+def test_speculative_fallback_delay_must_precede_gate_deadline():
+    cfg = BotConfig.__new__(BotConfig)
+    cfg.route_tournament_mode = "off"
+    cfg.route_tournament_canary = False
+    cfg.route_tournament_providers = ("uniswap", "sushiswap")
+    cfg.route_tournament_settlements = ("native", "weth")
+    cfg.chain_id = 4663
+    cfg.li_fi_api_key = ""
+    cfg.route_tournament_shadow_timeout_seconds = 4
+    cfg.route_tournament_gate_timeout_seconds = 12
+    cfg.route_tournament_speculative_fallback_seconds = 12
+
+    with pytest.raises(ValueError, match="must be 0 .* below"):
+        cfg.validate()
+
+
 def test_gridless_tournament_uses_exact_post_moonbag_amount_and_cost():
     b = bot("gate")
     b.config.moonbag_percentage = 1
@@ -961,11 +978,13 @@ def test_mode_parsing_and_default(monkeypatch, tmp_path):
         monkeypatch.setenv("ROUTE_TOURNAMENT_SETTLEMENTS", "native")
         monkeypatch.setenv("ROUTE_TOURNAMENT_SHADOW_TIMEOUT_SECONDS", "5")
         monkeypatch.setenv("ROUTE_TOURNAMENT_GATE_TIMEOUT_SECONDS", "7")
+        monkeypatch.setenv("ROUTE_TOURNAMENT_SPECULATIVE_FALLBACK_SECONDS", "5")
         configured = load_config()
         assert configured.route_tournament_providers == ("sushiswap", "uniswap")
         assert configured.route_tournament_settlements == ("native",)
         assert configured.route_tournament_shadow_timeout_seconds == 5
         assert configured.route_tournament_gate_timeout_seconds == 7
+        assert configured.route_tournament_speculative_fallback_seconds == 5
 
         monkeypatch.setenv("ROUTE_TOURNAMENT_PROVIDERS", "uniswap,sushiswap,umbra")
         assert load_config().route_tournament_providers == ("uniswap", "sushiswap", "umbra")
@@ -1180,6 +1199,8 @@ def test_execution_preflight_logs_one_ordered_correlated_record_per_candidate(ca
     assert len(candidates) == 4
     assert all("tournament_id=round-ordered" in message for message in messages)
     assert all("candidate_elapsed_ms=" in message for message in candidates)
+    assert all("stage_elapsed_ms=" in message for message in candidates)
+    assert all("quote" in row["stage_elapsed_ms"] for row in result["candidates"])
     assert all(messages.index(message) < winner_index for message in candidates)
 
 
@@ -1199,7 +1220,7 @@ def test_timed_out_preflight_workers_cannot_log_candidates_after_winner(caplog):
     cfg = SimpleNamespace(uniswap_api_key="key", weth_address="weth", token_address="token")
     correlated = {**context("sell"), "tournament_id": "round-timeout"}
     with caplog.at_level(logging.INFO, logger="grid_bot.route_tournament"):
-        collect_execution_preflight(
+        result = collect_execution_preflight(
             cfg, "wallet", correlated, factory,
             gas_estimate_provider=lambda _quote, _settlement: 100000,
             max_seconds=0.01,
@@ -1214,6 +1235,9 @@ def test_timed_out_preflight_workers_cannot_log_candidates_after_winner(caplog):
                   if "Route tournament candidate" in message]
     assert len(candidates) == 4
     assert all("tournament_id=round-timeout" in message for message in candidates)
+    assert all("timeout_stage=quote" in message for message in candidates)
+    assert all(row["timeout_stage"] == "quote" for row in result["candidates"])
+    assert all("client_init" in row["stage_elapsed_ms"] for row in result["candidates"])
     assert "Route tournament winner" in messages[-1]
 
 
@@ -1648,6 +1672,166 @@ def test_gate_preflight_failure_falls_back_to_normal_provider_path():
     router.build_swap_transaction.assert_called_once()
     b._revalidate_selected_route.assert_not_called()
     assert b._route_execution_preflight["status"] == "baseline_fallback"
+
+
+def test_gate_sell_reuses_isolated_speculative_baseline_after_no_winner():
+    b = bot("gate")
+    b.config.use_eth_trading = False
+    b.config.route_tournament_speculative_fallback_seconds = 0.001
+    b.config.route_tournament_gate_timeout_seconds = 0.2
+    b.config.weth_address = "weth"
+    b._swap_slippage_fraction = Mock(return_value=0.01)
+    prefetched_quote = QuoteResult(success=True, sell_amount=10**15, buy_amount=2 * 10**15)
+    isolated = SimpleNamespace(
+        name="uniswap", build_swap_transaction=Mock(return_value=prefetched_quote),
+    )
+    primary = SimpleNamespace(name="uniswap")
+    router = SimpleNamespace(
+        primary=primary, active=primary,
+        provider_for_name=Mock(return_value=primary),
+        build_swap_transaction=Mock(),
+    )
+    b.provider = router
+    b.api_client = router
+    b._route_execution_preflight = {
+        "mode": "execution_preflight", "direction": "sell", "status": "baseline_fallback",
+    }
+    b._route_comparisons = {"sell": b._route_execution_preflight}
+
+    def no_winner(*_args):
+        time.sleep(0.02)
+        return None
+
+    b._collect_route_execution_preflight = Mock(side_effect=no_winner)
+    b._revalidate_selected_route = Mock()
+
+    with patch("swap_provider.create_swap_provider", return_value=isolated):
+        quote_result, weth_fallback = b._actionable_quote_with_weth_fallback(
+            sell_token="token", buy_token="native", sell_amount=10**15,
+            direction="sell",
+        )
+
+    assert quote_result is prefetched_quote
+    assert weth_fallback is False
+    isolated.build_swap_transaction.assert_called_once()
+    router.build_swap_transaction.assert_not_called()
+    assert b._route_comparisons["sell"]["speculative_fallback"]["outcome"] == "used"
+
+
+def test_tournament_winner_discards_ready_speculative_baseline():
+    b = bot("gate")
+    b.config.use_eth_trading = False
+    b.config.route_tournament_speculative_fallback_seconds = 0.001
+    b.config.route_tournament_gate_timeout_seconds = 0.2
+    b.config.weth_address = "weth"
+    b._swap_slippage_fraction = Mock(return_value=0.01)
+    speculative_quote = QuoteResult(success=True, sell_amount=10**15, buy_amount=2 * 10**15)
+    selected_quote = QuoteResult(success=True, sell_amount=10**15, buy_amount=3 * 10**15)
+    isolated = SimpleNamespace(
+        name="uniswap", build_swap_transaction=Mock(return_value=speculative_quote),
+    )
+    primary = SimpleNamespace(name="uniswap")
+    selected_provider = SimpleNamespace(name="sushiswap")
+    router = SimpleNamespace(primary=primary, active=primary)
+    b.provider = router
+    b.api_client = router
+    comparison = {"mode": "execution_preflight", "direction": "sell"}
+    b._route_comparisons = {"sell": comparison}
+
+    def winner(*_args):
+        time.sleep(0.02)
+        return {"provider": "sushiswap", "settlement": "native"}
+
+    b._collect_route_execution_preflight = Mock(side_effect=winner)
+    b._revalidate_selected_route = Mock(return_value={
+        "provider": selected_provider, "quote": selected_quote,
+        "weth_fallback": False, "gas_estimate": 100000,
+    })
+
+    with patch("swap_provider.create_swap_provider", return_value=isolated):
+        quote_result, weth_fallback = b._actionable_quote_with_weth_fallback(
+            sell_token="token", buy_token="native", sell_amount=10**15,
+            direction="sell",
+        )
+
+    assert quote_result is selected_quote
+    assert quote_result is not speculative_quote
+    assert weth_fallback is False
+    assert comparison["speculative_fallback"]["outcome"] == "discarded_tournament_winner"
+
+
+def test_failed_speculative_baseline_recovers_through_normal_path():
+    b = bot("gate")
+    b.config.use_eth_trading = False
+    b.config.route_tournament_speculative_fallback_seconds = 0.001
+    b.config.route_tournament_gate_timeout_seconds = 0.2
+    b.config.weth_address = "weth"
+    b._swap_slippage_fraction = Mock(return_value=0.01)
+    classic_quote = QuoteResult(success=True, sell_amount=10**15, buy_amount=2 * 10**15)
+    primary = SimpleNamespace(name="uniswap")
+    router = SimpleNamespace(
+        primary=primary, active=primary,
+        provider_for_name=Mock(return_value=primary),
+        build_swap_transaction=Mock(return_value=classic_quote),
+    )
+    b.provider = router
+    b.api_client = router
+    b._route_execution_preflight = {
+        "mode": "execution_preflight", "direction": "sell", "status": "baseline_fallback",
+    }
+    b._route_comparisons = {"sell": b._route_execution_preflight}
+    b._collect_route_execution_preflight = Mock(
+        side_effect=lambda *_args: (time.sleep(0.02), None)[1]
+    )
+    b._revalidate_selected_route = Mock()
+
+    with patch("swap_provider.create_swap_provider", side_effect=RuntimeError("secret")):
+        quote_result, weth_fallback = b._actionable_quote_with_weth_fallback(
+            sell_token="token", buy_token="native", sell_amount=10**15,
+            direction="sell",
+        )
+
+    assert quote_result is classic_quote
+    assert weth_fallback is False
+    router.build_swap_transaction.assert_called_once()
+    telemetry = b._route_comparisons["sell"]["speculative_fallback"]
+    assert telemetry["status"] == "failed"
+    assert telemetry["outcome"] == "not_used"
+
+
+def test_stale_speculative_quote_is_rejected_for_normal_refresh():
+    b = bot("gate")
+    b.config.route_tournament_gate_timeout_seconds = 0.1
+    primary = SimpleNamespace(name="uniswap")
+    b.provider = SimpleNamespace(
+        active=primary, provider_for_name=Mock(return_value=primary),
+    )
+    b.api_client = b.provider
+    b._route_comparisons = {"sell": {}}
+    state = {
+        "done": threading.Event(), "lock": threading.Lock(),
+        "result": (QuoteResult(success=True), False, "uniswap"),
+        "ready_monotonic": time.monotonic() - 4,
+        "telemetry": {"status": "ready"},
+    }
+    state["done"].set()
+
+    assert b._consume_speculative_fallback("sell", state) is None
+    assert b._route_comparisons["sell"]["speculative_fallback"]["outcome"] == "stale_retry_normal"
+
+
+def test_speculative_fallback_can_be_cancelled_before_request_start():
+    b = bot("gate")
+    b.config.route_tournament_speculative_fallback_seconds = 0.2
+    b.config.route_tournament_gate_timeout_seconds = 1
+    state = b._start_speculative_sell_fallback(
+        sell_token="token", buy_token="native", sell_amount=10**15,
+        direction="sell",
+    )
+
+    state["cancel"].set()
+    assert state["done"].wait(0.1)
+    assert state["telemetry"]["status"] == "cancelled_before_start"
 
 
 def test_existing_baseline_fallback_is_not_published_twice():

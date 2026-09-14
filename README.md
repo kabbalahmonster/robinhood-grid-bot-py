@@ -115,6 +115,7 @@ python grid_bot.py
 | `ROUTE_TOURNAMENT_SETTLEMENTS` | No | native,weth | Comma-separated non-empty subset; `native` skips WETH candidates |
 | `ROUTE_TOURNAMENT_SHADOW_TIMEOUT_SECONDS` | No | 4 | Absolute shadow round deadline, bounded to 1-15 seconds |
 | `ROUTE_TOURNAMENT_GATE_TIMEOUT_SECONDS` | No | 12 | Absolute execution-preflight deadline, bounded to 1-15 seconds |
+| `ROUTE_TOURNAMENT_SPECULATIVE_FALLBACK_SECONDS` | No | 0 | Opt-in gate canary: start an isolated sell-only baseline quote after this delay while preserving the full tournament deadline; `0` disables |
 | `USE_LI_FI` | No | false | Use LI.FI instead of 0x for swaps |
 | `USE_UNISWAP_API` | No | true | Legacy Uniswap selection used when `SWAP_PROVIDER` is empty |
 | **Token Configuration** ||||
@@ -1794,6 +1795,24 @@ keeps more requests in flight and delays the trading round. For roughly 30 bots
 in gate mode, use `POLL_INTERVAL_SECONDS=12-20` with startup jitter rather than
 the twelve-second default. Move toward 15 seconds only if deadlines persist;
 move toward 15-20 seconds if 429s or overlapping tournament rounds appear.
+
+Gate candidates also report bounded `stage_elapsed_ms` timings for client
+initialization, quote retrieval, transaction preparation, gas-price lookup,
+swap/conversion/approval gas estimation, allowance lookup, and scoring. A
+deadline placeholder includes `timeout_stage`, identifying the operation that
+was still active without exposing provider response text, addresses, calldata,
+headers, or credentials.
+
+`ROUTE_TOURNAMENT_SPECULATIVE_FALLBACK_SECONDS` is an opt-in, sell-only gate
+canary optimization. A positive value starts the ordinary baseline quote on an
+isolated provider graph after that delay while the tournament retains its full
+deadline. The overlap result is used only when the tournament has no freshly
+revalidated winner, the quote succeeded, its provider remains in the execution
+registry, and it is no more than three seconds old. Otherwise normal baseline
+quoting runs from scratch. The overlap never approves, signs, broadcasts, or
+weakens the later slippage, gas-cap, profit-floor, simulation, receipt, or
+settlement guards. Keep it at `0` fleet-wide until a one-bot canary demonstrates
+lower fallback latency without a material increase in provider throttling.
 
 For a ROBINVAULT canary, record the current revision/config and baseline
 actionable request counts, latency, gas and route/fallback logs. Enable only

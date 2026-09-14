@@ -193,6 +193,7 @@ class BotConfig:
     route_tournament_settlements: tuple[str, ...] = ("native", "weth")
     route_tournament_shadow_timeout_seconds: float = 4.0
     route_tournament_gate_timeout_seconds: float = 12.0
+    route_tournament_speculative_fallback_seconds: float = 0.0
     
     # Derived properties
     @property
@@ -230,6 +231,17 @@ class BotConfig:
             value = float(getattr(self, name, 4 if "shadow" in name else 12))
             if not 1 <= value <= 15:
                 raise ValueError(f"{name.upper()} must be between 1 and 15 seconds")
+        speculative_seconds = float(getattr(
+            self, "route_tournament_speculative_fallback_seconds", 0
+        ))
+        if speculative_seconds < 0 or (
+            speculative_seconds > 0
+            and not 1 <= speculative_seconds < self.route_tournament_gate_timeout_seconds
+        ):
+            raise ValueError(
+                "ROUTE_TOURNAMENT_SPECULATIVE_FALLBACK_SECONDS must be 0 (disabled) "
+                "or at least 1 second and below ROUTE_TOURNAMENT_GATE_TIMEOUT_SECONDS"
+            )
         # Check required fields
         if not self.private_key or self.private_key == "0x...":
             raise ValueError("PRIVATE_KEY is required and must be set")
@@ -486,6 +498,9 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
         ),
         route_tournament_gate_timeout_seconds=float(
             os.getenv("ROUTE_TOURNAMENT_GATE_TIMEOUT_SECONDS", "12")
+        ),
+        route_tournament_speculative_fallback_seconds=float(
+            os.getenv("ROUTE_TOURNAMENT_SPECULATIVE_FALLBACK_SECONDS", "0")
         ),
         swap_fallback_provider=os.getenv("SWAP_FALLBACK_PROVIDER", "sushiswap"),
         sushi_api_key=os.getenv("SUSHI_API_KEY", ""),

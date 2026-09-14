@@ -1581,6 +1581,23 @@ update-variable --apply --only earn \
 restart-bot EARN
 ```
 
+If the canary shows repeated 12-second no-winner waits, preview and enable the
+sell-only baseline overlap on that same bot:
+
+```bash
+update-variable --allow-add --only earn \
+  ROUTE_TOURNAMENT_SPECULATIVE_FALLBACK_SECONDS=8
+update-variable --apply --allow-add --only earn \
+  ROUTE_TOURNAMENT_SPECULATIVE_FALLBACK_SECONDS=8
+restart-bot EARN
+```
+
+This does not shorten the tournament deadline or authorize an alternate trade.
+It prepares the normal fallback with an isolated provider instance and uses it
+only after the tournament produces no winner. Failed or more-than-three-second-old
+results are discarded and rebuilt normally. Set the value back to `0` to
+disable the overlap without changing tournament policy.
+
 Use `shadow` with `ROUTE_TOURNAMENT_CANARY=false` for comparison telemetry
 without tournament route authority. Promote beyond one bot only after a
 monitored window confirms acceptable provider quota and execution behavior.

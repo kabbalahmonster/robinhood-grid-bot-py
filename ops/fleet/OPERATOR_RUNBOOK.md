@@ -310,12 +310,23 @@ fallback revisions indicate mixed/older code or duplicated source records.
 
 All tournament candidates, eligible or rejected, expose only aggregation-safe fields:
 `failure_category`, `provider_error`, `http_status`, `retry_after_seconds`,
-`pair_fingerprint`, and `candidate_elapsed_ms`. The fingerprint is a stable,
+`pair_fingerprint`, `candidate_elapsed_ms`, `stage_elapsed_ms`, and
+`timeout_stage`. The fingerprint is a stable,
 non-reversible chain/direction/pair/settlement key. Provider response bodies,
 request IDs, credentials, and calldata are not emitted. Selected-winner lines
 repeat the fingerprint so the execution lifecycle can be grouped by pair. Use
 these fields to compare failures by provider and pair before considering a scoped cooldown;
 they do not themselves disable or penalize a provider.
+
+For a one-bot timeout canary, set
+`ROUTE_TOURNAMENT_SPECULATIVE_FALLBACK_SECONDS=8`. This starts an isolated
+baseline sell quote after eight seconds but leaves the 12-second tournament
+deadline and route ranking unchanged. It never runs for buys and never sends a
+transaction. A successful overlap result is reused only on the no-winner path
+and only while no more than three seconds old; failed, stale, or unavailable
+results fall back to a new normal quote. Monitor `speculative_fallback.status`,
+`outcome`, `elapsed_ms`, and `quote_age_ms`, plus provider 429s. Return the value
+to `0` immediately if request pressure rises or fallback correctness differs.
 
 Completed lifecycle payloads include receipt status, gas used, effective gas
 price, measured token/proceeds base units, and reconciled realized profit when

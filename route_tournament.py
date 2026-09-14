@@ -22,6 +22,7 @@ import re
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
+from threading import Lock
 
 from swap_provider import PROVIDERS
 from zero_x import QuoteResult
@@ -78,8 +79,13 @@ def _log_candidate(row, context, tournament_id):
         row.get("provider_retry_after_seconds", "none"),
         row.get("pair_fingerprint", "unknown"),
     )
-    suffix = " · tournament_id=%s candidate_elapsed_ms=%s" % (
-        tournament_id, row.get("candidate_elapsed_ms", "unknown")
+    stage_elapsed = row.get("stage_elapsed_ms") or {}
+    stage_summary = ",".join(
+        "%s:%s" % (name, stage_elapsed[name]) for name in sorted(stage_elapsed)
+    ) or "none"
+    suffix = " · tournament_id=%s candidate_elapsed_ms=%s timeout_stage=%s stage_elapsed_ms=%s" % (
+        tournament_id, row.get("candidate_elapsed_ms", "unknown"),
+        row.get("timeout_stage", "none"), stage_summary,
     )
     if context.get("direction") == "sell" and row.get("projected_profit_percent") is not None:
         LOG.info(
@@ -619,7 +625,8 @@ def collect(config, address, context, client_factory=None,
             conversion_gas_estimate_provider=None, approval_gas_estimate_provider=None,
             max_seconds=8,
             protocol_hints=None, mode="shadow", _candidate_filter=None,
-            _suppress_summary=False, _suppress_candidate_logs=False):
+            _suppress_summary=False, _suppress_candidate_logs=False,
+            _stage_callback=None):
     """One get_quote per provider/settlement; never prepare, approve, or send.
 
     Independent client instances avoid mutating execution clients. Uniswap's
@@ -648,6 +655,36 @@ def collect(config, address, context, client_factory=None,
             tournament_id, context.get("direction"), mode, len(configured_identities),
         )
 
+    stage_elapsed_ms = {}
+    active_stages = []
+
+    def stage_started(stage):
+        active_stages.append(stage)
+        if callable(_stage_callback):
+            _stage_callback(stage, "started", None)
+        return time.monotonic()
+
+    def stage_finished(stage, stage_started_at):
+        elapsed = round((time.monotonic() - stage_started_at) * 1000, 1)
+        stage_elapsed_ms[stage] = elapsed
+        if active_stages and active_stages[-1] == stage:
+            active_stages.pop()
+        elif stage in active_stages:
+            active_stages.remove(stage)
+        if callable(_stage_callback):
+            _stage_callback(stage, "finished", elapsed)
+            if active_stages:
+                _stage_callback(active_stages[-1], "started", None)
+
+    def attach_stage_telemetry(row):
+        # Execution preflight runs exactly one identity per worker. Shadow mode
+        # reuses clients across sequential identities, so cumulative stage
+        # timings there would be misleading rather than useful diagnostics.
+        if _candidate_filter:
+            row["stage_elapsed_ms"] = dict(stage_elapsed_ms)
+            if active_stages:
+                row["timeout_stage"] = active_stages[-1]
+
     def deadline_row(name, settlement):
         return score_candidate(
             QuoteResult(success=False, error="shadow quote deadline elapsed"),
@@ -663,10 +700,13 @@ def collect(config, address, context, client_factory=None,
         # Do not construct/log clients for the other provider before skipping.
         if _candidate_filter and name != _candidate_filter[0]:
             continue
+        stage_mark = stage_started("client_init")
         try:
             client = client_factory(name) if client_factory else PROVIDERS[name].load_client_class()(config)
         except Exception:
             client = None
+        finally:
+            stage_finished("client_init", stage_mark)
         for settlement in configured_settlements:
             token = NATIVE if settlement == "native" else config.weth_address
             if _candidate_filter and (name, settlement) != _candidate_filter:
@@ -686,6 +726,7 @@ def collect(config, address, context, client_factory=None,
                        "approval_assumption": "none", "gas_basis": "skipped"}
                 row["tournament_id"] = tournament_id
                 row["candidate_elapsed_ms"] = 0.0
+                attach_stage_telemetry(row)
                 rows.append(row)
                 if not _suppress_candidate_logs:
                     _log_candidate(row, context, tournament_id)
@@ -716,7 +757,11 @@ def collect(config, address, context, client_factory=None,
                     mode == "execution_preflight"
                 )
                 args["quote_timeout_seconds"] = remaining_seconds / request_slots
-                quote = client.get_quote(**args)
+                stage_mark = stage_started("quote")
+                try:
+                    quote = client.get_quote(**args)
+                finally:
+                    stage_finished("quote", stage_mark)
                 staged_weth_buy = bool(
                     mode == "execution_preflight"
                     and context["direction"] == "buy"
@@ -739,23 +784,27 @@ def collect(config, address, context, client_factory=None,
                             remaining_preparation / remaining_candidates,
                             max(0.05, float(max_seconds) / 2),
                         )
-                        if name == "uniswap":
-                            quote = client.get_swap_transaction(
-                                quote.raw_response,
-                                quote_timeout_seconds=preparation_budget,
-                                **({"simulate_transaction": False} if staged_weth_buy else {}),
-                            )
-                        else:
-                            quote = client.get_swap_transaction(
-                                quote,
-                                sell_token=args["sell_token"],
-                                buy_token=args["buy_token"],
-                                sell_amount=args["sell_amount"],
-                                taker_address=args["taker_address"],
-                                slippage_percentage=args["slippage_percentage"],
-                                quote_timeout_seconds=preparation_budget,
-                                **({"simulate_transaction": False} if staged_weth_buy else {}),
-                            )
+                        stage_mark = stage_started("prepare")
+                        try:
+                            if name == "uniswap":
+                                quote = client.get_swap_transaction(
+                                    quote.raw_response,
+                                    quote_timeout_seconds=preparation_budget,
+                                    **({"simulate_transaction": False} if staged_weth_buy else {}),
+                                )
+                            else:
+                                quote = client.get_swap_transaction(
+                                    quote,
+                                    sell_token=args["sell_token"],
+                                    buy_token=args["buy_token"],
+                                    sell_amount=args["sell_amount"],
+                                    taker_address=args["taker_address"],
+                                    slippage_percentage=args["slippage_percentage"],
+                                    quote_timeout_seconds=preparation_budget,
+                                    **({"simulate_transaction": False} if staged_weth_buy else {}),
+                                )
+                        finally:
+                            stage_finished("prepare", stage_mark)
                         if name == "uniswap":
                             protocol_reader = getattr(client, "protocol_hint_for", None)
                             protocol = protocol_reader(
@@ -776,21 +825,32 @@ def collect(config, address, context, client_factory=None,
                 else:
                     # Read dynamic, already-normalized RPC gas after every quote.
                     # A single oracle failure rejects only this candidate.
-                    fresh_gas_price = int(gas_price_provider()) if gas_price_provider else int(context["gas_price"])
+                    stage_mark = stage_started("gas_price")
+                    try:
+                        fresh_gas_price = int(gas_price_provider()) if gas_price_provider else int(context["gas_price"])
+                    finally:
+                        stage_finished("gas_price", stage_mark)
                     if time.monotonic() >= deadline:
                         row = deadline_row(name, settlement)
                     else:
                         per_context = {**context, "gas_price": fresh_gas_price}
+                        stage_mark = stage_started("swap_gas")
                         try:
                             local_gas = int(gas_estimate_provider(quote, settlement)) if gas_estimate_provider else 0
                         except Exception:
                             local_gas = 0
+                        finally:
+                            stage_finished("swap_gas", stage_mark)
+                        stage_mark = stage_started("conversion_gas")
                         try:
                             conversion_gas = int(conversion_gas_estimate_provider(
                                 quote, settlement
                             )) if conversion_gas_estimate_provider else 0
                         except Exception:
                             conversion_gas = 0
+                        finally:
+                            stage_finished("conversion_gas", stage_mark)
+                        stage_mark = stage_started("approval_gas")
                         try:
                             # Internal-only identity used to build the same
                             # approval amount execution will send (Umbra exact,
@@ -801,25 +861,40 @@ def collect(config, address, context, client_factory=None,
                             )) if approval_gas_estimate_provider else 0
                         except Exception:
                             approval_gas = 0
+                        finally:
+                            stage_finished("approval_gas", stage_mark)
                         if time.monotonic() >= deadline:
                             row = deadline_row(name, settlement)
                         else:
-                            row = score_candidate(
-                                quote, name, settlement, per_context,
-                                allowance_probe=allowance_probe, gas_estimate=local_gas,
-                                conversion_gas_limit=conversion_gas,
-                                approval_gas_limit=approval_gas,
-                                deadline=deadline,
-                                require_local_gas=(mode == "execution_preflight"),
-                                require_dynamic_setup_gas=(mode == "execution_preflight"),
-                                staged_weth_buy=staged_weth_buy,
-                            )
+                            def timed_allowance_probe(token, spender):
+                                stage_mark = stage_started("allowance")
+                                try:
+                                    return allowance_probe(token, spender)
+                                finally:
+                                    stage_finished("allowance", stage_mark)
+
+                            stage_mark = stage_started("score")
+                            try:
+                                row = score_candidate(
+                                    quote, name, settlement, per_context,
+                                    allowance_probe=(timed_allowance_probe if allowance_probe else None),
+                                    gas_estimate=local_gas,
+                                    conversion_gas_limit=conversion_gas,
+                                    approval_gas_limit=approval_gas,
+                                    deadline=deadline,
+                                    require_local_gas=(mode == "execution_preflight"),
+                                    require_dynamic_setup_gas=(mode == "execution_preflight"),
+                                    staged_weth_buy=staged_weth_buy,
+                                )
+                            finally:
+                                stage_finished("score", stage_mark)
                             if time.monotonic() >= deadline:
                                 row = deadline_row(name, settlement)
                 row["tournament_id"] = tournament_id
                 row["candidate_elapsed_ms"] = round(
                     (time.monotonic() - candidate_started) * 1000, 1
                 )
+                attach_stage_telemetry(row)
                 rows.append(row)
                 if not _suppress_candidate_logs:
                     _log_candidate(row, context, tournament_id)
@@ -844,6 +919,7 @@ def collect(config, address, context, client_factory=None,
                 row["candidate_elapsed_ms"] = round(
                     (time.monotonic() - candidate_started) * 1000, 1
                 )
+                attach_stage_telemetry(row)
                 rows.append(row)
                 if not _suppress_candidate_logs:
                     _log_candidate(row, context, tournament_id)
@@ -959,7 +1035,20 @@ def collect_execution_preflight(config, address, context, client_factory=None,
         tournament_id, context.get("direction"), len(identities),
     )
 
+    progress = {identity: {"stage_elapsed_ms": {}, "active_stage": None}
+                for identity in identities}
+    progress_lock = Lock()
+
     def collect_one(identity):
+        def record_stage(stage, state, elapsed_ms):
+            with progress_lock:
+                if state == "started":
+                    progress[identity]["active_stage"] = stage
+                else:
+                    progress[identity]["stage_elapsed_ms"][stage] = elapsed_ms
+                    if progress[identity]["active_stage"] == stage:
+                        progress[identity]["active_stage"] = None
+
         return collect(
             config, address, context, client_factory=client_factory,
             gas_price_provider=gas_price_provider, allowance_probe=allowance_probe,
@@ -968,7 +1057,7 @@ def collect_execution_preflight(config, address, context, client_factory=None,
             approval_gas_estimate_provider=approval_gas_estimate_provider,
             protocol_hints=protocol_hints, mode="execution_preflight",
             _candidate_filter=identity, _suppress_summary=True,
-            _suppress_candidate_logs=True,
+            _suppress_candidate_logs=True, _stage_callback=record_stage,
         )
 
     results = {}
@@ -999,6 +1088,11 @@ def collect_execution_preflight(config, address, context, client_factory=None,
             row["candidate_elapsed_ms"] = round(
                 (time.monotonic() - started) * 1000, 1
             )
+            with progress_lock:
+                stage_progress = progress[(provider, settlement)]
+                row["stage_elapsed_ms"] = dict(stage_progress["stage_elapsed_ms"])
+                if stage_progress["active_stage"]:
+                    row["timeout_stage"] = stage_progress["active_stage"]
         row["tournament_id"] = tournament_id
         rows.append(row)
         _log_candidate(row, context, tournament_id)

@@ -1766,19 +1766,177 @@ class GridBot:
         if getattr(self.config, "route_tournament_mode", "off") in {"shadow", "gate"}:
             getattr(self, "_route_comparisons", {}).pop("buy", None)
 
+    def _build_baseline_quote(self, api_client, *, sell_token, buy_token,
+                              sell_amount, direction, recovery_provider=None):
+        """Build the ordinary baseline quote without changing bot provider state."""
+        quote = api_client.build_swap_transaction(
+            sell_token=sell_token, buy_token=buy_token, sell_amount=sell_amount,
+            taker_address=self.wallet.address,
+            slippage_percentage=self._swap_slippage_fraction(),
+        )
+        uses_weth = False
+        if quote.success or not getattr(self.config, "use_eth_trading", False):
+            return quote, uses_weth
+        fallback_sell = self.config.weth_address if direction == "buy" else sell_token
+        fallback_buy = buy_token if direction == "buy" else self.config.weth_address
+        logger.warning(
+            "%s native ETH route unavailable; trying direct WETH settlement: %s",
+            direction.capitalize(), quote.error,
+        )
+        quote = api_client.build_swap_transaction(
+            sell_token=fallback_sell, buy_token=fallback_buy, sell_amount=sell_amount,
+            taker_address=self.wallet.address,
+            slippage_percentage=self._swap_slippage_fraction(),
+        )
+        if quote.success:
+            uses_weth = True
+            recover = getattr(recovery_provider or api_client,
+                              "recover_current_operation", None)
+            if recover is not None:
+                recover()
+            logger.warning("ROUTE FALLBACK: using direct WETH %s settlement", direction)
+        try:
+            setattr(quote, "weth_fallback", uses_weth)
+        except Exception:
+            pass
+        return quote, uses_weth
+
+    def _start_speculative_sell_fallback(self, *, sell_token, buy_token, sell_amount,
+                                         direction):
+        """Start one isolated baseline quote while a slow sell tournament finishes."""
+        delay = float(getattr(
+            self.config, "route_tournament_speculative_fallback_seconds", 0
+        ) or 0)
+        gate_deadline = float(getattr(
+            self.config, "route_tournament_gate_timeout_seconds", 12
+        ))
+        if direction != "sell" or delay <= 0 or delay >= gate_deadline:
+            return None
+        state = {
+            "cancel": threading.Event(), "done": threading.Event(),
+            "lock": threading.Lock(), "result": None,
+            "telemetry": {"status": "scheduled", "delay_ms": round(delay * 1000, 1)},
+        }
+
+        def worker():
+            if state["cancel"].wait(delay):
+                with state["lock"]:
+                    state["telemetry"]["status"] = "cancelled_before_start"
+                state["done"].set()
+                return
+            started = time.monotonic()
+            with state["lock"]:
+                state["telemetry"]["status"] = "started"
+            try:
+                # The isolated provider graph prevents active-provider state
+                # racing tournament selection or final route revalidation.
+                from swap_provider import create_swap_provider
+                isolated = create_swap_provider(self.config)
+                quote, uses_weth = self._build_baseline_quote(
+                    isolated, sell_token=sell_token, buy_token=buy_token,
+                    sell_amount=sell_amount, direction=direction,
+                )
+                provider_name = getattr(isolated, "name", None)
+                with state["lock"]:
+                    state["result"] = (quote, uses_weth, provider_name)
+                    state["ready_monotonic"] = time.monotonic()
+                    state["telemetry"].update(
+                        status="ready", provider=provider_name or "unknown",
+                        quote_success=bool(getattr(quote, "success", False)),
+                    )
+            except Exception:
+                # Do not persist provider text, credentials, calldata, or raw responses.
+                with state["lock"]:
+                    state["telemetry"]["status"] = "failed"
+            finally:
+                with state["lock"]:
+                    state["telemetry"]["elapsed_ms"] = round(
+                        (time.monotonic() - started) * 1000, 1
+                    )
+                state["done"].set()
+
+        threading.Thread(
+            target=worker, name="tournament-speculative-fallback", daemon=True,
+        ).start()
+        return state
+
+    def _record_speculative_fallback(self, direction, state, *, outcome=None):
+        if not state:
+            return
+        with state["lock"]:
+            telemetry = dict(state["telemetry"])
+        if outcome:
+            telemetry["outcome"] = outcome
+        comparison = getattr(self, "_route_comparisons", {}).get(direction)
+        if isinstance(comparison, dict):
+            comparison["speculative_fallback"] = telemetry
+
+    def _consume_speculative_fallback(self, direction, state):
+        if not state:
+            return None
+        wait_seconds = float(getattr(
+            self.config, "route_tournament_gate_timeout_seconds", 12
+        ))
+        if not state["done"].wait(max(0.1, wait_seconds)):
+            with state["lock"]:
+                state["telemetry"]["status"] = "wait_timeout"
+            self._record_speculative_fallback(direction, state, outcome="not_used")
+            return None
+        with state["lock"]:
+            result = state["result"]
+        if result is None:
+            self._record_speculative_fallback(direction, state, outcome="not_used")
+            return None
+        quote, uses_weth, provider_name = result
+        ready_at = state.get("ready_monotonic")
+        quote_age = max(0.0, time.monotonic() - ready_at) if ready_at else float("inf")
+        with state["lock"]:
+            state["telemetry"]["quote_age_ms"] = round(quote_age * 1000, 1)
+        if not getattr(quote, "success", False):
+            self._record_speculative_fallback(direction, state, outcome="quote_failed_retry_normal")
+            return None
+        # Baseline execution historically starts with a fresh quote after the
+        # tournament. Never trade an overlap result that sat idle for long.
+        if quote_age > 3:
+            self._record_speculative_fallback(direction, state, outcome="stale_retry_normal")
+            return None
+        provider_lookup = getattr(self.provider, "provider_for_name", None)
+        provider = provider_lookup(provider_name) if callable(provider_lookup) else None
+        if provider is None:
+            self._record_speculative_fallback(direction, state, outcome="provider_unavailable")
+            return None
+        self.provider.active = provider
+        self.api_client = self.provider
+        self._record_speculative_fallback(direction, state, outcome="used")
+        logger.info(
+            "Tournament baseline overlap reused provider=%s direction=%s elapsed_ms=%s",
+            provider_name, direction, state["telemetry"].get("elapsed_ms", "unknown"),
+        )
+        return quote, uses_weth
+
     def _actionable_quote_with_weth_fallback(self, *, sell_token, buy_token, sell_amount, direction,
                                              sold_cost_wei=None):
         """Build the configured route, falling back to the direct WETH leg in native mode."""
+        speculative = None
         if getattr(self.config, "route_tournament_mode", "off") == "gate":
             if not getattr(self.config, "route_tournament_canary", False):
                 from zero_x import QuoteResult
                 logger.warning("Tournament gate requested without explicit canary flag; execution skipped")
                 return QuoteResult(success=False, error="tournament gate canary flag required"), False
+            speculative = self._start_speculative_sell_fallback(
+                sell_token=sell_token, buy_token=buy_token,
+                sell_amount=sell_amount, direction=direction,
+            )
             selection = self._collect_route_execution_preflight(
                 direction, sell_amount, sold_cost_wei,
             )
             validated = self._revalidate_selected_route(selection, direction, sell_amount) if selection else None
             if validated is not None:
+                if speculative:
+                    speculative["cancel"].set()
+                    self._record_speculative_fallback(
+                        direction, speculative, outcome="discarded_tournament_winner",
+                    )
                 self.provider.active = validated["provider"]
                 self.api_client = self.provider
                 # The gate's fresh quote has already been prepared and locally
@@ -1820,38 +1978,16 @@ class GridBot:
                 "Tournament preflight found no freshly valid %s route; using baseline provider path",
                 direction,
             )
+            overlapped = self._consume_speculative_fallback(direction, speculative)
+            if overlapped is not None:
+                return overlapped
         if direction == "buy":
             self._queue_route_shadow(direction, sell_amount)
-        quote = self.api_client.build_swap_transaction(
-            sell_token=sell_token, buy_token=buy_token, sell_amount=sell_amount,
-            taker_address=self.wallet.address,
-            slippage_percentage=self._swap_slippage_fraction(),
+        return self._build_baseline_quote(
+            self.api_client, sell_token=sell_token, buy_token=buy_token,
+            sell_amount=sell_amount, direction=direction,
+            recovery_provider=getattr(self, "provider", None),
         )
-        uses_weth = False
-        if quote.success or not getattr(self.config, "use_eth_trading", False):
-            return quote, uses_weth
-        fallback_sell = self.config.weth_address if direction == "buy" else sell_token
-        fallback_buy = buy_token if direction == "buy" else self.config.weth_address
-        logger.warning(
-            "%s native ETH route unavailable; trying direct WETH settlement: %s",
-            direction.capitalize(), quote.error,
-        )
-        quote = self.api_client.build_swap_transaction(
-            sell_token=fallback_sell, buy_token=fallback_buy, sell_amount=sell_amount,
-            taker_address=self.wallet.address,
-            slippage_percentage=self._swap_slippage_fraction(),
-        )
-        if quote.success:
-            uses_weth = True
-            recover = getattr(getattr(self, "provider", None), "recover_current_operation", None)
-            if recover is not None:
-                recover()
-            logger.warning("ROUTE FALLBACK: using direct WETH %s settlement", direction)
-        try:
-            setattr(quote, "weth_fallback", uses_weth)
-        except Exception:
-            pass
-        return quote, uses_weth
 
     def _project_weth_operation_gas(self, direction, amount_wei):
         """Return (transaction, conservative projected gas) for an exact wrap/unwrap."""
