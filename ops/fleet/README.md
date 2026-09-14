@@ -421,9 +421,12 @@ replacing a reviewed target.
 
 ## Analysis-ready fleet log bundles
 
-`bundle-logs` selects the newest regular `*.log` or rotated `*.log.*` file
-from each chosen bot, prefixes every record with bot and source filename, and
-writes one portable text file. The default analysis layout separates bots into
+`bundle-logs` selects the newest regular log from each chosen bot when no time
+window is supplied. With `--since`, it scans every current `*.log` and rotated
+`*.log.*` file and keeps all records inside that window. Exact records copied
+across a rotation boundary are deduplicated. Every record is prefixed with its
+bot and actual source filename, and the command writes one portable text file.
+The default analysis layout separates bots into
 clearly labelled sections, each with source, status, record count, and UTC time
 range. Use `--chronological` to interleave the entire fleet by UTC timestamp
 when investigating cross-bot timing or shared provider/RPC incidents.
@@ -487,7 +490,7 @@ unless their section explicitly says otherwise.
 | `strategy-model` | Compare gridless trigger geometry and generate HTML/CSV/JSON reports | Writes report files only |
 | `fleet-audit` | Reconcile local treasury/liquidation audit records | No |
 | `cleanup-logs` | Preview or delete aged bot log files by fleet selection | `--apply` only |
-| `bundle-logs` | Merge newest selected-bot logs into one redacted chronological report | Writes one report file |
+| `bundle-logs` | Merge selected-bot logs (all rotations with `--since`) into one redacted report | Writes one report file |
 | `start-fleet` / `stop-fleet` / `restart-fleet` | Manage the configured tmux fleet | Processes only |
 | `start-bot NAME` / `stop-bot NAMES...` / `restart-bot NAMES...` | Durably start, stop, or cleanly restart selected bots | Processes/state marker |
 | `update-this-checkout` | Fast-forward the dedicated operations clone | Yes, Git |

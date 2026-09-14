@@ -9,8 +9,9 @@ source "$SCRIPT_DIR/fleet-common.sh"
 usage() { cat <<'EOF'
 Usage: bundle-logs [options]
 
-Combine the newest bot log from every selected fleet member into one
-chronological, analysis-ready text file. Source logs are never modified.
+Combine bot logs from every selected fleet member into one analysis-ready text
+file. With --since, all current/rotated logs are scanned. Without it, only each
+bot's newest log is used. Source logs are never modified.
 
 Selection:
   --all                      Include the whole fleet (default)

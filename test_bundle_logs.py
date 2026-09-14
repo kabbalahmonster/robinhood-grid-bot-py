@@ -102,6 +102,32 @@ class BundleLogsTests(unittest.TestCase):
         self.assertNotIn("| one\n", body)
         self.assertNotIn("BETA:", body)
 
+    def test_since_reads_all_rotated_logs_and_deduplicates_rotation_overlap(self):
+        now = time.time()
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(now - 120))
+        older_stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(now - 240))
+        duplicate = f"{stamp} | INFO | copied during rotation\n"
+        self.write_log(
+            "ALPHA", "alpha.log.1",
+            f"{older_stamp} | INFO | from rotated file\n" + duplicate,
+            age=100,
+        )
+        self.write_log(
+            "ALPHA", "alpha.log",
+            duplicate + f"{stamp} | INFO | from current file\n",
+        )
+        self.write_log("BETA", "beta.log", f"{stamp} | INFO | beta\n")
+
+        output = self.root / "bundle.log"
+        result = self.run_bundle("--since", "1h", "--output", str(output))
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        body = output.read_text()
+        self.assertIn("from rotated file", body)
+        self.assertIn("from current file", body)
+        self.assertEqual(body.count("copied during rotation"), 1)
+        self.assertIn("source=alpha.log.1,alpha.log", body)
+
     def test_missing_log_is_partial_bundle_and_nonzero(self):
         self.write_log("ALPHA", "alpha.log", "2026-09-12 18:00:00 | INFO | alpha\n")
         output = self.root / "bundle.log"

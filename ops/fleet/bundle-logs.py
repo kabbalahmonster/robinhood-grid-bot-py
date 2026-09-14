@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Safely combine each selected fleet bot's newest log."""
+"""Safely combine selected fleet bot logs, including rotated time windows."""
 
 import argparse
 import heapq
@@ -80,6 +80,28 @@ def newest_log(bot_dir):
     return max(candidates, key=lambda row: (row[0], row[1])), None
 
 
+def selected_logs(bot_dir, include_rotated):
+    """Return the newest log, or every regular log when a time window is requested."""
+    newest, error = newest_log(bot_dir)
+    if error or not include_rotated:
+        return ([newest] if newest else []), error
+    logs = Path(bot_dir).resolve() / "logs"
+    candidates = []
+    try:
+        paths = list(logs.iterdir())
+    except OSError as exc:
+        return [], f"cannot list logs directory: {exc}"
+    for path in paths:
+        try:
+            item = path.lstat()
+        except OSError:
+            continue
+        if (stat.S_ISREG(item.st_mode) and not path.is_symlink()
+                and (path.name.endswith(".log") or ".log." in path.name)):
+            candidates.append((item.st_mtime_ns, path.name, path, item))
+    return sorted(candidates, key=lambda row: (row[0], row[1])), None
+
+
 def timestamp(line, fallback):
     match = STAMP.match(line)
     if not match:
@@ -120,6 +142,35 @@ def records(path, file_time, max_lines, cutoff):
     if current is not None:
         result.append(current)
     return [item for item in result if cutoff is None or item[0] >= cutoff]
+
+
+def deduplicate_records(items):
+    """Remove byte-identical timestamped records copied across log rotations."""
+    unique = []
+    seen = set()
+    for item in sorted(items, key=lambda row: (row[0], row[1])):
+        identity = (item[0], tuple(item[2]))
+        if identity in seen:
+            continue
+        seen.add(identity)
+        unique.append([item[0], len(unique), item[2], item[3]])
+    return unique
+
+
+def cap_records_by_lines(items, max_lines):
+    if not max_lines:
+        return items
+    kept = []
+    used = 0
+    for item in reversed(items):
+        line_count = len(item[2])
+        if kept and used + line_count > max_lines:
+            break
+        kept.append(item)
+        used += line_count
+        if used >= max_lines:
+            break
+    return list(reversed(kept))
 
 
 def tournament_rounds(items):
@@ -217,23 +268,31 @@ def main():
     manifest, merged, failures, skipped = [], [], 0, 0
     for order in range(0, len(args.targets), 2):
         name, bot_dir = args.targets[order:order + 2]
-        selected, error = newest_log(bot_dir)
+        selected, error = selected_logs(bot_dir, include_rotated=cutoff is not None)
         if error:
             failures += 1
             manifest.append((name, None, error, 0, None))
             continue
-        mtime_ns, filename, path, original = selected
+        filenames = []
+        total_size = 0
+        all_items = []
         try:
-            current = path.lstat()
-            if (path.is_symlink() or not stat.S_ISREG(current.st_mode)
-                    or (current.st_dev, current.st_ino) != (original.st_dev, original.st_ino)):
-                raise OSError("file changed after selection")
-            file_time = datetime.fromtimestamp(current.st_mtime, timezone.utc)
-            items = records(path, file_time, args.max_lines_per_bot, cutoff)
+            for _mtime_ns, filename, path, original in selected:
+                current = path.lstat()
+                if (path.is_symlink() or not stat.S_ISREG(current.st_mode)
+                        or (current.st_dev, current.st_ino) != (original.st_dev, original.st_ino)):
+                    raise OSError(f"file changed after selection: {filename}")
+                file_time = datetime.fromtimestamp(current.st_mtime, timezone.utc)
+                for item in records(path, file_time, None, cutoff):
+                    all_items.append([item[0], item[1], item[2], filename])
+                filenames.append(filename)
+                total_size += current.st_size
+            items = cap_records_by_lines(deduplicate_records(all_items), args.max_lines_per_bot)
         except OSError as exc:
             failures += 1
-            manifest.append((name, filename, str(exc), 0, None))
+            manifest.append((name, ",".join(filenames) or None, str(exc), 0, None))
             continue
+        filename = ",".join(filenames)
         if args.analysis_sample_only:
             items = [
                 item for item in items
@@ -241,27 +300,27 @@ def main():
             ]
             if not items:
                 skipped += 1
-                manifest.append((name, filename, "skipped: no analysis telemetry in included records", 0, current.st_size))
+                manifest.append((name, filename, "skipped: no analysis telemetry in included records", 0, total_size))
                 continue
             state = "ok: analysis_sample"
         elif args.tournament_rounds_only:
             items, complete_rounds, incomplete_rounds, correlation = tournament_rounds(items)
             if not items:
                 skipped += 1
-                manifest.append((name, filename, "skipped: no tournament in included records", 0, current.st_size))
+                manifest.append((name, filename, "skipped: no tournament in included records", 0, total_size))
                 continue
             state = (f"ok: rounds={complete_rounds} incomplete={incomplete_rounds} "
                      f"correlation={correlation}")
         elif args.tournament_only and not any(
                 TOURNAMENT_EVENT.search(line) for item in items for line in item[2]):
             skipped += 1
-            manifest.append((name, filename, "skipped: no tournament in included records", 0, current.st_size))
+            manifest.append((name, filename, "skipped: no tournament in included records", 0, total_size))
             continue
         else:
             state = "ok"
-        manifest.append((name, filename, state, len(items), current.st_size))
+        manifest.append((name, filename, state, len(items), total_size))
         for item in items:
-            merged.append((item[0], name.casefold(), item[1], name, filename, item[2]))
+            merged.append((item[0], name.casefold(), item[1], name, item[3], item[2]))
     merged.sort(key=lambda item: (item[0], item[1], item[2]))
     included = len(manifest) - failures - skipped
     fd, temporary = tempfile.mkstemp(prefix=f".{output.name}.", dir=output.parent)
@@ -271,6 +330,7 @@ def main():
             handle.write(f"# generated_utc: {generated.isoformat()}\n")
             handle.write(f"# redaction: {'disabled' if args.no_redact else 'enabled'}\n")
             handle.write(f"# cutoff_utc: {cutoff.isoformat() if cutoff else 'none'}\n")
+            handle.write(f"# log_selection: {'all_current_and_rotated' if cutoff else 'newest_only'}\n")
             handle.write(f"# tournament_only: {'enabled' if args.tournament_only else 'disabled'}\n")
             handle.write(f"# tournament_rounds_only: {'enabled' if args.tournament_rounds_only else 'disabled'}\n")
             handle.write(f"# analysis_sample_only: {'enabled' if args.analysis_sample_only else 'disabled'}\n")

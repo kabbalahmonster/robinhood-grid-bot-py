@@ -93,8 +93,8 @@ the fleet README for every accepted age format and live-process caveat.
 
 ## Bundle current fleet logs for analysis
 
-Create one safely shareable file from every bot's newest log without stopping
-the fleet:
+Create one safely shareable file from every bot's logs without stopping the
+fleet. A `--since` window spans current and rotated files automatically:
 
 ```bash
 bundle-logs --all --tournament-rounds-only --since 6h --output fleet-tournament.log
