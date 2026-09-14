@@ -135,6 +135,40 @@ def main():
                     "tx_hash": str(guard["tx_hash"]), "status": "verification_failed",
                     "error": str(exc),
                 }
+        if (args.automatic and not recovered_prior_reconciliation
+                and getattr(config, "use_gridless", False)
+                and isinstance(guard, dict) and guard.get("tx_hash")):
+            # A successful unresolved gridless buy produces wallet surplus, not
+            # the position deficit handled above. Reuse the existing receipt-
+            # verified buy reconciler so principal, confirmed gas, and exact
+            # token inflow become a real position before the guard is removed.
+            candidate_hash = str(guard["tx_hash"])
+            try:
+                from gridless_reconciler import run_gridless_reconciliation
+                recovery_code = run_gridless_reconciliation(
+                    [candidate_hash], apply=True, safety_halted=True,
+                )
+                guard_path = Path(getattr(
+                    wallet, "unresolved_broadcast_path",
+                    "data/unresolved_broadcast.json",
+                ))
+                if recovery_code == 0 and not guard_path.exists():
+                    recovered_prior_reconciliation = True
+                    result["unresolved_broadcast_match"] = {
+                        "tx_hash": candidate_hash,
+                        "status": "receipt_verified_gridless_buy",
+                    }
+                else:
+                    result["unresolved_broadcast_match"] = {
+                        "tx_hash": candidate_hash,
+                        "status": "gridless_buy_guard_not_archived",
+                    }
+            except Exception as exc:
+                result["unresolved_broadcast_match"] = {
+                    "tx_hash": candidate_hash,
+                    "status": "gridless_buy_verification_failed",
+                    "error": str(exc),
+                }
         print(json.dumps(result, separators=(",", ":")))
         # Automatic recovery used to be excluded from this zero-deficit branch,
         # so a previously applied haircut left the bot halted forever even when

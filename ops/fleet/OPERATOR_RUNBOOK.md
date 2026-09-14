@@ -230,11 +230,13 @@ To canary LI.FI, set `LI_FI_API_KEY` and use
 
 Set `AUTO_RECONCILE_UNRESOLVED_BROADCAST=true` in a bot's `.env` to let its
 safety-halted loop invoke this same reconciler automatically. Automatic mode
-requires a current deficit exactly matching a successful receipt's managed-token
-outflow from that wallet. If an earlier run already applied the exact haircut,
-automatic mode may instead verify that same outflow against the latest matching
-local reconciliation audit. It archives the exact guard and resumes only after
-the atomic repair or proven prior repair succeeds; all other cases stay halted.
+requires either a current deficit exactly matching a successful receipt's
+managed-token outflow from that wallet, or a receipt-proven omitted gridless buy
+matching the active guard. Buy recovery also proves native principal, confirmed
+gas economics, exact token inflow, unallocated inventory, position capacity,
+and the saved ledger before archiving. If an earlier sell repair already applied
+the exact haircut, automatic mode may instead verify that same outflow against
+the latest matching local reconciliation audit. All other cases stay halted.
 `AUTO_RECONCILE_INTERVAL_SECONDS` controls receipt-check cadence.
 If the isolated helper archives a legacy guard whose recorded error proves a
 definitive pre-broadcast rejection, the parent clears its stale in-memory halt
@@ -267,8 +269,10 @@ cost basis, backs up changed ledgers, and writes a reconciliation audit record.
 When the haircut exactly matches the receipt-proven managed-token outflow of
 the active unresolved-broadcast transaction, the matching guard is archived
 automatically. Any ambiguous or nonmatching guard remains in force.
-It never assigns wallet surplus or recovers an omitted buy. See the fleet README
-for multi-bot partial-failure behavior and backup restoration guidance.
+Manual position-balance repair never assigns wallet surplus. Automatic recovery
+may import an omitted gridless buy only through the receipt-verified workflow
+described below. See the fleet README for multi-bot partial-failure behavior and
+backup restoration guidance.
 
 For an omitted gridless buy with a known transaction hash, use
 `--reconcile-gridless-buy` from that bot checkout instead. After an applied,

@@ -1041,15 +1041,20 @@ After upgrading a bot whose haircut was already applied, rerun the same
 reconciliation with `--apply --confirm-bot-stopped`; a zero-current-deficit run
 may use the latest matching audit entry for this same receipt verification.
 With `AUTO_RECONCILE_UNRESOLVED_BROADCAST=true`, the safety-halted loop performs
-that same zero-deficit recovery automatically and resumes only after the exact
-guard is successfully archived. Missing/nonmatching audits remain halted.
+that same zero-deficit recovery automatically. For gridless wallet surplus, it
+also tries the existing receipt-driven buy recovery using the guard's exact
+transaction hash. That path requires a successful configured-wallet
+transaction, native principal, exact managed-token receipt, confirmed gas
+economics, sufficient unallocated inventory, available position capacity, and
+a verified ledger reload. It resumes only after the exact guard is archived.
 
 The repair is deliberately one-way and conservative:
 
-- it never increases tracked balances or absorbs untracked wallet surplus;
+- manual position-balance reconciliation never increases tracked balances or
+  absorbs untracked wallet surplus;
 - it never changes cost basis, sends tokens, approves, signs, or broadcasts;
-- it does not recover an omitted confirmed buy—use the receipt-driven
-  `--reconcile-gridless-buy` workflow in the recovery section;
+- automatic gridless recovery imports only a buy proven by the exact active
+  guard and the receipt-driven `--reconcile-gridless-buy` safeguards;
 - a multi-bot apply is not one cross-checkout transaction. If a later bot
   fails, earlier successful repairs retain their backups and audit entries.
 

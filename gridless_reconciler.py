@@ -98,9 +98,10 @@ def _atomic_json(path, data):
     os.replace(temp, path)
 
 
-def run_gridless_reconciliation(tx_hashes, apply=False, confirm_bot_stopped=False):
+def run_gridless_reconciliation(
+        tx_hashes, apply=False, confirm_bot_stopped=False, safety_halted=False):
     """Preview or atomically add receipt-proven buys to gridless positions."""
-    if apply and not confirm_bot_stopped:
+    if apply and not (confirm_bot_stopped or safety_halted):
         raise ValueError("--apply-reconciliation requires --confirm-bot-stopped")
     normalized = [Web3.to_hex(hexstr=value).lower() for value in tx_hashes]
     if len(normalized) != len(set(normalized)):

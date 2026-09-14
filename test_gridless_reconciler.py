@@ -127,6 +127,13 @@ def test_reconciliation_apply_requires_stopped_ack(recovery_env):
     assert FakeWallet.archived == []
 
 
+def test_reconciliation_apply_accepts_internal_safety_halt(recovery_env):
+    assert reconciler.run_gridless_reconciliation(
+        [TX1], apply=True, safety_halted=True,
+    ) == 0
+    assert FakeWallet.archived == [TX1]
+
+
 def test_reconciliation_does_not_archive_nonmatching_broadcast(recovery_env):
     FakeWallet.unresolved_hash = TX2
     assert reconciler.run_gridless_reconciliation(
