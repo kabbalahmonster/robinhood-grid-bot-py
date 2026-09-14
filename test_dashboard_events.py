@@ -4,7 +4,9 @@ import os
 import tempfile
 import unittest
 
-from grid_bot import DashboardEventHandler, GridBot, _safe_event_message
+from grid_bot import (
+    DashboardEventHandler, GridBot, _runtime_build_provenance, _safe_event_message,
+)
 
 
 class TestDashboardEvents(unittest.TestCase):
@@ -28,6 +30,43 @@ class TestDashboardEvents(unittest.TestCase):
         self.assertEqual(persisted[0]["level"], "error")
         self.assertEqual(persisted[0]["code"], "quote_failed")
         self.assertEqual(persisted[0]["source"], "grid_bot.zero_x")
+
+    def test_environment_build_sha_avoids_git_probe(self):
+        def forbidden(*_args, **_kwargs):
+            raise AssertionError("git must not run for an explicit build SHA")
+
+        self.assertEqual(
+            _runtime_build_provenance({"BOT_BUILD_SHA": "A" * 40}, forbidden),
+            ("a" * 40, "unknown", "environment"),
+        )
+
+    def test_cycle_performance_reports_sanitized_rpc_deltas(self):
+        self.bot.config.performance_telemetry_every_cycles = 1
+        self.bot.config.poll_interval_seconds = 6
+        self.bot.build_sha = "a" * 40
+        self.bot.build_dirty = "false"
+        self.bot.process_started_utc = "2026-09-14T00:00:00+00:00"
+        self.bot.round_count = 7
+        self.bot._performance_cycle_count = 0
+        snapshots = iter((
+            {"logical_calls": 10, "attempts": 11, "failures": 1, "total_ms": 50,
+             "methods": {"eth.call": {"calls": 10}}},
+            {"logical_calls": 13, "attempts": 15, "failures": 2, "total_ms": 90,
+             "methods": {"eth.call": {"calls": 12}, "eth.get_balance": {"calls": 1}}},
+        ))
+        self.bot.wallet = type(
+            "Wallet", (), {"rpc_telemetry_snapshot": lambda _self: next(snapshots)}
+        )()
+        self.bot._run_cycle_body = lambda: None
+
+        with self.assertLogs("grid_bot", level="INFO") as observed:
+            self.bot.run_cycle()
+
+        message = "\n".join(observed.output)
+        self.assertIn("rpc_logical_calls=3", message)
+        self.assertIn("rpc_attempts=4", message)
+        self.assertIn("rpc_failures=1", message)
+        self.assertIn("rpc_method_stats=eth.call:2/0/0.0,eth.get_balance:1/0/0.0", message)
 
     def test_consecutive_duplicates_are_counted(self):
         self.bot._record_dashboard_event("warning", "rpc_warning", "RPC slow")

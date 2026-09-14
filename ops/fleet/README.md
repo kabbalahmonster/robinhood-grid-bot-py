@@ -438,6 +438,7 @@ bundle-logs --all
 bundle-logs --all --tournament-only --since 6h --output tournament.log
 bundle-logs --all --tournament-rounds-only --since 6h --output rounds.log
 bundle-logs --all --tournament-rounds-only --chronological --output timeline.log
+bundle-logs --all --analysis-sample-only --since 24h --output analysis-sample.log
 bundle-logs --only MANY,ROBINVAULT --output tournament.log
 bundle-logs --exclude ARCHIVE --since 6h --output recent-fleet.log
 bundle-logs --all --max-lines-per-bot 10000

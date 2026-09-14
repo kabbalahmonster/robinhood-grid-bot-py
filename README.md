@@ -154,6 +154,7 @@ python grid_bot.py
 | **Bot Behavior** ||||
 | `POLL_INTERVAL_SECONDS` | No | 6 | Price check interval in seconds |
 | `STARTUP_JITTER_SECONDS` | No | 20 | Random delay before the first provider request so fleet restarts do not stampede |
+| `PERFORMANCE_TELEMETRY_EVERY_CYCLES` | No | 10 | Emit one sanitized cycle/RPC performance record every N cycles (slow/error/halted cycles emit immediately) |
 | `ANTI_MEV_JITTER` | No | true | Enable anti-MEV timing jitter |
 | `LOG_LEVEL` | No | INFO | INFO shows operational events only; DEBUG adds full per-round and quote telemetry |
 | `STATE_FILE` | No | ./data/positions.json | Position state file path |
@@ -1078,6 +1079,15 @@ profit. Quote failures log only sanitized classifications, status/retry timing,
 and a non-reversible pair fingerprint so fleet bundles can diagnose provider-
 and pair-specific behavior without exposing provider bodies or secrets. These
 diagnostics do not change route selection, deadlines, cooldowns, or fallback.
+
+Each process logs `Bot runtime provenance` once with its build SHA, tracked-file
+dirty state, source, and process-start UTC. Every
+`PERFORMANCE_TELEMETRY_EVERY_CYCLES` cycles it also logs `Bot cycle performance`
+with total/balance/price/sell/dashboard/buy timing and sanitized aggregate RPC
+method counts. RPC URLs, arguments, wallet data, payloads, and provider response
+bodies are never included. Slow, failed, and safety-halted cycles emit
+immediately. These records are observational and do not cache calls, alter
+deadlines, or change trading decisions.
 
 ## Troubleshooting
 

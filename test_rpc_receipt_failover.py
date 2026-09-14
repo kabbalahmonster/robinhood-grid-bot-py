@@ -32,6 +32,13 @@ class TestRPCReceiptFailover(unittest.TestCase):
 
         self.assertEqual(result, receipt)
         resilient._refresh_connection.assert_called_once()
+        telemetry = resilient.telemetry_snapshot()
+        self.assertEqual(telemetry["logical_calls"], 1)
+        self.assertEqual(telemetry["attempts"], 2)
+        self.assertEqual(telemetry["failures"], 1)
+        self.assertEqual(
+            telemetry["methods"]["eth.wait_for_transaction_receipt"]["calls"], 1
+        )
 
     @patch("rpc_rotator.time.sleep", return_value=None)
     def test_method_not_found_retries_identical_broadcast_on_next_endpoint(self, _sleep):

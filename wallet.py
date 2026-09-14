@@ -385,6 +385,11 @@ class Wallet:
         balance_wei = self.w3.eth.get_balance(self.address)
         return wei_to_eth(balance_wei)
 
+    def rpc_telemetry_snapshot(self):
+        """Return sanitized cumulative RPC counters when the transport supports it."""
+        snapshot = getattr(self.w3, "telemetry_snapshot", None)
+        return snapshot() if callable(snapshot) else None
+
     def get_eth_balance_wei(self) -> int:
         """Get the wallet's native ETH balance without losing wei precision."""
         return int(self.w3.eth.get_balance(self.address))

@@ -14,13 +14,38 @@ import uuid
 import sys
 import argparse
 import random
+import subprocess
 from functools import wraps
 from datetime import datetime
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
+from pathlib import Path
 from urllib.parse import urlsplit
 
 from profit_tracker import ProfitTracker
 from token_tax_detector import TokenTaxDetector
+
+
+def _runtime_build_provenance(environ=None, runner=subprocess.run):
+    """Resolve a public build identity once without making startup depend on Git."""
+    environ = os.environ if environ is None else environ
+    supplied = str(environ.get("BOT_BUILD_SHA", "")).strip().lower()
+    if re.fullmatch(r"[0-9a-f]{7,40}", supplied):
+        return supplied, "unknown", "environment"
+    repo = Path(__file__).resolve().parent
+    try:
+        revision = runner(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"],
+            text=True, capture_output=True, timeout=2, check=True,
+        ).stdout.strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{40}", revision):
+            raise ValueError("invalid revision")
+        dirty_result = runner(
+            ["git", "-C", str(repo), "status", "--porcelain", "--untracked-files=no"],
+            text=True, capture_output=True, timeout=2, check=True,
+        )
+        return revision, "true" if dirty_result.stdout.strip() else "false", "git"
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return "unknown", "unknown", "unavailable"
 
 
 def _with_swap_provider_fallback(method):
@@ -687,6 +712,7 @@ class DashboardEventHandler(logging.Handler):
 class GridBot:
     def __init__(self):
         self.config = load_config()
+        self.process_started_utc = datetime.now().astimezone().isoformat()
         self.dashboard_events_file = "data/dashboard_events.json"
         self._dashboard_event_lock = threading.Lock()
         self.dashboard_events = self._load_dashboard_events()
@@ -695,6 +721,12 @@ class GridBot:
         
         # Setup logging FIRST so we capture all initialization logs
         self._setup_logging()
+        self.build_sha, self.build_dirty, build_source = _runtime_build_provenance()
+        logger.info(
+            "Bot runtime provenance build_sha=%s build_dirty=%s build_source=%s "
+            "process_started_utc=%s",
+            self.build_sha, self.build_dirty, build_source, self.process_started_utc,
+        )
 
         self.tax_detector = TokenTaxDetector(
             path="data/token_tax_detection.json",
@@ -730,6 +762,7 @@ class GridBot:
         self._exact_approval_guard_path = "data/pending_exact_approval.json"
         self._exact_approval_guard = self._load_exact_approval_guard()
         self.round_count = 0
+        self._performance_cycle_count = 0
         self.start_time = time.time()
         self.session_buys = 0
         self.session_sells = 0
@@ -4843,7 +4876,94 @@ class GridBot:
         else:
             logger.error(f"❌ Banking failed: {result.error}")
     
+    @staticmethod
+    def _rpc_telemetry_delta(before, after):
+        if not isinstance(before, dict) or not isinstance(after, dict):
+            return None
+        delta = {}
+        for key in ("logical_calls", "attempts", "failures", "total_ms"):
+            delta[key] = max(0, after.get(key, 0) - before.get(key, 0))
+        methods = {}
+        for name, row in (after.get("methods") or {}).items():
+            old = (before.get("methods") or {}).get(name, {})
+            calls = int(row.get("calls", 0)) - int(old.get("calls", 0))
+            if calls > 0:
+                methods[name] = {
+                    "calls": calls,
+                    "failures": max(
+                        0, int(row.get("failures", 0)) - int(old.get("failures", 0))
+                    ),
+                    "total_ms": max(
+                        0.0, float(row.get("total_ms", 0)) - float(old.get("total_ms", 0))
+                    ),
+                }
+        delta["methods"] = methods
+        return delta
+
+    def _log_cycle_performance(self, started, rpc_before, outcome):
+        self._performance_cycle_count = int(
+            getattr(self, "_performance_cycle_count", 0)
+        ) + 1
+        every = max(1, int(getattr(
+            self.config, "performance_telemetry_every_cycles", 10
+        )))
+        total_ms = max(0.0, (time.perf_counter() - started) * 1000)
+        slow_ms = max(1000.0, float(getattr(
+            self.config, "poll_interval_seconds", 6
+        )) * 1000)
+        if (self._performance_cycle_count % every != 0
+                and outcome == "completed" and total_ms < slow_ms):
+            return
+        snapshot = getattr(self.wallet, "rpc_telemetry_snapshot", lambda: None)()
+        rpc = self._rpc_telemetry_delta(rpc_before, snapshot)
+        phases = getattr(self, "_cycle_phase_ms", {})
+        rpc_methods = "unavailable"
+        if rpc is not None:
+            ranked = sorted(
+                rpc["methods"].items(),
+                key=lambda item: (-item[1]["total_ms"], -item[1]["calls"], item[0]),
+            )[:8]
+            rpc_methods = ",".join(
+                f'{name}:{row["calls"]}/{row["failures"]}/{row["total_ms"]:.1f}'
+                for name, row in ranked
+            ) or "none"
+        logger.info(
+            "Bot cycle performance build_sha=%s build_dirty=%s process_started_utc=%s "
+            "cycle=%s outcome=%s total_ms=%.1f balances_ms=%.1f price_ms=%.1f "
+            "sells_ms=%.1f dashboard_ms=%.1f buys_ms=%.1f "
+            "rpc_logical_calls=%s rpc_attempts=%s rpc_failures=%s rpc_total_ms=%s "
+            "rpc_method_stats=%s",
+            getattr(self, "build_sha", "unknown"),
+            getattr(self, "build_dirty", "unknown"),
+            getattr(self, "process_started_utc", "unknown"),
+            getattr(self, "round_count", 0), outcome, total_ms,
+            phases.get("balances", 0.0), phases.get("price", 0.0),
+            phases.get("sells", 0.0), phases.get("dashboard", 0.0),
+            phases.get("buys", 0.0),
+            rpc.get("logical_calls", "unavailable") if rpc else "unavailable",
+            rpc.get("attempts", "unavailable") if rpc else "unavailable",
+            rpc.get("failures", "unavailable") if rpc else "unavailable",
+            f'{rpc.get("total_ms", 0):.1f}' if rpc else "unavailable",
+            rpc_methods,
+        )
+
     def run_cycle(self):
+        """Run one cycle and emit bounded, aggregation-safe performance telemetry."""
+        started = time.perf_counter()
+        self._cycle_phase_ms = {}
+        rpc_before = getattr(self.wallet, "rpc_telemetry_snapshot", lambda: None)()
+        outcome = "completed"
+        try:
+            return self._run_cycle_body()
+        except Exception:
+            outcome = "error"
+            raise
+        finally:
+            if getattr(self, "_safety_halted", False):
+                outcome = "safety_halted"
+            self._log_cycle_performance(started, rpc_before, outcome)
+
+    def _run_cycle_body(self):
         """Run one trading cycle."""
         if self.wallet.has_unresolved_broadcast():
             record = self.wallet.unresolved_broadcast
@@ -4879,6 +4999,7 @@ class GridBot:
                 comparisons.pop("sell", None)
         
         # Get balances
+        phase_started = time.perf_counter()
         if getattr(self.config, 'use_eth_trading', False):
             eth_bal = self.wallet.get_eth_balance()
             weth_bal = eth_bal  # Use ETH balance for display
@@ -4893,6 +5014,7 @@ class GridBot:
                 # Dashboard enrichment must never interrupt trading or create a
                 # recurring warning event when a public RPC is briefly limited.
                 logger.debug(f"USDG balance read failed: {exc}")
+        self._cycle_phase_ms["balances"] = (time.perf_counter() - phase_started) * 1000
         
         # Check if gridless mode is enabled
         use_gridless = getattr(self.config, 'use_gridless', False)
@@ -4946,7 +5068,9 @@ class GridBot:
         moonbag_balance = (int(token_raw) - int(position_balance_raw)) / self.token_unit
         
         # Get price
+        phase_started = time.perf_counter()
         price = self.get_token_price()
+        self._cycle_phase_ms["price"] = (time.perf_counter() - phase_started) * 1000
         if price is None:
             logger.warning("Could not get price")
             return
@@ -5113,7 +5237,9 @@ class GridBot:
         
         # Check sells before reporting so this round's transient attempt state
         # appears immediately rather than one poll late.
+        phase_started = time.perf_counter()
         self.check_sells(price)
+        self._cycle_phase_ms["sells"] = (time.perf_counter() - phase_started) * 1000
 
         # A sell may have broadcast successfully even if every receipt RPC then
         # failed.  Never continue into dashboard-side actions or a buy in that
@@ -5124,6 +5250,7 @@ class GridBot:
             return
 
         # Report to dashboard if configured (runs regardless of compact mode)
+        phase_started = time.perf_counter()
         if self._reporter:
             try:
                 positions_data = []
@@ -5230,6 +5357,7 @@ class GridBot:
                 )
             except Exception as e:
                 logger.warning(f"Dashboard report failed: {e}")
+        self._cycle_phase_ms["dashboard"] = (time.perf_counter() - phase_started) * 1000
         
         # Funding blocks are discovered during the buy check, which runs after
         # this round's status report. Preserve the prior round's finding long
@@ -5244,7 +5372,9 @@ class GridBot:
         # occurs. Leaving gate comparisons here made completed buy cards repeat
         # forever.
         # Then check buys
+        phase_started = time.perf_counter()
         self.check_buys(price)
+        self._cycle_phase_ms["buys"] = (time.perf_counter() - phase_started) * 1000
 
     def _round_summary_mode(self):
         """Choose compact, verbose-debug, or quiet per-round console output."""

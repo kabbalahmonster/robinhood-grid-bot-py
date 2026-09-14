@@ -124,6 +124,7 @@ class BotConfig:
     # Bot Behavior
     poll_interval_seconds: int
     startup_jitter_seconds: float
+    performance_telemetry_every_cycles: int
     anti_mev_jitter: bool
     log_level: str
     state_file: str
@@ -343,6 +344,8 @@ class BotConfig:
             raise ValueError("POLL_INTERVAL_SECONDS must be at least 1 second")
         if self.startup_jitter_seconds < 0:
             raise ValueError("STARTUP_JITTER_SECONDS must be non-negative")
+        if self.performance_telemetry_every_cycles < 1:
+            raise ValueError("PERFORMANCE_TELEMETRY_EVERY_CYCLES must be at least 1")
         if not 0 < self.uniswap_rate_limit_rps <= 6:
             raise ValueError("UNISWAP_RATE_LIMIT_RPS must be greater than 0 and at most 6")
         if self.uniswap_cooldown_base_seconds < 1:
@@ -454,6 +457,9 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
         # Bot Behavior
         poll_interval_seconds=int(os.getenv("POLL_INTERVAL_SECONDS", "6")),
         startup_jitter_seconds=float(os.getenv("STARTUP_JITTER_SECONDS", "20")),
+        performance_telemetry_every_cycles=int(os.getenv(
+            "PERFORMANCE_TELEMETRY_EVERY_CYCLES", "10"
+        )),
         anti_mev_jitter=os.getenv("ANTI_MEV_JITTER", "true").lower() == "true",
         log_level=os.getenv("LOG_LEVEL", "INFO"),
         state_file=os.getenv("STATE_FILE", "./data/positions.json"),

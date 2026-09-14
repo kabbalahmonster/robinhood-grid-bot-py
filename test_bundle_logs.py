@@ -214,6 +214,26 @@ class BundleLogsTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("cannot be combined", result.stderr)
 
+    def test_analysis_sample_only_keeps_provenance_performance_and_tournaments(self):
+        self.write_log(
+            "ALPHA", "alpha.log",
+            "2026-09-12 18:00:00 | INFO | unrelated cycle detail\n"
+            "2026-09-12 18:00:01 | INFO | Bot runtime provenance build_sha=abc1234\n"
+            "2026-09-12 18:00:02 | INFO | Bot cycle performance total_ms=12.3\n"
+            "2026-09-12 18:00:03 | INFO | Route tournament winner provider=none tournament_id=x\n",
+        )
+        self.write_log("BETA", "beta.log", "2026-09-12 18:00:00 | INFO | unrelated\n")
+        output = self.root / "analysis.log"
+        result = self.run_bundle("--analysis-sample-only", "--output", str(output))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        body = output.read_text()
+        self.assertIn("# analysis_sample_only: enabled", body)
+        self.assertIn("build_sha=abc1234", body)
+        self.assertIn("Bot cycle performance", body)
+        self.assertIn("Route tournament winner", body)
+        self.assertNotIn("unrelated cycle detail", body)
+        self.assertIn("skipped: no analysis telemetry", body)
+
     def test_existing_output_uses_next_numbered_name_unless_forced(self):
         self.write_log("ALPHA", "alpha.log", "2026-09-12 18:00:00 | INFO | alpha\n")
         self.write_log("BETA", "beta.log", "2026-09-12 18:00:00 | INFO | beta\n")

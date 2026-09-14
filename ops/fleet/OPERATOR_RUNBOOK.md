@@ -98,6 +98,9 @@ the fleet:
 
 ```bash
 bundle-logs --all --tournament-rounds-only --since 6h --output fleet-tournament.log
+
+# Combined tournament plus bounded cycle/RPC/provenance evidence:
+bundle-logs --all --analysis-sample-only --since 24h --output fleet-analysis.log
 ```
 
 For a focused comparison, use `--only MANY,ROBINVAULT`. The default output is
@@ -304,3 +307,11 @@ Completed lifecycle payloads include receipt status, gas used, effective gas
 price, measured token/proceeds base units, and reconciled realized profit when
 available. Missing exact settlement produces `settlement_unresolved`, not
 invented economics.
+
+For performance investigations, `--analysis-sample-only` retains tournament
+events plus `Bot runtime provenance` and `Bot cycle performance` records while
+discarding ordinary log chatter. Verify `build_sha`, `build_dirty=false`, and a
+post-deployment `process_started_utc` for every included bot before comparing
+timings. Cycle phase and RPC figures are measurement data only; do not change a
+deadline or provider policy until selected-route economics quantify the winners
+that would be lost.

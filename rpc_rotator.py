@@ -10,6 +10,7 @@ the single RPC_URL exactly as before.
 import time
 import logging
 import threading
+from copy import deepcopy
 from typing import Optional, List
 from dataclasses import dataclass, field
 from web3 import Web3
@@ -302,7 +303,45 @@ class ResilientWeb3:
         )
         self._current_url: Optional[str] = None
         self._w3: Optional[Web3] = None
+        self._telemetry_lock = threading.Lock()
+        self._telemetry = {
+            "logical_calls": 0, "attempts": 0, "failures": 0,
+            "total_ms": 0.0, "methods": {},
+        }
         self._refresh_connection()
+
+    def _record_telemetry(self, method, started, attempts, failures):
+        """Record aggregate RPC costs without arguments, URLs, or payloads."""
+        lock = getattr(self, "_telemetry_lock", None)
+        if lock is None:
+            lock = self._telemetry_lock = threading.Lock()
+        with lock:
+            if not hasattr(self, "_telemetry"):
+                self._telemetry = {
+                    "logical_calls": 0, "attempts": 0, "failures": 0,
+                    "total_ms": 0.0, "methods": {},
+                }
+            elapsed_ms = max(0.0, (time.perf_counter() - started) * 1000)
+            self._telemetry["logical_calls"] += 1
+            self._telemetry["attempts"] += int(attempts)
+            self._telemetry["failures"] += int(failures)
+            self._telemetry["total_ms"] += elapsed_ms
+            row = self._telemetry["methods"].setdefault(
+                method, {"calls": 0, "attempts": 0, "failures": 0, "total_ms": 0.0}
+            )
+            row["calls"] += 1
+            row["attempts"] += int(attempts)
+            row["failures"] += int(failures)
+            row["total_ms"] += elapsed_ms
+
+    def telemetry_snapshot(self):
+        """Return cumulative, aggregation-safe RPC method counters."""
+        lock = getattr(self, "_telemetry_lock", None)
+        if lock is None:
+            return {"logical_calls": 0, "attempts": 0, "failures": 0,
+                    "total_ms": 0.0, "methods": {}}
+        with lock:
+            return deepcopy(self._telemetry)
     
     def _refresh_connection(self):
         """Get a fresh Web3 connection from the rotator."""
@@ -325,8 +364,12 @@ class ResilientWeb3:
             Method result.
         """
         last_error = None
+        started = time.perf_counter()
+        attempts_made = 0
+        failures = 0
         
         for attempt in range(self.MAX_RETRIES):
+            attempts_made += 1
             try:
                 # Navigate to the method (e.g., w3.eth.get_balance)
                 obj = self._w3
@@ -338,9 +381,13 @@ class ResilientWeb3:
                 # Success — report and return
                 if self._current_url:
                     self.rotator.report_success(self._current_url)
+                self._record_telemetry(
+                    func_name, started, attempts_made, failures,
+                )
                 return result
             
             except Exception as e:
+                failures += 1
                 last_error = e
                 error_str = str(e).lower()
                 
@@ -387,6 +434,9 @@ class ResilientWeb3:
                     # them. This matters after an earlier safe capability
                     # failover: a later ambiguous broadcast timeout must not be
                     # offered to yet another endpoint.
+                    self._record_telemetry(
+                        func_name, started, attempts_made, failures,
+                    )
                     raise
                 
                 if attempt < self.MAX_RETRIES - 1:
@@ -397,6 +447,7 @@ class ResilientWeb3:
                     self._refresh_connection()
                     time.sleep(0.5 * (attempt + 1))  # Brief backoff
         
+        self._record_telemetry(func_name, started, attempts_made, failures)
         raise ConnectionError(
             f"All RPC endpoints failed after {self.MAX_RETRIES} attempts. "
             f"Last error: {last_error}"

@@ -24,6 +24,9 @@ TOURNAMENT_EVENT = re.compile(r"\bRoute tournament (?:candidate|winner)\b", re.I
 TOURNAMENT_CANDIDATE = re.compile(r"\bRoute tournament candidate\b", re.I)
 TOURNAMENT_WINNER = re.compile(r"\bRoute tournament winner\b", re.I)
 TOURNAMENT_ID = re.compile(r"\btournament_id=([A-Za-z0-9_.:-]{1,128})\b")
+ANALYSIS_EVENT = re.compile(
+    r"\b(?:Route tournament |Bot runtime provenance\b|Bot cycle performance\b)", re.I
+)
 
 
 def parse_age(raw):
@@ -195,9 +198,12 @@ def main():
     parser.add_argument("--no-redact", action="store_true")
     parser.add_argument("--tournament-only", action="store_true")
     parser.add_argument("--tournament-rounds-only", action="store_true")
+    parser.add_argument("--analysis-sample-only", action="store_true")
     parser.add_argument("--chronological", action="store_true")
     parser.add_argument("targets", nargs="+")
     args = parser.parse_args()
+    if args.analysis_sample_only and (args.tournament_only or args.tournament_rounds_only):
+        parser.error("--analysis-sample-only cannot be combined with tournament-only modes")
     if len(args.targets) % 2:
         parser.error("targets must be NAME PATH pairs")
     requested_output = Path(args.output).expanduser().resolve()
@@ -228,7 +234,17 @@ def main():
             failures += 1
             manifest.append((name, filename, str(exc), 0, None))
             continue
-        if args.tournament_rounds_only:
+        if args.analysis_sample_only:
+            items = [
+                item for item in items
+                if any(ANALYSIS_EVENT.search(line) for line in item[2])
+            ]
+            if not items:
+                skipped += 1
+                manifest.append((name, filename, "skipped: no analysis telemetry in included records", 0, current.st_size))
+                continue
+            state = "ok: analysis_sample"
+        elif args.tournament_rounds_only:
             items, complete_rounds, incomplete_rounds, correlation = tournament_rounds(items)
             if not items:
                 skipped += 1
@@ -257,6 +273,7 @@ def main():
             handle.write(f"# cutoff_utc: {cutoff.isoformat() if cutoff else 'none'}\n")
             handle.write(f"# tournament_only: {'enabled' if args.tournament_only else 'disabled'}\n")
             handle.write(f"# tournament_rounds_only: {'enabled' if args.tournament_rounds_only else 'disabled'}\n")
+            handle.write(f"# analysis_sample_only: {'enabled' if args.analysis_sample_only else 'disabled'}\n")
             handle.write(f"# layout: {'chronological' if args.chronological else 'grouped_by_bot'}\n")
             handle.write(f"# selected_bots: {len(manifest)}\n")
             handle.write(f"# included_bots: {included}\n")
