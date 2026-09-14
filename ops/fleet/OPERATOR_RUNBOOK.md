@@ -283,7 +283,8 @@ WETH-settlement behavior, and unavoidable on-chain risks.
 
 In gate mode every selected route now closes with exactly one terminal phase:
 `completed`, `execution_aborted`, `execution_failed`, or
-`settlement_unresolved`. A confirmed trade always has a preceding
+`settlement_unresolved`. The first terminal phase is immutable: a delayed
+callback cannot replace it or emit a second terminal record. A confirmed trade always has a preceding
 `transaction_submitted` lifecycle record; if the live callback was unavailable,
 confirmation reconstructs the submission record and labels that timing as
 observed-at-completion. `settlement_unresolved` is fail-closed: it means the

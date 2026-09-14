@@ -185,6 +185,24 @@ class TestDashboardEvents(unittest.TestCase):
         self.assertEqual(first["terminal_reason"], "post_selection_exit_without_broadcast")
         self.assertEqual(second["revision"], first_revision)
 
+    def test_terminal_tournament_state_rejects_late_transition(self):
+        self.bot.config.route_tournament_mode = "gate"
+        self.bot._route_comparisons = {
+            "sell": {"mode": "execution_preflight", "direction": "sell",
+                     "status": "settlement_unresolved", "tournament_id": "round-final",
+                     "revision": 4, "terminal_reason": "confirmed_proceeds_unreconciled",
+                     "candidates": []}
+        }
+
+        observed = self.bot._publish_tournament_transition(
+            "sell", "completed", receipt_status=1,
+            final={"measured_proceeds_wei": "123"},
+        )
+
+        self.assertEqual(observed["status"], "settlement_unresolved")
+        self.assertEqual(observed["revision"], 4)
+        self.assertNotIn("final", observed)
+
     def test_submitted_tournament_early_exit_is_execution_failed(self):
         self.bot.config.route_tournament_mode = "gate"
         self.bot._route_comparisons = {

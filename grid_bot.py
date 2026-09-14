@@ -1537,6 +1537,17 @@ class GridBot:
         """Advance and immediately publish one monotonic tournament lifecycle."""
         comparisons = getattr(self, "_route_comparisons", {})
         comparison = None if new_tournament else comparisons.get(direction)
+        terminal_states = {
+            "completed", "execution_aborted", "execution_failed",
+            "settlement_unresolved",
+        }
+        # A terminal lifecycle event is an audit fact, not a mutable dashboard
+        # status.  Several recovery paths can observe the same transaction;
+        # retain the first terminal outcome so a late callback cannot emit a
+        # second terminal record or rewrite an unresolved settlement as exact.
+        if (not new_tournament and isinstance(comparison, dict)
+                and comparison.get("status") in terminal_states):
+            return comparison
         now = datetime.now().astimezone().isoformat()
         if not isinstance(comparison, dict):
             comparison = {
