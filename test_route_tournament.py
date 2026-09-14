@@ -1650,6 +1650,36 @@ def test_gate_preflight_failure_falls_back_to_normal_provider_path():
     assert b._route_execution_preflight["status"] == "baseline_fallback"
 
 
+def test_existing_baseline_fallback_is_not_published_twice():
+    b = bot("gate")
+    b.config.use_eth_trading = True
+    b._swap_slippage_fraction = Mock(return_value=0.01)
+    classic_quote = QuoteResult(success=True, sell_amount=10**15, buy_amount=2 * 10**15)
+    primary = SimpleNamespace(name="uniswap")
+    router = SimpleNamespace(
+        primary=primary, active=primary,
+        build_swap_transaction=Mock(return_value=classic_quote),
+    )
+    b.provider = router
+    b.api_client = router
+    b._route_execution_preflight = {
+        "mode": "execution_preflight", "direction": "sell",
+        "status": "baseline_fallback", "revision": 2,
+        "execution_fallback": {"reason": "no_fresh_tournament_candidate"},
+    }
+    b._collect_route_execution_preflight = Mock(return_value=None)
+    b._revalidate_selected_route = Mock()
+    b._publish_tournament_transition = Mock()
+
+    quote_result, weth_fallback = b._actionable_quote_with_weth_fallback(
+        sell_token="token", buy_token="native", sell_amount=10**15, direction="sell",
+    )
+
+    assert quote_result is classic_quote
+    assert weth_fallback is False
+    b._publish_tournament_transition.assert_not_called()
+
+
 def test_tournament_submission_callback_publishes_pending_transaction_immediately():
     b = bot("gate")
     b._reporter = Mock()

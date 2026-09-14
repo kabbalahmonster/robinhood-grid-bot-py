@@ -305,6 +305,8 @@ a submitted transaction exited the local execution path before its receipt was
 classified, or a confirmed transaction's exact tokens/proceeds or required WETH
 settlement could not be reconciled. Follow the unresolved-broadcast recovery
 procedure; never treat that state as a revert, a completion, or realized profit.
+The no-winner path emits one `baseline_fallback` transition; repeated identical
+fallback revisions indicate mixed/older code or duplicated source records.
 
 All tournament candidates, eligible or rejected, expose only aggregation-safe fields:
 `failure_category`, `provider_error`, `http_status`, `retry_after_seconds`,

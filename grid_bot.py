@@ -1369,9 +1369,18 @@ class GridBot:
         comparisons = getattr(self, "_route_comparisons", {})
         comparisons[direction] = comparison
         self._route_comparisons = comparisons
+        transition_details = {}
+        if selection is None:
+            transition_details["execution_fallback"] = {
+                "reason": "no_fresh_tournament_candidate",
+                "provider": getattr(
+                    getattr(self.provider, "primary", None), "name", None
+                ),
+            }
         self._publish_tournament_transition(
             direction,
             "preflight_candidate_selected" if selection else "baseline_fallback",
+            **transition_details,
         )
         return selection
 
@@ -1792,7 +1801,8 @@ class GridBot:
             # quote, approval, gas-cap, profit-floor, simulation and broadcast
             # safeguard below. This is not post-gate quote shopping.
             comparison = getattr(self, "_route_execution_preflight", None)
-            if isinstance(comparison, dict):
+            if (isinstance(comparison, dict)
+                    and comparison.get("status") != "baseline_fallback"):
                 self._publish_tournament_transition(
                     direction, "baseline_fallback",
                     execution_fallback={

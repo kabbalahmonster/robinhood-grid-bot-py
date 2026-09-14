@@ -1084,6 +1084,9 @@ status/retry timing, and a non-reversible pair fingerprint so fleet bundles can
 diagnose provider- and pair-specific behavior without exposing provider bodies
 or secrets. These diagnostics do not change route selection, deadlines,
 cooldowns, or fallback.
+Each lifecycle transition is emitted once; in particular, the decision to use
+the baseline path produces one `baseline_fallback` revision rather than a
+second event when baseline execution begins.
 
 Each process logs `Bot runtime provenance` once with its build SHA, tracked-file
 dirty state, source, and process-start UTC. Every
