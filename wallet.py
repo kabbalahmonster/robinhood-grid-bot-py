@@ -277,6 +277,42 @@ class Wallet:
         )
         return archived
 
+    def matching_archived_broadcast(self, tx_hash: str) -> Optional[dict]:
+        """Return durable evidence that this exact guard was safely archived."""
+        expected = str(tx_hash or "").strip().lower()
+        if not expected:
+            return None
+        active_path = getattr(
+            self, "unresolved_broadcast_path",
+            os.path.join("data", "unresolved_broadcast.json"),
+        )
+        directory = os.path.dirname(active_path) or "."
+        basename = os.path.basename(active_path)
+        prefixes = {
+            f"{basename}.reconciled.": "receipt_reconciled",
+            f"{basename}.definitive-rejection.": "definitive_prebroadcast_rejection",
+        }
+        try:
+            names = sorted(os.listdir(directory), reverse=True)
+        except OSError:
+            return None
+        for name in names:
+            reason = next((value for prefix, value in prefixes.items()
+                           if name.startswith(prefix)), None)
+            if reason is None:
+                continue
+            path = os.path.join(directory, name)
+            try:
+                with open(path, "r", encoding="utf-8") as handle:
+                    record = json.load(handle)
+            except (OSError, json.JSONDecodeError):
+                continue
+            archived_hash = str(record.get("tx_hash") or "").strip().lower() \
+                if isinstance(record, dict) else ""
+            if archived_hash == expected:
+                return {"tx_hash": expected, "archived_path": path, "reason": reason}
+        return None
+
     @staticmethod
     def _definitive_submission_rejection(error: Exception) -> bool:
         """Return true only for RPC errors proving the signed tx was rejected."""

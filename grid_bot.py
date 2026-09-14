@@ -5176,6 +5176,29 @@ class GridBot:
             logger.error("Automatic reconciliation check failed closed: %s", exc)
             return False
         if result.returncode != 0:
+            # The helper constructs its own Wallet. Legacy definitive-rejection
+            # cleanup can therefore archive the guard safely in the child while
+            # this parent still holds the old record in memory. Resume only if
+            # the active guard is gone and an archive contains the exact hash.
+            latest_guard = self.wallet._load_unresolved_broadcast()
+            archive_reader = getattr(
+                type(self.wallet), "matching_archived_broadcast", None
+            )
+            archive_evidence = (
+                archive_reader(self.wallet, tx_hash)
+                if latest_guard is None and callable(archive_reader) else None
+            )
+            if archive_evidence:
+                self.wallet.unresolved_broadcast = None
+                if not getattr(self.config, "use_gridless", False):
+                    self.load_positions()
+                self._safety_halted = False
+                logger.warning(
+                    "Automatic reconciliation observed safely archived guard; "
+                    "trading resumed tx=%s archive_reason=%s",
+                    tx_hash, archive_evidence["reason"],
+                )
+                return True
             detail = (result.stdout or result.stderr or "no detail").strip()
             logger.warning("Automatic reconciliation not yet safe: %s", detail[:1000])
             return False

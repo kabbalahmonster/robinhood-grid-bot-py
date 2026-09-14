@@ -236,6 +236,9 @@ automatic mode may instead verify that same outflow against the latest matching
 local reconciliation audit. It archives the exact guard and resumes only after
 the atomic repair or proven prior repair succeeds; all other cases stay halted.
 `AUTO_RECONCILE_INTERVAL_SECONDS` controls receipt-check cadence.
+If the isolated helper archives a legacy guard whose recorded error proves a
+definitive pre-broadcast rejection, the parent clears its stale in-memory halt
+only after finding an archive containing that exact transaction hash.
 
 When `fleet-doctor`, inventory, or bot logs show tracked managed-token balances
 above the wallet's on-chain balance, preview the repair before stopping:

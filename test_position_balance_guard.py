@@ -137,6 +137,42 @@ class PositionBalanceGuardTests(unittest.TestCase):
         self.assertFalse(bot._attempt_auto_reconcile_unresolved_broadcast())
         self.assertTrue(bot._safety_halted)
 
+    @patch("grid_bot.subprocess.run")
+    def test_auto_reconcile_resumes_from_exact_child_archived_guard(self, run):
+        class ArchivedWallet:
+            unresolved_broadcast = {"tx_hash": "0xarchived"}
+
+            def has_unresolved_broadcast(self):
+                return bool(self.unresolved_broadcast)
+
+            def _load_unresolved_broadcast(self):
+                return None
+
+            def matching_archived_broadcast(self, tx_hash):
+                if tx_hash == "0xarchived":
+                    return {
+                        "tx_hash": tx_hash, "archived_path": "guard.reconciled.1",
+                        "reason": "receipt_reconciled",
+                    }
+                return None
+
+        bot = GridBot.__new__(GridBot)
+        bot.config = SimpleNamespace(
+            auto_reconcile_unresolved_broadcast=True,
+            auto_reconcile_interval_seconds=30,
+            use_gridless=True,
+        )
+        bot.wallet = ArchivedWallet()
+        bot._safety_halted = True
+        bot._last_auto_reconcile_attempt = 0
+        run.return_value = subprocess.CompletedProcess(
+            [], 2, stdout='{"deficit_raw":0}', stderr="",
+        )
+
+        self.assertTrue(bot._attempt_auto_reconcile_unresolved_broadcast())
+        self.assertIsNone(bot.wallet.unresolved_broadcast)
+        self.assertFalse(bot._safety_halted)
+
 
 if __name__ == "__main__":
     unittest.main()

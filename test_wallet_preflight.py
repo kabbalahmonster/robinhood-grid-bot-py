@@ -267,6 +267,23 @@ class TestWalletPreflight(unittest.TestCase):
             self.assertTrue(os.path.exists(path))
             self.assertEqual(wallet.unresolved_broadcast["tx_hash"], "0xabc123")
 
+    def test_matching_archived_broadcast_requires_exact_hash(self):
+        wallet = self.make_wallet()
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "unresolved_broadcast.json")
+            wallet.unresolved_broadcast_path = path
+            matching = path + ".definitive-rejection.123"
+            with open(matching, "w", encoding="utf-8") as handle:
+                json.dump({"tx_hash": "0xABC123"}, handle)
+            with open(path + ".reconciled.122", "w", encoding="utf-8") as handle:
+                json.dump({"tx_hash": "0xdifferent"}, handle)
+
+            evidence = wallet.matching_archived_broadcast("0xabc123")
+
+            self.assertEqual(evidence["archived_path"], matching)
+            self.assertEqual(evidence["reason"], "definitive_prebroadcast_rejection")
+            self.assertIsNone(wallet.matching_archived_broadcast("0xwrong"))
+
 
 if __name__ == "__main__":
     unittest.main()
