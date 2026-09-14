@@ -10,6 +10,42 @@ from pathlib import Path
 
 
 POSITION_FILES = (Path("data/positions.json"), Path("data/gridless_positions.json"))
+TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+
+
+def _hex(value):
+    if hasattr(value, "hex"):
+        value = value.hex()
+    value = str(value)
+    return value if value.startswith("0x") else "0x" + value
+
+
+def _int(value):
+    if isinstance(value, (bytes, bytearray)):
+        return int.from_bytes(value, byteorder="big")
+    if isinstance(value, str):
+        return int(value, 16) if value.startswith("0x") else int(value)
+    return int(value)
+
+
+def verified_outgoing_tokens(wallet, token_address, tx_hash):
+    """Return receipt-proven managed-token outflow for a successful wallet tx."""
+    tx = wallet.w3.eth.get_transaction(tx_hash)
+    receipt = wallet.w3.eth.get_transaction_receipt(tx_hash)
+    if _int(receipt.get("status", 0)) != 1:
+        raise ValueError("unresolved broadcast receipt is not successful")
+    if str(tx.get("from", "")).lower() != wallet.address.lower():
+        raise ValueError("unresolved broadcast sender is not the configured wallet")
+    wallet_topic = "0x" + wallet.address.lower().removeprefix("0x").rjust(64, "0")
+    total = 0
+    for entry in receipt.get("logs", []):
+        if str(entry.get("address", "")).lower() != token_address.lower():
+            continue
+        topics = [_hex(topic).lower() for topic in entry.get("topics", [])]
+        if len(topics) < 3 or topics[0] != TRANSFER_TOPIC or topics[1] != wallet_topic:
+            continue
+        total += _int(entry.get("data", 0))
+    return total
 
 
 def load_mapping(path):
@@ -65,6 +101,35 @@ def main():
         "apply": args.apply, "changes": [],
     }
     if deficit_raw == 0:
+        # Recovery for a haircut applied by an older release: re-check the most
+        # recent local audit and archive only an exact receipt-proven match.
+        guard = getattr(wallet, "unresolved_broadcast", None)
+        audit_path = Path("data/position_balance_reconciliations.json")
+        if args.apply and isinstance(guard, dict) and guard.get("tx_hash"):
+            try:
+                audit = json.loads(audit_path.read_text())
+                prior = next(
+                    entry for entry in reversed(audit)
+                    if isinstance(entry, dict)
+                    and entry.get("checkout") == str(checkout)
+                    and entry.get("token_symbol") == config.token_symbol
+                    and int(entry.get("deficit_raw", 0)) > 0
+                )
+                outgoing_raw = verified_outgoing_tokens(
+                    wallet, config.token_address, str(guard["tx_hash"]),
+                )
+                if outgoing_raw == int(prior["deficit_raw"]):
+                    archived = wallet.archive_reconciled_broadcast(str(guard["tx_hash"]))
+                    result["unresolved_broadcast_match"] = {
+                        "tx_hash": str(guard["tx_hash"]), "outgoing_raw": outgoing_raw,
+                        "status": "receipt_verified_against_prior_reconciliation",
+                        "archived_path": archived,
+                    }
+            except (FileNotFoundError, StopIteration, TypeError, ValueError, json.JSONDecodeError) as exc:
+                result["unresolved_broadcast_match"] = {
+                    "tx_hash": str(guard["tx_hash"]), "status": "verification_failed",
+                    "error": str(exc),
+                }
         print(json.dumps(result, separators=(",", ":")))
         return 0
     if wallet_raw < 0 or not active:
@@ -92,6 +157,31 @@ def main():
             if args.apply:
                 position["balance"] = new_balance
 
+    matching_guard_hash = None
+    guard = getattr(wallet, "unresolved_broadcast", None)
+    if args.apply and isinstance(guard, dict) and guard.get("tx_hash"):
+        candidate_hash = str(guard["tx_hash"])
+        try:
+            outgoing_raw = verified_outgoing_tokens(
+                wallet, config.token_address, candidate_hash,
+            )
+            if outgoing_raw == deficit_raw:
+                matching_guard_hash = candidate_hash
+                result["unresolved_broadcast_match"] = {
+                    "tx_hash": candidate_hash, "outgoing_raw": outgoing_raw,
+                    "status": "receipt_verified_exact_deficit",
+                }
+            else:
+                result["unresolved_broadcast_match"] = {
+                    "tx_hash": candidate_hash, "outgoing_raw": outgoing_raw,
+                    "status": "outflow_does_not_match_deficit",
+                }
+        except Exception as exc:
+            result["unresolved_broadcast_match"] = {
+                "tx_hash": candidate_hash, "status": "verification_failed",
+                "error": str(exc),
+            }
+
     if args.apply:
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         for path, positions in documents.items():
@@ -100,6 +190,9 @@ def main():
             backup = path.with_name(path.name + f".bak.reconcile.{timestamp}")
             backup.write_bytes(path.read_bytes())
             atomic_json(path, positions)
+        if matching_guard_hash:
+            archived = wallet.archive_reconciled_broadcast(matching_guard_hash)
+            result["unresolved_broadcast_match"]["archived_path"] = archived
         audit_path = Path("data/position_balance_reconciliations.json")
         try:
             audit = json.loads(audit_path.read_text())

@@ -1030,6 +1030,13 @@ prove that no separately launched process is writing those files. Applying
 creates timestamped `.bak.reconcile.*` backups beside each changed ledger,
 writes atomically, and appends a bounded audit record to
 `data/position_balance_reconciliations.json`. Review inventory before restart.
+If an applied haircut exactly equals the managed-token outflow proven by the
+successful receipt of the current `unresolved_broadcast.json` transaction, the
+tool archives that guard automatically as `unresolved_broadcast.json.reconciled.*`.
+Receipt failures, sender mismatches, and non-exact outflows remain guarded.
+After upgrading a bot whose haircut was already applied, rerun the same
+reconciliation with `--apply --confirm-bot-stopped`; a zero-current-deficit run
+may use the latest matching audit entry for this same receipt verification.
 
 The repair is deliberately one-way and conservative:
 

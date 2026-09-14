@@ -252,6 +252,9 @@ to return it to desired-running state.
 
 The tool proportionally reduces position balances to wallet reality, preserves
 cost basis, backs up changed ledgers, and writes a reconciliation audit record.
+When the haircut exactly matches the receipt-proven managed-token outflow of
+the active unresolved-broadcast transaction, the matching guard is archived
+automatically. Any ambiguous or nonmatching guard remains in force.
 It never assigns wallet surplus or recovers an omitted buy. See the fleet README
 for multi-bot partial-failure behavior and backup restoration guidance.
 
