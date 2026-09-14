@@ -759,6 +759,7 @@ class GridBot:
         self.positions = {}
         self.running = True
         self._safety_halted = False
+        self._last_auto_reconcile_attempt = 0.0
         self._exact_approval_guard_path = "data/pending_exact_approval.json"
         self._exact_approval_guard = self._load_exact_approval_guard()
         self.round_count = 0
@@ -4963,6 +4964,48 @@ class GridBot:
                 outcome = "safety_halted"
             self._log_cycle_performance(started, rpc_before, outcome)
 
+    def _attempt_auto_reconcile_unresolved_broadcast(self):
+        """Fail-closed recovery for a receipt-proven sell position deficit."""
+        if not getattr(self.config, "auto_reconcile_unresolved_broadcast", False):
+            return False
+        if not self.wallet.has_unresolved_broadcast():
+            self._safety_halted = False
+            return True
+        now = time.monotonic()
+        interval = max(5, int(getattr(
+            self.config, "auto_reconcile_interval_seconds", 30
+        )))
+        if now - self._last_auto_reconcile_attempt < interval:
+            return False
+        self._last_auto_reconcile_attempt = now
+        tx_hash = self.wallet.unresolved_broadcast.get("tx_hash", "unknown")
+        logger.warning(
+            "Automatic reconciliation paused trading for unresolved tx=%s", tx_hash,
+        )
+        script = Path(__file__).resolve().parent / "ops" / "fleet" / "reconcile-position-balances.py"
+        try:
+            result = subprocess.run(
+                [sys.executable, str(script), "--automatic"],
+                cwd=Path(__file__).resolve().parent,
+                text=True, capture_output=True, timeout=max(20, interval), check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            logger.error("Automatic reconciliation check failed closed: %s", exc)
+            return False
+        if result.returncode != 0:
+            detail = (result.stdout or result.stderr or "no detail").strip()
+            logger.warning("Automatic reconciliation not yet safe: %s", detail[:1000])
+            return False
+        self.wallet.unresolved_broadcast = self.wallet._load_unresolved_broadcast()
+        if self.wallet.has_unresolved_broadcast():
+            logger.critical("Automatic reconciliation returned without archiving tx=%s", tx_hash)
+            return False
+        if not getattr(self.config, "use_gridless", False):
+            self.load_positions()
+        self._safety_halted = False
+        logger.warning("Automatic reconciliation completed; trading resumed tx=%s", tx_hash)
+        return True
+
     def _run_cycle_body(self):
         """Run one trading cycle."""
         if self.wallet.has_unresolved_broadcast():
@@ -5402,6 +5445,8 @@ class GridBot:
         logger.info(f"Starting main loop (polling every {poll_interval}s)...")
         while self.running:
             try:
+                if getattr(self, "_safety_halted", False):
+                    self._attempt_auto_reconcile_unresolved_broadcast()
                 if not getattr(self, "_safety_halted", False):
                     self.run_cycle()
                 time.sleep(poll_interval)

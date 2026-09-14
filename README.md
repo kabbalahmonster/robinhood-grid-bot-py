@@ -155,6 +155,8 @@ python grid_bot.py
 | `POLL_INTERVAL_SECONDS` | No | 6 | Price check interval in seconds |
 | `STARTUP_JITTER_SECONDS` | No | 20 | Random delay before the first provider request so fleet restarts do not stampede |
 | `PERFORMANCE_TELEMETRY_EVERY_CYCLES` | No | 10 | Emit one sanitized cycle/RPC performance record every N cycles (slow/error/halted cycles emit immediately) |
+| `AUTO_RECONCILE_UNRESOLVED_BROADCAST` | No | false | While safety-halted, automatically repair and resume only for an exact receipt-proven successful managed-token outflow |
+| `AUTO_RECONCILE_INTERVAL_SECONDS` | No | 30 | Retry interval for safe unresolved-broadcast receipt/reconciliation checks (minimum 5 seconds) |
 | `ANTI_MEV_JITTER` | No | true | Enable anti-MEV timing jitter |
 | `LOG_LEVEL` | No | INFO | INFO shows operational events only; DEBUG adds full per-round and quote telemetry |
 | `STATE_FILE` | No | ./data/positions.json | Position state file path |
@@ -1165,6 +1167,7 @@ Common failures:
 - Verify sufficient ETH for gas
 - Check token approvals haven't expired
 - If `data/unresolved_broadcast.json` exists, stop the bot and verify its recorded transaction on-chain; never delete the guard or retry the trade blindly
+- Optional `AUTO_RECONCILE_UNRESOLVED_BROADCAST=true` keeps the bot paused while it checks the receipt. It resumes only after a successful wallet-sent transaction proves a managed-token outflow exactly equal to the current position deficit, the proportional ledger repair is atomically applied, and the exact guard is archived. Pending/reverted transactions, buys, mismatches, RPC failures, and corrupt evidence remain halted for manual recovery.
 
 ### "Position cost seems wrong"
 - Check the transaction on block explorer

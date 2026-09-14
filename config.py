@@ -185,6 +185,8 @@ class BotConfig:
     dashboard_name: str = ""      # Optional display name
     dashboard_group: str = ""     # Optional dashboard grouping label
     mercury_evocation: bool = True  # Print the Mercury evocation once at bot startup
+    auto_reconcile_unresolved_broadcast: bool = False
+    auto_reconcile_interval_seconds: int = 30
     route_tournament_mode: str = "off"
     route_tournament_canary: bool = False
     route_tournament_providers: tuple[str, ...] = ("uniswap", "sushiswap")
@@ -346,6 +348,8 @@ class BotConfig:
             raise ValueError("STARTUP_JITTER_SECONDS must be non-negative")
         if self.performance_telemetry_every_cycles < 1:
             raise ValueError("PERFORMANCE_TELEMETRY_EVERY_CYCLES must be at least 1")
+        if self.auto_reconcile_interval_seconds < 5:
+            raise ValueError("AUTO_RECONCILE_INTERVAL_SECONDS must be at least 5")
         if not 0 < self.uniswap_rate_limit_rps <= 6:
             raise ValueError("UNISWAP_RATE_LIMIT_RPS must be greater than 0 and at most 6")
         if self.uniswap_cooldown_base_seconds < 1:
@@ -537,6 +541,12 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
         dashboard_name=os.getenv("DASHBOARD_NAME", ""),
         dashboard_group=os.getenv("DASHBOARD_GROUP", ""),
         mercury_evocation=os.getenv("MERCURY_EVOCATION", "true").lower() == "true",
+        auto_reconcile_unresolved_broadcast=os.getenv(
+            "AUTO_RECONCILE_UNRESOLVED_BROADCAST", "false"
+        ).lower() == "true",
+        auto_reconcile_interval_seconds=int(os.getenv(
+            "AUTO_RECONCILE_INTERVAL_SECONDS", "30"
+        )),
     )
     
     # Validate the configuration

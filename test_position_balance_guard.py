@@ -1,4 +1,5 @@
 import unittest
+import subprocess
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -103,6 +104,38 @@ class PositionBalanceGuardTests(unittest.TestCase):
 
         bot.wallet._record_unresolved_broadcast.assert_not_called()
         self.assertEqual(bot._sell_attempt["tx_hash"], "0xactual")
+
+    @patch("grid_bot.subprocess.run")
+    def test_auto_reconcile_archives_then_resumes(self, run):
+        bot = self.bot(400)
+        bot.config.auto_reconcile_unresolved_broadcast = True
+        bot.config.auto_reconcile_interval_seconds = 30
+        bot.config.use_gridless = True
+        bot.wallet.unresolved_broadcast = {"tx_hash": "0xresolved"}
+        bot.wallet.has_unresolved_broadcast.side_effect = [True, False]
+        bot.wallet._load_unresolved_broadcast.return_value = None
+        bot._safety_halted = True
+        bot._last_auto_reconcile_attempt = 0
+        run.return_value = subprocess.CompletedProcess([], 0, stdout='{"ok":true}', stderr="")
+
+        self.assertTrue(bot._attempt_auto_reconcile_unresolved_broadcast())
+
+        self.assertFalse(bot._safety_halted)
+        self.assertIn("--automatic", run.call_args.args[0])
+
+    @patch("grid_bot.subprocess.run")
+    def test_auto_reconcile_failure_stays_halted(self, run):
+        bot = self.bot(400)
+        bot.config.auto_reconcile_unresolved_broadcast = True
+        bot.config.auto_reconcile_interval_seconds = 30
+        bot.wallet.unresolved_broadcast = {"tx_hash": "0xpending"}
+        bot.wallet.has_unresolved_broadcast.return_value = True
+        bot._safety_halted = True
+        bot._last_auto_reconcile_attempt = 0
+        run.return_value = subprocess.CompletedProcess([], 2, stdout='{"status":"pending"}', stderr="")
+
+        self.assertFalse(bot._attempt_auto_reconcile_unresolved_broadcast())
+        self.assertTrue(bot._safety_halted)
 
 
 if __name__ == "__main__":

@@ -71,7 +71,10 @@ def atomic_json(path, value):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--apply", action="store_true")
+    parser.add_argument("--automatic", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.automatic:
+        args.apply = True
 
     checkout = Path.cwd().resolve()
     sys.path.insert(0, str(checkout))
@@ -105,7 +108,7 @@ def main():
         # recent local audit and archive only an exact receipt-proven match.
         guard = getattr(wallet, "unresolved_broadcast", None)
         audit_path = Path("data/position_balance_reconciliations.json")
-        if args.apply and isinstance(guard, dict) and guard.get("tx_hash"):
+        if args.apply and not args.automatic and isinstance(guard, dict) and guard.get("tx_hash"):
             try:
                 audit = json.loads(audit_path.read_text())
                 prior = next(
@@ -131,7 +134,7 @@ def main():
                     "error": str(exc),
                 }
         print(json.dumps(result, separators=(",", ":")))
-        return 0
+        return 2 if args.automatic else 0
     if wallet_raw < 0 or not active:
         raise ValueError("invalid wallet/position state")
 
@@ -181,6 +184,11 @@ def main():
                 "tx_hash": candidate_hash, "status": "verification_failed",
                 "error": str(exc),
             }
+
+    if args.automatic and not matching_guard_hash:
+        result["automatic_reconciliation"] = "refused_without_exact_receipt_match"
+        print(json.dumps(result, separators=(",", ":")))
+        return 2
 
     if args.apply:
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
