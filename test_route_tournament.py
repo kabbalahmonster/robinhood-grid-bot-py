@@ -554,6 +554,28 @@ def test_failed_candidate_exposes_only_sanitized_pair_and_http_diagnostics(caplo
     assert secret not in message
 
 
+def test_eligible_candidate_logs_stable_sanitized_pair_fingerprint(caplog):
+    import logging
+    c = context(
+        "buy", chain_id=4663,
+        token_address="0x1111111111111111111111111111111111111111",
+        trade_token_address="0x2222222222222222222222222222222222222222",
+    )
+    q = quote(output=10**18)
+    row = score_candidate(q, "uniswap", "native", c)
+    assert row["validation_level"] == "quote_only"
+
+    with caplog.at_level(logging.INFO, logger="grid_bot.route_tournament"):
+        import route_tournament
+        route_tournament._log_candidate(row, c, "eligible-round")
+
+    message = caplog.records[-1].getMessage()
+    assert f"pair_fingerprint={row['pair_fingerprint']}" in message
+    assert "failure_category=none provider_error=none" in message
+    assert c["token_address"] not in message
+    assert c["trade_token_address"] not in message
+
+
 def test_quote_deadline_is_exposed_as_an_observation_timeout():
     row = score_candidate(
         QuoteResult(success=False, error="shadow quote deadline elapsed"),
@@ -951,7 +973,9 @@ def test_mode_parsing_and_default(monkeypatch, tmp_path):
         assert load_config().route_tournament_providers == ("uniswap", "lifi")
 
 
-def test_native_only_preflight_collects_and_selects_two_candidates():
+def test_native_only_preflight_collects_and_selects_two_candidates(caplog):
+    import logging
+    caplog.set_level(logging.INFO, logger="grid_bot.route_tournament")
     cfg = SimpleNamespace(
         uniswap_api_key="key", weth_address="weth", token_address="token",
         route_tournament_providers=("uniswap", "sushiswap"),
@@ -973,6 +997,13 @@ def test_native_only_preflight_collects_and_selects_two_candidates():
     assert select_execution_candidate(result, "buy") == {
         "provider": "sushiswap", "settlement": "native"
     }
+    winner = result["candidates"][1]
+    winner_lines = [
+        record.getMessage() for record in caplog.records
+        if "Route tournament winner provider=sushiswap" in record.getMessage()
+    ]
+    assert len(winner_lines) == 1
+    assert f"pair_fingerprint={winner['pair_fingerprint']}" in winner_lines[0]
 
 
 def test_execution_selector_accepts_one_valid_route_from_complete_accounting():

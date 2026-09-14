@@ -242,7 +242,7 @@ class TestDashboardEvents(unittest.TestCase):
         self.assertEqual(observed["revision"], 4)
         self.assertNotIn("final", observed)
 
-    def test_submitted_tournament_early_exit_is_execution_failed(self):
+    def test_submitted_tournament_early_exit_is_settlement_unresolved(self):
         self.bot.config.route_tournament_mode = "gate"
         self.bot._route_comparisons = {
             "buy": {"mode": "execution_preflight", "direction": "buy",
@@ -254,7 +254,71 @@ class TestDashboardEvents(unittest.TestCase):
             "buy", reason="broadcast_or_receipt_failed"
         )
 
+        self.assertEqual(observed["status"], "settlement_unresolved")
+        self.assertEqual(observed["terminal_reason"], "broadcast_or_receipt_failed")
+
+    def test_submitted_tournament_normal_exit_uses_post_submission_reason(self):
+        self.bot.config.route_tournament_mode = "gate"
+        self.bot._route_comparisons = {
+            "buy": {"mode": "execution_preflight", "direction": "buy",
+                    "status": "transaction_submitted", "tournament_id": "round-3b",
+                    "revision": 3, "pending_transaction": {"tx_hash": "0xabc"},
+                    "candidates": []}
+        }
+
+        observed = self.bot._close_incomplete_tournament(
+            "buy", reason="post_selection_exit_without_broadcast"
+        )
+
+        self.assertEqual(observed["status"], "settlement_unresolved")
+        self.assertEqual(
+            observed["terminal_reason"],
+            "post_submission_exit_without_settlement",
+        )
+        self.assertEqual(observed["pending_transaction"]["tx_hash"], "0xabc")
+
+    def test_submitted_reverted_receipt_is_classified_execution_failed(self):
+        self.bot.config.route_tournament_mode = "gate"
+        self.bot._route_comparisons = {
+            "sell": {"mode": "execution_preflight", "direction": "sell",
+                     "status": "transaction_submitted", "tournament_id": "round-3c",
+                     "revision": 3, "candidates": []}
+        }
+        result = type("Result", (), {
+            "tx_hash": "0xdef", "receipt": {
+                "status": 0, "gasUsed": 21000, "effectiveGasPrice": 123,
+            },
+            "gas_used": None, "effective_gas_price": None,
+            "outcome_unknown": False,
+        })()
+
+        observed = self.bot._mark_tournament_transaction_failure("sell", result)
+
         self.assertEqual(observed["status"], "execution_failed")
+        self.assertEqual(observed["terminal_reason"], "receipt_status_failed")
+        self.assertEqual(observed["receipt_status"], 0)
+        self.assertEqual(observed["final"]["gas_used"], "21000")
+        self.assertEqual(observed["final"]["effective_gas_price_wei"], "123")
+
+    def test_submitted_unknown_outcome_is_unresolved_and_immutable(self):
+        self.bot.config.route_tournament_mode = "gate"
+        self.bot._route_comparisons = {
+            "buy": {"mode": "execution_preflight", "direction": "buy",
+                    "status": "transaction_submitted", "tournament_id": "round-3d",
+                    "revision": 3, "candidates": []}
+        }
+        result = type("Result", (), {
+            "tx_hash": "0x123", "receipt": None, "outcome_unknown": True,
+        })()
+
+        observed = self.bot._mark_tournament_transaction_failure("buy", result)
+        late = self.bot._publish_tournament_transition("buy", "completed")
+
+        self.assertEqual(observed["status"], "settlement_unresolved")
+        self.assertEqual(observed["terminal_reason"], "broadcast_outcome_unknown")
+        self.assertNotIn("receipt_status", observed)
+        self.assertEqual(late["status"], "settlement_unresolved")
+        self.assertEqual(late["revision"], observed["revision"])
 
     def test_completion_recovers_submission_order_and_records_exact_economics(self):
         self.bot.dashboard_trades = []

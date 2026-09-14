@@ -65,18 +65,19 @@ def _log_candidate(row, context, tournament_id):
         if rejection != "-" and quote_failure_kind else ""
     )
     failure_reason = row.get("failure_reason") or {}
-    diagnostic_suffix = ""
-    if rejection != "-":
-        diagnostic_suffix = (
-            " · failure_category=%s provider_error=%s http_status=%s "
-            "retry_after_seconds=%s pair_fingerprint=%s"
-        ) % (
-            failure_reason.get("category", "none"),
-            failure_reason.get("provider_error", "none"),
-            row.get("provider_http_status", "none"),
-            row.get("provider_retry_after_seconds", "none"),
-            row.get("pair_fingerprint", "unknown"),
-        )
+    # Emit the same bounded, sanitized schema for eligible and rejected rows.
+    # Selected routes need the fingerprint for pair-scoped lifecycle analysis;
+    # raw token addresses must never enter logs.
+    diagnostic_suffix = (
+        " · failure_category=%s provider_error=%s http_status=%s "
+        "retry_after_seconds=%s pair_fingerprint=%s"
+    ) % (
+        failure_reason.get("category", "none"),
+        failure_reason.get("provider_error", "none"),
+        row.get("provider_http_status", "none"),
+        row.get("provider_retry_after_seconds", "none"),
+        row.get("pair_fingerprint", "unknown"),
+    )
     suffix = " · tournament_id=%s candidate_elapsed_ms=%s" % (
         tournament_id, row.get("candidate_elapsed_ms", "unknown")
     )
@@ -888,10 +889,12 @@ def collect(config, address, context, client_factory=None,
     if winner and not _suppress_summary:
         LOG.info(
             "Route tournament winner provider=%s settlement=%s direction=%s score=%s "
-            "runner_up_delta=%s eligible=%d rejected=%d elapsed_ms=%s tournament_id=%s",
+            "runner_up_delta=%s eligible=%d rejected=%d elapsed_ms=%s tournament_id=%s "
+            "pair_fingerprint=%s",
             winner["provider"], winner["settlement"], context["direction"],
             eligible[0]["projected_net_score"], runner_up_delta or "n/a",
             len(eligible), len(rows) - len(eligible), elapsed_ms, tournament_id,
+            winner.get("pair_fingerprint", "unknown"),
         )
     elif not _suppress_summary:
         LOG.info(
@@ -1035,11 +1038,12 @@ def collect_execution_preflight(config, address, context, client_factory=None,
     if eligible:
         LOG.info(
             "Route tournament winner provider=%s settlement=%s direction=%s score=%s "
-            "runner_up_delta=%s eligible=%d rejected=%d elapsed_ms=%s tournament_id=%s",
+            "runner_up_delta=%s eligible=%d rejected=%d elapsed_ms=%s tournament_id=%s "
+            "pair_fingerprint=%s",
             eligible[0]["provider"], eligible[0]["settlement"], context.get("direction"),
             eligible[0]["projected_net_score"], runner_up_delta or "n/a",
             len(eligible), len(rows) - len(eligible), comparison["elapsed_ms"],
-            tournament_id,
+            tournament_id, eligible[0].get("pair_fingerprint", "unknown"),
         )
     else:
         LOG.info(

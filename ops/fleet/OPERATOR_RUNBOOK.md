@@ -300,17 +300,19 @@ In gate mode every selected route now closes with exactly one terminal phase:
 callback cannot replace it or emit a second terminal record. A confirmed trade always has a preceding
 `transaction_submitted` lifecycle record; if the live callback was unavailable,
 confirmation reconstructs the submission record and labels that timing as
-observed-at-completion. `settlement_unresolved` is fail-closed: it means the
-transaction confirmed but exact tokens/proceeds or required WETH settlement
-could not be reconciled. Follow the unresolved-broadcast recovery procedure;
-never treat that state as realized profit.
+observed-at-completion. `settlement_unresolved` is fail-closed: it means either
+a submitted transaction exited the local execution path before its receipt was
+classified, or a confirmed transaction's exact tokens/proceeds or required WETH
+settlement could not be reconciled. Follow the unresolved-broadcast recovery
+procedure; never treat that state as a revert, a completion, or realized profit.
 
-Failed tournament candidates expose only aggregation-safe fields:
+All tournament candidates, eligible or rejected, expose only aggregation-safe fields:
 `failure_category`, `provider_error`, `http_status`, `retry_after_seconds`,
 `pair_fingerprint`, and `candidate_elapsed_ms`. The fingerprint is a stable,
 non-reversible chain/direction/pair/settlement key. Provider response bodies,
-request IDs, credentials, and calldata are not emitted. Use these fields to
-compare failures by provider and pair before considering a scoped cooldown;
+request IDs, credentials, and calldata are not emitted. Selected-winner lines
+repeat the fingerprint so the execution lifecycle can be grouped by pair. Use
+these fields to compare failures by provider and pair before considering a scoped cooldown;
 they do not themselves disable or penalize a provider.
 
 Completed lifecycle payloads include receipt status, gas used, effective gas

@@ -1656,11 +1656,16 @@ class GridBot:
             return comparison
         safe_reason = re.sub(r"[^a-z0-9_.:-]+", "_", str(reason).lower()).strip("_")
         safe_reason = (safe_reason or "unknown")[:96]
-        terminal_status = (
-            "execution_failed"
-            if failed or status == "transaction_submitted"
-            else "execution_aborted"
-        )
+        if status == "transaction_submitted":
+            # Submission proves the transaction left the process, but an early
+            # return or exception does not prove whether it reverted, remained
+            # pending, or succeeded without locally reconciled settlement.
+            # Never collapse that uncertainty into execution_failed.
+            terminal_status = "settlement_unresolved"
+            if safe_reason == "post_selection_exit_without_broadcast":
+                safe_reason = "post_submission_exit_without_settlement"
+        else:
+            terminal_status = "execution_failed" if failed else "execution_aborted"
         return self._publish_tournament_transition(
             direction, terminal_status, terminal_reason=safe_reason,
         )
@@ -1677,6 +1682,34 @@ class GridBot:
             direction, "settlement_unresolved",
             terminal_reason=reason, receipt_status="confirmed",
             final=final,
+        )
+
+    def _mark_tournament_transaction_failure(self, direction, result):
+        """Classify a failed send result without inventing settlement certainty."""
+        comparison = getattr(self, "_route_comparisons", {}).get(direction)
+        if (getattr(self.config, "route_tournament_mode", "off") != "gate"
+                or not isinstance(comparison, dict)
+                or comparison.get("status") != "transaction_submitted"):
+            return comparison
+        tx_hash = getattr(result, "tx_hash", None)
+        receipt = getattr(result, "receipt", None) or {}
+        receipt_status = receipt.get("status") if hasattr(receipt, "get") else None
+        final = {"tx_hash": str(tx_hash)} if tx_hash else {}
+        if receipt_status is None or getattr(result, "outcome_unknown", False):
+            return self._publish_tournament_transition(
+                direction, "settlement_unresolved",
+                terminal_reason="broadcast_outcome_unknown", final=final,
+            )
+        for key, value in (
+            ("gas_used", getattr(result, "gas_used", None) or receipt.get("gasUsed")),
+            ("effective_gas_price_wei", getattr(result, "effective_gas_price", None)
+             or receipt.get("effectiveGasPrice")),
+        ):
+            if value is not None:
+                final[key] = str(int(value))
+        return self._publish_tournament_transition(
+            direction, "execution_failed", terminal_reason="receipt_status_failed",
+            receipt_status=int(receipt_status), final=final,
         )
 
     def _tournament_submission_callback(self, direction):
@@ -3294,6 +3327,7 @@ class GridBot:
             logger.info(f"   Buy price: {buy_price:.10f} {self.trade_token_name}/token")
             logger.info(f"   Tx: {result.tx_hash}")
         else:
+            self._mark_tournament_transaction_failure("buy", result)
             logger.error(f"❌ Gridless buy failed: {result.error}")
     
     @_with_tournament_terminal("sell")
@@ -4036,6 +4070,7 @@ class GridBot:
             
             logger.info(f"   Tx: {result.tx_hash}")
         else:
+            self._mark_tournament_transaction_failure("sell", result)
             logger.error(f"❌ Gridless sell failed: {result.error}")
             self._halt_on_unexpected_sell_balance_delta(
                 balance_before=attempted_token_balance_before,
@@ -4297,6 +4332,7 @@ class GridBot:
             logger.info(f"   Buy price: {buy_price:.10f} {self.trade_token_name} per token")
             logger.info(f"   Tx: {result.tx_hash}")
         else:
+            self._mark_tournament_transaction_failure("buy", result)
             logger.error(f"❌ Buy failed: {result.error}")
     
     @_with_tournament_terminal("sell")
@@ -4723,6 +4759,7 @@ class GridBot:
             
             logger.info(f"   Tx: {result.tx_hash}")
         else:
+            self._mark_tournament_transaction_failure("sell", result)
             logger.error(f"❌ Sell failed: {result.error}")
             self._halt_on_unexpected_sell_balance_delta(
                 balance_before=attempted_token_balance_before,

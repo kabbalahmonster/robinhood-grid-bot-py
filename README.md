@@ -1077,10 +1077,13 @@ Every selection ends as `completed`, `execution_aborted`, `execution_failed`,
 or `settlement_unresolved`, and confirmed broadcasts have a preceding
 `transaction_submitted` phase. Completed payloads carry receipt gas and exact
 reconciled base-unit economics; unresolved settlement carries no claimed
-profit. Quote failures log only sanitized classifications, status/retry timing,
-and a non-reversible pair fingerprint so fleet bundles can diagnose provider-
-and pair-specific behavior without exposing provider bodies or secrets. These
-diagnostics do not change route selection, deadlines, cooldowns, or fallback.
+profit. A submitted transaction that exits before its receipt and exact
+settlement are reconciled is `settlement_unresolved`, never a claimed execution
+failure. Every candidate and selected winner logs sanitized classifications,
+status/retry timing, and a non-reversible pair fingerprint so fleet bundles can
+diagnose provider- and pair-specific behavior without exposing provider bodies
+or secrets. These diagnostics do not change route selection, deadlines,
+cooldowns, or fallback.
 
 Each process logs `Bot runtime provenance` once with its build SHA, tracked-file
 dirty state, source, and process-start UTC. Every
