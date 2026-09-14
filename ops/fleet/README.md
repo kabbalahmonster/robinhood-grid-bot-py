@@ -1040,6 +1040,9 @@ Receipt failures, sender mismatches, and non-exact outflows remain guarded.
 After upgrading a bot whose haircut was already applied, rerun the same
 reconciliation with `--apply --confirm-bot-stopped`; a zero-current-deficit run
 may use the latest matching audit entry for this same receipt verification.
+With `AUTO_RECONCILE_UNRESOLVED_BROADCAST=true`, the safety-halted loop performs
+that same zero-deficit recovery automatically and resumes only after the exact
+guard is successfully archived. Missing/nonmatching audits remain halted.
 
 The repair is deliberately one-way and conservative:
 

@@ -1,6 +1,8 @@
 import importlib.util
+import json
 from pathlib import Path
-from types import SimpleNamespace
+import sys
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -53,3 +55,87 @@ def test_verified_outgoing_tokens_sums_only_managed_token_wallet_outflow():
 def test_verified_outgoing_tokens_rejects_unproven_transaction(receipt, sender):
     with pytest.raises(ValueError):
         reconciler.verified_outgoing_tokens(wallet_with(receipt, sender), TOKEN, TX_HASH)
+
+
+def test_automatic_zero_deficit_recovers_receipt_proven_prior_reconciliation(
+        monkeypatch, tmp_path):
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "gridless_positions.json").write_text(json.dumps({
+        "1": {"balance": 100},
+    }))
+    (data / "position_balance_reconciliations.json").write_text(json.dumps([{
+        "checkout": str(tmp_path), "token_symbol": "TOKEN", "deficit_raw": 50,
+    }]))
+    guard_path = data / "unresolved_broadcast.json"
+    guard_path.write_text(json.dumps({"tx_hash": TX_HASH}))
+
+    class FakeWallet:
+        def __init__(self, _config):
+            self.address = WALLET
+            self.unresolved_broadcast = {"tx_hash": TX_HASH}
+            self.w3 = wallet_with({
+                "status": 1, "logs": [transfer_log(50)],
+            }).w3
+
+        def get_token_balance(self, _token):
+            return 100, 100
+
+        def archive_reconciled_broadcast(self, tx_hash):
+            assert tx_hash == TX_HASH
+            archived = guard_path.with_suffix(".json.reconciled")
+            guard_path.replace(archived)
+            self.unresolved_broadcast = None
+            return str(archived)
+
+    config_module = ModuleType("config")
+    config_module.load_config = lambda: SimpleNamespace(
+        token_address=TOKEN, token_symbol="TOKEN",
+    )
+    wallet_module = ModuleType("wallet")
+    wallet_module.Wallet = FakeWallet
+    monkeypatch.setitem(sys.modules, "config", config_module)
+    monkeypatch.setitem(sys.modules, "wallet", wallet_module)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "argv", ["reconcile-position-balances", "--automatic"])
+
+    assert reconciler.main() == 0
+    assert not guard_path.exists()
+    assert guard_path.with_suffix(".json.reconciled").exists()
+
+
+def test_automatic_zero_deficit_stays_halted_without_matching_audit(
+        monkeypatch, tmp_path):
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "gridless_positions.json").write_text(json.dumps({
+        "1": {"balance": 100},
+    }))
+    (data / "position_balance_reconciliations.json").write_text("[]")
+    guard_path = data / "unresolved_broadcast.json"
+    guard_path.write_text(json.dumps({"tx_hash": TX_HASH}))
+
+    class FakeWallet:
+        def __init__(self, _config):
+            self.address = WALLET
+            self.unresolved_broadcast = {"tx_hash": TX_HASH}
+
+        def get_token_balance(self, _token):
+            return 100, 100
+
+        def archive_reconciled_broadcast(self, _tx_hash):
+            raise AssertionError("unproven guard must not be archived")
+
+    config_module = ModuleType("config")
+    config_module.load_config = lambda: SimpleNamespace(
+        token_address=TOKEN, token_symbol="TOKEN",
+    )
+    wallet_module = ModuleType("wallet")
+    wallet_module.Wallet = FakeWallet
+    monkeypatch.setitem(sys.modules, "config", config_module)
+    monkeypatch.setitem(sys.modules, "wallet", wallet_module)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "argv", ["reconcile-position-balances", "--automatic"])
+
+    assert reconciler.main() == 2
+    assert guard_path.exists()

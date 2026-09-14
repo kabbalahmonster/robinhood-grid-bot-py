@@ -230,10 +230,12 @@ To canary LI.FI, set `LI_FI_API_KEY` and use
 
 Set `AUTO_RECONCILE_UNRESOLVED_BROADCAST=true` in a bot's `.env` to let its
 safety-halted loop invoke this same reconciler automatically. Automatic mode
-never uses prior audit fallback: it requires a current deficit exactly matching
-a successful receipt's managed-token outflow from that wallet. It archives the
-exact guard and resumes only after the atomic repair succeeds; all other cases
-stay halted. `AUTO_RECONCILE_INTERVAL_SECONDS` controls receipt-check cadence.
+requires a current deficit exactly matching a successful receipt's managed-token
+outflow from that wallet. If an earlier run already applied the exact haircut,
+automatic mode may instead verify that same outflow against the latest matching
+local reconciliation audit. It archives the exact guard and resumes only after
+the atomic repair or proven prior repair succeeds; all other cases stay halted.
+`AUTO_RECONCILE_INTERVAL_SECONDS` controls receipt-check cadence.
 
 When `fleet-doctor`, inventory, or bot logs show tracked managed-token balances
 above the wallet's on-chain balance, preview the repair before stopping:

@@ -1174,7 +1174,7 @@ Common failures:
 - Verify sufficient ETH for gas
 - Check token approvals haven't expired
 - If `data/unresolved_broadcast.json` exists, stop the bot and verify its recorded transaction on-chain; never delete the guard or retry the trade blindly
-- Optional `AUTO_RECONCILE_UNRESOLVED_BROADCAST=true` keeps the bot paused while it checks the receipt. It resumes only after a successful wallet-sent transaction proves a managed-token outflow exactly equal to the current position deficit, the proportional ledger repair is atomically applied, and the exact guard is archived. Pending/reverted transactions, buys, mismatches, RPC failures, and corrupt evidence remain halted for manual recovery.
+- Optional `AUTO_RECONCILE_UNRESOLVED_BROADCAST=true` keeps the bot paused while it checks the receipt. It resumes only after a successful wallet-sent transaction proves a managed-token outflow exactly equal to either the current position deficit or the latest matching local reconciliation audit for an already-applied haircut, and the exact guard is archived. Pending/reverted transactions, buys, mismatches, missing audits, RPC failures, and corrupt evidence remain halted for manual recovery.
 
 ### "Position cost seems wrong"
 - Check the transaction on block explorer

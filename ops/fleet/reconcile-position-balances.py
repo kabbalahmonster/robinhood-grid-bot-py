@@ -108,7 +108,8 @@ def main():
         # recent local audit and archive only an exact receipt-proven match.
         guard = getattr(wallet, "unresolved_broadcast", None)
         audit_path = Path("data/position_balance_reconciliations.json")
-        if args.apply and not args.automatic and isinstance(guard, dict) and guard.get("tx_hash"):
+        recovered_prior_reconciliation = False
+        if args.apply and isinstance(guard, dict) and guard.get("tx_hash"):
             try:
                 audit = json.loads(audit_path.read_text())
                 prior = next(
@@ -128,13 +129,18 @@ def main():
                         "status": "receipt_verified_against_prior_reconciliation",
                         "archived_path": archived,
                     }
+                    recovered_prior_reconciliation = bool(archived)
             except (FileNotFoundError, StopIteration, TypeError, ValueError, json.JSONDecodeError) as exc:
                 result["unresolved_broadcast_match"] = {
                     "tx_hash": str(guard["tx_hash"]), "status": "verification_failed",
                     "error": str(exc),
                 }
         print(json.dumps(result, separators=(",", ":")))
-        return 2 if args.automatic else 0
+        # Automatic recovery used to be excluded from this zero-deficit branch,
+        # so a previously applied haircut left the bot halted forever even when
+        # the same receipt and audit could be proven exactly. Resume only after
+        # archive_reconciled_broadcast confirms that the matching guard moved.
+        return 0 if recovered_prior_reconciliation or not args.automatic else 2
     if wallet_raw < 0 or not active:
         raise ValueError("invalid wallet/position state")
 
