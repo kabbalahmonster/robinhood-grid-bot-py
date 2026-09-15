@@ -760,6 +760,7 @@ class GridBot:
         self.running = True
         self._safety_halted = False
         self._last_auto_reconcile_attempt = 0.0
+        self._auto_reconcile_failures = 0
         self._exact_approval_guard_path = "data/pending_exact_approval.json"
         self._exact_approval_guard = self._load_exact_approval_guard()
         self.round_count = 0
@@ -5159,7 +5160,9 @@ class GridBot:
         interval = max(5, int(getattr(
             self.config, "auto_reconcile_interval_seconds", 30
         )))
-        if now - self._last_auto_reconcile_attempt < interval:
+        failures = max(0, int(getattr(self, "_auto_reconcile_failures", 0)))
+        retry_interval = min(1800, interval * (2 ** min(failures, 6)))
+        if now - self._last_auto_reconcile_attempt < retry_interval:
             return False
         self._last_auto_reconcile_attempt = now
         tx_hash = self.wallet.unresolved_broadcast.get("tx_hash", "unknown")
@@ -5174,7 +5177,14 @@ class GridBot:
                 text=True, capture_output=True, timeout=max(20, interval), check=False,
             )
         except (OSError, subprocess.SubprocessError) as exc:
-            logger.error("Automatic reconciliation check failed closed: %s", exc)
+            self._auto_reconcile_failures = failures + 1
+            next_interval = min(
+                1800, interval * (2 ** min(self._auto_reconcile_failures, 6))
+            )
+            logger.error(
+                "Automatic reconciliation check failed closed; retry in %ss: %s",
+                next_interval, exc,
+            )
             return False
         if result.returncode != 0:
             # The helper constructs its own Wallet. Legacy definitive-rejection
@@ -5191,6 +5201,7 @@ class GridBot:
             )
             if archive_evidence:
                 self.wallet.unresolved_broadcast = None
+                self._auto_reconcile_failures = 0
                 if not getattr(self.config, "use_gridless", False):
                     self.load_positions()
                 self._safety_halted = False
@@ -5201,15 +5212,30 @@ class GridBot:
                 )
                 return True
             detail = (result.stdout or result.stderr or "no detail").strip()
-            logger.warning("Automatic reconciliation not yet safe: %s", detail[:1000])
+            self._auto_reconcile_failures = failures + 1
+            next_interval = min(
+                1800, interval * (2 ** min(self._auto_reconcile_failures, 6))
+            )
+            logger.warning(
+                "Automatic reconciliation not yet safe; retry in %ss: %s",
+                next_interval, detail[-1000:],
+            )
             return False
         self.wallet.unresolved_broadcast = self.wallet._load_unresolved_broadcast()
         if self.wallet.has_unresolved_broadcast():
-            logger.critical("Automatic reconciliation returned without archiving tx=%s", tx_hash)
+            self._auto_reconcile_failures = failures + 1
+            next_interval = min(
+                1800, interval * (2 ** min(self._auto_reconcile_failures, 6))
+            )
+            logger.critical(
+                "Automatic reconciliation returned without archiving tx=%s; retry in %ss",
+                tx_hash, next_interval,
+            )
             return False
         if not getattr(self.config, "use_gridless", False):
             self.load_positions()
         self._safety_halted = False
+        self._auto_reconcile_failures = 0
         logger.warning("Automatic reconciliation completed; trading resumed tx=%s", tx_hash)
         return True
 

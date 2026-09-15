@@ -1046,7 +1046,10 @@ also tries the existing receipt-driven buy recovery using the guard's exact
 transaction hash. That path requires a successful configured-wallet
 transaction, native principal, exact managed-token receipt, confirmed gas
 economics, sufficient unallocated inventory, available position capacity, and
-a verified ledger reload. It resumes only after the exact guard is archived.
+a verified ledger reload. Exact transaction and receipt reads check every
+configured RPC endpoint. Missing exact-hash evidence remains halted without a
+rebroadcast, and repeated failures back off exponentially to 30 minutes. It
+resumes only after the exact guard is archived.
 
 The repair is deliberately one-way and conservative:
 

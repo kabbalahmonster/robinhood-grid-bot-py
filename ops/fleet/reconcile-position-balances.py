@@ -30,8 +30,14 @@ def _int(value):
 
 def verified_outgoing_tokens(wallet, token_address, tx_hash):
     """Return receipt-proven managed-token outflow for a successful wallet tx."""
-    tx = wallet.w3.eth.get_transaction(tx_hash)
-    receipt = wallet.w3.eth.get_transaction_receipt(tx_hash)
+    transaction_finder = getattr(wallet.w3, "find_transaction", None)
+    receipt_finder = getattr(wallet.w3, "find_transaction_receipt", None)
+    tx = (transaction_finder(tx_hash) if callable(transaction_finder)
+          else wallet.w3.eth.get_transaction(tx_hash))
+    receipt = (receipt_finder(tx_hash) if callable(receipt_finder)
+               else wallet.w3.eth.get_transaction_receipt(tx_hash))
+    if tx is None or receipt is None:
+        raise ValueError("exact transaction or receipt is absent across all RPC endpoints")
     if _int(receipt.get("status", 0)) != 1:
         raise ValueError("unresolved broadcast receipt is not successful")
     if str(tx.get("from", "")).lower() != wallet.address.lower():
@@ -130,7 +136,7 @@ def main():
                         "archived_path": archived,
                     }
                     recovered_prior_reconciliation = bool(archived)
-            except (FileNotFoundError, StopIteration, TypeError, ValueError, json.JSONDecodeError) as exc:
+            except Exception as exc:
                 result["unresolved_broadcast_match"] = {
                     "tx_hash": str(guard["tx_hash"]), "status": "verification_failed",
                     "error": str(exc),

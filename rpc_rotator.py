@@ -551,6 +551,26 @@ class ResilientWeb3:
             logger.debug("Exact-hash receipt not found across RPCs: %s", last_error)
         return None
 
+    def find_transaction(self, tx_hash):
+        """Look up an exact transaction on every endpoint without rebroadcasting."""
+        last_error = None
+        for endpoint in self.rotator._endpoints:
+            w3 = self.rotator._get_web3_for_url(endpoint.url)
+            try:
+                transaction = w3.eth.get_transaction(tx_hash)
+                if transaction is not None:
+                    endpoint.record_success()
+                    return transaction
+            except Exception as exc:
+                last_error = exc
+                # TransactionNotFound commonly means one endpoint is lagging or
+                # has evicted a pending transaction. Check every independent
+                # view, but never replay the signed payload.
+                continue
+        if last_error:
+            logger.debug("Exact transaction not found across RPCs: %s", last_error)
+        return None
+
 
 class _ResilientNamespace:
     """Proxy for Web3 namespaces (eth, net, etc.) with failover."""

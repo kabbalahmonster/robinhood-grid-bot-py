@@ -49,8 +49,16 @@ def _received_from_logs(receipt, token_address, wallet_address):
 def inspect_buy(w3, tx_hash, token_address, wallet_address):
     """Return exact position economics after validating chain evidence."""
     tx_hash = tx_hash.lower()
-    tx = w3.eth.get_transaction(tx_hash)
-    receipt = w3.eth.get_transaction_receipt(tx_hash)
+    transaction_finder = getattr(w3, "find_transaction", None)
+    receipt_finder = getattr(w3, "find_transaction_receipt", None)
+    tx = (transaction_finder(tx_hash) if callable(transaction_finder)
+          else w3.eth.get_transaction(tx_hash))
+    receipt = (receipt_finder(tx_hash) if callable(receipt_finder)
+               else w3.eth.get_transaction_receipt(tx_hash))
+    if tx is None or receipt is None:
+        raise ValueError(
+            f"{tx_hash}: exact transaction or receipt is absent across all RPC endpoints"
+        )
     if _int(receipt.get("status", 0)) != 1:
         raise ValueError(f"{tx_hash}: transaction did not succeed")
     if str(tx.get("from", "")).lower() != wallet_address.lower():

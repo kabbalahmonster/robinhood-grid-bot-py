@@ -48,6 +48,28 @@ def test_verified_outgoing_tokens_sums_only_managed_token_wallet_outflow():
     assert reconciler.verified_outgoing_tokens(wallet_with(receipt), TOKEN, TX_HASH) == 1000
 
 
+def test_verified_outgoing_tokens_uses_cross_endpoint_exact_hash_finders():
+    receipt = {"status": 1, "logs": [transfer_log(1000)]}
+    w3 = SimpleNamespace(
+        find_transaction=lambda tx_hash: {"from": WALLET} if tx_hash == TX_HASH else None,
+        find_transaction_receipt=lambda tx_hash: receipt if tx_hash == TX_HASH else None,
+    )
+    wallet = SimpleNamespace(address=WALLET, w3=w3)
+
+    assert reconciler.verified_outgoing_tokens(wallet, TOKEN, TX_HASH) == 1000
+
+
+def test_verified_outgoing_tokens_rejects_exact_hash_absent_from_all_endpoints():
+    w3 = SimpleNamespace(
+        find_transaction=lambda _tx_hash: None,
+        find_transaction_receipt=lambda _tx_hash: None,
+    )
+    wallet = SimpleNamespace(address=WALLET, w3=w3)
+
+    with pytest.raises(ValueError, match="absent across all RPC endpoints"):
+        reconciler.verified_outgoing_tokens(wallet, TOKEN, TX_HASH)
+
+
 @pytest.mark.parametrize("receipt,sender", [
     ({"status": 0, "logs": []}, WALLET),
     ({"status": 1, "logs": []}, "0x" + "dd" * 20),
@@ -184,6 +206,61 @@ def test_automatic_zero_deficit_recovers_receipt_proven_gridless_buy(
 
     assert reconciler.main() == 0
     assert calls == [([TX_HASH], True, True)]
+    assert not guard_path.exists()
+
+
+def test_automatic_gridless_recovery_continues_after_exact_hash_lookup_failure(
+        monkeypatch, tmp_path):
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "gridless_positions.json").write_text(json.dumps({
+        "1": {"balance": 100},
+    }))
+    # Force the older sell/audit recovery branch to attempt an exact-hash read
+    # first. Its RPC failure must be contained so gridless buy recovery can run.
+    (data / "position_balance_reconciliations.json").write_text(json.dumps([{
+        "checkout": str(tmp_path), "token_symbol": "TOKEN", "deficit_raw": 50,
+    }]))
+    guard_path = data / "unresolved_broadcast.json"
+    guard_path.write_text(json.dumps({"tx_hash": TX_HASH}))
+
+    class FakeWallet:
+        def __init__(self, _config):
+            self.address = WALLET
+            self.unresolved_broadcast = {"tx_hash": TX_HASH}
+            self.unresolved_broadcast_path = str(guard_path)
+            self.w3 = SimpleNamespace(
+                find_transaction=lambda _tx_hash: (_ for _ in ()).throw(
+                    RuntimeError("all RPC endpoints unavailable")
+                )
+            )
+
+        def get_token_balance(self, _token):
+            return 150, 150
+
+    recovery_calls = []
+
+    def recover(tx_hashes, *, apply, safety_halted):
+        recovery_calls.append((tx_hashes, apply, safety_halted))
+        guard_path.rename(guard_path.with_name(guard_path.name + ".reconciled"))
+        return 0
+
+    config_module = ModuleType("config")
+    config_module.load_config = lambda: SimpleNamespace(
+        token_address=TOKEN, token_symbol="TOKEN", use_gridless=True,
+    )
+    wallet_module = ModuleType("wallet")
+    wallet_module.Wallet = FakeWallet
+    gridless_reconciler_module = ModuleType("gridless_reconciler")
+    gridless_reconciler_module.run_gridless_reconciliation = recover
+    monkeypatch.setitem(sys.modules, "config", config_module)
+    monkeypatch.setitem(sys.modules, "wallet", wallet_module)
+    monkeypatch.setitem(sys.modules, "gridless_reconciler", gridless_reconciler_module)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "argv", ["reconcile-position-balances", "--automatic"])
+
+    assert reconciler.main() == 0
+    assert recovery_calls == [([TX_HASH], True, True)]
     assert not guard_path.exists()
 
 

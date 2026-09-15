@@ -157,7 +157,7 @@ python grid_bot.py
 | `STARTUP_JITTER_SECONDS` | No | 20 | Random delay before the first provider request so fleet restarts do not stampede |
 | `PERFORMANCE_TELEMETRY_EVERY_CYCLES` | No | 10 | Emit one sanitized cycle/RPC performance record every N cycles (slow/error/halted cycles emit immediately) |
 | `AUTO_RECONCILE_UNRESOLVED_BROADCAST` | No | false | While safety-halted, automatically repair and resume only for an exact receipt-proven successful managed-token outflow |
-| `AUTO_RECONCILE_INTERVAL_SECONDS` | No | 30 | Retry interval for safe unresolved-broadcast receipt/reconciliation checks (minimum 5 seconds) |
+| `AUTO_RECONCILE_INTERVAL_SECONDS` | No | 30 | Base interval for safe unresolved-broadcast checks; failures back off exponentially to 30 minutes (minimum 5 seconds) |
 | `ANTI_MEV_JITTER` | No | true | Enable anti-MEV timing jitter |
 | `LOG_LEVEL` | No | INFO | INFO shows operational events only; DEBUG adds full per-round and quote telemetry |
 | `STATE_FILE` | No | ./data/positions.json | Position state file path |
@@ -1174,7 +1174,7 @@ Common failures:
 - Verify sufficient ETH for gas
 - Check token approvals haven't expired
 - If `data/unresolved_broadcast.json` exists, stop the bot and verify its recorded transaction on-chain; never delete the guard or retry the trade blindly
-- Optional `AUTO_RECONCILE_UNRESOLVED_BROADCAST=true` keeps the bot paused while it checks the receipt. It resumes only after a successful wallet-sent transaction proves a managed-token outflow exactly equal to either the current position deficit or the latest matching local reconciliation audit for an already-applied haircut, and the exact guard is archived. Pending/reverted transactions, buys, mismatches, missing audits, RPC failures, and corrupt evidence remain halted for manual recovery.
+- Optional `AUTO_RECONCILE_UNRESOLVED_BROADCAST=true` keeps the bot paused while it checks the exact transaction and receipt across every configured RPC endpoint. It resumes only after a successful wallet-sent transaction proves a managed-token outflow exactly equal to either the current position deficit or the latest matching local reconciliation audit for an already-applied haircut, and the exact guard is archived. Pending/reverted transactions, absent exact hashes, buys, mismatches, missing audits, RPC failures, and corrupt evidence remain halted for manual recovery. Failed checks back off exponentially from `AUTO_RECONCILE_INTERVAL_SECONDS` to 30 minutes instead of hammering RPCs every poll.
 
 ### "Position cost seems wrong"
 - Check the transaction on block explorer
