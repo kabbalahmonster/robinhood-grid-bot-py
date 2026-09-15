@@ -1,6 +1,7 @@
 import json
 import threading
 import time
+from contextlib import contextmanager
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -1181,12 +1182,22 @@ def test_execution_preflight_logs_one_ordered_correlated_record_per_candidate(ca
     cfg = SimpleNamespace(uniswap_api_key="key", weth_address="weth", token_address="token")
     correlated = {**context("sell"), "tournament_id": "round-ordered"}
 
+    @contextmanager
+    def rpc_trace_scope(sink):
+        sink.append({
+            "method": "eth.estimate_gas", "attempts": 1, "failures": 0,
+            "elapsed_ms": 12.5, "endpoint_labels": ["rpc_2"],
+            "client_queue_wait_ms": 0.0,
+        })
+        yield sink
+
     with caplog.at_level(logging.INFO, logger="grid_bot.route_tournament"):
         result = collect_execution_preflight(
             cfg, "wallet", correlated, clients.__getitem__,
             allowance_probe=lambda _token, _spender: 10**15,
             gas_estimate_provider=lambda _quote, _settlement: 100000,
             conversion_gas_estimate_provider=lambda _quote, _settlement: 60000,
+            rpc_trace_scope=rpc_trace_scope,
         )
 
     messages = [record.getMessage() for record in caplog.records
@@ -1200,7 +1211,15 @@ def test_execution_preflight_logs_one_ordered_correlated_record_per_candidate(ca
     assert all("tournament_id=round-ordered" in message for message in messages)
     assert all("candidate_elapsed_ms=" in message for message in candidates)
     assert all("stage_elapsed_ms=" in message for message in candidates)
+    assert all("stage_remaining_ms=" in message for message in candidates)
+    assert all("rpc_trace=eth.estimate_gas:1/0/12.5/0.0/done@rpc_2" in message
+               for message in candidates)
     assert all("quote" in row["stage_elapsed_ms"] for row in result["candidates"])
+    assert all("quote" in row["stage_remaining_ms"] for row in result["candidates"])
+    assert all(row["rpc_trace_summary"] ==
+               "eth.estimate_gas:1/0/12.5/0.0/done@rpc_2"
+               for row in result["candidates"])
+    assert all("secret" not in message for message in candidates)
     assert all(messages.index(message) < winner_index for message in candidates)
 
 
@@ -1219,11 +1238,22 @@ def test_timed_out_preflight_workers_cannot_log_candidates_after_winner(caplog):
 
     cfg = SimpleNamespace(uniswap_api_key="key", weth_address="weth", token_address="token")
     correlated = {**context("sell"), "tournament_id": "round-timeout"}
+
+    @contextmanager
+    def active_rpc_trace(sink):
+        sink.append({
+            "method": "eth.estimate_gas", "attempts": 1, "failures": 0,
+            "elapsed_ms": None, "endpoint_labels": ["rpc_1"],
+            "client_queue_wait_ms": 0.0, "_started": time.perf_counter(),
+        })
+        yield sink
+
     with caplog.at_level(logging.INFO, logger="grid_bot.route_tournament"):
         result = collect_execution_preflight(
             cfg, "wallet", correlated, factory,
             gas_estimate_provider=lambda _quote, _settlement: 100000,
             max_seconds=0.01,
+            rpc_trace_scope=active_rpc_trace,
         )
         # Workers deliberately outlive the aggregate result. Their eventual
         # completion must not append misleading candidate events.
@@ -1238,6 +1268,10 @@ def test_timed_out_preflight_workers_cannot_log_candidates_after_winner(caplog):
     assert all("timeout_stage=quote" in message for message in candidates)
     assert all(row["timeout_stage"] == "quote" for row in result["candidates"])
     assert all("client_init" in row["stage_elapsed_ms"] for row in result["candidates"])
+    assert all("quote" in row["stage_remaining_ms"] for row in result["candidates"])
+    assert all("eth.estimate_gas:1/0/" in row["rpc_trace_summary"]
+               and "/active@rpc_1" in row["rpc_trace_summary"]
+               for row in result["candidates"])
     assert "Route tournament winner" in messages[-1]
 
 

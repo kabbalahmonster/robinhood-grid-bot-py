@@ -10,6 +10,7 @@ the single RPC_URL exactly as before.
 import time
 import logging
 import threading
+from contextlib import contextmanager
 from copy import deepcopy
 from typing import Optional, List
 from dataclasses import dataclass, field
@@ -219,6 +220,13 @@ class RPCRotator:
             if ep.url == url:
                 ep.record_success()
                 break
+
+    def endpoint_label(self, url: str) -> str:
+        """Return a stable process-local ordinal without exposing an RPC URL."""
+        for index, endpoint in enumerate(self._endpoints, start=1):
+            if endpoint.url == url:
+                return f"rpc_{index}"
+        return "rpc_unknown"
     
     def report_failure(self, url: str, error: Optional[Exception] = None):
         """Report a failed request to an endpoint."""
@@ -304,13 +312,41 @@ class ResilientWeb3:
         self._current_url: Optional[str] = None
         self._w3: Optional[Web3] = None
         self._telemetry_lock = threading.Lock()
+        self._trace_local = threading.local()
         self._telemetry = {
             "logical_calls": 0, "attempts": 0, "failures": 0,
             "total_ms": 0.0, "methods": {},
         }
         self._refresh_connection()
 
-    def _record_telemetry(self, method, started, attempts, failures):
+    def _trace_event_started(self, method):
+        event = {
+            "method": method, "attempts": 0, "failures": 0,
+            "elapsed_ms": None, "endpoint_labels": [],
+            "client_queue_wait_ms": 0.0, "_started": time.perf_counter(),
+        }
+        for sink in getattr(getattr(self, "_trace_local", None), "sinks", ()):
+            sink.append(event)
+        return event
+
+    @contextmanager
+    def telemetry_scope(self, sink=None):
+        """Collect sanitized RPC observations made by the current worker thread."""
+        if sink is None:
+            sink = []
+        local = getattr(self, "_trace_local", None)
+        if local is None:
+            local = self._trace_local = threading.local()
+        sinks = getattr(local, "sinks", None)
+        if sinks is None:
+            sinks = local.sinks = []
+        sinks.append(sink)
+        try:
+            yield sink
+        finally:
+            sinks.pop()
+
+    def _record_telemetry(self, method, started, attempts, failures, trace_event=None):
         """Record aggregate RPC costs without arguments, URLs, or payloads."""
         lock = getattr(self, "_telemetry_lock", None)
         if lock is None:
@@ -322,6 +358,11 @@ class ResilientWeb3:
                     "total_ms": 0.0, "methods": {},
                 }
             elapsed_ms = max(0.0, (time.perf_counter() - started) * 1000)
+            if trace_event is not None:
+                trace_event["attempts"] = int(attempts)
+                trace_event["failures"] = int(failures)
+                trace_event["elapsed_ms"] = round(elapsed_ms, 1)
+                trace_event.pop("_started", None)
             self._telemetry["logical_calls"] += 1
             self._telemetry["attempts"] += int(attempts)
             self._telemetry["failures"] += int(failures)
@@ -367,27 +408,37 @@ class ResilientWeb3:
         started = time.perf_counter()
         attempts_made = 0
         failures = 0
+        trace_event = self._trace_event_started(func_name)
         
         for attempt in range(self.MAX_RETRIES):
             attempts_made += 1
+            current_w3 = self._w3
+            attempt_url = str(getattr(
+                getattr(current_w3, "provider", None), "endpoint_uri", "unknown"
+            ))
+            trace_event["attempts"] = attempts_made
+            trace_event["endpoint_labels"].append(
+                self.rotator.endpoint_label(attempt_url)
+            )
             try:
                 # Navigate to the method (e.g., w3.eth.get_balance)
-                obj = self._w3
+                obj = current_w3
                 for part in func_name.split('.'):
                     obj = getattr(obj, part)
                 
                 result = obj(*args, **kwargs)
                 
                 # Success — report and return
-                if self._current_url:
-                    self.rotator.report_success(self._current_url)
+                if attempt_url != "unknown":
+                    self.rotator.report_success(attempt_url)
                 self._record_telemetry(
-                    func_name, started, attempts_made, failures,
+                    func_name, started, attempts_made, failures, trace_event,
                 )
                 return result
             
             except Exception as e:
                 failures += 1
+                trace_event["failures"] = failures
                 last_error = e
                 error_str = str(e).lower()
                 
@@ -426,8 +477,8 @@ class ResilientWeb3:
                     or (transaction_broadcast and capability_error)
                 )
                 
-                if self._current_url:
-                    self.rotator.report_failure(self._current_url, e)
+                if attempt_url != "unknown":
+                    self.rotator.report_failure(attempt_url, e)
                 
                 if not is_retryable:
                     # Non-retryable errors stop at whichever endpoint returned
@@ -435,7 +486,7 @@ class ResilientWeb3:
                     # failover: a later ambiguous broadcast timeout must not be
                     # offered to yet another endpoint.
                     self._record_telemetry(
-                        func_name, started, attempts_made, failures,
+                        func_name, started, attempts_made, failures, trace_event,
                     )
                     raise
                 
@@ -447,7 +498,9 @@ class ResilientWeb3:
                     self._refresh_connection()
                     time.sleep(0.5 * (attempt + 1))  # Brief backoff
         
-        self._record_telemetry(func_name, started, attempts_made, failures)
+        self._record_telemetry(
+            func_name, started, attempts_made, failures, trace_event,
+        )
         raise ConnectionError(
             f"All RPC endpoints failed after {self.MAX_RETRIES} attempts. "
             f"Last error: {last_error}"

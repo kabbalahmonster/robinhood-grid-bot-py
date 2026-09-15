@@ -1347,6 +1347,7 @@ class GridBot:
                 gas_estimate_provider=gas_estimate_provider,
                 conversion_gas_estimate_provider=conversion_gas_estimate_provider,
                 approval_gas_estimate_provider=approval_gas_estimate_provider,
+                rpc_trace_scope=getattr(self.wallet.w3, "telemetry_scope", None),
                 # Gate-only collection gets twelve seconds: Uniswap indicative
                 # routes require both /quote and read-only /swap preparation
                 # before local gas simulation. Candidates run in parallel, so

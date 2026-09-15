@@ -1801,7 +1801,12 @@ initialization, quote retrieval, transaction preparation, gas-price lookup,
 swap/conversion/approval gas estimation, allowance lookup, and scoring. A
 deadline placeholder includes `timeout_stage`, identifying the operation that
 was still active without exposing provider response text, addresses, calldata,
-headers, or credentials.
+headers, or credentials. `stage_remaining_ms` records the remaining absolute
+observation budget when each stage began. When the resilient RPC transport is
+active, `rpc_trace` adds candidate-worker method totals in the bounded form
+`method:attempts/failures/elapsed_ms/client_queue_wait_ms/state@endpoint`.
+Endpoints are process-local ordinals such as `rpc_1`; URLs and RPC arguments are
+never logged. `unavailable` means the transport cannot provide a scoped trace.
 
 `ROUTE_TOURNAMENT_SPECULATIVE_FALLBACK_SECONDS` is an opt-in, sell-only gate
 canary optimization. A positive value starts the ordinary baseline quote on an
