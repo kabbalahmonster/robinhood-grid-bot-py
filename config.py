@@ -194,6 +194,9 @@ class BotConfig:
     route_tournament_shadow_timeout_seconds: float = 4.0
     route_tournament_gate_timeout_seconds: float = 12.0
     route_tournament_speculative_fallback_seconds: float = 0.0
+    executable_pnl_sample_seconds: float = 120.0
+    executable_pnl_near_trigger_seconds: float = 60.0
+    executable_pnl_near_trigger_margin_percent: float = 5.0
     
     # Derived properties
     @property
@@ -241,6 +244,24 @@ class BotConfig:
             raise ValueError(
                 "ROUTE_TOURNAMENT_SPECULATIVE_FALLBACK_SECONDS must be 0 (disabled) "
                 "or at least 1 second and below ROUTE_TOURNAMENT_GATE_TIMEOUT_SECONDS"
+            )
+        sample_seconds = float(getattr(self, "executable_pnl_sample_seconds", 120))
+        near_seconds = float(getattr(self, "executable_pnl_near_trigger_seconds", 60))
+        near_margin = float(getattr(
+            self, "executable_pnl_near_trigger_margin_percent", 5
+        ))
+        if sample_seconds != 0 and not 30 <= sample_seconds <= 3600:
+            raise ValueError(
+                "EXECUTABLE_PNL_SAMPLE_SECONDS must be 0 (disabled) or between 30 and 3600"
+            )
+        if sample_seconds and not 30 <= near_seconds <= sample_seconds:
+            raise ValueError(
+                "EXECUTABLE_PNL_NEAR_TRIGGER_SECONDS must be between 30 and "
+                "EXECUTABLE_PNL_SAMPLE_SECONDS"
+            )
+        if not math.isfinite(near_margin) or not 0 <= near_margin <= 100:
+            raise ValueError(
+                "EXECUTABLE_PNL_NEAR_TRIGGER_MARGIN_PERCENT must be between 0 and 100"
             )
         # Check required fields
         if not self.private_key or self.private_key == "0x...":
@@ -501,6 +522,15 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
         ),
         route_tournament_speculative_fallback_seconds=float(
             os.getenv("ROUTE_TOURNAMENT_SPECULATIVE_FALLBACK_SECONDS", "0")
+        ),
+        executable_pnl_sample_seconds=float(
+            os.getenv("EXECUTABLE_PNL_SAMPLE_SECONDS", "120")
+        ),
+        executable_pnl_near_trigger_seconds=float(
+            os.getenv("EXECUTABLE_PNL_NEAR_TRIGGER_SECONDS", "60")
+        ),
+        executable_pnl_near_trigger_margin_percent=float(
+            os.getenv("EXECUTABLE_PNL_NEAR_TRIGGER_MARGIN_PERCENT", "5")
         ),
         swap_fallback_provider=os.getenv("SWAP_FALLBACK_PROVIDER", "sushiswap"),
         sushi_api_key=os.getenv("SUSHI_API_KEY", ""),
