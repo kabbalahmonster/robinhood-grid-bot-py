@@ -154,9 +154,9 @@ python grid_bot.py
 | `GAS_PRICE_MULTIPLIER` | No | 1.05 | Safety multiplier applied to current/quoted gas price; values below 1 are clamped |
 | **Bot Behavior** ||||
 | `POLL_INTERVAL_SECONDS` | No | 6 | Price check interval in seconds |
-| `EXECUTABLE_PNL_SAMPLE_SECONDS` | No | 120 | Dashboard-only exact reverse-quote cadence for the next gridless sell candidate; `0` disables |
-| `EXECUTABLE_PNL_NEAR_TRIGGER_SECONDS` | No | 60 | Faster dashboard reverse-quote cadence when spot P&L is near the sell trigger |
-| `EXECUTABLE_PNL_NEAR_TRIGGER_MARGIN_PERCENT` | No | 5 | Enter the faster cadence this many percentage points below the sell trigger |
+| `BIDIRECTIONAL_PNL_ENABLED` | No | true | Alternate exact buy- and sell-side net P&L observations for gridless triggers and dashboard display |
+| `BIDIRECTIONAL_PNL_QUOTE_TIMEOUT_SECONDS` | No | 4 | Per-request timeout for read-only bidirectional P&L quotes |
+| `BIDIRECTIONAL_PNL_MAX_AGE_SECONDS` | No | 90 | Maximum cached quote age allowed to influence a trigger or dashboard P&L |
 | `STARTUP_JITTER_SECONDS` | No | 20 | Random delay before the first provider request so fleet restarts do not stampede |
 | `PERFORMANCE_TELEMETRY_EVERY_CYCLES` | No | 10 | Emit one sanitized cycle/RPC performance record every N cycles (slow/error/halted cycles emit immediately) |
 | `AUTO_RECONCILE_UNRESOLVED_BROADCAST` | No | false | While safety-halted, automatically repair and resume only for an exact receipt-proven successful managed-token outflow |

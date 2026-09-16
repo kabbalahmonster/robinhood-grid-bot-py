@@ -774,10 +774,11 @@ class GridBot:
         # handoff must be observed for one full poll before it may authorize a
         # sale; materially divergent providers remain visibly blocked.
         self._last_sell_quotes = {}
-        # Dashboard-only exit economics. This sampler never prepares, approves,
-        # signs, broadcasts, or grants execution authority to a cached quote.
-        self._executable_pnl_sample = None
-        self._next_executable_pnl_sample_at = 0.0
+        # Read-only bidirectional market observations. Cached quotes can wake a
+        # strategy check, but can never prepare, approve, sign, or broadcast.
+        # The execution path always obtains and validates a fresh route.
+        self._pnl_quotes = {"buy": None, "sell": None}
+        self._next_pnl_poll_side = "buy"
         self.profit_tracker = ProfitTracker()
         self.dashboard_trades_file = "data/dashboard_trades.json"
         self.dashboard_trades = self._load_dashboard_trades()
@@ -3013,11 +3014,11 @@ class GridBot:
             )
             return raw_price * self.token_unit / 10**18 if raw_price is not None else None
     
-    def check_buys(self, price):
+    def check_buys(self, price, position_pnls=None):
         """Check for buy opportunities."""
         # Gridless mode
         if getattr(self.config, 'use_gridless', False):
-            return self._check_buys_gridless(price)
+            return self._check_buys_gridless(price, position_pnls)
         
         # Get available ETH/WETH
         if getattr(self.config, 'use_eth_trading', False):
@@ -3053,11 +3054,11 @@ class GridBot:
                     self.execute_buy(pos_id, price)
                     return  # One buy per cycle
     
-    def check_sells(self, price):
+    def check_sells(self, price, position_pnls=None):
         """Check for sell opportunities."""
         # Gridless mode
         if getattr(self.config, 'use_gridless', False):
-            return self._check_sells_gridless(price)
+            return self._check_sells_gridless(price, position_pnls)
         
         min_profit_percent = getattr(self.config, 'min_profit_percent', 2.0)  # Default 2% minimum profit
         slippage_buffer = 1.5  # Require extra 1.5% to cover slippage
@@ -3112,205 +3113,255 @@ class GridBot:
         )
         return sell_amount, sold_cost_wei
 
-    def _executable_pnl_sample_interval(self, spot_pnl):
-        """Return the jittered dashboard sampling interval for current conditions."""
-        normal = float(getattr(self.config, "executable_pnl_sample_seconds", 120) or 0)
-        if normal <= 0:
-            return 0.0
-        near = float(getattr(
-            self.config, "executable_pnl_near_trigger_seconds", min(60, normal)
-        ))
-        margin = float(getattr(
-            self.config, "executable_pnl_near_trigger_margin_percent", 5
-        ))
-        trigger = float(getattr(self.config, "gridless_sell_threshold", 5))
-        base = near if float(spot_pnl) >= trigger - margin else normal
-        # Startup jitter already separates the first observations. Per-sample
-        # jitter prevents a fleet from converging again after long runtimes.
-        return max(1.0, base * random.uniform(0.9, 1.1))
+    def _next_gridless_buy_amount_wei(self, positions, trade_balance_eth):
+        """Return the exact principal the next gridless buy would spend."""
+        slots = self._available_gridless_slots(positions)
+        divisor = slots if slots > 0 else max(
+            1, int(getattr(self.config, "max_active_positions", 1))
+        )
+        reserve = (
+            float(getattr(self.config, "eth_gas_reserve", 0.001))
+            if getattr(self.config, "use_eth_trading", False) else 0.0
+        )
+        available = max(0.0, float(trade_balance_eth) - reserve)
+        tradeable = float(getattr(
+            self.config, "tradeable_balance_percent", 90.0
+        )) / 100.0
+        return max(0, int(available * tradeable * 10**18 / divisor))
 
-    def _tournament_executable_pnl_sample(self, position_id, sell_amount, sold_cost_wei):
-        """Reuse authoritative same-cycle tournament economics when available."""
-        comparison = getattr(self, "_route_comparisons", {}).get("sell")
-        if not isinstance(comparison, dict) or comparison.get("mode") != "execution_preflight":
-            return None
-        if comparison.get("status") in {
-            "completed", "execution_aborted", "execution_failed", "settlement_unresolved"
-        }:
-            return None
-        winner = comparison.get("selected_hypothetical_winner")
-        rows = comparison.get("candidates")
-        if not isinstance(winner, dict) or not isinstance(rows, list):
-            return None
-        row = next((item for item in rows if isinstance(item, dict)
-                    and item.get("provider") == winner.get("provider")
-                    and item.get("settlement") == winner.get("settlement")), None)
-        if not row or row.get("projected_profit_percent") is None:
-            return None
-        try:
-            pnl = float(row["projected_profit_percent"])
-            net_return_wei = int(row["projected_net_score"])
-            gas_wei = int(row.get("projected_total_gas_wei") or 0)
-        except (TypeError, ValueError, KeyError):
-            return None
-        if not all(map(math.isfinite, (pnl,))):
-            return None
-        return {
-            "position_id": str(position_id),
-            "sell_amount_raw": int(sell_amount),
-            "sold_cost_wei": int(sold_cost_wei),
-            "pnl_percent": round(pnl, 2),
-            "net_return_eth": round(net_return_wei / 10**18, 10),
-            "projected_gas_eth": round(gas_wei / 10**18, 10),
-            "provider": str(row.get("provider") or "unknown"),
-            "settlement": str(row.get("settlement") or "unknown"),
-            "basis": "tournament",
-            "quoted_at": str(comparison.get("updated_at") or datetime.now().astimezone().isoformat()),
-            "sampled_monotonic": time.monotonic(),
-        }
-
-    def _quote_executable_pnl_sample(self, position_id, sell_amount, sold_cost_wei):
-        """Fetch one read-only exact-input reverse quote and price conservative exit P&L."""
+    def _fetch_pnl_observation_quote(self, direction, amount):
+        """Fetch one exact-input, read-only quote for bidirectional P&L."""
+        amount = int(amount)
+        if amount <= 0:
+            return None, None
         used_provider = {"name": str(getattr(self.provider, "name", "unknown"))}
 
         def fetch():
             used_provider["name"] = str(getattr(self.provider, "name", "unknown"))
             kwargs = dict(
-                sell_token=self.config.token_address,
-                buy_token=self.trade_token_address,
-                sell_amount=int(sell_amount),
+                sell_token=(self.trade_token_address if direction == "buy"
+                            else self.config.token_address),
+                buy_token=(self.config.token_address if direction == "buy"
+                           else self.trade_token_address),
+                sell_amount=amount,
                 taker_address=self.wallet.address,
                 slippage_percentage=self._swap_slippage_fraction(),
                 apply_jitter_to_price=False,
-                quote_timeout_seconds=4,
+                quote_timeout_seconds=float(getattr(
+                    self.config, "bidirectional_pnl_quote_timeout_seconds", 4
+                )),
             )
             try:
                 return self.api_client.get_quote(**kwargs)
             except TypeError as exc:
-                # Legacy 0x does not expose a per-request timeout argument.
-                # Do not retry real provider errors that happen to be TypeError.
                 if "quote_timeout_seconds" not in str(exc):
                     raise
                 kwargs.pop("quote_timeout_seconds")
                 return self.api_client.get_quote(**kwargs)
 
         runner = getattr(self.provider, "run_with_fallback", None)
-        quote = runner(fetch, "executable P&L sample") if callable(runner) else fetch()
+        quote = runner(fetch, f"{direction}-side P&L observation") if callable(runner) else fetch()
         if not getattr(quote, "success", False) or not self._quote_matches_exact_input(
-            quote, sell_amount
+            quote, amount
         ):
-            return None
-        floor_wei = self._taxed_quote_return_wei(quote)
-        if floor_wei <= 0:
-            return None
-        provider_gas = int(getattr(quote, "gas", 0) or 300000)
-        gas_limit = int(provider_gas * float(getattr(self.config, "gas_limit_multiplier", 1.05)))
-        gas_price = int(self.wallet.normal_gas_price())
-        projected_gas_wei = gas_limit * gas_price
-        net_return_wei = max(0, floor_wei - projected_gas_wei)
-        pnl = (net_return_wei - int(sold_cost_wei)) * 100 / int(sold_cost_wei)
-        return {
-            "position_id": str(position_id),
-            "sell_amount_raw": int(sell_amount),
-            "sold_cost_wei": int(sold_cost_wei),
-            "pnl_percent": round(pnl, 2),
-            "net_return_eth": round(net_return_wei / 10**18, 10),
-            "projected_gas_eth": round(projected_gas_wei / 10**18, 10),
-            "provider": used_provider["name"],
-            "settlement": "native" if self.config.use_eth_trading else "weth",
-            "basis": "exact_reverse_quote",
-            "quoted_at": datetime.now().astimezone().isoformat(),
-            "sampled_monotonic": time.monotonic(),
-        }
+            return None, used_provider["name"]
+        return quote, used_provider["name"]
 
-    def _refresh_executable_pnl_sample(self, positions, price, now=None):
-        """Refresh one display-only exit estimate without affecting trading state."""
-        interval_enabled = float(getattr(
-            self.config, "executable_pnl_sample_seconds", 120
-        ) or 0)
-        if interval_enabled <= 0 or not positions:
-            self._executable_pnl_sample = None
+    def _observation_gas_wei(self, quote, direction, amount):
+        """Project swap plus any immediately-required ERC-20 approval gas."""
+        default_gas = 350000 if direction == "buy" else 300000
+        # Polling must never run local calldata simulation. Provider gas plus
+        # the wallet's fresh gas-price oracle gives conservative economics
+        # without turning every observation into an eth_estimateGas call.
+        gas_price = int(self.wallet.normal_gas_price())
+        gas_limit = int(
+            int(getattr(quote, "gas", 0) or default_gas)
+            * float(getattr(self.config, "gas_limit_multiplier", 1.05))
+        )
+        total = gas_limit * gas_price
+        approval_token = None
+        if direction == "sell":
+            approval_token = self.config.token_address
+        elif not getattr(self.config, "use_eth_trading", False):
+            approval_token = self.config.weth_address
+        spender = getattr(quote, "allowance_target", None) or self.config.zero_x_proxy
+        if approval_token and spender:
+            allowance = self.wallet.check_allowance(
+                approval_token, spender, use_permit2=False,
+            )
+            if int(allowance) < int(amount):
+                approval = self.wallet.build_token_approval_transaction(
+                    approval_token, spender, int(amount),
+                )
+                approval_price = int(
+                    approval.get("gasPrice") or approval.get("maxFeePerGas")
+                    or gas_price
+                )
+                total += int(approval["gas"]) * approval_price
+        return int(total)
+
+    def _fresh_pnl_sample(self, direction, now=None):
+        sample = getattr(self, "_pnl_quotes", {}).get(direction)
+        if not isinstance(sample, dict):
             return None
+        now = time.monotonic() if now is None else float(now)
+        max_age = float(getattr(
+            self.config, "bidirectional_pnl_max_age_seconds", 90
+        ))
+        return sample if now - float(sample.get("sampled_monotonic", 0)) <= max_age else None
+
+    def _bidirectional_position_pnls(self, positions, now=None):
+        """Return per-position net buy marks and extrapolated net sell exits."""
         from gridless import calculate_pnl
-        candidates = []
+        buy_sample = self._fresh_pnl_sample("buy", now)
+        sell_sample = self._fresh_pnl_sample("sell", now)
+        result = {}
         for position_id, position in positions.items():
+            row = {}
+            if buy_sample is not None:
+                economic_position = dict(position)
+                base_cost = int(
+                    position.get("cost_wei", 0)
+                    or int(position.get("cost", 0) or 0) * 10**9
+                )
+                economic_position["cost_wei"] = base_cost + int(
+                    position.get("deferred_sell_gas_wei", 0) or 0
+                )
+                row["buy_pnl"] = calculate_pnl(
+                    economic_position, float(buy_sample["price_eth_per_token"]),
+                    self.token_decimals,
+                )
+            if sell_sample is not None:
+                sell_amount, sold_cost_wei = self._gridless_sell_terms(position)
+                quoted_amount = int(sell_sample["sell_amount_raw"])
+                if sell_amount > 0 and sold_cost_wei > 0 and quoted_amount > 0:
+                    floor_wei = (
+                        int(sell_sample["floor_return_wei"]) * int(sell_amount)
+                        // quoted_amount
+                    )
+                    net_wei = floor_wei - int(sell_sample["projected_gas_wei"])
+                    row["sell_pnl"] = (
+                        (net_wei - sold_cost_wei) * 100 / sold_cost_wei
+                    )
+            result[str(position_id)] = row
+        return result
+
+    def _next_sell_observation_position(self, positions, now=None):
+        """Pick the position most likely to sell next using current net marks."""
+        pnls = self._bidirectional_position_pnls(positions, now)
+        ranked = []
+        for position_id, position in positions.items():
+            values = pnls.get(str(position_id), {})
+            ranking_pnl = values.get("sell_pnl", values.get("buy_pnl", float("-inf")))
             sell_amount, sold_cost_wei = self._gridless_sell_terms(position)
             if sell_amount > 0 and sold_cost_wei > 0:
-                candidates.append((
-                    calculate_pnl(position, price, self.token_decimals),
-                    str(position_id), position, sell_amount, sold_cost_wei,
-                ))
-        if not candidates:
-            self._executable_pnl_sample = None
-            return None
-        spot_pnl, position_id, _position, sell_amount, sold_cost_wei = max(
-            candidates, key=lambda item: (item[0], item[1])
-        )
-        sample = getattr(self, "_executable_pnl_sample", None)
-        identity = (position_id, int(sell_amount), int(sold_cost_wei))
-        if sample and (
-            sample.get("position_id"), sample.get("sell_amount_raw"), sample.get("sold_cost_wei")
-        ) != identity:
-            sample = None
-            self._executable_pnl_sample = None
-            self._next_executable_pnl_sample_at = 0.0
+                ranked.append((float(ranking_pnl), str(position_id), sell_amount, sold_cost_wei))
+        return max(ranked, default=None, key=lambda item: (item[0], item[1]))
 
-        reused = self._tournament_executable_pnl_sample(
-            position_id, sell_amount, sold_cost_wei
-        )
-        if reused is not None:
-            self._executable_pnl_sample = reused
-            self._next_executable_pnl_sample_at = (
-                (time.monotonic() if now is None else float(now))
-                + self._executable_pnl_sample_interval(spot_pnl)
-            )
-            return reused
-
+    def _refresh_bidirectional_pnl(self, positions, trade_balance_eth, now=None):
+        """Refresh one side per cycle, alternating to keep request volume flat."""
+        if not getattr(self.config, "bidirectional_pnl_enabled", True):
+            return self._bidirectional_position_pnls(positions, now)
         now = time.monotonic() if now is None else float(now)
-        if sample is not None and now < float(getattr(
-            self, "_next_executable_pnl_sample_at", 0
-        )):
-            return sample
-        # Schedule before I/O so a failed provider cannot create a request loop
-        # on every ordinary price poll. The last valid sample remains visible.
-        self._next_executable_pnl_sample_at = (
-            now + self._executable_pnl_sample_interval(spot_pnl)
-        )
-        try:
-            refreshed = self._quote_executable_pnl_sample(
-                position_id, sell_amount, sold_cost_wei
-            )
-        except Exception as exc:
-            logger.debug("Executable P&L sample unavailable: %s", exc)
-            return sample
-        if refreshed is not None:
-            self._executable_pnl_sample = refreshed
-            logger.info(
-                "Executable P&L sample position=%s provider=%s pnl=%+.2f%% interval=%.1fs",
-                position_id, refreshed["provider"], refreshed["pnl_percent"],
-                self._next_executable_pnl_sample_at - now,
-            )
-            return refreshed
-        return sample
+        side = getattr(self, "_next_pnl_poll_side", "buy")
+        if not positions:
+            side = "buy"
+        elif self._fresh_pnl_sample("buy", now) is None:
+            side = "buy"
+        elif self._fresh_pnl_sample("sell", now) is None:
+            side = "sell"
 
-    @staticmethod
-    def _attach_executable_pnl_sample(positions_data, sample):
-        if not isinstance(sample, dict):
-            return positions_data
-        position = next((item for item in positions_data
-                         if str(item.get("id")) == sample.get("position_id")), None)
-        if position is None:
-            return positions_data
-        position.update({
-            "executable_pnl": sample["pnl_percent"],
-            "executable_net_return_eth": sample["net_return_eth"],
-            "executable_projected_gas_eth": sample["projected_gas_eth"],
-            "executable_quote_provider": sample["provider"],
-            "executable_quote_settlement": sample["settlement"],
-            "executable_quote_basis": sample["basis"],
-            "executable_quote_at": sample["quoted_at"],
-            "executable_sell_amount_raw": str(sample["sell_amount_raw"]),
-        })
+        try:
+            if side == "buy":
+                amount = self._next_gridless_buy_amount_wei(
+                    positions, trade_balance_eth,
+                ) or 10**15
+                quote, provider = self._fetch_pnl_observation_quote("buy", amount)
+                if quote is not None:
+                    output_floor = self._taxed_quote_return_wei(quote)
+                    gas_wei = self._observation_gas_wei(quote, "buy", amount)
+                    if output_floor > 0:
+                        effective_cost_wei = int(amount) + gas_wei
+                        market_price = (
+                            int(amount) / 10**18
+                            / (output_floor / self.token_unit)
+                        )
+                        price = (
+                            effective_cost_wei / 10**18
+                            / (output_floor / self.token_unit)
+                        )
+                        self._pnl_quotes["buy"] = {
+                            "direction": "buy",
+                            "sell_amount_raw": int(amount),
+                            "floor_output_raw": int(output_floor),
+                            "projected_gas_wei": gas_wei,
+                            "market_price_eth_per_token": market_price,
+                            "price_eth_per_token": price,
+                            "provider": provider,
+                            "settlement": "native" if self.config.use_eth_trading else "weth",
+                            "basis": "exact_buy_quote_net",
+                            "quoted_at": datetime.now().astimezone().isoformat(),
+                            "sampled_monotonic": now,
+                        }
+            else:
+                target = self._next_sell_observation_position(positions, now)
+                if target is not None:
+                    _, position_id, sell_amount, sold_cost_wei = target
+                    quote, provider = self._fetch_pnl_observation_quote(
+                        "sell", sell_amount,
+                    )
+                    if quote is not None:
+                        floor_wei = self._taxed_quote_return_wei(quote)
+                        gas_wei = self._observation_gas_wei(
+                            quote, "sell", sell_amount,
+                        )
+                        if floor_wei > 0:
+                            self._pnl_quotes["sell"] = {
+                                "direction": "sell",
+                                "position_id": position_id,
+                                "sell_amount_raw": int(sell_amount),
+                                "sold_cost_wei": int(sold_cost_wei),
+                                "floor_return_wei": int(floor_wei),
+                                "projected_gas_wei": int(gas_wei),
+                                "provider": provider,
+                                "settlement": "native" if self.config.use_eth_trading else "weth",
+                                "basis": "exact_sell_quote_extrapolated_net",
+                                "quoted_at": datetime.now().astimezone().isoformat(),
+                                "sampled_monotonic": now,
+                            }
+        except Exception as exc:
+            logger.debug("%s-side P&L observation unavailable: %s", side, exc)
+        finally:
+            self._next_pnl_poll_side = "sell" if side == "buy" and positions else "buy"
+        return self._bidirectional_position_pnls(positions, now)
+
+    def _attach_bidirectional_pnls(self, positions_data, position_pnls, now=None):
+        now = time.monotonic() if now is None else float(now)
+        buy_sample = self._fresh_pnl_sample("buy", now)
+        sell_sample = self._fresh_pnl_sample("sell", now)
+        for row in positions_data:
+            values = position_pnls.get(str(row.get("id")), {})
+            if values.get("buy_pnl") is not None and buy_sample is not None:
+                row.update({
+                    "buy_pnl": round(values["buy_pnl"], 2),
+                    "buy_quote_at": buy_sample["quoted_at"],
+                    "buy_quote_provider": buy_sample["provider"],
+                    "buy_projected_gas_eth": round(
+                        int(buy_sample["projected_gas_wei"]) / 10**18, 10
+                    ),
+                })
+                row["pnl"] = row["buy_pnl"]
+            if values.get("sell_pnl") is not None and sell_sample is not None:
+                row.update({
+                    "sell_pnl": round(values["sell_pnl"], 2),
+                    "sell_quote_at": sell_sample["quoted_at"],
+                    "sell_quote_provider": sell_sample["provider"],
+                    "sell_quote_source_position_id": sell_sample["position_id"],
+                    "sell_projected_gas_eth": round(
+                        int(sell_sample["projected_gas_wei"]) / 10**18, 10
+                    ),
+                    "sell_quote_basis": sell_sample["basis"],
+                })
         return positions_data
 
     def _defer_sell_gas_cost(self, position_id, gas_wei, *, gridless_position):
@@ -3338,7 +3389,7 @@ class GridBot:
         )
         self.save_positions()
 
-    def _check_buys_gridless(self, price):
+    def _check_buys_gridless(self, price, position_pnls=None):
         """Gridless buy logic - buy when no positions or top position P&L <= threshold."""
         from gridless import should_buy, load_positions, add_position
 
@@ -3363,7 +3414,9 @@ class GridBot:
         gridless_positions = load_positions()
         
         # Check if we should buy
-        should_buy_flag, reason = should_buy(gridless_positions, price, self.config)
+        should_buy_flag, reason = should_buy(
+            gridless_positions, price, self.config, position_pnls
+        )
         if not should_buy_flag:
             logger.debug(f"Gridless: No buy - {reason}")
             return
@@ -3454,7 +3507,19 @@ class GridBot:
                 # the strategy. A route returning more tokens for the principal
                 # is price improvement, not market recovery, and must not veto
                 # an otherwise valid buy.
-                pnl_at_trigger_price = calculate_pnl(top[1], price, self.token_decimals)
+                economic_top = dict(top[1])
+                economic_top["cost_wei"] = int(
+                    top[1].get("cost_wei", 0)
+                    or int(top[1].get("cost", 0) or 0) * 10**9
+                ) + int(top[1].get("deferred_sell_gas_wei", 0) or 0)
+                buy_sample = self._fresh_pnl_sample("buy")
+                net_trigger_price = (
+                    float(buy_sample["price_eth_per_token"])
+                    if buy_sample is not None else price
+                )
+                pnl_at_trigger_price = calculate_pnl(
+                    economic_top, net_trigger_price, self.token_decimals
+                )
                 buy_threshold = getattr(self.config, 'gridless_buy_threshold', -10.0)
                 
                 # Calculate block threshold as percentage of threshold distance from 0
@@ -3686,7 +3751,7 @@ class GridBot:
     
     @_with_tournament_terminal("sell")
     @_with_swap_provider_fallback
-    def _check_sells_gridless(self, price):
+    def _check_sells_gridless(self, price, position_pnls=None):
         """Gridless sell logic - sell when P&L >= threshold or stoploss triggered."""
         from gridless import load_positions, find_sell_candidate, calculate_pnl, remove_position, get_buy_price
         
@@ -3706,7 +3771,15 @@ class GridBot:
         best_pnl = float('-inf')
         
         for pos_id, pos in gridless_positions.items():
-            pnl = calculate_pnl(pos, price, self.token_decimals)
+            observed = (position_pnls or {}).get(str(pos_id), {})
+            pnl = observed.get("sell_pnl")
+            if pnl is None:
+                # Bidirectional mode fails closed when its sell-side quote is
+                # missing or stale. Legacy mode retains the original mark.
+                if (getattr(self.config, "bidirectional_pnl_enabled", True)
+                        and hasattr(self, "_pnl_quotes")):
+                    continue
+                pnl = calculate_pnl(pos, price, self.token_decimals)
             
             # Check stoploss first (highest priority)
             if stoploss_enabled and pnl <= stoploss_threshold:
@@ -3864,7 +3937,7 @@ class GridBot:
         
         if projected_net_profit_eth < min_profit_eth:
             buy_price = get_buy_price(pos, self.token_decimals)
-            pnl_at_check = calculate_pnl(pos, price, self.token_decimals)
+            pnl_at_check = best_pnl
             logger.info(
                 "⏸️  Position #%s at %.1f%% P&L but projected net profit "
                 "(%.6f after %.6f gas) < min (%.6f) - skipping",
@@ -5549,12 +5622,27 @@ class GridBot:
         # Calculate moonbag (tokens in wallet not in positions)
         moonbag_balance = (int(token_raw) - int(position_balance_raw)) / self.token_unit
         
-        # Get price
+        # Refresh exactly one market side per cycle in gridless mode. Buy and
+        # sell observations alternate, preserving the old one-request cadence.
         phase_started = time.perf_counter()
-        price = self.get_token_price()
+        position_pnls = {}
+        if use_gridless and getattr(self.config, "bidirectional_pnl_enabled", True):
+            trade_balance = eth_bal if getattr(
+                self.config, "use_eth_trading", False
+            ) else weth_bal
+            position_pnls = self._refresh_bidirectional_pnl(
+                gridless_positions, trade_balance,
+            )
+            buy_sample = self._fresh_pnl_sample("buy")
+            price = (
+                float(buy_sample["market_price_eth_per_token"])
+                if buy_sample is not None else None
+            )
+        else:
+            price = self.get_token_price()
         self._cycle_phase_ms["price"] = (time.perf_counter() - phase_started) * 1000
         if price is None:
-            logger.warning("Could not get price")
+            logger.warning("Could not get a fresh buy-side net price")
             return
         
         # Check for compact/debug round telemetry. Normal INFO operation is
@@ -5720,7 +5808,7 @@ class GridBot:
         # Check sells before reporting so this round's transient attempt state
         # appears immediately rather than one poll late.
         phase_started = time.perf_counter()
-        self.check_sells(price)
+        self.check_sells(price, position_pnls)
         self._cycle_phase_ms["sells"] = (time.perf_counter() - phase_started) * 1000
 
         # A sell may have broadcast successfully even if every receipt RPC then
@@ -5740,15 +5828,16 @@ class GridBot:
                 if use_gridless:
                     from gridless import load_positions, get_capacity_warning
                     gpos = load_positions()
-                    capacity_warning = get_capacity_warning(gpos, price, self.config)
-                    executable_pnl_sample = self._refresh_executable_pnl_sample(
-                        gpos, price
+                    capacity_warning = get_capacity_warning(
+                        gpos, price, self.config, position_pnls
                     )
                     for pos_id, pos in gpos.items():
                         bal = pos.get('balance', 0)
                         if bal > 0:
                             tokens = bal / self.token_unit
-                            cost_wei = pos.get('cost_wei', pos.get('cost', 0) * 10**9)
+                            cost_wei = int(
+                                pos.get('cost_wei', pos.get('cost', 0) * 10**9)
+                            ) + int(pos.get('deferred_sell_gas_wei', 0) or 0)
                             cost_eth = cost_wei / 10**18
                             if tokens > 0 and cost_eth > 0:
                                 buy_price = cost_eth / tokens
@@ -5760,8 +5849,8 @@ class GridBot:
                                     'pnl': round(pnl, 2),
                                     'timestamp': pos.get('timestamp'),
                                 })
-                    self._attach_executable_pnl_sample(
-                        positions_data, executable_pnl_sample
+                    self._attach_bidirectional_pnls(
+                        positions_data, position_pnls
                     )
                 else:
                     for pos_id, pos in self.positions.items():
@@ -5780,9 +5869,11 @@ class GridBot:
                                 })
 
                 total_cost = sum(p['cost_basis'] for p in positions_data)
-                total_value = sum(p['buy_amount_token'] * price for p in positions_data)
                 profit_percent = (
-                    ((total_value - total_cost) / total_cost) * 100
+                    sum(
+                        p['cost_basis'] * float(p.get('buy_pnl', p.get('pnl', 0)))
+                        for p in positions_data
+                    ) / total_cost
                     if total_cost > 0 else 0.0
                 )
                 
@@ -5861,7 +5952,7 @@ class GridBot:
         # forever.
         # Then check buys
         phase_started = time.perf_counter()
-        self.check_buys(price)
+        self.check_buys(price, position_pnls)
         self._cycle_phase_ms["buys"] = (time.perf_counter() - phase_started) * 1000
 
     def _round_summary_mode(self):

@@ -81,7 +81,8 @@ def get_top_position(positions: Dict[str, Dict], token_decimals: int = 18) -> Op
     return (top_id, top_pos) if top_id else None
 
 
-def should_buy(positions: Dict[str, Dict], current_price: float, config: Any) -> Tuple[bool, str]:
+def should_buy(positions: Dict[str, Dict], current_price: float, config: Any,
+               position_pnls: Optional[Dict[str, Dict[str, float]]] = None) -> Tuple[bool, str]:
     """Check buy rules with leading edge support.
     
     Standard buy: no positions OR (under max AND top_pnl <= buy_threshold)
@@ -106,7 +107,9 @@ def should_buy(positions: Dict[str, Dict], current_price: float, config: Any) ->
     if top is None:
         return (True, "No holding positions found")
     
-    top_pnl = calculate_pnl(top[1], current_price, token_decimals)
+    top_pnl = (position_pnls or {}).get(str(top[0]), {}).get("buy_pnl")
+    if top_pnl is None:
+        top_pnl = calculate_pnl(top[1], current_price, token_decimals)
     if top_pnl <= buy_threshold:
         return (True, f"Top position P&L {top_pnl:.2f}% <= threshold {buy_threshold}%")
     
@@ -122,7 +125,8 @@ def should_buy(positions: Dict[str, Dict], current_price: float, config: Any) ->
     return (False, f"Top position P&L {top_pnl:.2f}% > threshold {buy_threshold}%")
 
 
-def get_capacity_warning(positions: Dict[str, Dict], current_price: float, config: Any) -> Optional[Dict]:
+def get_capacity_warning(positions: Dict[str, Dict], current_price: float, config: Any,
+                         position_pnls: Optional[Dict[str, Dict[str, float]]] = None) -> Optional[Dict]:
     """Describe a dip buy blocked only because all gridless slots are filled."""
     max_active = getattr(config, 'max_active_positions', 10)
     buy_threshold = getattr(config, 'gridless_buy_threshold', -10.0)
@@ -134,7 +138,9 @@ def get_capacity_warning(positions: Dict[str, Dict], current_price: float, confi
     if top is None:
         return None
 
-    top_pnl = calculate_pnl(top[1], current_price, token_decimals)
+    top_pnl = (position_pnls or {}).get(str(top[0]), {}).get("buy_pnl")
+    if top_pnl is None:
+        top_pnl = calculate_pnl(top[1], current_price, token_decimals)
     if top_pnl > buy_threshold:
         return None
 

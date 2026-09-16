@@ -194,9 +194,9 @@ class BotConfig:
     route_tournament_shadow_timeout_seconds: float = 4.0
     route_tournament_gate_timeout_seconds: float = 12.0
     route_tournament_speculative_fallback_seconds: float = 0.0
-    executable_pnl_sample_seconds: float = 120.0
-    executable_pnl_near_trigger_seconds: float = 60.0
-    executable_pnl_near_trigger_margin_percent: float = 5.0
+    bidirectional_pnl_enabled: bool = True
+    bidirectional_pnl_quote_timeout_seconds: float = 4.0
+    bidirectional_pnl_max_age_seconds: float = 90.0
     
     # Derived properties
     @property
@@ -245,23 +245,17 @@ class BotConfig:
                 "ROUTE_TOURNAMENT_SPECULATIVE_FALLBACK_SECONDS must be 0 (disabled) "
                 "or at least 1 second and below ROUTE_TOURNAMENT_GATE_TIMEOUT_SECONDS"
             )
-        sample_seconds = float(getattr(self, "executable_pnl_sample_seconds", 120))
-        near_seconds = float(getattr(self, "executable_pnl_near_trigger_seconds", 60))
-        near_margin = float(getattr(
-            self, "executable_pnl_near_trigger_margin_percent", 5
+        quote_timeout = float(getattr(
+            self, "bidirectional_pnl_quote_timeout_seconds", 4
         ))
-        if sample_seconds != 0 and not 30 <= sample_seconds <= 3600:
+        max_age = float(getattr(self, "bidirectional_pnl_max_age_seconds", 90))
+        if not math.isfinite(quote_timeout) or not 1 <= quote_timeout <= 30:
             raise ValueError(
-                "EXECUTABLE_PNL_SAMPLE_SECONDS must be 0 (disabled) or between 30 and 3600"
+                "BIDIRECTIONAL_PNL_QUOTE_TIMEOUT_SECONDS must be between 1 and 30"
             )
-        if sample_seconds and not 30 <= near_seconds <= sample_seconds:
+        if not math.isfinite(max_age) or not 30 <= max_age <= 600:
             raise ValueError(
-                "EXECUTABLE_PNL_NEAR_TRIGGER_SECONDS must be between 30 and "
-                "EXECUTABLE_PNL_SAMPLE_SECONDS"
-            )
-        if not math.isfinite(near_margin) or not 0 <= near_margin <= 100:
-            raise ValueError(
-                "EXECUTABLE_PNL_NEAR_TRIGGER_MARGIN_PERCENT must be between 0 and 100"
+                "BIDIRECTIONAL_PNL_MAX_AGE_SECONDS must be between 30 and 600"
             )
         # Check required fields
         if not self.private_key or self.private_key == "0x...":
@@ -523,14 +517,14 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
         route_tournament_speculative_fallback_seconds=float(
             os.getenv("ROUTE_TOURNAMENT_SPECULATIVE_FALLBACK_SECONDS", "0")
         ),
-        executable_pnl_sample_seconds=float(
-            os.getenv("EXECUTABLE_PNL_SAMPLE_SECONDS", "120")
+        bidirectional_pnl_enabled=os.getenv(
+            "BIDIRECTIONAL_PNL_ENABLED", "true"
+        ).lower() == "true",
+        bidirectional_pnl_quote_timeout_seconds=float(
+            os.getenv("BIDIRECTIONAL_PNL_QUOTE_TIMEOUT_SECONDS", "4")
         ),
-        executable_pnl_near_trigger_seconds=float(
-            os.getenv("EXECUTABLE_PNL_NEAR_TRIGGER_SECONDS", "60")
-        ),
-        executable_pnl_near_trigger_margin_percent=float(
-            os.getenv("EXECUTABLE_PNL_NEAR_TRIGGER_MARGIN_PERCENT", "5")
+        bidirectional_pnl_max_age_seconds=float(
+            os.getenv("BIDIRECTIONAL_PNL_MAX_AGE_SECONDS", "90")
         ),
         swap_fallback_provider=os.getenv("SWAP_FALLBACK_PROVIDER", "sushiswap"),
         sushi_api_key=os.getenv("SUSHI_API_KEY", ""),
