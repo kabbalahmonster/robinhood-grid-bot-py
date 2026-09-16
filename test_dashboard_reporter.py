@@ -16,6 +16,8 @@ class TestDashboardReporter(unittest.TestCase):
             usdg_balance=123.456,
             buy_point_percent=-14.0,
             sell_point_percent=10.0,
+            pnl_polling_mode="bidirectional",
+            pnl_trigger_mode="minimum_profit",
             poll_interval_seconds=30,
             token_symbol="TENDIES",
             moonbag_balance=42.0,
@@ -28,6 +30,8 @@ class TestDashboardReporter(unittest.TestCase):
         self.assertEqual(reporter._queue[0]["poll_interval_seconds"], 30)
         self.assertEqual(reporter._queue[0]["buy_point_percent"], -14.0)
         self.assertEqual(reporter._queue[0]["sell_point_percent"], 10.0)
+        self.assertEqual(reporter._queue[0]["pnl_polling_mode"], "bidirectional")
+        self.assertEqual(reporter._queue[0]["pnl_trigger_mode"], "minimum_profit")
         self.assertEqual(reporter._queue[0]["token_symbol"], "TENDIES")
         self.assertEqual(reporter._queue[0]["moonbag_balance"], 42.0)
         self.assertEqual(reporter._queue[0]["estimated_moonbag_value_eth"], 0.00123)

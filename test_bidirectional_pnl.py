@@ -3,7 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 from grid_bot import GridBot
-from gridless import should_buy
+from gridless import get_sell_trigger_percent, should_buy
 from zero_x import QuoteResult
 
 
@@ -24,6 +24,8 @@ def make_bot():
     bot = GridBot.__new__(GridBot)
     bot.config = SimpleNamespace(
         bidirectional_pnl_enabled=True,
+        pnl_polling_mode="bidirectional",
+        pnl_trigger_by_min_profit=False,
         bidirectional_pnl_quote_timeout_seconds=4,
         bidirectional_pnl_max_age_seconds=90,
         moonbag_percentage=0,
@@ -42,6 +44,7 @@ def make_bot():
         eth_gas_reserve=0,
         gridless_buy_threshold=-10,
         gridless_sell_threshold=5,
+        min_profit_percent=3,
         gridless_leading_edge=False,
     )
     bot.token_decimals = 18
@@ -98,6 +101,51 @@ class TestBidirectionalPnl(unittest.TestCase):
         expected_pnl = (expected_price - 0.01) / 0.01 * 100
         self.assertAlmostEqual(pnls["1"]["buy_pnl"], expected_pnl, places=8)
         self.assertEqual(bot._pnl_quotes["buy"]["projected_gas_wei"], 10**14)
+
+    def test_buy_only_mode_never_polls_sell_side(self):
+        bot = make_bot()
+        bot.config.pnl_polling_mode = "buy"
+        positions = {"1": {"balance": 100 * 10**18, "cost_wei": 10**18}}
+        bot.api_client.get_quote.return_value = quote(
+            9 * 10**17, 90 * 10**18, 89 * 10**18,
+        )
+
+        bot._refresh_bidirectional_pnl(positions, 1.0, now=100)
+        bot._refresh_bidirectional_pnl(positions, 1.0, now=120)
+
+        self.assertEqual(bot.api_client.get_quote.call_count, 2)
+        self.assertTrue(all(
+            call.kwargs["sell_token"] == bot.trade_token_address
+            for call in bot.api_client.get_quote.call_args_list
+        ))
+        self.assertIsNone(bot._fresh_pnl_sample("sell", now=120))
+
+    def test_sell_only_mode_polls_exact_next_position(self):
+        bot = make_bot()
+        bot.config.pnl_polling_mode = "sell"
+        positions = {
+            "1": {"balance": 100 * 10**18, "cost_wei": 10**18},
+            "2": {"balance": 50 * 10**18, "cost_wei": 10**18},
+        }
+        bot.api_client.get_quote.return_value = quote(
+            100 * 10**18, 12 * 10**17, 11 * 10**17,
+        )
+
+        pnls = bot._refresh_bidirectional_pnl(positions, 1.0, now=100)
+
+        self.assertIn("sell_pnl", pnls["1"])
+        self.assertNotIn("buy_pnl", pnls["1"])
+        self.assertEqual(bot._pnl_quotes["sell"]["position_id"], "1")
+        self.assertEqual(
+            bot.api_client.get_quote.call_args.kwargs["sell_token"],
+            bot.config.token_address,
+        )
+
+    def test_minimum_profit_can_be_the_sell_trigger(self):
+        bot = make_bot()
+        self.assertEqual(get_sell_trigger_percent(bot.config), 5)
+        bot.config.pnl_trigger_by_min_profit = True
+        self.assertEqual(get_sell_trigger_percent(bot.config), 3)
 
     def test_stale_sell_quote_cannot_wake_sell_logic(self):
         bot = make_bot()

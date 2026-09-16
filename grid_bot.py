@@ -3201,6 +3201,8 @@ class GridBot:
         return int(total)
 
     def _fresh_pnl_sample(self, direction, now=None):
+        if direction not in self._pnl_polling_sides():
+            return None
         sample = getattr(self, "_pnl_quotes", {}).get(direction)
         if not isinstance(sample, dict):
             return None
@@ -3209,6 +3211,16 @@ class GridBot:
             self.config, "bidirectional_pnl_max_age_seconds", 90
         ))
         return sample if now - float(sample.get("sampled_monotonic", 0)) <= max_age else None
+
+    def _pnl_polling_mode(self):
+        mode = str(getattr(
+            self.config, "pnl_polling_mode", "bidirectional"
+        )).strip().lower()
+        return mode if mode in {"bidirectional", "buy", "sell"} else "bidirectional"
+
+    def _pnl_polling_sides(self):
+        mode = self._pnl_polling_mode()
+        return {"buy", "sell"} if mode == "bidirectional" else {mode}
 
     def _bidirectional_position_pnls(self, positions, now=None):
         """Return per-position net buy marks and extrapolated net sell exits."""
@@ -3252,9 +3264,14 @@ class GridBot:
         ranked = []
         for position_id, position in positions.items():
             values = pnls.get(str(position_id), {})
-            ranking_pnl = values.get("sell_pnl", values.get("buy_pnl", float("-inf")))
             sell_amount, sold_cost_wei = self._gridless_sell_terms(position)
             if sell_amount > 0 and sold_cost_wei > 0:
+                ranking_pnl = values.get("sell_pnl", values.get("buy_pnl"))
+                if ranking_pnl is None:
+                    # Sell-only mode has no buy-side mark for the first sample.
+                    # Lowest cost per sellable token is the position most likely
+                    # to reach the common market-price trigger first.
+                    ranking_pnl = -float(sold_cost_wei) / float(sell_amount)
                 ranked.append((float(ranking_pnl), str(position_id), sell_amount, sold_cost_wei))
         return max(ranked, default=None, key=lambda item: (item[0], item[1]))
 
@@ -3263,13 +3280,17 @@ class GridBot:
         if not getattr(self.config, "bidirectional_pnl_enabled", True):
             return self._bidirectional_position_pnls(positions, now)
         now = time.monotonic() if now is None else float(now)
-        side = getattr(self, "_next_pnl_poll_side", "buy")
-        if not positions:
-            side = "buy"
-        elif self._fresh_pnl_sample("buy", now) is None:
-            side = "buy"
-        elif self._fresh_pnl_sample("sell", now) is None:
-            side = "sell"
+        mode = self._pnl_polling_mode()
+        side = mode if mode in {"buy", "sell"} else getattr(
+            self, "_next_pnl_poll_side", "buy"
+        )
+        if mode == "bidirectional":
+            if not positions:
+                side = "buy"
+            elif self._fresh_pnl_sample("buy", now) is None:
+                side = "buy"
+            elif self._fresh_pnl_sample("sell", now) is None:
+                side = "sell"
 
         try:
             if side == "buy":
@@ -3316,6 +3337,7 @@ class GridBot:
                             quote, "sell", sell_amount,
                         )
                         if floor_wei > 0:
+                            net_return_wei = max(0, int(floor_wei) - int(gas_wei))
                             self._pnl_quotes["sell"] = {
                                 "direction": "sell",
                                 "position_id": position_id,
@@ -3323,6 +3345,10 @@ class GridBot:
                                 "sold_cost_wei": int(sold_cost_wei),
                                 "floor_return_wei": int(floor_wei),
                                 "projected_gas_wei": int(gas_wei),
+                                "price_eth_per_token": (
+                                    net_return_wei / 10**18
+                                    / (int(sell_amount) / self.token_unit)
+                                ),
                                 "provider": provider,
                                 "settlement": "native" if self.config.use_eth_trading else "weth",
                                 "basis": "exact_sell_quote_extrapolated_net",
@@ -3332,7 +3358,10 @@ class GridBot:
         except Exception as exc:
             logger.debug("%s-side P&L observation unavailable: %s", side, exc)
         finally:
-            self._next_pnl_poll_side = "sell" if side == "buy" and positions else "buy"
+            if mode == "bidirectional":
+                self._next_pnl_poll_side = "sell" if side == "buy" and positions else "buy"
+            else:
+                self._next_pnl_poll_side = mode
         return self._bidirectional_position_pnls(positions, now)
 
     def _attach_bidirectional_pnls(self, positions_data, position_pnls, now=None):
@@ -3362,6 +3391,8 @@ class GridBot:
                     ),
                     "sell_quote_basis": sell_sample["basis"],
                 })
+                if values.get("buy_pnl") is None:
+                    row["pnl"] = row["sell_pnl"]
         return positions_data
 
     def _defer_sell_gas_cost(self, position_id, gas_wei, *, gridless_position):
@@ -3762,7 +3793,8 @@ class GridBot:
         
         # Find best sell candidate based on P&L only (quote checked at execution)
         # This allows profitable positions to sell even when aggregate portfolio is down
-        sell_threshold = getattr(self.config, 'gridless_sell_threshold', 5.0)
+        from gridless import get_sell_trigger_percent
+        sell_threshold = get_sell_trigger_percent(self.config)
         stoploss_enabled = getattr(self.config, 'gridless_stoploss_enabled', False)
         stoploss_threshold = getattr(self.config, 'gridless_stoploss_threshold', -25.0)
         
@@ -5626,7 +5658,9 @@ class GridBot:
         # sell observations alternate, preserving the old one-request cadence.
         phase_started = time.perf_counter()
         position_pnls = {}
+        pnl_polling_mode = "legacy"
         if use_gridless and getattr(self.config, "bidirectional_pnl_enabled", True):
+            pnl_polling_mode = self._pnl_polling_mode()
             trade_balance = eth_bal if getattr(
                 self.config, "use_eth_trading", False
             ) else weth_bal
@@ -5634,15 +5668,18 @@ class GridBot:
                 gridless_positions, trade_balance,
             )
             buy_sample = self._fresh_pnl_sample("buy")
-            price = (
-                float(buy_sample["market_price_eth_per_token"])
-                if buy_sample is not None else None
-            )
+            sell_sample = self._fresh_pnl_sample("sell")
+            if buy_sample is not None:
+                price = float(buy_sample["market_price_eth_per_token"])
+            elif sell_sample is not None:
+                price = float(sell_sample["price_eth_per_token"])
+            else:
+                price = None
         else:
             price = self.get_token_price()
         self._cycle_phase_ms["price"] = (time.perf_counter() - phase_started) * 1000
         if price is None:
-            logger.warning("Could not get a fresh buy-side net price")
+            logger.warning("Could not get a fresh %s-side net price", pnl_polling_mode)
             return
         
         # Check for compact/debug round telemetry. Normal INFO operation is
@@ -5724,7 +5761,8 @@ class GridBot:
                 if use_gridless:
                     # Display gridless positions sorted by buy price ascending
                     from gridless import get_buy_price
-                    sell_threshold = getattr(self.config, 'gridless_sell_threshold', 5.0)
+                    from gridless import get_sell_trigger_percent
+                    sell_threshold = get_sell_trigger_percent(self.config)
                     sorted_positions = sorted(
                         gridless_positions.items(),
                         key=lambda x: get_buy_price(x[1], self.token_decimals)
@@ -5808,7 +5846,8 @@ class GridBot:
         # Check sells before reporting so this round's transient attempt state
         # appears immediately rather than one poll late.
         phase_started = time.perf_counter()
-        self.check_sells(price, position_pnls)
+        if pnl_polling_mode != "buy":
+            self.check_sells(price, position_pnls)
         self._cycle_phase_ms["sells"] = (time.perf_counter() - phase_started) * 1000
 
         # A sell may have broadcast successfully even if every receipt RPC then
@@ -5828,9 +5867,10 @@ class GridBot:
                 if use_gridless:
                     from gridless import load_positions, get_capacity_warning
                     gpos = load_positions()
-                    capacity_warning = get_capacity_warning(
-                        gpos, price, self.config, position_pnls
-                    )
+                    if pnl_polling_mode != "sell":
+                        capacity_warning = get_capacity_warning(
+                            gpos, price, self.config, position_pnls
+                        )
                     for pos_id, pos in gpos.items():
                         bal = pos.get('balance', 0)
                         if bal > 0:
@@ -5928,7 +5968,17 @@ class GridBot:
                     display_name=self.config.dashboard_name,
                     group=self.config.dashboard_group,
                     buy_point_percent=self.config.gridless_buy_threshold,
-                    sell_point_percent=self.config.gridless_sell_threshold,
+                    sell_point_percent=(
+                        self.config.min_profit_percent
+                        if getattr(self.config, "pnl_trigger_by_min_profit", False)
+                        else self.config.gridless_sell_threshold
+                    ),
+                    pnl_polling_mode=pnl_polling_mode,
+                    pnl_trigger_mode=(
+                        "minimum_profit"
+                        if getattr(self.config, "pnl_trigger_by_min_profit", False)
+                        else "sell_threshold"
+                    ),
                     poll_interval_seconds=self.config.poll_interval_seconds,
                     trades_history=self.dashboard_trades,
                     events=self.dashboard_events,
@@ -5952,7 +6002,8 @@ class GridBot:
         # forever.
         # Then check buys
         phase_started = time.perf_counter()
-        self.check_buys(price, position_pnls)
+        if pnl_polling_mode != "sell":
+            self.check_buys(price, position_pnls)
         self._cycle_phase_ms["buys"] = (time.perf_counter() - phase_started) * 1000
 
     def _round_summary_mode(self):

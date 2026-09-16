@@ -195,6 +195,8 @@ class BotConfig:
     route_tournament_gate_timeout_seconds: float = 12.0
     route_tournament_speculative_fallback_seconds: float = 0.0
     bidirectional_pnl_enabled: bool = True
+    pnl_polling_mode: str = "bidirectional"
+    pnl_trigger_by_min_profit: bool = False
     bidirectional_pnl_quote_timeout_seconds: float = 4.0
     bidirectional_pnl_max_age_seconds: float = 90.0
     
@@ -249,6 +251,13 @@ class BotConfig:
             self, "bidirectional_pnl_quote_timeout_seconds", 4
         ))
         max_age = float(getattr(self, "bidirectional_pnl_max_age_seconds", 90))
+        polling_mode = str(getattr(
+            self, "pnl_polling_mode", "bidirectional"
+        )).strip().lower()
+        if polling_mode not in {"bidirectional", "buy", "sell"}:
+            raise ValueError(
+                "PNL_POLLING_MODE supports bidirectional, buy, or sell"
+            )
         if not math.isfinite(quote_timeout) or not 1 <= quote_timeout <= 30:
             raise ValueError(
                 "BIDIRECTIONAL_PNL_QUOTE_TIMEOUT_SECONDS must be between 1 and 30"
@@ -519,6 +528,12 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
         ),
         bidirectional_pnl_enabled=os.getenv(
             "BIDIRECTIONAL_PNL_ENABLED", "true"
+        ).lower() == "true",
+        pnl_polling_mode=os.getenv(
+            "PNL_POLLING_MODE", "bidirectional"
+        ).strip().lower(),
+        pnl_trigger_by_min_profit=os.getenv(
+            "PNL_TRIGGER_BY_MIN_PROFIT", "false"
         ).lower() == "true",
         bidirectional_pnl_quote_timeout_seconds=float(
             os.getenv("BIDIRECTIONAL_PNL_QUOTE_TIMEOUT_SECONDS", "4")

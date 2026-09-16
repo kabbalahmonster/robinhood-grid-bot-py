@@ -81,6 +81,13 @@ def get_top_position(positions: Dict[str, Dict], token_decimals: int = 18) -> Op
     return (top_id, top_pos) if top_id else None
 
 
+def get_sell_trigger_percent(config: Any) -> float:
+    """Return the configured net P&L threshold that wakes a normal sell."""
+    if getattr(config, 'pnl_trigger_by_min_profit', False) is True:
+        return float(getattr(config, 'min_profit_percent', 5.0))
+    return float(getattr(config, 'gridless_sell_threshold', 5.0))
+
+
 def should_buy(positions: Dict[str, Dict], current_price: float, config: Any,
                position_pnls: Optional[Dict[str, Dict[str, float]]] = None) -> Tuple[bool, str]:
     """Check buy rules with leading edge support.
@@ -90,7 +97,7 @@ def should_buy(positions: Dict[str, Dict], current_price: float, config: Any,
     """
     max_active = getattr(config, 'max_active_positions', 10)
     buy_threshold = getattr(config, 'gridless_buy_threshold', -10.0)
-    sell_threshold = getattr(config, 'gridless_sell_threshold', 5.0)
+    sell_threshold = get_sell_trigger_percent(config)
     leading_edge_enabled = getattr(config, 'gridless_leading_edge', False)
     token_decimals = _configured_token_decimals(config)
     
@@ -157,7 +164,7 @@ def get_capacity_warning(positions: Dict[str, Dict], current_price: float, confi
 def should_sell(position: Dict[str, int], current_price: float, config: Any,
                 quote_profit_eth: float = 0.0) -> Tuple[bool, str]:
     """Check sell rules: profit target OR stoploss."""
-    sell_threshold = getattr(config, 'gridless_sell_threshold', 5.0)
+    sell_threshold = get_sell_trigger_percent(config)
     stoploss_threshold = getattr(config, 'gridless_stoploss_threshold', -25.0)
     stoploss_enabled = getattr(config, 'gridless_stoploss_enabled', False)
     min_profit = getattr(config, 'min_profit_percent', 1.5)
