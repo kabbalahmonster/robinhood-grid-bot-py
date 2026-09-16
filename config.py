@@ -38,6 +38,23 @@ CHAIN_CONFIG = {
         "uniswap_router": "0xEf1c6E67703c7BD7107eed8303Fbe6EC2554BF6B",  # Universal Router v2
         "default_max_positions": 10,
     },
+    5042: {  # Arc Mainnet
+        "name": "Arc",
+        # Arc's native USDC balance is exposed through this ERC-20 interface.
+        # The interface uses 6 decimals while native gas accounting uses 18.
+        "weth": "0x3600000000000000000000000000000000000000",
+        "settlement_symbol": "USDC",
+        "settlement_decimals": 6,
+        "native_symbol": "USDC",
+        "native_decimals": 18,
+        "settlement_shares_native_balance": True,
+        "supports_wrapped_native": False,
+        "permit2": "0x000000000022d473030f116ddee9f6b43ac78ba3",
+        "zero_x_proxy": "",
+        "uniswap_router": "",
+        "default_max_positions": 10,
+        "price_probe_amount": 1.0,
+    },
 }
 
 # 0x API base URLs by chain
@@ -205,6 +222,34 @@ class BotConfig:
     def zero_x_api_url(self) -> str:
         """Get the 0x API URL for the configured chain."""
         return ZEROX_API_URLS.get(self.chain_id, "https://api.0x.org")
+
+    @property
+    def settlement_symbol(self) -> str:
+        return str(CHAIN_CONFIG.get(self.chain_id, {}).get("settlement_symbol", "WETH"))
+
+    @property
+    def settlement_decimals(self) -> int:
+        return int(CHAIN_CONFIG.get(self.chain_id, {}).get("settlement_decimals", 18))
+
+    @property
+    def native_symbol(self) -> str:
+        return str(CHAIN_CONFIG.get(self.chain_id, {}).get("native_symbol", "ETH"))
+
+    @property
+    def native_decimals(self) -> int:
+        return int(CHAIN_CONFIG.get(self.chain_id, {}).get("native_decimals", 18))
+
+    @property
+    def settlement_shares_native_balance(self) -> bool:
+        return bool(CHAIN_CONFIG.get(self.chain_id, {}).get("settlement_shares_native_balance", False))
+
+    @property
+    def supports_wrapped_native(self) -> bool:
+        return bool(CHAIN_CONFIG.get(self.chain_id, {}).get("supports_wrapped_native", True))
+
+    @property
+    def price_probe_amount(self) -> float:
+        return float(CHAIN_CONFIG.get(self.chain_id, {}).get("price_probe_amount", 0.001))
     
     def validate(self) -> None:
         """
@@ -260,6 +305,8 @@ class BotConfig:
             provider = "uniswap" if self.use_uniswap_api else ("lifi" if self.use_li_fi else "0x")
         if provider not in {"0x", "lifi", "uniswap", "sushiswap", "umbra"}:
             raise ValueError(f"Unsupported SWAP_PROVIDER: {provider}")
+        if self.chain_id == 5042 and provider != "lifi":
+            raise ValueError("Arc mainnet currently requires SWAP_PROVIDER=lifi")
         if provider == "umbra" and self.chain_id != 4663:
             raise ValueError("SWAP_PROVIDER=umbra supports Robinhood Chain 4663 only")
         if provider == "lifi":
@@ -278,6 +325,8 @@ class BotConfig:
         )
         if fallback_provider not in {"", "0x", "lifi", "uniswap", "sushiswap", "umbra"}:
             raise ValueError(f"Unsupported SWAP_FALLBACK_PROVIDER: {fallback_provider}")
+        if self.chain_id == 5042 and fallback_provider:
+            raise ValueError("Arc mainnet requires SWAP_FALLBACK_PROVIDER to be empty")
         if fallback_provider == "umbra" and self.chain_id != 4663:
             raise ValueError("SWAP_FALLBACK_PROVIDER=umbra supports Robinhood Chain 4663 only")
         if fallback_provider == "lifi" and not self.li_fi_api_key:
@@ -293,6 +342,13 @@ class BotConfig:
         # Validate chain ID
         if self.chain_id not in CHAIN_CONFIG:
             raise ValueError(f"Unsupported chain ID: {self.chain_id}")
+        if self.chain_id == 5042:
+            if self.use_eth_trading:
+                raise ValueError(
+                    "Arc must use its 6-decimal USDC ERC-20 interface; set USE_ETH_TRADING=false"
+                )
+            if self.route_tournament_mode != "off":
+                raise ValueError("Arc route tournaments remain disabled until a second provider is verified")
         
         # Validate numeric ranges
         if self.grid_spacing_percent <= 0:

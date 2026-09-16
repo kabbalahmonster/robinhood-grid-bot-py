@@ -547,6 +547,7 @@ _TRANSACTION_EXPLORER_BASES = {
     1: "https://etherscan.io/tx/",
     4663: "https://robinhoodchain.blockscout.com/tx/",
     8453: "https://basescan.org/tx/",
+    5042: "https://explorer.arc.io/tx/",
 }
 
 
@@ -647,7 +648,10 @@ def check_config():
         if chain_id != config.chain_id:
             raise ValueError(f"RPC chain ID {chain_id} does not match configured {config.chain_id}")
         print(f"PASS RPC: connected to chain {chain_id}")
-        print(f"PASS wallet: {wallet.address} ({wallet.get_eth_balance():.8f} ETH)")
+        print(
+            f"PASS wallet: {wallet.address} "
+            f"({wallet.get_eth_balance():.8f} {getattr(config, 'native_symbol', 'ETH')})"
+        )
         token_info = wallet._load_token_info(config.token_address)
         token_balance, _ = wallet.get_token_balance(config.token_address)
         print(f"PASS token: {token_info.symbol} at {config.token_address} ({token_balance:.8f})")
@@ -747,6 +751,10 @@ class GridBot:
         # discovered metadata at runtime; position files continue storing raw
         # integer balances and therefore require no migration.
         self.config.token_decimals = self.token_decimals
+        self.trade_token_decimals = int(getattr(self.config, "settlement_decimals", 18))
+        self.trade_token_unit = 10 ** self.trade_token_decimals
+        self.native_token_decimals = int(getattr(self.config, "native_decimals", 18))
+        self.native_token_unit = 10 ** self.native_token_decimals
         logger.info(
             f"Trading token: {token_info.symbol} ({self.token_decimals} decimals)"
         )
@@ -772,7 +780,7 @@ class GridBot:
         # handoff must be observed for one full poll before it may authorize a
         # sale; materially divergent providers remain visibly blocked.
         self._last_sell_quotes = {}
-        self.profit_tracker = ProfitTracker()
+        self.profit_tracker = ProfitTracker(unit=self._trade_unit())
         self.dashboard_trades_file = "data/dashboard_trades.json"
         self.dashboard_trades = self._load_dashboard_trades()
         self.profit_tracker.seed_profit_history(self.dashboard_trades)
@@ -793,12 +801,16 @@ class GridBot:
         if getattr(self.config, 'use_eth_trading', False):
             # Use native ETH address (zero address for Uniswap API)
             self.trade_token_address = UNISWAP_ETH_ADDRESS
-            self.trade_token_name = "ETH"
-            logger.info("Trading mode: Native ETH")
+            self.trade_token_name = getattr(self.config, "native_symbol", "ETH")
+            logger.info("Trading mode: Native %s", self.trade_token_name)
         else:
             self.trade_token_address = self.config.weth_address
-            self.trade_token_name = "WETH"
-            logger.info("Trading mode: WETH")
+            self.trade_token_name = getattr(self.config, "settlement_symbol", "WETH")
+            logger.info(
+                "Trading mode: %s settlement (%s decimals)",
+                self.trade_token_name,
+                self.trade_token_decimals,
+            )
 
         if self._taxed_token_active():
             source = "declared" if self.config.taxed_token else "auto-detected"
@@ -818,6 +830,55 @@ class GridBot:
         logger.debug(f"dashboard_url={self.config.dashboard_url!r}, reporter={self._reporter}")
         if self._reporter:
             logger.info(f"Dashboard reporting enabled (bot_id={self._reporter.bot_id})")
+
+    def _trade_unit(self):
+        return int(getattr(self, "trade_token_unit", 10 ** int(
+            getattr(self.config, "settlement_decimals", 18)
+        )))
+
+    def _native_unit(self):
+        return int(getattr(self, "native_token_unit", 10 ** int(
+            getattr(self.config, "native_decimals", 18)
+        )))
+
+    def _gas_wei_to_trade_units(self, gas_wei):
+        """Convert native gas atomic units into settlement-token atomic units."""
+        gas_wei = max(0, int(gas_wei or 0))
+        native_unit = self._native_unit()
+        trade_unit = self._trade_unit()
+        return (gas_wei * trade_unit + native_unit - 1) // native_unit
+
+    def _trade_units_to_float(self, amount):
+        return int(amount or 0) / self._trade_unit()
+
+    def _trade_float_to_units(self, amount):
+        return int(Decimal(str(amount)) * Decimal(self._trade_unit()))
+
+    def _trade_units_to_native_wei(self, amount):
+        amount = max(0, int(amount or 0))
+        return (amount * self._native_unit() + self._trade_unit() - 1) // self._trade_unit()
+
+    def _available_trade_balance(self):
+        """Return spendable settlement balance after the native gas reserve."""
+        reserve = float(getattr(self.config, "eth_gas_reserve", 0.001))
+        if getattr(self.config, "use_eth_trading", False):
+            return max(0.0, self.wallet.get_eth_balance() - reserve)
+        balance, _ = self.wallet.get_token_balance(self.config.weth_address)
+        if getattr(self.config, "settlement_shares_native_balance", False):
+            balance = max(0.0, balance - reserve)
+        return balance
+
+    def _position_cost_units(self, position):
+        """Load the precise settlement cost, including legacy nano-unit files."""
+        cost = int(position.get("cost_wei", 0) or 0)
+        if cost <= 0:
+            cost = (
+                int(position.get("cost", 0) or 0) * self._trade_unit()
+            ) // 10**9
+        return cost
+
+    def _legacy_nano_cost(self, cost_units):
+        return int(cost_units) * 10**9 // self._trade_unit()
 
     def _effective_token_transfer_fee_percent(self):
         if getattr(self.config, 'taxed_token', False):
@@ -1775,7 +1836,8 @@ class GridBot:
             slippage_percentage=self._swap_slippage_fraction(),
         )
         uses_weth = False
-        if quote.success or not getattr(self.config, "use_eth_trading", False):
+        if (quote.success or not getattr(self.config, "use_eth_trading", False)
+                or not getattr(self.config, "supports_wrapped_native", True)):
             return quote, uses_weth
         fallback_sell = self.config.weth_address if direction == "buy" else sell_token
         fallback_buy = buy_token if direction == "buy" else self.config.weth_address
@@ -2210,12 +2272,27 @@ class GridBot:
         self, quote, gas_limit, gas_price, weth_fallback, requested_principal_wei=0
     ):
         """Require funds for the final buy, without treating the gas reserve as untouchable."""
-        if not getattr(self.config, "use_eth_trading", False):
+        if (
+            not getattr(self.config, "use_eth_trading", False)
+            and not getattr(self.config, "settlement_shares_native_balance", False)
+        ):
             return True
-        principal = self._native_buy_principal_wei(quote, requested_principal_wei, weth_fallback)
+        if getattr(self.config, "use_eth_trading", False):
+            principal = self._native_buy_principal_wei(
+                quote, requested_principal_wei, weth_fallback
+            )
+            reserve = 0
+        else:
+            principal = self._trade_units_to_native_wei(requested_principal_wei)
+            reserve = int(Decimal(str(getattr(
+                self.config, "eth_gas_reserve", 0
+            ))) * Decimal(self._native_unit()))
         required = principal + int(gas_limit) * int(gas_price)
-        if self.wallet.get_eth_balance_wei() < required:
-            logger.warning("Buy refused: wallet cannot fund principal plus final projected gas")
+        if self.wallet.get_eth_balance_wei() - required < reserve:
+            logger.warning(
+                "Buy refused: wallet cannot fund principal plus final projected gas "
+                "while preserving the native reserve"
+            )
             return False
         return True
 
@@ -2361,7 +2438,8 @@ class GridBot:
         """Economic profit after position cost basis and confirmed sell gas."""
         return (
             int(received_wei) - int(sold_cost_wei)
-            - int(setup_gas_wei) - self._receipt_gas_cost_wei(result)
+            - self._gas_wei_to_trade_units(setup_gas_wei)
+            - self._gas_wei_to_trade_units(self._receipt_gas_cost_wei(result))
         )
 
     @staticmethod
@@ -2384,8 +2462,9 @@ class GridBot:
             sold_cost_wei, min_profit_percent
         )
         return (
-            int(sold_cost_wei) + minimum_profit_wei + int(setup_gas_wei)
-            + (
+            int(sold_cost_wei) + minimum_profit_wei
+            + self._gas_wei_to_trade_units(setup_gas_wei)
+            + self._gas_wei_to_trade_units(
                 self._projected_gas_cost_wei(quote)
                 if projected_gas_cost_wei is None
                 else int(projected_gas_cost_wei)
@@ -2414,7 +2493,14 @@ class GridBot:
 
     def _measured_trade_received_wei(self, before_balance, result, expected_wei=0):
         """Measure proceeds, reconciling stale RPC balances against receipt logs."""
-        gas_cost = self._receipt_gas_cost_wei(result) if getattr(self.config, 'use_eth_trading', False) else 0
+        gas_cost = (
+            self._gas_wei_to_trade_units(self._receipt_gas_cost_wei(result))
+            if (
+                getattr(self.config, 'use_eth_trading', False)
+                or getattr(self.config, "settlement_shares_native_balance", False)
+            )
+            else 0
+        )
         expected_wei = max(0, int(expected_wei or 0))
         plausible_floor = int(expected_wei * 0.90) if expected_wei else 0
         attempts = 6 if plausible_floor else 1
@@ -2547,7 +2633,7 @@ class GridBot:
         fee_wei = int(accrual["pending_wei"])
         minimum_wei = int(Decimal(str(getattr(
             self.config, "min_profit_fee_transfer_eth", 0.0001
-        ))) * Decimal(10**18))
+        ))) * Decimal(self._trade_unit()))
         entry = {
             "timestamp": datetime.now().astimezone().isoformat(),
             "sale_tx_hash": sale_tx_hash,
@@ -2566,9 +2652,9 @@ class GridBot:
             self._record_profit_fee(entry)
             logger.info(
                 "💰 Profit fee accrued: %.8f %s pending; minimum transfer is %.8f",
-                fee_wei / 10**18,
+                self._trade_units_to_float(fee_wei),
                 self.trade_token_name,
-                minimum_wei / 10**18,
+                self._trade_units_to_float(minimum_wei),
             )
             return entry
         try:
@@ -2639,7 +2725,7 @@ class GridBot:
             logger.info(
                 "💸 Profit fee sent: %.2f%% = %.8f %s → %s (tx: %s)",
                 fee_percent,
-                fee_wei / 10**18,
+                self._trade_units_to_float(fee_wei),
                 self.trade_token_name,
                 recipient,
                 entry.get("fee_tx_hash"),
@@ -2980,19 +3066,23 @@ class GridBot:
     
     @_with_swap_provider_fallback
     def get_token_price(self):
-        """Get current token price in ETH/WETH using the lighter /price endpoint."""
+        """Get current token price in the configured settlement asset."""
+        probe_amount = max(
+            1,
+            self._trade_float_to_units(getattr(self.config, "price_probe_amount", 0.001)),
+        )
         # Use /price endpoint for price discovery (doesn't count against quote-to-trade metrics)
         if self.provider.capabilities.price_requires_taker:
             result = self.api_client.get_quote(
                 sell_token=self.trade_token_address,
                 buy_token=self.config.token_address,
-                sell_amount=10**15,  # 0.001 ETH/WETH
+                sell_amount=probe_amount,
                 taker_address=self.wallet.address,
                 slippage_percentage=self._swap_slippage_fraction(),
                 apply_jitter_to_price=False,
             )
             if result.success and result.price:
-                price = result.price * self.token_unit / 10**18
+                price = result.price * self.token_unit / self._trade_unit()
                 logger.debug(f"API price: {price}")
                 return price
             else:
@@ -3002,9 +3092,9 @@ class GridBot:
             raw_price = self.provider.get_price(
                 sell_token=self.trade_token_address,
                 buy_token=self.config.token_address,
-                sell_amount=10**15,  # 0.001 ETH/WETH
+                sell_amount=probe_amount,
             )
-            return raw_price * self.token_unit / 10**18 if raw_price is not None else None
+            return raw_price * self.token_unit / self._trade_unit() if raw_price is not None else None
     
     def check_buys(self, price):
         """Check for buy opportunities."""
@@ -3013,12 +3103,7 @@ class GridBot:
             return self._check_buys_gridless(price)
         
         # Get available ETH/WETH
-        if getattr(self.config, 'use_eth_trading', False):
-            trade_balance = self.wallet.get_eth_balance()
-            gas_reserve = getattr(self.config, 'eth_gas_reserve', 0.001)
-            trade_balance = max(0, trade_balance - gas_reserve)
-        else:
-            trade_balance, _ = self.wallet.get_token_balance(self.config.weth_address)
+        trade_balance = self._available_trade_balance()
         
         if trade_balance < 0.001:
             logger.warning(f"Low {self.trade_token_name} balance: {trade_balance:.6f}")
@@ -3092,9 +3177,7 @@ class GridBot:
     def _gridless_sell_terms(self, position):
         """Return the exact post-moonbag sell amount and proportional cost."""
         balance = int(position.get("balance", 0) or 0)
-        cost_wei = int(position.get("cost_wei", 0) or 0)
-        if cost_wei <= 0:
-            cost_wei = int(position.get("cost", 0) or 0) * 10**9
+        cost_wei = self._position_cost_units(position)
         cost_wei += int(position.get("deferred_sell_gas_wei", 0) or 0)
         moonbag_pct = float(getattr(self.config, "moonbag_percentage", 0) or 0)
         moonbag_amount = int(balance * moonbag_pct / 100) if moonbag_pct > 0 else 0
@@ -3107,7 +3190,7 @@ class GridBot:
 
     def _defer_sell_gas_cost(self, position_id, gas_wei, *, gridless_position):
         """Persist confirmed setup gas until a later successful sell recovers it."""
-        gas_wei = int(gas_wei)
+        gas_wei = self._gas_wei_to_trade_units(gas_wei)
         if gas_wei <= 0:
             return
         position_id = str(position_id)
@@ -3161,12 +3244,7 @@ class GridBot:
             return
         
         # Get available ETH/WETH
-        if getattr(self.config, 'use_eth_trading', False):
-            eth_balance = self.wallet.get_eth_balance()
-            gas_reserve = getattr(self.config, 'eth_gas_reserve', 0.001)
-            trade_balance = max(0, eth_balance - gas_reserve)
-        else:
-            trade_balance, _ = self.wallet.get_token_balance(self.config.weth_address)
+        trade_balance = self._available_trade_balance()
         
         if trade_balance < 0.001:
             logger.warning(f"Gridless: Low {self.trade_token_name} balance: {trade_balance:.6f}")
@@ -3188,7 +3266,7 @@ class GridBot:
         
         tradeable_pct = getattr(self.config, 'tradeable_balance_percent', 90.0) / 100.0
         buy_amount_eth = (trade_balance * tradeable_pct) / available_slots
-        buy_amount_wei = int(buy_amount_eth * 10**18)
+        buy_amount_wei = self._trade_float_to_units(buy_amount_eth)
         
         logger.info(f"🎯 Gridless buy triggered: {reason}")
         logger.info(f"   Amount: {buy_amount_eth:.6f} {self.trade_token_name} ({trade_balance:.6f} × {tradeable_pct*100:.0f}% / {available_slots} slots)")
@@ -3236,7 +3314,7 @@ class GridBot:
             if gridless_positions:
                 top_id, top_pos, top_price = None, None, float('inf')
                 for pos_id, pos in gridless_positions.items():
-                    buy_price = get_buy_price(pos, self.token_decimals)
+                    buy_price = get_buy_price(pos, self.token_decimals, self.trade_token_decimals)
                     if buy_price > 0 and buy_price < top_price:
                         top_price, top_id, top_pos = buy_price, pos_id, pos
                 top = (top_id, top_pos) if top_id else None
@@ -3246,7 +3324,9 @@ class GridBot:
                 # the strategy. A route returning more tokens for the principal
                 # is price improvement, not market recovery, and must not veto
                 # an otherwise valid buy.
-                pnl_at_trigger_price = calculate_pnl(top[1], price, self.token_decimals)
+                pnl_at_trigger_price = calculate_pnl(
+                    top[1], price, self.token_decimals, self.trade_token_decimals
+                )
                 buy_threshold = getattr(self.config, 'gridless_buy_threshold', -10.0)
                 
                 # Calculate block threshold as percentage of threshold distance from 0
@@ -3264,7 +3344,7 @@ class GridBot:
                         trigger_threshold_percent=buy_threshold,
                     )
                     logger.info(f"⏸️ Buy aborted: Market P&L ({pnl_at_trigger_price:.1f}%) recovered past {execution_margin_pct}% margin (block above {block_threshold:.1f}%)")
-                    logger.info(f"   Market price moved from trigger. Current: {price:.10f}, Top position buy: {get_buy_price(top[1], self.token_decimals):.10f}")
+                    logger.info(f"   Market price moved from trigger. Current: {price:.10f}, Top position buy: {get_buy_price(top[1], self.token_decimals, self.trade_token_decimals):.10f}")
                     return
 
         initial_gas_limit, initial_gas_price = self._swap_gas_fields(
@@ -3437,10 +3517,10 @@ class GridBot:
                     "buy", reason="confirmed_tokens_unreconciled", tx_hash=result.tx_hash,
                 )
                 return
-            # Use the actual sell amount from the quote in wei for precision
+            # Use the actual settlement amount from the quote in atomic units.
             principal_cost_wei = quote.sell_amount if quote.sell_amount else buy_amount_wei
             buy_gas_wei = buy_setup_gas_wei + self._receipt_gas_cost_wei(result)
-            cost_wei = principal_cost_wei + buy_gas_wei
+            cost_wei = principal_cost_wei + self._gas_wei_to_trade_units(buy_gas_wei)
             
             logger.debug(
                 "Recording position: cost_wei=%s (principal=%s + buy_gas=%s), tokens_received=%s",
@@ -3454,7 +3534,7 @@ class GridBot:
                 self._clear_settlement_guard()
             
             tokens = tokens_received / self.token_unit
-            economic_cost_eth = cost_wei / 10**18
+            economic_cost_eth = self._trade_units_to_float(cost_wei)
             buy_price = economic_cost_eth / tokens if tokens > 0 else 0
             self.session_buys += 1
             self.last_buy_time = time.time()  # Update cooldown timer
@@ -3468,7 +3548,9 @@ class GridBot:
             logger.info(f"   Tokens: {tokens:.6f} {self.config.token_symbol}")
             logger.info(
                 "   Economic cost: %.6f %s (principal %.6f + gas %.6f)",
-                economic_cost_eth, self.trade_token_name, principal_cost_wei / 10**18, buy_gas_wei / 10**18,
+                economic_cost_eth, self.trade_token_name,
+                self._trade_units_to_float(principal_cost_wei),
+                buy_gas_wei / self._native_unit(),
             )
             logger.info(f"   Buy price: {buy_price:.10f} {self.trade_token_name}/token")
             logger.info(f"   Tx: {result.tx_hash}")
@@ -3498,7 +3580,7 @@ class GridBot:
         best_pnl = float('-inf')
         
         for pos_id, pos in gridless_positions.items():
-            pnl = calculate_pnl(pos, price, self.token_decimals)
+            pnl = calculate_pnl(pos, price, self.token_decimals, self.trade_token_decimals)
             
             # Check stoploss first (highest priority)
             if stoploss_enabled and pnl <= stoploss_threshold:
@@ -3524,7 +3606,7 @@ class GridBot:
             return
         if not self._wallet_can_cover_sell(balance, pos_id):
             return
-        self._queue_route_shadow("sell", balance, int(pos.get("cost_wei") or pos.get("cost", 0) * 10**9))
+        self._queue_route_shadow("sell", balance, self._position_cost_units(pos))
             
         # Quote the exact amount that execution will sell. Previously the gate
         # first ran a full-position tournament, then discarded its winner and
@@ -3632,10 +3714,10 @@ class GridBot:
         # Check min profit requirement against individual position quote
         # Support both cost_wei (new) and cost (legacy nano-ETH)
         cost_wei = sold_cost_wei
-        cost_eth = cost_wei / 1e18
+        cost_eth = self._trade_units_to_float(cost_wei)
         min_profit = getattr(self.config, 'min_profit_percent', 1.5)
         min_profit_eth = cost_eth * (min_profit / 100)
-        quote_return_eth = quote_return_wei / 10**18
+        quote_return_eth = self._trade_units_to_float(quote_return_wei)
         quote_profit_eth = quote_return_eth - cost_eth
         unwrap_projected_wei = 0
         if weth_fallback:
@@ -3647,16 +3729,18 @@ class GridBot:
             projected_gas_eth = (
                 int(approval_tx["gas"]) * int(self.wallet.normal_gas_price())
                 + unwrap_projected_wei
-            ) / 10**18
+            ) / self._native_unit()
         else:
             projected_gas_eth = (
                 self._projected_gas_cost_wei(quote) + unwrap_projected_wei
-            ) / 10**18
+            ) / self._native_unit()
         projected_net_profit_eth = quote_profit_eth - projected_gas_eth
         
         if projected_net_profit_eth < min_profit_eth:
-            buy_price = get_buy_price(pos, self.token_decimals)
-            pnl_at_check = calculate_pnl(pos, price, self.token_decimals)
+            buy_price = get_buy_price(pos, self.token_decimals, self.trade_token_decimals)
+            pnl_at_check = calculate_pnl(
+                pos, price, self.token_decimals, self.trade_token_decimals
+            )
             logger.info(
                 "⏸️  Position #%s at %.1f%% P&L but projected net profit "
                 "(%.6f after %.6f gas) < min (%.6f) - skipping",
@@ -3683,21 +3767,16 @@ class GridBot:
         from gridless import remove_position, calculate_pnl
         
         balance = pos.get('balance', 0)
-        # Support both cost_wei (new) and cost (legacy nano-ETH)
-        cost_wei = pos.get('cost_wei', 0)
-        if cost_wei <= 0 and 'cost' in pos:
-            old_cost = pos.get('cost', 0)
-            if old_cost > 0:
-                cost_wei = old_cost * 10**9
+        cost_wei = self._position_cost_units(pos)
         
         if balance <= 0 or cost_wei <= 0:
             logger.warning(f"Invalid position #{pos_id}: balance={balance}, cost_wei={cost_wei}")
             return
         
         tokens = balance / self.token_unit
-        cost_eth = cost_wei / 1e18
+        cost_eth = self._trade_units_to_float(cost_wei)
         buy_price = cost_eth / tokens if tokens > 0 else 0
-        pnl = calculate_pnl(pos, price, self.token_decimals)
+        pnl = calculate_pnl(pos, price, self.token_decimals, self.trade_token_decimals)
         
         # Moonbag logic
         moonbag_pct = getattr(self.config, 'moonbag_percentage', 0)
@@ -3712,7 +3791,7 @@ class GridBot:
             moonbag_tokens = 0
         
         _, sold_cost_wei = self._gridless_sell_terms(pos)
-        sold_cost_eth = sold_cost_wei / 10**18
+        sold_cost_eth = self._trade_units_to_float(sold_cost_wei)
         self._queue_route_shadow("sell", sell_amount, sold_cost_wei)
         expected_eth = sell_tokens * price
         profit_eth = expected_eth - sold_cost_eth
@@ -3782,15 +3861,17 @@ class GridBot:
             )
             min_return_eth = (
                 sold_cost_wei + self._minimum_profit_wei(sold_cost_wei, min_profit)
-                + unwrap_projected_wei + projected_approval_gas_wei
-                + self._provisional_swap_gas_cost_wei(quote)
-            ) / 10**18
+                + self._gas_wei_to_trade_units(
+                    unwrap_projected_wei + projected_approval_gas_wei
+                    + self._provisional_swap_gas_cost_wei(quote)
+                )
+            ) / self._trade_unit()
         else:
             min_return_eth = self._minimum_gas_aware_return_wei(
                 sold_cost_wei, quote, min_profit,
                 setup_gas_wei=unwrap_projected_wei,
-            ) / 10**18
-        quote_return_eth = self._taxed_quote_return_wei(quote) / 10**18
+            ) / self._trade_unit()
+        quote_return_eth = self._trade_units_to_float(self._taxed_quote_return_wei(quote))
         
         # Skip min_profit check for stoploss
         stoploss_enabled = getattr(self.config, 'gridless_stoploss_enabled', False)
@@ -4062,7 +4143,8 @@ class GridBot:
             if final_return_wei < final_minimum_wei:
                 logger.warning(
                     "❌ Sell aborted after route refresh: return %.8f ETH < gas-aware minimum %.8f ETH",
-                    final_return_wei / 10**18, final_minimum_wei / 10**18,
+                    self._trade_units_to_float(final_return_wei),
+                    self._trade_units_to_float(final_minimum_wei),
                 )
                 return
         
@@ -4171,11 +4253,11 @@ class GridBot:
                     )
                     return
             logger.info("Measured trade-token receipt: %s wei", received_wei)
-            eth_received = received_wei / 10**18
+            eth_received = self._trade_units_to_float(received_wei)
             profit_wei = self._net_sale_profit_wei(
                 received_wei, sold_cost_wei, result, setup_gas_wei=sell_setup_gas_wei
             )
-            actual_profit = profit_wei / 10**18
+            actual_profit = self._trade_units_to_float(profit_wei)
             
             self.session_sells += 1
             self.session_profit_weth += actual_profit
@@ -4233,12 +4315,7 @@ class GridBot:
         pos = self.positions[pos_id]
         
         # Calculate buy amount (divide available ETH/WETH by available slots up to max_active_positions)
-        if getattr(self.config, 'use_eth_trading', False):
-            eth_balance = self.wallet.get_eth_balance()
-            gas_reserve = getattr(self.config, 'eth_gas_reserve', 0.001)
-            trade_balance = max(0, eth_balance - gas_reserve)
-        else:
-            trade_balance, _ = self.wallet.get_token_balance(self.config.weth_address)
+        trade_balance = self._available_trade_balance()
         
         active_positions = sum(1 for p in self.positions.values() if p['balance'] > 0)
         available_slots = self.config.max_active_positions - active_positions
@@ -4250,7 +4327,7 @@ class GridBot:
         # Use configured % of available balance divided by available slots
         tradeable_pct = getattr(self.config, 'tradeable_balance_percent', 90.0) / 100.0
         buy_amount_eth = (trade_balance * tradeable_pct) / available_slots
-        buy_amount_wei = int(buy_amount_eth * 10**18)
+        buy_amount_wei = self._trade_float_to_units(buy_amount_eth)
         
         logger.info(f"Buying position {pos_id}: {buy_amount_eth:.6f} {self.trade_token_name} ({trade_balance:.6f} {self.trade_token_name} × {tradeable_pct*100:.0f}% / {available_slots} slots)")
         
@@ -4445,19 +4522,19 @@ class GridBot:
                 return
             tokens = tokens_received / self.token_unit
             self.positions[pos_id]['balance'] = tokens_received
-            # Cost = actual WETH spent for profit calculation (in wei for precision)
+            # Cost is stored in settlement-token atomic units.
             principal_cost_wei = quote.sell_amount if quote.sell_amount else buy_amount_wei
             buy_gas_wei = buy_setup_gas_wei + self._receipt_gas_cost_wei(result)
-            cost_wei = principal_cost_wei + buy_gas_wei
+            cost_wei = principal_cost_wei + self._gas_wei_to_trade_units(buy_gas_wei)
             self.positions[pos_id]['cost_wei'] = cost_wei
             # Keep legacy 'cost' field for backward compatibility
-            self.positions[pos_id]['cost'] = cost_wei // 10**9
+            self.positions[pos_id]['cost'] = self._legacy_nano_cost(cost_wei)
             self.save_positions()
             if weth_fallback:
                 self._clear_settlement_guard()
             
             # Calculate buy price for logging
-            economic_cost_eth = cost_wei / 10**18
+            economic_cost_eth = self._trade_units_to_float(cost_wei)
             buy_price = economic_cost_eth / tokens if tokens > 0 else 0
             
             # Track session stats
@@ -4473,7 +4550,9 @@ class GridBot:
             logger.info(f"   Tokens: {tokens:.6f} {self.config.token_symbol}")
             logger.info(
                 "   Economic cost: %.6f %s (principal %.6f + gas %.6f)",
-                economic_cost_eth, self.trade_token_name, principal_cost_wei / 10**18, buy_gas_wei / 10**18,
+                economic_cost_eth, self.trade_token_name,
+                self._trade_units_to_float(principal_cost_wei),
+                buy_gas_wei / self._native_unit(),
             )
             logger.info(f"   Buy price: {buy_price:.10f} {self.trade_token_name} per token")
             logger.info(f"   Tx: {result.tx_hash}")
@@ -4490,16 +4569,15 @@ class GridBot:
         total_tokens = total_balance / self.token_unit
         
         # Validate position has tokens and cost basis
-        cost_wei = (
-            int(pos.get('cost_wei', pos.get('cost', 0) * 10**9))
-            + int(pos.get('deferred_sell_gas_wei', 0) or 0)
+        cost_wei = self._position_cost_units(pos) + int(
+            pos.get('deferred_sell_gas_wei', 0) or 0
         )
         if total_balance <= 0 or cost_wei <= 0:
             logger.warning(f"Skipping sell for position {pos_id}: balance={total_balance}, cost_wei={cost_wei}")
             return
         
         # Cost is ETH/WETH spent (in wei)
-        cost_eth = cost_wei / 10**18
+        cost_eth = self._trade_units_to_float(cost_wei)
         buy_price = cost_eth / total_tokens if total_tokens > 0 else 0
         
         # Calculate profit
@@ -4530,7 +4608,7 @@ class GridBot:
             (int(cost_wei) * int(sell_amount) + int(total_balance) - 1)
             // int(total_balance)
         )
-        sold_cost_eth = sold_cost_wei / 10**18
+        sold_cost_eth = self._trade_units_to_float(sold_cost_wei)
         self._queue_route_shadow("sell", sell_amount, sold_cost_wei)
         profit_eth = expected_eth - sold_cost_eth
         
@@ -4593,8 +4671,10 @@ class GridBot:
             preapproval_minimum_wei = (
                 sold_cost_wei
                 + self._minimum_profit_wei(sold_cost_wei, min_profit_percent)
-                + unwrap_projected_wei + projected_approval_gas_wei
-                + self._provisional_swap_gas_cost_wei(quote)
+                + self._gas_wei_to_trade_units(
+                    unwrap_projected_wei + projected_approval_gas_wei
+                    + self._provisional_swap_gas_cost_wei(quote)
+                )
             )
         else:
             preapproval_minimum_wei = self._minimum_gas_aware_return_wei(
@@ -4614,7 +4694,8 @@ class GridBot:
             if alternate is None:
                 logger.warning(
                     "❌ Sell ABORTED before approval: return %.8f ETH < gas-aware minimum %.8f ETH",
-                    preapproval_return_wei / 10**18, preapproval_minimum_wei / 10**18,
+                    self._trade_units_to_float(preapproval_return_wei),
+                    self._trade_units_to_float(preapproval_minimum_wei),
                 )
                 return
             self.provider.active = alternate
@@ -4709,10 +4790,10 @@ class GridBot:
         min_return_eth = self._minimum_gas_aware_return_wei(
             sold_cost_wei, quote, min_profit_percent,
             setup_gas_wei=sell_setup_gas_wei,
-        ) / 10**18
+        ) / self._trade_unit()
         
         # quote.buy_amount is in wei
-        quote_return_eth = self._taxed_quote_return_wei(quote) / 10**18
+        quote_return_eth = self._trade_units_to_float(self._taxed_quote_return_wei(quote))
         
         if quote_return_eth < min_return_eth:
             logger.warning(f"❌ Sell ABORTED: Quote return ({quote_return_eth:.6f} {self.trade_token_name}) < minimum ({min_return_eth:.6f} {self.trade_token_name})")
@@ -4857,11 +4938,11 @@ class GridBot:
                     )
                     return
             logger.info("Measured trade-token receipt: %s wei", received_wei)
-            eth_received = received_wei / 10**18
+            eth_received = self._trade_units_to_float(received_wei)
             profit_wei = self._net_sale_profit_wei(
                 received_wei, sold_cost_wei, result, setup_gas_wei=sell_setup_gas_wei
             )
-            actual_profit_eth = profit_wei / 10**18
+            actual_profit_eth = self._trade_units_to_float(profit_wei)
             
             # Track session stats
             self.session_sells += 1
@@ -4921,8 +5002,8 @@ class GridBot:
         if eth_amount <= 0:
             return
         
-        # Convert to wei
-        eth_wei = int(eth_amount * 10**18)
+        # Convert to settlement-token atomic units.
+        eth_wei = self._trade_float_to_units(eth_amount)
         
         logger.info(f"🏦 Getting quote for banking {eth_amount:.6f} {self.trade_token_name} → USDG...")
         
@@ -5007,13 +5088,16 @@ class GridBot:
         # Banking is profit extraction, so its principal plus gas must fit
         # entirely inside the confirmed net-profit budget from the sale.
         if profit_budget_eth is not None:
-            budget_wei = int(float(profit_budget_eth) * 10**18)
-            economic_cost_wei = eth_wei + bank_setup_gas_wei + gas_limit * gas_price
+            budget_wei = self._trade_float_to_units(profit_budget_eth)
+            economic_cost_wei = eth_wei + self._gas_wei_to_trade_units(
+                bank_setup_gas_wei + gas_limit * gas_price
+            )
             if economic_cost_wei > budget_wei:
                 logger.warning(
                     "🏦 Banking skipped: amount plus projected gas (%.8f ETH) exceeds "
                     "confirmed net-profit budget (%.8f ETH)",
-                    economic_cost_wei / 10**18, budget_wei / 10**18,
+                    self._trade_units_to_float(economic_cost_wei),
+                    self._trade_units_to_float(budget_wei),
                 )
                 return
 
@@ -5340,17 +5424,14 @@ class GridBot:
                 from gridless import get_buy_price
                 active_positions = sorted(
                     [(pid, p) for pid, p in gridless_positions.items()],
-                    key=lambda x: get_buy_price(x[1], self.token_decimals)
+                    key=lambda x: get_buy_price(
+                        x[1], self.token_decimals, self.trade_token_decimals
+                    )
                 )
                 for pos_id, pos in active_positions[:3]:
                     tokens = pos.get('balance', 0) / self.token_unit
-                    # Support both cost_wei (new) and cost (legacy nano-ETH)
-                    cost_wei = pos.get('cost_wei', 0)
-                    if cost_wei <= 0 and 'cost' in pos:
-                        old_cost = pos.get('cost', 0)
-                        if old_cost > 0:
-                            cost_wei = old_cost * 10**9
-                    cost_eth = cost_wei / 10**18
+                    cost_wei = self._position_cost_units(pos)
+                    cost_eth = self._trade_units_to_float(cost_wei)
                     if tokens > 0 and cost_eth > 0:
                         buy_price = cost_eth / tokens
                         pnl = ((price - buy_price) / buy_price * 100)
@@ -5387,7 +5468,7 @@ class GridBot:
             # Full round-by-round telemetry is intentionally debug-only. The
             # normal INFO console remains focused on decisions, transactions,
             # safety blocks, and actionable failures.
-            balance_label = "ETH" if getattr(self.config, 'use_eth_trading', False) else "WETH"
+            balance_label = self.trade_token_name
             logger.info("=" * 70)
             logger.info(f"ROUND #{self.round_count} | {self.config.token_symbol} | Elapsed: {elapsed:.0f}s")
             logger.info("=" * 70)
@@ -5406,18 +5487,15 @@ class GridBot:
                     sell_threshold = getattr(self.config, 'gridless_sell_threshold', 5.0)
                     sorted_positions = sorted(
                         gridless_positions.items(),
-                        key=lambda x: get_buy_price(x[1], self.token_decimals)
+                        key=lambda x: get_buy_price(
+                            x[1], self.token_decimals, self.trade_token_decimals
+                        )
                     )
                     for pos_id, pos in sorted_positions:
                         balance_raw = pos.get('balance', 0)
-                        # Support both cost_wei (new) and cost (legacy nano-ETH)
-                        cost_wei = pos.get('cost_wei', 0)
-                        if cost_wei <= 0 and 'cost' in pos:
-                            old_cost = pos.get('cost', 0)
-                            if old_cost > 0:
-                                cost_wei = old_cost * 10**9
+                        cost_wei = self._position_cost_units(pos)
                         tokens = balance_raw / self.token_unit
-                        cost_eth = cost_wei / 10**18
+                        cost_eth = self._trade_units_to_float(cost_wei)
                         # Calculate buy_price from cost/balance
                         if tokens > 0 and cost_eth > 0:
                             buy_price = cost_eth / tokens
@@ -5512,8 +5590,8 @@ class GridBot:
                         bal = pos.get('balance', 0)
                         if bal > 0:
                             tokens = bal / self.token_unit
-                            cost_wei = pos.get('cost_wei', pos.get('cost', 0) * 10**9)
-                            cost_eth = cost_wei / 10**18
+                            cost_wei = self._position_cost_units(pos)
+                            cost_eth = self._trade_units_to_float(cost_wei)
                             if tokens > 0 and cost_eth > 0:
                                 buy_price = cost_eth / tokens
                                 pnl = ((price - buy_price) / buy_price * 100)
@@ -5582,6 +5660,9 @@ class GridBot:
                     buy_attempt=self._attempt_with_route_comparison("buy"),
                     sell_attempt=self._attempt_with_route_comparison("sell"),
                     chain_id=self.config.chain_id,
+                    settlement_symbol=self.trade_token_name,
+                    settlement_decimals=self.trade_token_decimals,
+                    native_symbol=self.config.native_symbol,
                     swap_provider=self.provider.name,
                     taxed_token=self._taxed_token_active(),
                     token_transfer_fee_percent=self._effective_token_transfer_fee_percent(),

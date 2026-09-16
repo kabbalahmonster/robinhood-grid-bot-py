@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).parent
-TEMPLATES = (".env.example", ".env.robinhood", ".env.base", ".env.mainnet")
+TEMPLATES = (".env.example", ".env.robinhood", ".env.base", ".env.mainnet", ".env.arc")
 
 
 def configured_environment_variables():

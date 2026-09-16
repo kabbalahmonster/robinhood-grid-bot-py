@@ -37,7 +37,7 @@ A production-grade grid trading bot for Robinhood Chain and other EVM networks, 
 
 - Python 3.9+
 - pip
-- A wallet with ETH/WETH for trading
+- A wallet funded with the configured chain's settlement and native gas asset
 - Credentials for the selected swap provider when required; Sushi's public v7 API works without a key
 - Alchemy or other RPC provider API key
 
@@ -280,7 +280,7 @@ not to trade a token.
 
 ### Chain-Specific Configuration
 
-Three template files are provided:
+Four template files are provided:
 
 #### Robinhood Chain (4663) - `.env.robinhood`
 ```bash
@@ -312,6 +312,28 @@ POLL_INTERVAL_SECONDS=6
 MAX_POSITIONS=10
 INITIAL_BUY_AMOUNT=0.01      # Higher amounts due to gas costs
 ```
+
+#### Arc Mainnet (5042) - `.env.arc`
+```bash
+CHAIN_ID=5042
+RPC_URLS=https://rpc.mainnet.arc.io,https://rpc.drpc.mainnet.arc.io,https://rpc.quicknode.mainnet.arc.io
+WETH_ADDRESS=0x3600000000000000000000000000000000000000 # Arc USDC ERC-20 interface
+SWAP_PROVIDER=lifi
+SWAP_FALLBACK_PROVIDER=
+USE_ETH_TRADING=false
+ETH_GAS_RESERVE=1            # USDC reserved for gas
+MAX_SWAP_GAS_ETH=0.10        # Legacy suffix; denominated in USDC on Arc
+```
+
+Arc is USDC-native. Its RPC-native gas balance uses 18 decimal precision, while
+the canonical USDC ERC-20 interface used for swaps uses 6 decimals. The bot
+converts gas costs into settlement units before calculating position cost,
+minimum sell return, realized profit, fees, and banking budgets. Because both
+interfaces share one underlying balance, `ETH_GAS_RESERVE` is also withheld
+from the ERC-20 trading balance. Arc has no wrapped-native token, so WETH
+wrap/unwrap fallback is disabled. Initial Arc support is fail-closed to LI.FI;
+route tournaments and automatic provider fallback remain off until another Arc
+execution provider is verified.
 
 ## Usage
 

@@ -27,8 +27,11 @@ def _now():
 
 
 class ProfitTracker:
-    def __init__(self, path="data/profit_totals.json"):
+    def __init__(self, path="data/profit_totals.json", unit=10**18):
         self.path = path
+        self.unit = int(unit)
+        if self.unit <= 0:
+            raise ValueError("profit accounting unit must be positive")
         self.state = self._load()
 
     def _default_state(self):
@@ -79,7 +82,7 @@ class ProfitTracker:
 
     @property
     def realized_profit_eth(self):
-        return self.realized_profit_wei / 10**18
+        return self.realized_profit_wei / self.unit
 
     @property
     def realized_sales(self):
@@ -136,7 +139,7 @@ class ProfitTracker:
                     continue
                 entries.append({
                     "timestamp": timestamp.isoformat(),
-                    "profit_wei": int(round(float(trade["profit_eth"]) * 10**18)),
+                    "profit_wei": int(round(float(trade["profit_eth"]) * self.unit)),
                     "tx_hash": str(trade.get("tx_hash", "")).strip().lower(),
                 })
             except (KeyError, TypeError, ValueError):
@@ -165,7 +168,7 @@ class ProfitTracker:
                         profit_wei += int(entry["profit_wei"])
                 except (KeyError, TypeError, ValueError):
                     continue
-            result[name] = profit_wei / 10**18
+            result[name] = profit_wei / self.unit
         return result
 
     def reset_baseline(self):

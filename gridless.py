@@ -18,8 +18,14 @@ def _configured_token_decimals(config: Any) -> int:
     return value if isinstance(value, int) and 0 <= value <= 255 else 18
 
 
+def _configured_settlement_decimals(config: Any) -> int:
+    value = getattr(config, 'settlement_decimals', 18)
+    return value if isinstance(value, int) and 0 <= value <= 255 else 18
+
+
 def calculate_pnl(position: Dict[str, int], current_price: float,
-                  token_decimals: int = 18) -> float:
+                  token_decimals: int = 18,
+                  settlement_decimals: int = 18) -> float:
     """Calculate P&L using wei units throughout for precision.
     
     Args:
@@ -34,14 +40,16 @@ def calculate_pnl(position: Dict[str, int], current_price: float,
     if cost_wei <= 0 and 'cost' in position:
         old_cost = position.get('cost', 0)
         if old_cost > 0:
-            cost_wei = old_cost * 10**9
+            cost_wei = old_cost * (10 ** settlement_decimals) // 10**9
     
     balance = position.get('balance', 0)
     if balance <= 0 or cost_wei <= 0:
         return 0.0
     
     # Calculate buy price in wei per wei-token for precise comparison
-    buy_price_eth_per_token = (cost_wei / 1e18) / (balance / (10 ** token_decimals))
+    buy_price_eth_per_token = (
+        cost_wei / (10 ** settlement_decimals)
+    ) / (balance / (10 ** token_decimals))
     
     if buy_price_eth_per_token <= 0:
         return 0.0
@@ -54,28 +62,30 @@ def calculate_pnl(position: Dict[str, int], current_price: float,
     return ((current_price - buy_price_eth_per_token) / buy_price_eth_per_token) * 100
 
 
-def get_buy_price(position: Dict[str, int], token_decimals: int = 18) -> float:
+def get_buy_price(position: Dict[str, int], token_decimals: int = 18,
+                  settlement_decimals: int = 18) -> float:
     """Calculate buy price in WETH per token."""
     # Migrate from old cost (nano-ETH) if needed
     cost_wei = position.get('cost_wei', 0)
     if cost_wei <= 0 and 'cost' in position:
         old_cost = position.get('cost', 0)
         if old_cost > 0:
-            cost_wei = old_cost * 10**9
+            cost_wei = old_cost * (10 ** settlement_decimals) // 10**9
     
     balance = position.get('balance', 0)
     if balance <= 0 or cost_wei <= 0:
         return 0.0
-    return (cost_wei / 1e18) / (balance / (10 ** token_decimals))
+    return (cost_wei / (10 ** settlement_decimals)) / (balance / (10 ** token_decimals))
 
 
-def get_top_position(positions: Dict[str, Dict], token_decimals: int = 18) -> Optional[Tuple[str, Dict]]:
+def get_top_position(positions: Dict[str, Dict], token_decimals: int = 18,
+                     settlement_decimals: int = 18) -> Optional[Tuple[str, Dict]]:
     """Get position with lowest buy price (best position)."""
     if not positions:
         return None
     top_id, top_pos, top_price = None, None, float('inf')
     for pos_id, pos in positions.items():
-        buy_price = get_buy_price(pos, token_decimals)
+        buy_price = get_buy_price(pos, token_decimals, settlement_decimals)
         if buy_price > 0 and buy_price < top_price:
             top_price, top_id, top_pos = buy_price, pos_id, pos
     return (top_id, top_pos) if top_id else None
@@ -92,6 +102,7 @@ def should_buy(positions: Dict[str, Dict], current_price: float, config: Any) ->
     sell_threshold = getattr(config, 'gridless_sell_threshold', 5.0)
     leading_edge_enabled = getattr(config, 'gridless_leading_edge', False)
     token_decimals = _configured_token_decimals(config)
+    settlement_decimals = _configured_settlement_decimals(config)
     
     # No positions - initial buy
     if len(positions) == 0 and max_active > 0:
@@ -102,11 +113,13 @@ def should_buy(positions: Dict[str, Dict], current_price: float, config: Any) ->
         return (False, f"Max positions reached ({len(positions)}/{max_active})")
     
     # Standard dip-buying logic
-    top = get_top_position(positions, token_decimals)
+    top = get_top_position(positions, token_decimals, settlement_decimals)
     if top is None:
         return (True, "No holding positions found")
     
-    top_pnl = calculate_pnl(top[1], current_price, token_decimals)
+    top_pnl = calculate_pnl(
+        top[1], current_price, token_decimals, settlement_decimals
+    )
     if top_pnl <= buy_threshold:
         return (True, f"Top position P&L {top_pnl:.2f}% <= threshold {buy_threshold}%")
     
@@ -127,14 +140,17 @@ def get_capacity_warning(positions: Dict[str, Dict], current_price: float, confi
     max_active = getattr(config, 'max_active_positions', 10)
     buy_threshold = getattr(config, 'gridless_buy_threshold', -10.0)
     token_decimals = _configured_token_decimals(config)
+    settlement_decimals = _configured_settlement_decimals(config)
     if max_active <= 0 or len(positions) < max_active:
         return None
 
-    top = get_top_position(positions, token_decimals)
+    top = get_top_position(positions, token_decimals, settlement_decimals)
     if top is None:
         return None
 
-    top_pnl = calculate_pnl(top[1], current_price, token_decimals)
+    top_pnl = calculate_pnl(
+        top[1], current_price, token_decimals, settlement_decimals
+    )
     if top_pnl > buy_threshold:
         return None
 
@@ -156,7 +172,8 @@ def should_sell(position: Dict[str, int], current_price: float, config: Any,
     stoploss_enabled = getattr(config, 'gridless_stoploss_enabled', False)
     min_profit = getattr(config, 'min_profit_percent', 1.5)
     token_decimals = _configured_token_decimals(config)
-    pnl = calculate_pnl(position, current_price, token_decimals)
+    settlement_decimals = _configured_settlement_decimals(config)
+    pnl = calculate_pnl(position, current_price, token_decimals, settlement_decimals)
     # Stoploss check (highest priority)
     if stoploss_enabled and pnl <= stoploss_threshold:
         if quote_profit_eth < 0:
@@ -166,8 +183,11 @@ def should_sell(position: Dict[str, int], current_price: float, config: Any,
     if pnl >= sell_threshold - 0.01:  # >= with 0.01% tolerance
         if quote_profit_eth <= 0:
             return (False, f"Target met ({pnl:.1f}%) but no quote profit")
-        cost_wei = position.get('cost_wei', position.get('cost', 0) * 10**9)
-        cost_eth = cost_wei / 1e18
+        cost_wei = position.get(
+            'cost_wei',
+            position.get('cost', 0) * (10 ** settlement_decimals) // 10**9,
+        )
+        cost_eth = cost_wei / (10 ** settlement_decimals)
         min_profit_eth = cost_eth * (min_profit / 100)
         if quote_profit_eth < min_profit_eth:
             return (False, f"Target met ({pnl:.1f}%) but quote < min")
@@ -181,9 +201,10 @@ def find_sell_candidate(positions: Dict[str, Dict], current_price: float,
     stoploss_enabled = getattr(config, 'gridless_stoploss_enabled', False)
     stoploss_threshold = getattr(config, 'gridless_stoploss_threshold', -25.0)
     token_decimals = _configured_token_decimals(config)
+    settlement_decimals = _configured_settlement_decimals(config)
     candidates = []
     for pos_id, pos in positions.items():
-        pnl = calculate_pnl(pos, current_price, token_decimals)
+        pnl = calculate_pnl(pos, current_price, token_decimals, settlement_decimals)
         should_sell_flag, reason = should_sell(pos, current_price, config, quote_profit_eth)
         if should_sell_flag:
             priority = 0 if (stoploss_enabled and pnl <= stoploss_threshold) else 1

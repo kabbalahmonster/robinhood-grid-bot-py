@@ -38,10 +38,18 @@ DEFAULT_MAINNET_RPCS = [
     "https://rpc.ankr.com/eth",
 ]
 
+# Default public RPC endpoints for Arc Mainnet (chainId 5042)
+DEFAULT_ARC_RPCS = [
+    "https://rpc.mainnet.arc.io",
+    "https://rpc.drpc.mainnet.arc.io",
+    "https://rpc.quicknode.mainnet.arc.io",
+]
+
 CHAIN_DEFAULT_RPCS = {
     4663: DEFAULT_ROBINHOOD_RPCS,
     8453: DEFAULT_BASE_RPCS,
     1: DEFAULT_MAINNET_RPCS,
+    5042: DEFAULT_ARC_RPCS,
 }
 
 

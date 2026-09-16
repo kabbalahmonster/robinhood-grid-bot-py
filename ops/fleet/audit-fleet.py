@@ -7,7 +7,12 @@ import re
 from pathlib import Path
 
 
-EXPLORERS = {1: "https://etherscan.io/tx/", 8453: "https://basescan.org/tx/", 4663: "https://robinhoodchain.blockscout.com/tx/"}
+EXPLORERS = {
+    1: "https://etherscan.io/tx/",
+    8453: "https://basescan.org/tx/",
+    4663: "https://robinhoodchain.blockscout.com/tx/",
+    5042: "https://explorer.arc.io/tx/",
+}
 
 
 def read_list(path):

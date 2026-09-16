@@ -83,7 +83,7 @@ class LiFiClient:
         """Get LI.FI chain ID. LI.FI uses numeric chain IDs, not string codes."""
         # LI.FI uses the actual chain ID numbers
         # See: https://docs.li.fi/ for supported chains
-        supported_chains = [1, 8453, 4663]  # ETH, Base, Robinhood
+        supported_chains = [1, 8453, 4663, 5042]  # ETH, Base, Robinhood, Arc
         if chain_id not in supported_chains:
             self.logger.error(f"Chain {chain_id} not supported by LI.FI. Supported: {supported_chains}")
         return chain_id
