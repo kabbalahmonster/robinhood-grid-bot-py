@@ -37,6 +37,13 @@ class UpdateThisCheckoutTests(unittest.TestCase):
         self.git("push", cwd=self.seed)
         self.updated_commit = self.git("rev-parse", "HEAD", cwd=self.seed).stdout.strip()
 
+        self.git("switch", "-c", "canary", cwd=self.seed)
+        (self.seed / "CANARY").write_text("branch\n", encoding="utf-8")
+        self.git("add", "CANARY", cwd=self.seed)
+        self.git("commit", "-m", "Canary", cwd=self.seed)
+        self.git("push", "-u", "origin", "canary", cwd=self.seed)
+        self.canary_commit = self.git("rev-parse", "HEAD", cwd=self.seed).stdout.strip()
+
     def tearDown(self):
         self.tempdir.cleanup()
 
@@ -75,6 +82,26 @@ class UpdateThisCheckoutTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Dirty worktree", result.stderr)
         self.assertEqual(self.git("rev-parse", "HEAD", cwd=self.operations).stdout.strip(), self.original_commit)
+
+    def test_branch_check_is_read_only_then_switches_to_remote_branch(self):
+        checked = self.run_updater("--branch", "canary", "--check")
+        self.assertEqual(checked.returncode, 0, checked.stderr)
+        self.assertIn("would create local tracking branch canary", checked.stdout)
+        self.assertEqual(
+            self.git("branch", "--show-current", cwd=self.operations).stdout.strip(),
+            "main",
+        )
+
+        switched = self.run_updater("--branch", "canary")
+        self.assertEqual(switched.returncode, 0, switched.stderr)
+        self.assertEqual(
+            self.git("branch", "--show-current", cwd=self.operations).stdout.strip(),
+            "canary",
+        )
+        self.assertEqual(
+            self.git("rev-parse", "HEAD", cwd=self.operations).stdout.strip(),
+            self.canary_commit,
+        )
 
 
 if __name__ == "__main__":

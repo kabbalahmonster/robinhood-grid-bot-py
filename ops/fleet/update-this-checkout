@@ -8,19 +8,22 @@ die() {
 
 usage() {
   cat <<'EOF'
-Usage: update-this-checkout [--check]
+Usage: update-this-checkout [--branch BRANCH] [--check]
 
 Safely update only the Git checkout containing this script. The fleet
 configuration is never loaded, no other checkout is touched, and no bot is
 restarted.
 
+--branch BRANCH  Switch/update this origin branch instead of the current branch.
 --check  Fetch and report whether a fast-forward is available without merging.
 EOF
 }
 
 check_only=0
+branch=""
 while (($#)); do
   case "$1" in
+    --branch) (($# >= 2)) || die "--branch requires a name"; branch="$2"; shift 2 ;;
     --check) check_only=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) die "Unknown option: $1" ;;
@@ -28,6 +31,9 @@ while (($#)); do
 done
 
 command -v git >/dev/null 2>&1 || die "git is required but was not found in PATH"
+if [[ -n "$branch" ]]; then
+  git check-ref-format --branch "$branch" >/dev/null 2>&1 || die "Invalid branch name: $branch"
+fi
 
 # Follow symlinks so a command installed in ~/bin still updates the repository
 # that owns the real script rather than whichever directory invokes it.
@@ -43,35 +49,83 @@ TOP_LEVEL="$(git -C "$REPO_DIR" rev-parse --show-toplevel)"
 [[ -z "$(git -C "$REPO_DIR" status --porcelain)" ]] || \
   die "Dirty worktree; commit, stash, or discard local changes before updating: $REPO_DIR"
 
-BRANCH="$(git -C "$REPO_DIR" symbolic-ref --quiet --short HEAD)" || \
-  die "Detached HEAD; check out a branch before updating: $REPO_DIR"
-UPSTREAM="$(git -C "$REPO_DIR" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null)" || \
-  die "Branch has no upstream: $BRANCH"
-
-printf 'Checkout: %s\nBranch:   %s -> %s\n' "$REPO_DIR" "$BRANCH" "$UPSTREAM"
-printf 'Fetching remote updates...\n'
-git -C "$REPO_DIR" fetch --prune
-
-COUNTS="$(git -C "$REPO_DIR" rev-list --left-right --count "HEAD...@{upstream}")"
-read -r AHEAD BEHIND <<<"$COUNTS"
-
-if ((AHEAD > 0 && BEHIND > 0)); then
-  die "Local branch and $UPSTREAM have diverged; refusing a non-fast-forward update"
+CURRENT="$(git -C "$REPO_DIR" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+if [[ -z "$CURRENT" && -z "$branch" ]]; then
+  die "Detached HEAD; use --branch BRANCH to select a branch explicitly: $REPO_DIR"
 fi
 
-if ((BEHIND == 0)); then
-  if ((AHEAD > 0)); then
-    printf 'No update needed; this checkout is %d commit(s) ahead of %s.\n' "$AHEAD" "$UPSTREAM"
+printf 'Fetching remote updates...\n'
+if [[ -n "$branch" ]]; then
+  git -C "$REPO_DIR" fetch --prune origin
+else
+  git -C "$REPO_DIR" fetch --prune
+fi
+
+TARGET="${branch:-$CURRENT}"
+CREATE_TRACKING=0
+if [[ -n "$branch" ]]; then
+  TARGET_REF="origin/$TARGET"
+  git -C "$REPO_DIR" show-ref --verify --quiet "refs/remotes/$TARGET_REF" || \
+    die "Remote branch does not exist: $TARGET_REF"
+  if ! git -C "$REPO_DIR" show-ref --verify --quiet "refs/heads/$TARGET"; then
+    CREATE_TRACKING=1
+  fi
+else
+  TARGET_REF="$(git -C "$REPO_DIR" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null)" || \
+    die "Branch has no upstream: $CURRENT"
+fi
+
+if ((CREATE_TRACKING)); then
+  AHEAD=0
+  BEHIND=0
+else
+  COUNTS="$(git -C "$REPO_DIR" rev-list --left-right --count "$TARGET...$TARGET_REF")"
+  read -r AHEAD BEHIND <<<"$COUNTS"
+fi
+
+printf 'Checkout: %s\nCurrent:  %s\nTarget:   %s -> %s\n' \
+  "$REPO_DIR" "${CURRENT:-(detached)}" "$TARGET" "$TARGET_REF"
+
+if ((AHEAD > 0 && BEHIND > 0)); then
+  die "Local $TARGET and $TARGET_REF have diverged; refusing a non-fast-forward switch/update"
+fi
+
+if ((check_only)); then
+  if ((CREATE_TRACKING)); then
+    printf 'Check only: would create local tracking branch %s from %s.\n' "$TARGET" "$TARGET_REF"
   else
-    printf 'Already up to date.\n'
+    if ((BEHIND > 0)); then
+      printf 'Update available: would fast-forward by %d commit(s).\n' "$BEHIND"
+    elif ((AHEAD > 0)); then
+      printf 'No update needed; local target is %d commit(s) ahead.\n' "$AHEAD"
+    else
+      printf 'Already up to date.\n'
+    fi
+    [[ "$CURRENT" == "$TARGET" ]] || printf 'Check only: would switch %s -> %s.\n' "${CURRENT:-(detached)}" "$TARGET"
   fi
   exit 0
 fi
 
-if ((check_only)); then
-  printf 'Update available: would fast-forward by %d commit(s).\n' "$BEHIND"
-  exit 0
+if ((CREATE_TRACKING)); then
+  git -C "$REPO_DIR" switch --track -c "$TARGET" "$TARGET_REF"
+elif [[ "$CURRENT" != "$TARGET" ]]; then
+  git -C "$REPO_DIR" switch "$TARGET"
 fi
 
-git -C "$REPO_DIR" merge --ff-only '@{upstream}'
-printf 'Updated only this checkout by %d commit(s). No bots were restarted.\n' "$BEHIND"
+if [[ -n "$branch" ]]; then
+  UPSTREAM="$(git -C "$REPO_DIR" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null || true)"
+  if [[ "$UPSTREAM" != "$TARGET_REF" ]]; then
+    git -C "$REPO_DIR" branch --set-upstream-to="$TARGET_REF" "$TARGET"
+  fi
+fi
+
+if ((CREATE_TRACKING)); then
+  printf 'Created %s tracking %s. No bots were restarted.\n' "$TARGET" "$TARGET_REF"
+elif ((BEHIND > 0)); then
+  git -C "$REPO_DIR" merge --ff-only "$TARGET_REF"
+  printf 'Updated only this checkout by %d commit(s). No bots were restarted.\n' "$BEHIND"
+elif ((AHEAD > 0)); then
+  printf 'No update needed; %s is %d commit(s) ahead of %s.\n' "$TARGET" "$AHEAD" "$TARGET_REF"
+else
+  printf 'Already up to date.\n'
+fi

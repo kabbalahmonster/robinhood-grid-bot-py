@@ -678,6 +678,16 @@ ln -sf "$PWD/ops/fleet/update-all" "$HOME/bin/update-all"
 update-all
 ```
 
+Deploy one branch across the operations checkout and every configured bot,
+then restart only after all updates succeed:
+
+```bash
+update-all --branch nullfox/bidirectional-net-pnl
+```
+
+The branch must exist on `origin` for every checkout. Existing local branches
+must be fast-forward compatible; the command never force-resets or rebases.
+
 To update both the operations checkout and configured bots while deliberately
 leaving the fleet stopped, even if an update later fails, run:
 
