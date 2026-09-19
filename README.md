@@ -155,7 +155,7 @@ python grid_bot.py
 | **Bot Behavior** ||||
 | `POLL_INTERVAL_SECONDS` | No | 6 | Price check interval in seconds |
 | `BIDIRECTIONAL_PNL_ENABLED` | No | true | Alternate exact buy- and sell-side net P&L observations for gridless triggers and dashboard display |
-| `PNL_POLLING_MODE` | No | bidirectional | Net P&L side to poll: `bidirectional` alternates, while `buy` or `sell` polls only that side and disables the opposite-side trigger |
+| `PNL_POLLING_MODE` | No | bidirectional | Net P&L quote side to poll: `bidirectional` alternates and routes each side to its matching trigger; `buy` or `sell` polls only that side and lets both buy and sell triggers use that observation |
 | `PNL_TRIGGER_BY_MIN_PROFIT` | No | false | Use `MIN_PROFIT_PERCENT` instead of `GRIDLESS_SELL_THRESHOLD` to wake normal net-P&L sell checks |
 | `BIDIRECTIONAL_PNL_QUOTE_TIMEOUT_SECONDS` | No | 4 | Per-request timeout for read-only bidirectional P&L quotes |
 | `BIDIRECTIONAL_PNL_MAX_AGE_SECONDS` | No | 90 | Maximum cached quote age allowed to influence a trigger or dashboard P&L |

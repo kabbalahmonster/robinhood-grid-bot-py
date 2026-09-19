@@ -114,8 +114,12 @@ def should_buy(positions: Dict[str, Dict], current_price: float, config: Any,
     if top is None:
         return (True, "No holding positions found")
     
-    top_pnl = (position_pnls or {}).get(str(top[0]), {}).get("buy_pnl")
+    observed = (position_pnls or {}).get(str(top[0]), {})
+    top_pnl = observed.get("buy_trigger_pnl", observed.get("buy_pnl"))
     if top_pnl is None:
+        if (position_pnls is not None
+                and getattr(config, 'bidirectional_pnl_enabled', False)):
+            return (False, "No fresh buy-trigger P&L observation")
         top_pnl = calculate_pnl(top[1], current_price, token_decimals)
     if top_pnl <= buy_threshold:
         return (True, f"Top position P&L {top_pnl:.2f}% <= threshold {buy_threshold}%")
@@ -145,8 +149,12 @@ def get_capacity_warning(positions: Dict[str, Dict], current_price: float, confi
     if top is None:
         return None
 
-    top_pnl = (position_pnls or {}).get(str(top[0]), {}).get("buy_pnl")
+    observed = (position_pnls or {}).get(str(top[0]), {})
+    top_pnl = observed.get("buy_trigger_pnl", observed.get("buy_pnl"))
     if top_pnl is None:
+        if (position_pnls is not None
+                and getattr(config, 'bidirectional_pnl_enabled', False)):
+            return None
         top_pnl = calculate_pnl(top[1], current_price, token_decimals)
     if top_pnl > buy_threshold:
         return None

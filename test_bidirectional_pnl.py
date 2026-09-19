@@ -101,6 +101,14 @@ class TestBidirectionalPnl(unittest.TestCase):
         expected_pnl = (expected_price - 0.01) / 0.01 * 100
         self.assertAlmostEqual(pnls["1"]["buy_pnl"], expected_pnl, places=8)
         self.assertEqual(bot._pnl_quotes["buy"]["projected_gas_wei"], 10**14)
+        self.assertAlmostEqual(
+            bot._pnl_quotes["buy"]["market_price_eth_per_token"],
+            0.9 / 90,
+        )
+        self.assertAlmostEqual(
+            bot._pnl_quotes["buy"]["price_eth_per_token"],
+            expected_price,
+        )
 
     def test_buy_only_mode_never_polls_sell_side(self):
         bot = make_bot()
@@ -110,8 +118,8 @@ class TestBidirectionalPnl(unittest.TestCase):
             9 * 10**17, 90 * 10**18, 89 * 10**18,
         )
 
-        bot._refresh_bidirectional_pnl(positions, 1.0, now=100)
-        bot._refresh_bidirectional_pnl(positions, 1.0, now=120)
+        first = bot._refresh_bidirectional_pnl(positions, 1.0, now=100)
+        second = bot._refresh_bidirectional_pnl(positions, 1.0, now=120)
 
         self.assertEqual(bot.api_client.get_quote.call_count, 2)
         self.assertTrue(all(
@@ -119,6 +127,9 @@ class TestBidirectionalPnl(unittest.TestCase):
             for call in bot.api_client.get_quote.call_args_list
         ))
         self.assertIsNone(bot._fresh_pnl_sample("sell", now=120))
+        for values in (first["1"], second["1"]):
+            self.assertEqual(values["buy_trigger_pnl"], values["buy_pnl"])
+            self.assertEqual(values["sell_trigger_pnl"], values["buy_pnl"])
 
     def test_sell_only_mode_polls_exact_next_position(self):
         bot = make_bot()
@@ -135,7 +146,13 @@ class TestBidirectionalPnl(unittest.TestCase):
 
         self.assertIn("sell_pnl", pnls["1"])
         self.assertNotIn("buy_pnl", pnls["1"])
+        self.assertEqual(pnls["1"]["buy_trigger_pnl"], pnls["1"]["sell_pnl"])
+        self.assertEqual(pnls["1"]["sell_trigger_pnl"], pnls["1"]["sell_pnl"])
         self.assertEqual(bot._pnl_quotes["sell"]["position_id"], "1")
+        self.assertAlmostEqual(
+            bot._pnl_quotes["sell"]["market_price_eth_per_token"],
+            0.012,
+        )
         self.assertEqual(
             bot.api_client.get_quote.call_args.kwargs["sell_token"],
             bot.config.token_address,
@@ -174,6 +191,55 @@ class TestBidirectionalPnl(unittest.TestCase):
         )
         self.assertTrue(decision)
         self.assertIn("-12.50%", reason)
+
+    def test_sell_only_mark_can_trigger_a_buy(self):
+        bot = make_bot()
+        bot.config.pnl_polling_mode = "sell"
+        positions = {"1": {"balance": 100 * 10**18, "cost_wei": 10**18}}
+        bot.api_client.get_quote.return_value = quote(
+            100 * 10**18, 9 * 10**17, 8 * 10**17,
+        )
+
+        pnls = bot._refresh_bidirectional_pnl(positions, 1.0, now=100)
+        decision, reason = should_buy(
+            positions, 12345.0, bot.config, pnls,
+        )
+
+        self.assertTrue(decision)
+        self.assertIn("-20.01%", reason)
+
+    def test_bidirectional_trigger_marks_remain_separate(self):
+        bot = make_bot()
+        bot._pnl_quotes = {
+            "buy": {
+                "sampled_monotonic": 100,
+                "price_eth_per_token": 0.009,
+            },
+            "sell": {
+                "sampled_monotonic": 100,
+                "sell_amount_raw": 100 * 10**18,
+                "floor_return_wei": 11 * 10**17,
+                "projected_gas_wei": 10**14,
+            },
+        }
+        positions = {"1": {"balance": 100 * 10**18, "cost_wei": 10**18}}
+
+        values = bot._bidirectional_position_pnls(positions, now=100)["1"]
+
+        self.assertEqual(values["buy_trigger_pnl"], values["buy_pnl"])
+        self.assertEqual(values["sell_trigger_pnl"], values["sell_pnl"])
+        self.assertNotEqual(values["buy_trigger_pnl"], values["sell_trigger_pnl"])
+
+    def test_bidirectional_buy_trigger_fails_closed_without_buy_quote(self):
+        bot = make_bot()
+        positions = {"1": {"balance": 100 * 10**18, "cost_wei": 10**18}}
+
+        decision, reason = should_buy(
+            positions, 0.001, bot.config, {"1": {"sell_pnl": -90}},
+        )
+
+        self.assertFalse(decision)
+        self.assertIn("No fresh buy-trigger", reason)
 
     def test_dashboard_rows_expose_both_sides_and_quote_provenance(self):
         bot = make_bot()

@@ -3222,6 +3222,12 @@ class GridBot:
         mode = self._pnl_polling_mode()
         return {"buy", "sell"} if mode == "bidirectional" else {mode}
 
+    def _pnl_sample_for_trigger(self, trigger, now=None):
+        """Return the quote side that is authoritative for one trigger."""
+        mode = self._pnl_polling_mode()
+        side = trigger if mode == "bidirectional" else mode
+        return self._fresh_pnl_sample(side, now)
+
     def _bidirectional_position_pnls(self, positions, now=None):
         """Return per-position net buy marks and extrapolated net sell exits."""
         from gridless import calculate_pnl
@@ -3255,6 +3261,22 @@ class GridBot:
                     row["sell_pnl"] = (
                         (net_wei - sold_cost_wei) * 100 / sold_cost_wei
                     )
+
+            # Single-sided polling intentionally lets both strategy directions
+            # use the same observation. Only bidirectional mode separates the
+            # buy and sell trigger marks.
+            mode = self._pnl_polling_mode()
+            if mode == "bidirectional":
+                if row.get("buy_pnl") is not None:
+                    row["buy_trigger_pnl"] = row["buy_pnl"]
+                if row.get("sell_pnl") is not None:
+                    row["sell_trigger_pnl"] = row["sell_pnl"]
+            elif mode == "buy" and row.get("buy_pnl") is not None:
+                row["buy_trigger_pnl"] = row["buy_pnl"]
+                row["sell_trigger_pnl"] = row["buy_pnl"]
+            elif mode == "sell" and row.get("sell_pnl") is not None:
+                row["buy_trigger_pnl"] = row["sell_pnl"]
+                row["sell_trigger_pnl"] = row["sell_pnl"]
             result[str(position_id)] = row
         return result
 
@@ -3299,13 +3321,17 @@ class GridBot:
                 ) or 10**15
                 quote, provider = self._fetch_pnl_observation_quote("buy", amount)
                 if quote is not None:
+                    quoted_output = int(getattr(quote, "buy_amount", 0) or 0)
                     output_floor = self._taxed_quote_return_wei(quote)
                     gas_wei = self._observation_gas_wei(quote, "buy", amount)
-                    if output_floor > 0:
+                    if quoted_output > 0 and output_floor > 0:
                         effective_cost_wei = int(amount) + gas_wei
+                        # Keep the ordinary spot/display mark free of configured
+                        # slippage and projected gas. The trigger mark below is
+                        # deliberately conservative and includes both.
                         market_price = (
                             int(amount) / 10**18
-                            / (output_floor / self.token_unit)
+                            / (quoted_output / self.token_unit)
                         )
                         price = (
                             effective_cost_wei / 10**18
@@ -3314,6 +3340,7 @@ class GridBot:
                         self._pnl_quotes["buy"] = {
                             "direction": "buy",
                             "sell_amount_raw": int(amount),
+                            "quoted_output_raw": quoted_output,
                             "floor_output_raw": int(output_floor),
                             "projected_gas_wei": gas_wei,
                             "market_price_eth_per_token": market_price,
@@ -3332,19 +3359,27 @@ class GridBot:
                         "sell", sell_amount,
                     )
                     if quote is not None:
+                        quoted_return_wei = int(
+                            getattr(quote, "buy_amount", 0) or 0
+                        )
                         floor_wei = self._taxed_quote_return_wei(quote)
                         gas_wei = self._observation_gas_wei(
                             quote, "sell", sell_amount,
                         )
-                        if floor_wei > 0:
+                        if quoted_return_wei > 0 and floor_wei > 0:
                             net_return_wei = max(0, int(floor_wei) - int(gas_wei))
                             self._pnl_quotes["sell"] = {
                                 "direction": "sell",
                                 "position_id": position_id,
                                 "sell_amount_raw": int(sell_amount),
                                 "sold_cost_wei": int(sold_cost_wei),
+                                "quoted_return_wei": quoted_return_wei,
                                 "floor_return_wei": int(floor_wei),
                                 "projected_gas_wei": int(gas_wei),
+                                "market_price_eth_per_token": (
+                                    quoted_return_wei / 10**18
+                                    / (int(sell_amount) / self.token_unit)
+                                ),
                                 "price_eth_per_token": (
                                     net_return_wei / 10**18
                                     / (int(sell_amount) / self.token_unit)
@@ -3543,7 +3578,7 @@ class GridBot:
                     top[1].get("cost_wei", 0)
                     or int(top[1].get("cost", 0) or 0) * 10**9
                 ) + int(top[1].get("deferred_sell_gas_wei", 0) or 0)
-                buy_sample = self._fresh_pnl_sample("buy")
+                buy_sample = self._pnl_sample_for_trigger("buy")
                 net_trigger_price = (
                     float(buy_sample["price_eth_per_token"])
                     if buy_sample is not None else price
@@ -3804,10 +3839,10 @@ class GridBot:
         
         for pos_id, pos in gridless_positions.items():
             observed = (position_pnls or {}).get(str(pos_id), {})
-            pnl = observed.get("sell_pnl")
+            pnl = observed.get("sell_trigger_pnl", observed.get("sell_pnl"))
             if pnl is None:
-                # Bidirectional mode fails closed when its sell-side quote is
-                # missing or stale. Legacy mode retains the original mark.
+                # Net-P&L polling fails closed when its authoritative trigger
+                # quote is missing or stale. Legacy mode retains the old mark.
                 if (getattr(self.config, "bidirectional_pnl_enabled", True)
                         and hasattr(self, "_pnl_quotes")):
                     continue
@@ -5669,10 +5704,12 @@ class GridBot:
             )
             buy_sample = self._fresh_pnl_sample("buy")
             sell_sample = self._fresh_pnl_sample("sell")
-            if buy_sample is not None:
-                price = float(buy_sample["market_price_eth_per_token"])
-            elif sell_sample is not None:
-                price = float(sell_sample["price_eth_per_token"])
+            display_sample = buy_sample or sell_sample
+            if display_sample is not None:
+                price = float(display_sample.get(
+                    "market_price_eth_per_token",
+                    display_sample["price_eth_per_token"],
+                ))
             else:
                 price = None
         else:
@@ -5846,8 +5883,7 @@ class GridBot:
         # Check sells before reporting so this round's transient attempt state
         # appears immediately rather than one poll late.
         phase_started = time.perf_counter()
-        if pnl_polling_mode != "buy":
-            self.check_sells(price, position_pnls)
+        self.check_sells(price, position_pnls)
         self._cycle_phase_ms["sells"] = (time.perf_counter() - phase_started) * 1000
 
         # A sell may have broadcast successfully even if every receipt RPC then
@@ -5867,10 +5903,9 @@ class GridBot:
                 if use_gridless:
                     from gridless import load_positions, get_capacity_warning
                     gpos = load_positions()
-                    if pnl_polling_mode != "sell":
-                        capacity_warning = get_capacity_warning(
-                            gpos, price, self.config, position_pnls
-                        )
+                    capacity_warning = get_capacity_warning(
+                        gpos, price, self.config, position_pnls
+                    )
                     for pos_id, pos in gpos.items():
                         bal = pos.get('balance', 0)
                         if bal > 0:
@@ -6002,8 +6037,7 @@ class GridBot:
         # forever.
         # Then check buys
         phase_started = time.perf_counter()
-        if pnl_polling_mode != "sell":
-            self.check_buys(price, position_pnls)
+        self.check_buys(price, position_pnls)
         self._cycle_phase_ms["buys"] = (time.perf_counter() - phase_started) * 1000
 
     def _round_summary_mode(self):
