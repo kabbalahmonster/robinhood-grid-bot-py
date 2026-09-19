@@ -8,13 +8,15 @@ source "$SCRIPT_DIR/fleet-common.sh"
 
 usage() {
   cat <<'EOF'
-Usage: update-fleet [--restart] [--detach] [--only NAMES] [--exclude NAMES] [--config PATH]
+Usage: update-fleet [--branch BRANCH] [--restart] [--detach]
+                    [--only NAMES] [--exclude NAMES] [--config PATH]
 
 Fast-forward every configured bot checkout from its current upstream branch.
 All checkouts are preflighted before any pull. Tracked modifications, detached
 HEADs, missing upstreams, and non-fast-forward updates are refused. Untracked
 files are allowed unless Git determines an incoming file would overwrite them.
 
+--branch   Switch/update this origin branch in every selected checkout.
 --restart  Restart the fleet after every checkout updates successfully.
 --detach   With --restart, leave the restarted fleet detached.
 EOF
@@ -25,8 +27,10 @@ restart=0
 detach=0
 only=""
 exclude=""
+branch=""
 while (($#)); do
   case "$1" in
+    --branch) (($# >= 2)) || fleet_die "--branch requires a name"; branch="$2"; shift 2 ;;
     --config)
       (($# >= 2)) || fleet_die "--config requires a path"
       config_path="$2"
@@ -40,6 +44,9 @@ while (($#)); do
     *) fleet_die "Unknown option: $1" ;;
   esac
 done
+if [[ -n "$branch" ]]; then
+  git check-ref-format --branch "$branch" >/dev/null 2>&1 || fleet_die "Invalid branch name: $branch"
+fi
 ((detach == 0 || restart == 1)) || fleet_die "--detach is only meaningful with --restart"
 [[ -z "$only$exclude" || $restart == 0 ]] || fleet_die "--restart cannot be combined with --only/--exclude; restart the selected bots manually"
 
@@ -50,6 +57,7 @@ fleet_validate_bots
 
 printf 'Preflighting %d fleet checkouts...\n' "${#FLEET_BOT_DIRS[@]}"
 preflight_failures=0
+declare -a target_branches=() target_refs=() create_tracking_flags=() behind_counts=()
 for bot_dir in "${FLEET_BOT_DIRS[@]}"; do
   if ! git -C "$bot_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     printf '  BLOCKED  Not a Git checkout: %s\n' "$bot_dir" >&2
@@ -62,24 +70,84 @@ for bot_dir in "${FLEET_BOT_DIRS[@]}"; do
     preflight_failures=$((preflight_failures + 1))
     continue
   fi
-  if ! branch="$(git -C "$bot_dir" symbolic-ref --quiet --short HEAD)"; then
+  current="$(git -C "$bot_dir" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+  if [[ -z "$current" && -z "$branch" ]]; then
     printf '  BLOCKED  Detached HEAD: %s\n' "$bot_dir" >&2
     preflight_failures=$((preflight_failures + 1))
     continue
   fi
-  if ! upstream="$(git -C "$bot_dir" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null)"; then
-    printf '  BLOCKED  Branch has no upstream: %s (%s)\n' "$bot_dir" "$branch" >&2
+
+  if [[ -n "$branch" ]]; then
+    git -C "$bot_dir" fetch --prune origin
+  else
+    git -C "$bot_dir" fetch --prune
+  fi
+  target="${branch:-$current}"
+  create_tracking=0
+  if [[ -n "$branch" ]]; then
+    target_ref="origin/$target"
+    if ! git -C "$bot_dir" show-ref --verify --quiet "refs/remotes/$target_ref"; then
+      printf '  BLOCKED  Remote branch does not exist: %s (%s)\n' "$target_ref" "$bot_dir" >&2
+      preflight_failures=$((preflight_failures + 1))
+      continue
+    fi
+    if ! git -C "$bot_dir" show-ref --verify --quiet "refs/heads/$target"; then
+      create_tracking=1
+    fi
+  elif ! target_ref="$(git -C "$bot_dir" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null)"; then
+    printf '  BLOCKED  Branch has no upstream: %s (%s)\n' "$bot_dir" "$current" >&2
     preflight_failures=$((preflight_failures + 1))
     continue
   fi
-  printf '  OK  %s (%s -> %s)\n' "$bot_dir" "$branch" "$upstream"
+
+  behind=0
+  if ((create_tracking == 0)); then
+    counts="$(git -C "$bot_dir" rev-list --left-right --count "$target...$target_ref")"
+    read -r ahead behind <<<"$counts"
+    if ((ahead > 0 && behind > 0)); then
+      printf '  BLOCKED  Local %s and %s have diverged: %s\n' "$target" "$target_ref" "$bot_dir" >&2
+      preflight_failures=$((preflight_failures + 1))
+      continue
+    fi
+  fi
+
+  target_branches+=("$target")
+  target_refs+=("$target_ref")
+  create_tracking_flags+=("$create_tracking")
+  behind_counts+=("$behind")
+  printf '  OK  %s (%s -> %s)\n' "$bot_dir" "${current:-(detached)}" "$target_ref"
 done
 ((preflight_failures == 0)) || fleet_die "$preflight_failures checkout(s) blocked fleet update; no repositories were changed"
 
 failures=0
-for bot_dir in "${FLEET_BOT_DIRS[@]}"; do
+for i in "${!FLEET_BOT_DIRS[@]}"; do
+  bot_dir="${FLEET_BOT_DIRS[$i]}"
+  target="${target_branches[$i]}"
+  target_ref="${target_refs[$i]}"
+  create_tracking="${create_tracking_flags[$i]}"
+  behind="${behind_counts[$i]}"
   printf '\nUpdating %s\n' "$bot_dir"
-  if ! git -C "$bot_dir" pull --ff-only; then
+  if ((create_tracking)); then
+    update_command=(git -C "$bot_dir" switch --track -c "$target" "$target_ref")
+  else
+    update_command=(git -C "$bot_dir" switch "$target")
+  fi
+  if ! "${update_command[@]}"; then
+    printf 'FAILED: %s\n' "$bot_dir" >&2
+    failures=$((failures + 1))
+    continue
+  fi
+  if [[ -n "$branch" ]]; then
+    upstream="$(git -C "$bot_dir" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null || true)"
+    if [[ "$upstream" != "$target_ref" ]] && \
+       ! git -C "$bot_dir" branch --set-upstream-to="$target_ref" "$target"; then
+      printf 'FAILED: %s\n' "$bot_dir" >&2
+      failures=$((failures + 1))
+      continue
+    fi
+  fi
+  if ((create_tracking == 0 && behind > 0)) && \
+     ! git -C "$bot_dir" merge --ff-only "$target_ref"; then
     printf 'FAILED: %s\n' "$bot_dir" >&2
     failures=$((failures + 1))
   fi

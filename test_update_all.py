@@ -34,6 +34,34 @@ class UpdateAllTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(trace.read_text(), "self\nfleet --restart --detach\n")
 
+    def test_branch_is_applied_to_checkout_and_fleet(self):
+        with tempfile.TemporaryDirectory() as root:
+            checkout = Path(root)
+            scripts = checkout / "ops" / "fleet"
+            scripts.mkdir(parents=True)
+            trace = checkout / "trace"
+            self.make_script(
+                scripts / "update-this-checkout",
+                f'printf "self %s\\n" "$*" >> "{trace}"',
+            )
+            self.make_script(
+                scripts / "update-fleet",
+                f'printf "fleet %s\\n" "$*" >> "{trace}"',
+            )
+
+            result = subprocess.run(
+                [str(SCRIPT), "--branch", "canary"],
+                env={**os.environ, "FLEET_COMMAND_CHECKOUT": str(checkout)},
+                text=True,
+                capture_output=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                trace.read_text(),
+                "self --branch canary\nfleet --restart --branch canary\n",
+            )
+
     def test_leave_stopped_stops_before_update_and_does_not_restart(self):
         with tempfile.TemporaryDirectory() as root:
             checkout = Path(root)

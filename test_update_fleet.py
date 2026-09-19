@@ -42,6 +42,13 @@ class UpdateFleetTests(unittest.TestCase):
         self.git("push", cwd=self.seed)
         self.updated_commit = self.git("rev-parse", "HEAD", cwd=self.seed).stdout.strip()
 
+        self.git("switch", "-c", "canary", cwd=self.seed)
+        (self.seed / "CANARY").write_text("branch\n", encoding="utf-8")
+        self.git("add", "CANARY", cwd=self.seed)
+        self.git("commit", "-m", "Canary", cwd=self.seed)
+        self.git("push", "-u", "origin", "canary", cwd=self.seed)
+        self.canary_commit = self.git("rev-parse", "HEAD", cwd=self.seed).stdout.strip()
+
     def tearDown(self):
         self.tempdir.cleanup()
 
@@ -54,9 +61,9 @@ class UpdateFleetTests(unittest.TestCase):
             check=True,
         )
 
-    def run_update(self):
+    def run_update(self, *args):
         return subprocess.run(
-            [str(UPDATE_FLEET), "--config", str(self.config)],
+            [str(UPDATE_FLEET), "--config", str(self.config), *args],
             cwd=self.root,
             env={**os.environ, "HOME": str(self.root)},
             text=True,
@@ -87,6 +94,35 @@ class UpdateFleetTests(unittest.TestCase):
         self.assertIn("2 checkout(s) blocked", result.stderr)
         self.assertEqual(self.git("rev-parse", "HEAD", cwd=self.alpha).stdout.strip(), self.original_commit)
         self.assertEqual(self.git("rev-parse", "HEAD", cwd=self.beta).stdout.strip(), self.original_commit)
+
+    def test_branch_switches_every_checkout_to_remote_tracking_branch(self):
+        result = self.run_update("--branch", "canary")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for checkout in (self.alpha, self.beta):
+            self.assertEqual(
+                self.git("branch", "--show-current", cwd=checkout).stdout.strip(),
+                "canary",
+            )
+            self.assertEqual(
+                self.git("rev-parse", "HEAD", cwd=checkout).stdout.strip(),
+                self.canary_commit,
+            )
+            self.assertEqual(
+                self.git("rev-parse", "--abbrev-ref", "@{upstream}", cwd=checkout).stdout.strip(),
+                "origin/canary",
+            )
+
+    def test_missing_branch_is_refused_before_any_checkout_switches(self):
+        result = self.run_update("--branch", "does-not-exist")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("2 checkout(s) blocked", result.stderr)
+        for checkout in (self.alpha, self.beta):
+            self.assertEqual(
+                self.git("branch", "--show-current", cwd=checkout).stdout.strip(),
+                "main",
+            )
 
 
 if __name__ == "__main__":

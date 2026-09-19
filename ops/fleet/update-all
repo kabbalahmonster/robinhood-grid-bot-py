@@ -11,20 +11,30 @@ die() {
 
 usage() {
   cat <<'EOF'
-Usage: update-all [--leave-stopped] [update-fleet options]
+Usage: update-all [--branch BRANCH] [--leave-stopped] [update-fleet options]
 
 Update the operations checkout and configured bot checkouts. By default the
 fleet is restarted after complete success. --leave-stopped records intentional
 downtime before updating and does not restart, even after successful updates.
+
+--branch BRANCH switches the operations checkout and every selected bot
+checkout to the named origin branch before fast-forwarding them.
 EOF
 }
 
 leave_stopped=0
 config_path=""
+branch=""
 forward_args=()
 while (($#)); do
   case "$1" in
     --leave-stopped) leave_stopped=1; shift ;;
+    --branch)
+      (($# >= 2)) || die "--branch requires a name"
+      branch="$2"
+      forward_args+=("$1" "$2")
+      shift 2
+      ;;
     --config)
       (($# >= 2)) || die "--config requires a path"
       config_path="$2"
@@ -70,7 +80,9 @@ if ((leave_stopped)); then
 fi
 
 printf 'Updating fleet command checkout: %s\n' "$FLEET_COMMAND_CHECKOUT"
-"$update_self"
+self_args=()
+[[ -z "$branch" ]] || self_args+=(--branch "$branch")
+"$update_self" "${self_args[@]}"
 
 if ((leave_stopped)); then
   printf '\nUpdating configured bots; fleet will remain stopped...\n'
