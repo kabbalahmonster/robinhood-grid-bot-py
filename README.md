@@ -187,6 +187,12 @@ python grid_bot.py
 | `GRIDLESS_BUY_COOLDOWN_SECONDS` | No | 0 | Cooldown between gridless buys (0 disables cooldown) |
 | `GRIDLESS_BUY_EXECUTION_MARGIN` | No | 50 | Execution margin % - blocks buy if quote P&L recovered past threshold + (abs(threshold) * margin%) (e.g., -10% trigger + 50% = block above -5%) |
 
+Buy-side P&L observations are published only when another gridless position can
+actually be opened and the exact next-buy principal is at least 0.001 ETH/WETH.
+Quotes whose projected gas is greater than or equal to that principal are also
+discarded. This prevents full-capacity reserve dust from becoming a misleading
+gas-dominated buy mark or trigger.
+
 ### Swap providers
 
 Prefer explicit provider selection:

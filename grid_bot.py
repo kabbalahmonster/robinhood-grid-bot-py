@@ -26,6 +26,9 @@ from profit_tracker import ProfitTracker
 from token_tax_detector import TokenTaxDetector
 
 
+MIN_BUY_OBSERVATION_PRINCIPAL_WEI = 10**15  # 0.001 ETH/WETH
+
+
 def _runtime_build_provenance(environ=None, runner=subprocess.run):
     """Resolve a public build identity once without making startup depend on Git."""
     environ = os.environ if environ is None else environ
@@ -3121,9 +3124,8 @@ class GridBot:
     def _next_gridless_buy_amount_wei(self, positions, trade_balance_eth):
         """Return the exact principal the next gridless buy would spend."""
         slots = self._available_gridless_slots(positions)
-        divisor = slots if slots > 0 else max(
-            1, int(getattr(self.config, "max_active_positions", 1))
-        )
+        if slots <= 0:
+            return 0
         reserve = (
             float(getattr(self.config, "eth_gas_reserve", 0.001))
             if getattr(self.config, "use_eth_trading", False) else 0.0
@@ -3132,7 +3134,7 @@ class GridBot:
         tradeable = float(getattr(
             self.config, "tradeable_balance_percent", 90.0
         )) / 100.0
-        return max(0, int(available * tradeable * 10**18 / divisor))
+        return max(0, int(available * tradeable * 10**18 / slots))
 
     def _fetch_pnl_observation_quote(self, direction, amount):
         """Fetch one exact-input, read-only quote for bidirectional P&L."""
@@ -3351,11 +3353,15 @@ class GridBot:
 
     def _pnl_poll_sequence(self, positions):
         mode = self._pnl_polling_mode()
-        if mode in {"legacy", "buy", "sell"}:
-            return [mode]
-        sequence = (["buy", "sell"] if mode == "bidirectional"
+        sequence = ([mode] if mode in {"legacy", "buy", "sell"}
+                    else ["buy", "sell"] if mode == "bidirectional"
                     else ["buy", "sell", "legacy"])
-        return [side for side in sequence if side != "sell" or positions]
+        buy_available = self._available_gridless_slots(positions) > 0
+        return [
+            side for side in sequence
+            if (side != "sell" or positions)
+            and (side != "buy" or buy_available)
+        ]
 
     def _normal_pnl_poll_side(self, eligible, now):
         side = getattr(self, "_next_pnl_poll_side", eligible[0])
@@ -3373,6 +3379,8 @@ class GridBot:
 
     def _select_pnl_poll_side(self, positions, now):
         eligible = self._pnl_poll_sequence(positions)
+        if not eligible:
+            return None, "unavailable"
         latches = getattr(
             self, "_pnl_trigger_latches", {"buy": None, "sell": None}
         )
@@ -3521,19 +3529,41 @@ class GridBot:
         if not getattr(self.config, "bidirectional_pnl_enabled", True):
             return self._bidirectional_position_pnls(positions, now)
         now = time.monotonic() if now is None else float(now)
+        if self._available_gridless_slots(positions) <= 0:
+            # A full bot has no executable next buy. Never retain a prior buy
+            # mark whose economics no longer describe an actionable trade.
+            self._pnl_quotes["buy"] = None
         side, _focus_reason = self._select_pnl_poll_side(positions, now)
 
         try:
             if side == "buy":
                 amount = self._next_gridless_buy_amount_wei(
                     positions, trade_balance_eth,
-                ) or 10**15
-                quote, provider = self._fetch_pnl_observation_quote("buy", amount)
+                )
+                if amount < MIN_BUY_OBSERVATION_PRINCIPAL_WEI:
+                    self._pnl_quotes["buy"] = None
+                    logger.debug(
+                        "Buy-side P&L observation unavailable: next principal "
+                        "%d wei is below the %d wei observation floor",
+                        amount, MIN_BUY_OBSERVATION_PRINCIPAL_WEI,
+                    )
+                    quote, provider = None, None
+                else:
+                    quote, provider = self._fetch_pnl_observation_quote(
+                        "buy", amount,
+                    )
                 if quote is not None:
                     quoted_output = int(getattr(quote, "buy_amount", 0) or 0)
                     output_floor = self._taxed_quote_return_wei(quote)
                     gas_wei = self._observation_gas_wei(quote, "buy", amount)
-                    if quoted_output > 0 and output_floor > 0:
+                    if gas_wei >= amount:
+                        self._pnl_quotes["buy"] = None
+                        logger.debug(
+                            "Buy-side P&L observation unavailable: projected "
+                            "gas %d wei is not below principal %d wei",
+                            gas_wei, amount,
+                        )
+                    elif quoted_output > 0 and output_floor > 0:
                         effective_cost_wei = int(amount) + gas_wei
                         # Keep the ordinary spot/display mark free of configured
                         # slippage and projected gas. The trigger mark below is
@@ -3599,7 +3629,7 @@ class GridBot:
                                 "quoted_at": datetime.now().astimezone().isoformat(),
                                 "sampled_monotonic": now,
                             }
-            else:
+            elif side == "legacy":
                 price = self.get_token_price()
                 if price is not None and float(price) > 0:
                     self._pnl_quotes["legacy"] = {

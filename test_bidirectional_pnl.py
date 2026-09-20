@@ -76,10 +76,8 @@ class TestBidirectionalPnl(unittest.TestCase):
         bot = make_bot()
         positions = {
             "1": {"balance": 100 * 10**18, "cost_wei": 10**18},
-            "2": {"balance": 50 * 10**18, "cost_wei": 6 * 10**17},
         }
-        # At capacity the display uses one normal tranche (balance / max slots).
-        buy = quote(45 * 10**16, 45 * 10**18, 44 * 10**18)
+        buy = quote(9 * 10**17, 90 * 10**18, 89 * 10**18)
         sell = quote(100 * 10**18, 12 * 10**17, 11 * 10**17)
         bot.api_client.get_quote.side_effect = [buy, sell]
 
@@ -89,11 +87,84 @@ class TestBidirectionalPnl(unittest.TestCase):
         self.assertIn("buy_pnl", first["1"])
         self.assertNotIn("sell_pnl", first["1"])
         self.assertAlmostEqual(second["1"]["sell_pnl"], 9.99, places=2)
-        self.assertAlmostEqual(second["2"]["sell_pnl"], -8.35, places=2)
         calls = bot.api_client.get_quote.call_args_list
-        self.assertEqual(calls[0].kwargs["sell_amount"], 45 * 10**16)
+        self.assertEqual(calls[0].kwargs["sell_amount"], 9 * 10**17)
         self.assertEqual(calls[1].kwargs["sell_amount"], 100 * 10**18)
         self.assertEqual(bot._pnl_quotes["sell"]["position_id"], "1")
+
+    def test_full_capacity_removes_buy_lane_and_clears_old_mark(self):
+        bot = make_bot()
+        bot.config.pnl_polling_mode = "trilateral"
+        positions = {
+            "1": {"balance": 100 * 10**18, "cost_wei": 10**18},
+            "2": {"balance": 50 * 10**18, "cost_wei": 6 * 10**17},
+        }
+        bot._pnl_quotes["buy"] = {
+            "sampled_monotonic": 99,
+            "price_eth_per_token": 999,
+        }
+        bot.api_client.get_quote.return_value = quote(
+            100 * 10**18, 12 * 10**17, 11 * 10**17,
+        )
+
+        pnls = bot._refresh_bidirectional_pnl(
+            positions, 0.000600143, now=100,
+        )
+
+        self.assertEqual(bot._pnl_poll_sequence(positions), ["sell", "legacy"])
+        self.assertIsNone(bot._pnl_quotes["buy"])
+        self.assertNotIn("buy_pnl", pnls["1"])
+        self.assertEqual(
+            bot.api_client.get_quote.call_args.kwargs["sell_token"],
+            bot.config.token_address,
+        )
+
+    def test_dust_next_buy_is_not_quoted_or_published(self):
+        bot = make_bot()
+        bot.config.pnl_polling_mode = "buy"
+        bot.config.max_active_positions = 10
+        bot.config.eth_gas_reserve = 0.0006
+        bot.config.tradeable_balance_percent = 100
+        positions = {
+            str(index): {"balance": 100 * 10**18, "cost_wei": 10**18}
+            for index in range(1, 10)
+        }
+
+        pnls = bot._refresh_bidirectional_pnl(
+            positions, 0.000600143, now=100,
+        )
+
+        bot.api_client.get_quote.assert_not_called()
+        self.assertIsNone(bot._pnl_quotes["buy"])
+        self.assertTrue(all("buy_pnl" not in row for row in pnls.values()))
+
+    def test_buy_only_mode_at_capacity_makes_no_observation_request(self):
+        bot = make_bot()
+        bot.config.pnl_polling_mode = "buy"
+        positions = {
+            "1": {"balance": 100 * 10**18, "cost_wei": 10**18},
+            "2": {"balance": 50 * 10**18, "cost_wei": 6 * 10**17},
+        }
+
+        pnls = bot._refresh_bidirectional_pnl(positions, 1.0, now=100)
+
+        bot.api_client.get_quote.assert_not_called()
+        bot.get_token_price.assert_not_called()
+        self.assertTrue(all("buy_pnl" not in row for row in pnls.values()))
+
+    def test_gas_dominated_buy_quote_is_not_published(self):
+        bot = make_bot()
+        bot.config.pnl_polling_mode = "buy"
+        positions = {"1": {"balance": 100 * 10**18, "cost_wei": 10**18}}
+        bot.wallet.normal_gas_price.return_value = 10**12
+        bot.api_client.get_quote.return_value = quote(
+            9 * 10**17, 90 * 10**18, 89 * 10**18, gas=1_000_000,
+        )
+
+        pnls = bot._refresh_bidirectional_pnl(positions, 1.0, now=100)
+
+        self.assertIsNone(bot._pnl_quotes["buy"])
+        self.assertNotIn("buy_pnl", pnls["1"])
 
     def test_buy_mark_includes_output_floor_and_projected_gas(self):
         bot = make_bot()
