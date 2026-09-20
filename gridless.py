@@ -88,6 +88,30 @@ def get_sell_trigger_percent(config: Any) -> float:
     return float(getattr(config, 'gridless_sell_threshold', 5.0))
 
 
+def trigger_pnl_candidates(observed: Dict[str, Any], direction: str):
+    """Return named, finite P&L marks authorized for one strategy direction."""
+    configured = observed.get(f"{direction}_trigger_pnls")
+    if isinstance(configured, dict):
+        candidates = []
+        for source, value in configured.items():
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(numeric):
+                candidates.append((str(source), numeric))
+        if candidates:
+            return candidates
+    fallback = observed.get(
+        f"{direction}_trigger_pnl", observed.get(f"{direction}_pnl")
+    )
+    try:
+        numeric = float(fallback)
+    except (TypeError, ValueError):
+        return []
+    return [(direction, numeric)] if math.isfinite(numeric) else []
+
+
 def should_buy(positions: Dict[str, Dict], current_price: float, config: Any,
                position_pnls: Optional[Dict[str, Dict[str, float]]] = None) -> Tuple[bool, str]:
     """Check buy rules with leading edge support.
@@ -115,25 +139,29 @@ def should_buy(positions: Dict[str, Dict], current_price: float, config: Any,
         return (True, "No holding positions found")
     
     observed = (position_pnls or {}).get(str(top[0]), {})
-    top_pnl = observed.get("buy_trigger_pnl", observed.get("buy_pnl"))
-    if top_pnl is None:
+    candidates = trigger_pnl_candidates(observed, "buy")
+    if not candidates:
         if (position_pnls is not None
                 and getattr(config, 'bidirectional_pnl_enabled', False)):
             return (False, "No fresh buy-trigger P&L observation")
-        top_pnl = calculate_pnl(top[1], current_price, token_decimals)
-    if top_pnl <= buy_threshold:
-        return (True, f"Top position P&L {top_pnl:.2f}% <= threshold {buy_threshold}%")
+        candidates = [("legacy", calculate_pnl(
+            top[1], current_price, token_decimals
+        ))]
+    dip_source, dip_pnl = min(candidates, key=lambda item: item[1])
+    if dip_pnl <= buy_threshold:
+        return (True, f"Top position {dip_source} P&L {dip_pnl:.2f}% <= threshold {buy_threshold}%")
     
     # Leading edge: buy into strength when single position is climbing
     # Trigger at 50% of sell threshold (e.g., if sell=5%, buy at +2.5%)
     if leading_edge_enabled and len(positions) == 1:
         leading_edge_trigger = sell_threshold * 0.5
-        if top_pnl > leading_edge_trigger or math.isclose(
-            top_pnl, leading_edge_trigger, rel_tol=1e-12, abs_tol=1e-9
+        leading_source, leading_pnl = max(candidates, key=lambda item: item[1])
+        if leading_pnl > leading_edge_trigger or math.isclose(
+            leading_pnl, leading_edge_trigger, rel_tol=1e-12, abs_tol=1e-9
         ):
-            return (True, f"Leading edge: P&L {top_pnl:.2f}% >= 50% of sell ({leading_edge_trigger}%)")
+            return (True, f"Leading edge: {leading_source} P&L {leading_pnl:.2f}% >= 50% of sell ({leading_edge_trigger}%)")
     
-    return (False, f"Top position P&L {top_pnl:.2f}% > threshold {buy_threshold}%")
+    return (False, f"Top position P&L marks remain above threshold {buy_threshold}%")
 
 
 def get_capacity_warning(positions: Dict[str, Dict], current_price: float, config: Any,
@@ -150,12 +178,15 @@ def get_capacity_warning(positions: Dict[str, Dict], current_price: float, confi
         return None
 
     observed = (position_pnls or {}).get(str(top[0]), {})
-    top_pnl = observed.get("buy_trigger_pnl", observed.get("buy_pnl"))
-    if top_pnl is None:
+    candidates = trigger_pnl_candidates(observed, "buy")
+    if not candidates:
         if (position_pnls is not None
                 and getattr(config, 'bidirectional_pnl_enabled', False)):
             return None
-        top_pnl = calculate_pnl(top[1], current_price, token_decimals)
+        candidates = [("legacy", calculate_pnl(
+            top[1], current_price, token_decimals
+        ))]
+    _, top_pnl = min(candidates, key=lambda item: item[1])
     if top_pnl > buy_threshold:
         return None
 

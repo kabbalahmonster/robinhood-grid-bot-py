@@ -196,6 +196,7 @@ class BotConfig:
     route_tournament_speculative_fallback_seconds: float = 0.0
     bidirectional_pnl_enabled: bool = True
     pnl_polling_mode: str = "bidirectional"
+    pnl_legacy_triggers: Optional[bool] = None
     pnl_trigger_by_min_profit: bool = False
     bidirectional_pnl_quote_timeout_seconds: float = 4.0
     bidirectional_pnl_max_age_seconds: float = 90.0
@@ -254,9 +255,12 @@ class BotConfig:
         polling_mode = str(getattr(
             self, "pnl_polling_mode", "bidirectional"
         )).strip().lower()
-        if polling_mode not in {"bidirectional", "buy", "sell"}:
+        if polling_mode not in {
+            "legacy", "buy", "sell", "bidirectional", "trilateral"
+        }:
             raise ValueError(
-                "PNL_POLLING_MODE supports bidirectional, buy, or sell"
+                "PNL_POLLING_MODE supports legacy, buy, sell, bidirectional, "
+                "or trilateral"
             )
         if not math.isfinite(quote_timeout) or not 1 <= quote_timeout <= 30:
             raise ValueError(
@@ -413,6 +417,16 @@ def _gas_cap_env(name: str, legacy_value: str) -> float:
     return float(value if value else legacy_value)
 
 
+def _optional_bool_env(name: str) -> Optional[bool]:
+    """Parse an optional boolean while rejecting dangerous silent typos."""
+    value = os.getenv(name, "").strip().lower()
+    if not value:
+        return None
+    if value not in {"true", "false"}:
+        raise ValueError(f"{name} must be true, false, or blank")
+    return value == "true"
+
+
 def load_config(env_file: Optional[str] = None) -> BotConfig:
     """
     Load configuration from environment variables.
@@ -532,6 +546,7 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
         pnl_polling_mode=os.getenv(
             "PNL_POLLING_MODE", "bidirectional"
         ).strip().lower(),
+        pnl_legacy_triggers=_optional_bool_env("PNL_LEGACY_TRIGGERS"),
         pnl_trigger_by_min_profit=os.getenv(
             "PNL_TRIGGER_BY_MIN_PROFIT", "false"
         ).lower() == "true",

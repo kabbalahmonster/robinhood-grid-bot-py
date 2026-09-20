@@ -777,7 +777,7 @@ class GridBot:
         # Read-only bidirectional market observations. Cached quotes can wake a
         # strategy check, but can never prepare, approve, sign, or broadcast.
         # The execution path always obtains and validates a fresh route.
-        self._pnl_quotes = {"buy": None, "sell": None}
+        self._pnl_quotes = {"buy": None, "sell": None, "legacy": None}
         self._next_pnl_poll_side = "buy"
         self.profit_tracker = ProfitTracker()
         self.dashboard_trades_file = "data/dashboard_trades.json"
@@ -3216,16 +3216,27 @@ class GridBot:
         mode = str(getattr(
             self.config, "pnl_polling_mode", "bidirectional"
         )).strip().lower()
-        return mode if mode in {"bidirectional", "buy", "sell"} else "bidirectional"
+        valid = {"legacy", "buy", "sell", "bidirectional", "trilateral"}
+        return mode if mode in valid else "bidirectional"
+
+    def _legacy_pnl_triggers_enabled(self):
+        configured = getattr(self.config, "pnl_legacy_triggers", None)
+        if configured is None:
+            return self._pnl_polling_mode() == "legacy"
+        return configured is True
 
     def _pnl_polling_sides(self):
         mode = self._pnl_polling_mode()
-        return {"buy", "sell"} if mode == "bidirectional" else {mode}
+        if mode == "bidirectional":
+            return {"buy", "sell"}
+        if mode == "trilateral":
+            return {"buy", "sell", "legacy"}
+        return {mode}
 
     def _pnl_sample_for_trigger(self, trigger, now=None):
         """Return the quote side that is authoritative for one trigger."""
         mode = self._pnl_polling_mode()
-        side = trigger if mode == "bidirectional" else mode
+        side = trigger if mode in {"bidirectional", "trilateral"} else mode
         return self._fresh_pnl_sample(side, now)
 
     def _bidirectional_position_pnls(self, positions, now=None):
@@ -3233,6 +3244,7 @@ class GridBot:
         from gridless import calculate_pnl
         buy_sample = self._fresh_pnl_sample("buy", now)
         sell_sample = self._fresh_pnl_sample("sell", now)
+        legacy_sample = self._fresh_pnl_sample("legacy", now)
         result = {}
         for position_id, position in positions.items():
             row = {}
@@ -3261,22 +3273,39 @@ class GridBot:
                     row["sell_pnl"] = (
                         (net_wei - sold_cost_wei) * 100 / sold_cost_wei
                     )
+            if legacy_sample is not None:
+                row["legacy_pnl"] = calculate_pnl(
+                    position,
+                    float(legacy_sample["price_eth_per_token"]),
+                    self.token_decimals,
+                )
 
             # Single-sided polling intentionally lets both strategy directions
-            # use the same observation. Only bidirectional mode separates the
-            # buy and sell trigger marks.
+            # use the same observation. Multi-sided modes keep the directional
+            # marks separate; trilateral can additionally authorize the legacy
+            # mark as an independent candidate for both trigger directions.
             mode = self._pnl_polling_mode()
-            if mode == "bidirectional":
+            if mode in {"bidirectional", "trilateral"}:
                 if row.get("buy_pnl") is not None:
                     row["buy_trigger_pnl"] = row["buy_pnl"]
+                    row.setdefault("buy_trigger_pnls", {})["buy"] = row["buy_pnl"]
                 if row.get("sell_pnl") is not None:
                     row["sell_trigger_pnl"] = row["sell_pnl"]
+                    row.setdefault("sell_trigger_pnls", {})["sell"] = row["sell_pnl"]
+                if (mode == "trilateral" and self._legacy_pnl_triggers_enabled()
+                        and row.get("legacy_pnl") is not None):
+                    row.setdefault("buy_trigger_pnls", {})["legacy"] = row["legacy_pnl"]
+                    row.setdefault("sell_trigger_pnls", {})["legacy"] = row["legacy_pnl"]
             elif mode == "buy" and row.get("buy_pnl") is not None:
                 row["buy_trigger_pnl"] = row["buy_pnl"]
                 row["sell_trigger_pnl"] = row["buy_pnl"]
             elif mode == "sell" and row.get("sell_pnl") is not None:
                 row["buy_trigger_pnl"] = row["sell_pnl"]
                 row["sell_trigger_pnl"] = row["sell_pnl"]
+            elif (mode == "legacy" and self._legacy_pnl_triggers_enabled()
+                  and row.get("legacy_pnl") is not None):
+                row["buy_trigger_pnl"] = row["legacy_pnl"]
+                row["sell_trigger_pnl"] = row["legacy_pnl"]
             result[str(position_id)] = row
         return result
 
@@ -3303,16 +3332,22 @@ class GridBot:
             return self._bidirectional_position_pnls(positions, now)
         now = time.monotonic() if now is None else float(now)
         mode = self._pnl_polling_mode()
-        side = mode if mode in {"buy", "sell"} else getattr(
+        side = mode if mode in {"legacy", "buy", "sell"} else getattr(
             self, "_next_pnl_poll_side", "buy"
         )
-        if mode == "bidirectional":
-            if not positions:
-                side = "buy"
-            elif self._fresh_pnl_sample("buy", now) is None:
-                side = "buy"
-            elif self._fresh_pnl_sample("sell", now) is None:
-                side = "sell"
+        if mode in {"bidirectional", "trilateral"}:
+            sequence = (["buy", "sell"] if mode == "bidirectional"
+                        else ["buy", "sell", "legacy"])
+            eligible = [candidate for candidate in sequence
+                        if candidate != "sell" or positions]
+            if side not in eligible:
+                side = eligible[0]
+            start = eligible.index(side)
+            rotation = eligible[start:] + eligible[:start]
+            missing = [candidate for candidate in rotation
+                       if self._fresh_pnl_sample(candidate, now) is None]
+            if missing:
+                side = missing[0]
 
         try:
             if side == "buy":
@@ -3351,7 +3386,7 @@ class GridBot:
                             "quoted_at": datetime.now().astimezone().isoformat(),
                             "sampled_monotonic": now,
                         }
-            else:
+            elif side == "sell":
                 target = self._next_sell_observation_position(positions, now)
                 if target is not None:
                     _, position_id, sell_amount, sold_cost_wei = target
@@ -3390,11 +3425,31 @@ class GridBot:
                                 "quoted_at": datetime.now().astimezone().isoformat(),
                                 "sampled_monotonic": now,
                             }
+            else:
+                price = self.get_token_price()
+                if price is not None and float(price) > 0:
+                    self._pnl_quotes["legacy"] = {
+                        "direction": "legacy",
+                        "sell_amount_raw": 10**15,
+                        "market_price_eth_per_token": float(price),
+                        "price_eth_per_token": float(price),
+                        "provider": str(getattr(self.provider, "name", "unknown")),
+                        "settlement": "native" if self.config.use_eth_trading else "weth",
+                        "basis": "legacy_gross_0.001_buy_quote",
+                        "quoted_at": datetime.now().astimezone().isoformat(),
+                        "sampled_monotonic": now,
+                    }
         except Exception as exc:
             logger.debug("%s-side P&L observation unavailable: %s", side, exc)
         finally:
-            if mode == "bidirectional":
-                self._next_pnl_poll_side = "sell" if side == "buy" and positions else "buy"
+            if mode in {"bidirectional", "trilateral"}:
+                sequence = (["buy", "sell"] if mode == "bidirectional"
+                            else ["buy", "sell", "legacy"])
+                eligible = [candidate for candidate in sequence
+                            if candidate != "sell" or positions]
+                self._next_pnl_poll_side = eligible[
+                    (eligible.index(side) + 1) % len(eligible)
+                ]
             else:
                 self._next_pnl_poll_side = mode
         return self._bidirectional_position_pnls(positions, now)
@@ -3403,6 +3458,7 @@ class GridBot:
         now = time.monotonic() if now is None else float(now)
         buy_sample = self._fresh_pnl_sample("buy", now)
         sell_sample = self._fresh_pnl_sample("sell", now)
+        legacy_sample = self._fresh_pnl_sample("legacy", now)
         for row in positions_data:
             values = position_pnls.get(str(row.get("id")), {})
             if values.get("buy_pnl") is not None and buy_sample is not None:
@@ -3428,6 +3484,15 @@ class GridBot:
                 })
                 if values.get("buy_pnl") is None:
                     row["pnl"] = row["sell_pnl"]
+            if values.get("legacy_pnl") is not None and legacy_sample is not None:
+                row.update({
+                    "legacy_pnl": round(values["legacy_pnl"], 2),
+                    "legacy_quote_at": legacy_sample["quoted_at"],
+                    "legacy_quote_provider": legacy_sample["provider"],
+                    "legacy_quote_basis": legacy_sample["basis"],
+                })
+                if values.get("buy_pnl") is None and values.get("sell_pnl") is None:
+                    row["pnl"] = row["legacy_pnl"]
         return positions_data
 
     def _defer_sell_gas_cost(self, position_id, gas_wei, *, gridless_position):
@@ -3819,7 +3884,9 @@ class GridBot:
     @_with_swap_provider_fallback
     def _check_sells_gridless(self, price, position_pnls=None):
         """Gridless sell logic - sell when P&L >= threshold or stoploss triggered."""
-        from gridless import load_positions, find_sell_candidate, calculate_pnl, remove_position, get_buy_price
+        from gridless import (load_positions, find_sell_candidate, calculate_pnl,
+                              remove_position, get_buy_price,
+                              trigger_pnl_candidates)
         
         # Load gridless positions
         gridless_positions = load_positions()
@@ -3839,27 +3906,34 @@ class GridBot:
         
         for pos_id, pos in gridless_positions.items():
             observed = (position_pnls or {}).get(str(pos_id), {})
-            pnl = observed.get("sell_trigger_pnl", observed.get("sell_pnl"))
-            if pnl is None:
+            candidates = trigger_pnl_candidates(observed, "sell")
+            if not candidates:
                 # Net-P&L polling fails closed when its authoritative trigger
                 # quote is missing or stale. Legacy mode retains the old mark.
                 if (getattr(self.config, "bidirectional_pnl_enabled", True)
                         and hasattr(self, "_pnl_quotes")):
                     continue
-                pnl = calculate_pnl(pos, price, self.token_decimals)
-            
-            # Check stoploss first (highest priority)
-            if stoploss_enabled and pnl <= stoploss_threshold:
-                if best_priority > 0 or pnl > best_pnl:
-                    best_candidate = (pos_id, pos, f"STOPLOSS: {pnl:.1f}%")
-                    best_priority = 0
-                    best_pnl = pnl
-            # Check profit target
-            elif pnl >= sell_threshold:
-                if best_priority > 1 or pnl > best_pnl:
-                    best_candidate = (pos_id, pos, f"PROFIT: {pnl:.1f}%")
-                    best_priority = 1
-                    best_pnl = pnl
+                candidates = [("legacy", calculate_pnl(
+                    pos, price, self.token_decimals
+                ))]
+
+            for source, pnl in candidates:
+                # Check stoploss first (highest priority)
+                if stoploss_enabled and pnl <= stoploss_threshold:
+                    if best_priority > 0 or pnl > best_pnl:
+                        best_candidate = (
+                            pos_id, pos, f"STOPLOSS ({source}): {pnl:.1f}%"
+                        )
+                        best_priority = 0
+                        best_pnl = pnl
+                # Check profit target
+                elif pnl >= sell_threshold:
+                    if best_priority > 1 or pnl > best_pnl:
+                        best_candidate = (
+                            pos_id, pos, f"PROFIT ({source}): {pnl:.1f}%"
+                        )
+                        best_priority = 1
+                        best_pnl = pnl
         
         if best_candidate is None:
             return
@@ -5704,7 +5778,8 @@ class GridBot:
             )
             buy_sample = self._fresh_pnl_sample("buy")
             sell_sample = self._fresh_pnl_sample("sell")
-            display_sample = buy_sample or sell_sample
+            legacy_sample = self._fresh_pnl_sample("legacy")
+            display_sample = buy_sample or sell_sample or legacy_sample
             if display_sample is not None:
                 price = float(display_sample.get(
                     "market_price_eth_per_token",
@@ -6009,6 +6084,7 @@ class GridBot:
                         else self.config.gridless_sell_threshold
                     ),
                     pnl_polling_mode=pnl_polling_mode,
+                    pnl_legacy_triggers=self._legacy_pnl_triggers_enabled(),
                     pnl_trigger_mode=(
                         "minimum_profit"
                         if getattr(self.config, "pnl_trigger_by_min_profit", False)

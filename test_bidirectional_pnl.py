@@ -25,6 +25,7 @@ def make_bot():
     bot.config = SimpleNamespace(
         bidirectional_pnl_enabled=True,
         pnl_polling_mode="bidirectional",
+        pnl_legacy_triggers=None,
         pnl_trigger_by_min_profit=False,
         bidirectional_pnl_quote_timeout_seconds=4,
         bidirectional_pnl_max_age_seconds=90,
@@ -58,8 +59,9 @@ def make_bot():
     )
     bot.provider = SimpleNamespace(name="uniswap")
     bot.api_client = SimpleNamespace(get_quote=Mock())
-    bot._pnl_quotes = {"buy": None, "sell": None}
+    bot._pnl_quotes = {"buy": None, "sell": None, "legacy": None}
     bot._next_pnl_poll_side = "buy"
+    bot.get_token_price = Mock(return_value=0.01)
     return bot
 
 
@@ -229,6 +231,96 @@ class TestBidirectionalPnl(unittest.TestCase):
         self.assertEqual(values["buy_trigger_pnl"], values["buy_pnl"])
         self.assertEqual(values["sell_trigger_pnl"], values["sell_pnl"])
         self.assertNotEqual(values["buy_trigger_pnl"], values["sell_trigger_pnl"])
+
+    def test_legacy_mode_defaults_to_polling_and_triggering_both_directions(self):
+        bot = make_bot()
+        bot.config.pnl_polling_mode = "legacy"
+        positions = {"1": {"balance": 100 * 10**18, "cost_wei": 10**18}}
+
+        values = bot._refresh_bidirectional_pnl(positions, 1.0, now=100)["1"]
+
+        bot.get_token_price.assert_called_once_with()
+        bot.api_client.get_quote.assert_not_called()
+        self.assertEqual(values["legacy_pnl"], 0.0)
+        self.assertEqual(values["buy_trigger_pnl"], values["legacy_pnl"])
+        self.assertEqual(values["sell_trigger_pnl"], values["legacy_pnl"])
+
+    def test_legacy_triggers_can_be_disabled_in_legacy_mode(self):
+        bot = make_bot()
+        bot.config.pnl_polling_mode = "legacy"
+        bot.config.pnl_legacy_triggers = False
+        positions = {"1": {"balance": 100 * 10**18, "cost_wei": 10**18}}
+
+        values = bot._refresh_bidirectional_pnl(positions, 1.0, now=100)["1"]
+
+        self.assertIn("legacy_pnl", values)
+        self.assertNotIn("buy_trigger_pnl", values)
+        self.assertNotIn("sell_trigger_pnl", values)
+
+    def test_trilateral_rotates_three_marks_at_one_request_per_cycle(self):
+        bot = make_bot()
+        bot.config.pnl_polling_mode = "trilateral"
+        positions = {"1": {"balance": 100 * 10**18, "cost_wei": 10**18}}
+        bot.api_client.get_quote.side_effect = [
+            quote(9 * 10**17, 90 * 10**18, 89 * 10**18),
+            quote(100 * 10**18, 11 * 10**17, 10 * 10**17),
+        ]
+
+        bot._refresh_bidirectional_pnl(positions, 1.0, now=100)
+        bot._refresh_bidirectional_pnl(positions, 1.0, now=110)
+        values = bot._refresh_bidirectional_pnl(positions, 1.0, now=120)["1"]
+
+        self.assertEqual(bot.api_client.get_quote.call_count, 2)
+        bot.get_token_price.assert_called_once_with()
+        self.assertIn("buy_pnl", values)
+        self.assertIn("sell_pnl", values)
+        self.assertIn("legacy_pnl", values)
+        self.assertEqual(values["buy_trigger_pnls"], {"buy": values["buy_pnl"]})
+        self.assertEqual(values["sell_trigger_pnls"], {"sell": values["sell_pnl"]})
+
+    def test_trilateral_rotation_does_not_starve_legacy_when_marks_expire(self):
+        bot = make_bot()
+        bot.config.pnl_polling_mode = "trilateral"
+        positions = {"1": {"balance": 100 * 10**18, "cost_wei": 10**18}}
+        bot.api_client.get_quote.side_effect = [
+            quote(9 * 10**17, 90 * 10**18, 89 * 10**18),
+            quote(100 * 10**18, 11 * 10**17, 10 * 10**17),
+        ]
+
+        for now in (100, 220, 340):
+            bot._refresh_bidirectional_pnl(positions, 1.0, now=now)
+
+        self.assertEqual(bot.api_client.get_quote.call_count, 2)
+        bot.get_token_price.assert_called_once_with()
+        self.assertEqual(bot._pnl_quotes["legacy"]["sampled_monotonic"], 340)
+
+    def test_trilateral_can_authorize_legacy_for_both_triggers(self):
+        bot = make_bot()
+        bot.config.pnl_polling_mode = "trilateral"
+        bot.config.pnl_legacy_triggers = True
+        bot._pnl_quotes = {
+            "buy": {"sampled_monotonic": 100, "price_eth_per_token": 0.011},
+            "sell": {
+                "sampled_monotonic": 100,
+                "sell_amount_raw": 100 * 10**18,
+                "floor_return_wei": 11 * 10**17,
+                "projected_gas_wei": 10**14,
+            },
+            "legacy": {
+                "sampled_monotonic": 100,
+                "price_eth_per_token": 0.009,
+            },
+        }
+        positions = {"1": {"balance": 100 * 10**18, "cost_wei": 10**18}}
+
+        values = bot._bidirectional_position_pnls(positions, now=100)["1"]
+
+        self.assertEqual(values["buy_trigger_pnls"]["legacy"], values["legacy_pnl"])
+        self.assertEqual(values["sell_trigger_pnls"]["legacy"], values["legacy_pnl"])
+
+        decision, reason = should_buy(positions, 12345.0, bot.config, {"1": values})
+        self.assertTrue(decision)
+        self.assertIn("legacy P&L", reason)
 
     def test_bidirectional_buy_trigger_fails_closed_without_buy_quote(self):
         bot = make_bot()
