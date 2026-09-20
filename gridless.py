@@ -112,6 +112,62 @@ def trigger_pnl_candidates(observed: Dict[str, Any], direction: str):
     return [(direction, numeric)] if math.isfinite(numeric) else []
 
 
+def trigger_focus_candidates(positions: Dict[str, Dict], config: Any,
+                             position_pnls: Dict[str, Dict[str, Any]]):
+    """Describe how close every authorized mark is to an actionable trigger."""
+    result = {"buy": {}, "sell": {}}
+    token_decimals = _configured_token_decimals(config)
+    max_active = int(getattr(config, 'max_active_positions', 10))
+    buy_threshold = float(getattr(config, 'gridless_buy_threshold', -10.0))
+    sell_threshold = get_sell_trigger_percent(config)
+    leading_edge = bool(getattr(config, 'gridless_leading_edge', False))
+    stoploss_enabled = bool(getattr(config, 'gridless_stoploss_enabled', False))
+    stoploss_threshold = float(getattr(
+        config, 'gridless_stoploss_threshold', -25.0
+    ))
+
+    if positions and len(positions) < max_active:
+        top = get_top_position(positions, token_decimals)
+        if top is not None:
+            observed = (position_pnls or {}).get(str(top[0]), {})
+            for source, pnl in trigger_pnl_candidates(observed, "buy"):
+                distances = [max(0.0, pnl - buy_threshold)]
+                triggered = pnl <= buy_threshold
+                if leading_edge and len(positions) == 1:
+                    leading_threshold = sell_threshold * 0.5
+                    distances.append(max(0.0, leading_threshold - pnl))
+                    triggered = triggered or pnl >= leading_threshold
+                result["buy"][source] = {
+                    "triggered": triggered,
+                    "distance": 0.0 if triggered else min(distances),
+                    "pnl": pnl,
+                    "position_id": str(top[0]),
+                }
+
+    for position_id in positions:
+        observed = (position_pnls or {}).get(str(position_id), {})
+        for source, pnl in trigger_pnl_candidates(observed, "sell"):
+            distances = [max(0.0, sell_threshold - pnl)]
+            triggered = pnl >= sell_threshold
+            if stoploss_enabled:
+                distances.append(max(0.0, pnl - stoploss_threshold))
+                triggered = triggered or pnl <= stoploss_threshold
+            candidate = {
+                "triggered": triggered,
+                "distance": 0.0 if triggered else min(distances),
+                "pnl": pnl,
+                "position_id": str(position_id),
+            }
+            previous = result["sell"].get(source)
+            if (previous is None
+                    or (candidate["triggered"] and not previous["triggered"])
+                    or (candidate["triggered"] == previous["triggered"]
+                        and candidate["distance"] < previous["distance"])):
+                result["sell"][source] = candidate
+
+    return result
+
+
 def should_buy(positions: Dict[str, Dict], current_price: float, config: Any,
                position_pnls: Optional[Dict[str, Dict[str, float]]] = None) -> Tuple[bool, str]:
     """Check buy rules with leading edge support.

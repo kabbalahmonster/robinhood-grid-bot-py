@@ -157,6 +157,7 @@ python grid_bot.py
 | `BIDIRECTIONAL_PNL_ENABLED` | No | true | Alternate exact buy- and sell-side net P&L observations for gridless triggers and dashboard display |
 | `PNL_POLLING_MODE` | No | bidirectional | P&L observations: `legacy`, `buy`, or `sell` polls only that mark; `bidirectional` alternates buy/sell; `trilateral` rotates buy/sell/legacy while retaining one request per cycle |
 | `PNL_LEGACY_TRIGGERS` | No | mode-dependent | Let the gross legacy mark independently wake both buy and sell tournaments. Defaults to true in `legacy` mode and false in every other mode when blank |
+| `PNL_TRIGGER_FOCUS_MARGIN_PERCENT` | No | 2 | Percentage-point approach window for adaptive polling. An authorized mark inside the window is refreshed every other cycle; a crossed mark is latched and refreshed every cycle until execution succeeds or a fresh quote leaves trigger range. Set 0 to disable near-trigger acceleration without disabling crossed-trigger latching |
 | `PNL_TRIGGER_BY_MIN_PROFIT` | No | false | Use `MIN_PROFIT_PERCENT` instead of `GRIDLESS_SELL_THRESHOLD` to wake normal net-P&L sell checks |
 | `BIDIRECTIONAL_PNL_QUOTE_TIMEOUT_SECONDS` | No | 4 | Per-request timeout for read-only bidirectional P&L quotes |
 | `BIDIRECTIONAL_PNL_MAX_AGE_SECONDS` | No | 90 | Maximum cached quote age allowed to influence a trigger or dashboard P&L |

@@ -779,6 +779,11 @@ class GridBot:
         # The execution path always obtains and validates a fresh route.
         self._pnl_quotes = {"buy": None, "sell": None, "legacy": None}
         self._next_pnl_poll_side = "buy"
+        self._last_pnl_poll_side = None
+        self._pnl_trigger_latches = {"buy": None, "sell": None}
+        self._pnl_near_focus_side = None
+        self._pnl_near_focus_poll_due = True
+        self._last_pnl_focus_status = None
         self.profit_tracker = ProfitTracker()
         self.dashboard_trades_file = "data/dashboard_trades.json"
         self.dashboard_trades = self._load_dashboard_trades()
@@ -3299,13 +3304,19 @@ class GridBot:
             elif mode == "buy" and row.get("buy_pnl") is not None:
                 row["buy_trigger_pnl"] = row["buy_pnl"]
                 row["sell_trigger_pnl"] = row["buy_pnl"]
+                row["buy_trigger_pnls"] = {"buy": row["buy_pnl"]}
+                row["sell_trigger_pnls"] = {"buy": row["buy_pnl"]}
             elif mode == "sell" and row.get("sell_pnl") is not None:
                 row["buy_trigger_pnl"] = row["sell_pnl"]
                 row["sell_trigger_pnl"] = row["sell_pnl"]
+                row["buy_trigger_pnls"] = {"sell": row["sell_pnl"]}
+                row["sell_trigger_pnls"] = {"sell": row["sell_pnl"]}
             elif (mode == "legacy" and self._legacy_pnl_triggers_enabled()
                   and row.get("legacy_pnl") is not None):
                 row["buy_trigger_pnl"] = row["legacy_pnl"]
                 row["sell_trigger_pnl"] = row["legacy_pnl"]
+                row["buy_trigger_pnls"] = {"legacy": row["legacy_pnl"]}
+                row["sell_trigger_pnls"] = {"legacy": row["legacy_pnl"]}
             result[str(position_id)] = row
         return result
 
@@ -3326,28 +3337,191 @@ class GridBot:
                 ranked.append((float(ranking_pnl), str(position_id), sell_amount, sold_cost_wei))
         return max(ranked, default=None, key=lambda item: (item[0], item[1]))
 
+    def _pnl_source_authorized(self, direction, source):
+        mode = self._pnl_polling_mode()
+        if mode == "legacy":
+            return source == "legacy" and self._legacy_pnl_triggers_enabled()
+        if mode in {"buy", "sell"}:
+            return source == mode
+        if mode == "bidirectional":
+            return source == direction
+        return source == direction or (
+            source == "legacy" and self._legacy_pnl_triggers_enabled()
+        )
+
+    def _pnl_poll_sequence(self, positions):
+        mode = self._pnl_polling_mode()
+        if mode in {"legacy", "buy", "sell"}:
+            return [mode]
+        sequence = (["buy", "sell"] if mode == "bidirectional"
+                    else ["buy", "sell", "legacy"])
+        return [side for side in sequence if side != "sell" or positions]
+
+    def _normal_pnl_poll_side(self, eligible, now):
+        side = getattr(self, "_next_pnl_poll_side", eligible[0])
+        if side not in eligible:
+            side = eligible[0]
+        start = eligible.index(side)
+        rotation = eligible[start:] + eligible[:start]
+        missing = [candidate for candidate in rotation
+                   if self._fresh_pnl_sample(candidate, now) is None]
+        selected = missing[0] if missing else rotation[0]
+        self._next_pnl_poll_side = eligible[
+            (eligible.index(selected) + 1) % len(eligible)
+        ]
+        return selected
+
+    def _select_pnl_poll_side(self, positions, now):
+        eligible = self._pnl_poll_sequence(positions)
+        latches = getattr(
+            self, "_pnl_trigger_latches", {"buy": None, "sell": None}
+        )
+        latched_sides = []
+        for side in eligible:
+            if side in latches.values() and side not in latched_sides:
+                latched_sides.append(side)
+        if latched_sides:
+            last = getattr(self, "_last_pnl_poll_side", None)
+            if last in latched_sides and len(latched_sides) > 1:
+                side = latched_sides[(latched_sides.index(last) + 1)
+                                     % len(latched_sides)]
+            else:
+                side = latched_sides[0]
+            return side, "triggered"
+
+        near = getattr(self, "_pnl_near_focus_side", None)
+        if near in eligible:
+            background = [side for side in eligible if side != near]
+            due = bool(getattr(self, "_pnl_near_focus_poll_due", True))
+            if due or not background:
+                self._pnl_near_focus_poll_due = False if background else True
+                return near, "near"
+            self._pnl_near_focus_poll_due = True
+            return self._normal_pnl_poll_side(background, now), "rotation"
+
+        self._pnl_near_focus_poll_due = True
+        return self._normal_pnl_poll_side(eligible, now), "rotation"
+
+    def _pnl_focus_snapshot(self):
+        latches = getattr(
+            self, "_pnl_trigger_latches", {"buy": None, "sell": None}
+        )
+        sides = []
+        directions = []
+        for direction in ("buy", "sell"):
+            source = latches.get(direction)
+            if source:
+                directions.append(direction)
+                if source not in sides:
+                    sides.append(source)
+        if sides:
+            return {
+                "side": "+".join(sides),
+                "reason": "triggered",
+                "directions": "+".join(directions),
+            }
+        near = getattr(self, "_pnl_near_focus_side", None)
+        if near:
+            return {"side": near, "reason": "near", "directions": ""}
+        return {"side": None, "reason": None, "directions": ""}
+
+    def _log_pnl_focus_transition(self):
+        status = self._pnl_focus_snapshot()
+        state = (status["side"], status["reason"], status["directions"])
+        previous = getattr(self, "_last_pnl_focus_status", None)
+        if state == previous:
+            return
+        self._last_pnl_focus_status = state
+        if status["side"]:
+            logger.info(
+                "P&L polling focus: side=%s reason=%s triggers=%s",
+                status["side"], status["reason"],
+                status["directions"] or "approaching",
+            )
+        elif previous and previous[0]:
+            logger.info("P&L polling focus cleared; normal rotation resumed")
+
+    def _update_pnl_poll_focus(self, positions, position_pnls):
+        from gridless import trigger_focus_candidates
+
+        observations = trigger_focus_candidates(
+            positions, self.config, position_pnls
+        )
+        latches = getattr(
+            self, "_pnl_trigger_latches", {"buy": None, "sell": None}
+        )
+        self._pnl_trigger_latches = latches
+        max_active = int(getattr(self.config, "max_active_positions", 10))
+        actionable = {
+            "buy": bool(positions) and len(positions) < max_active,
+            "sell": bool(positions),
+        }
+
+        for direction in ("buy", "sell"):
+            source = latches.get(direction)
+            if source and (not actionable[direction]
+                           or not self._pnl_source_authorized(direction, source)):
+                latches[direction] = None
+                source = None
+            if source:
+                current = observations[direction].get(source)
+                # Missing/stale/failed samples cannot prove that a crossed mark
+                # left range. Keep focusing until the same lane quotes again.
+                if current is not None and not current["triggered"]:
+                    latches[direction] = None
+                    source = None
+            if source is None and actionable[direction]:
+                for candidate in self._pnl_poll_sequence(positions):
+                    current = observations[direction].get(candidate)
+                    if (current is not None and current["triggered"]
+                            and self._pnl_source_authorized(direction, candidate)):
+                        latches[direction] = candidate
+                        break
+
+        if any(latches.values()):
+            self._pnl_near_focus_side = None
+            self._pnl_near_focus_poll_due = True
+        else:
+            margin = float(getattr(
+                self.config, "pnl_trigger_focus_margin_percent", 2
+            ))
+            near = []
+            for direction in ("buy", "sell"):
+                if not actionable[direction]:
+                    continue
+                for source, current in observations[direction].items():
+                    if (self._pnl_source_authorized(direction, source)
+                            and not current["triggered"]
+                            and current["distance"] <= margin):
+                        near.append((current["distance"], source))
+            current_focus = getattr(self, "_pnl_near_focus_side", None)
+            best_focus = min(
+                near, default=(None, None), key=lambda item: item[0]
+            )[1]
+            if current_focus != best_focus:
+                self._pnl_near_focus_side = best_focus
+                self._pnl_near_focus_poll_due = True
+
+        self._log_pnl_focus_transition()
+
+    def _clear_pnl_trigger_latch(self, direction, reason):
+        latches = getattr(self, "_pnl_trigger_latches", None)
+        if not isinstance(latches, dict) or not latches.get(direction):
+            return
+        source = latches[direction]
+        latches[direction] = None
+        logger.info(
+            "P&L %s trigger focus cleared after %s (source=%s)",
+            direction, reason, source,
+        )
+        self._log_pnl_focus_transition()
+
     def _refresh_bidirectional_pnl(self, positions, trade_balance_eth, now=None):
-        """Refresh one side per cycle, alternating to keep request volume flat."""
+        """Refresh one side per cycle, adapting cadence near active triggers."""
         if not getattr(self.config, "bidirectional_pnl_enabled", True):
             return self._bidirectional_position_pnls(positions, now)
         now = time.monotonic() if now is None else float(now)
-        mode = self._pnl_polling_mode()
-        side = mode if mode in {"legacy", "buy", "sell"} else getattr(
-            self, "_next_pnl_poll_side", "buy"
-        )
-        if mode in {"bidirectional", "trilateral"}:
-            sequence = (["buy", "sell"] if mode == "bidirectional"
-                        else ["buy", "sell", "legacy"])
-            eligible = [candidate for candidate in sequence
-                        if candidate != "sell" or positions]
-            if side not in eligible:
-                side = eligible[0]
-            start = eligible.index(side)
-            rotation = eligible[start:] + eligible[:start]
-            missing = [candidate for candidate in rotation
-                       if self._fresh_pnl_sample(candidate, now) is None]
-            if missing:
-                side = missing[0]
+        side, _focus_reason = self._select_pnl_poll_side(positions, now)
 
         try:
             if side == "buy":
@@ -3442,17 +3616,10 @@ class GridBot:
         except Exception as exc:
             logger.debug("%s-side P&L observation unavailable: %s", side, exc)
         finally:
-            if mode in {"bidirectional", "trilateral"}:
-                sequence = (["buy", "sell"] if mode == "bidirectional"
-                            else ["buy", "sell", "legacy"])
-                eligible = [candidate for candidate in sequence
-                            if candidate != "sell" or positions]
-                self._next_pnl_poll_side = eligible[
-                    (eligible.index(side) + 1) % len(eligible)
-                ]
-            else:
-                self._next_pnl_poll_side = mode
-        return self._bidirectional_position_pnls(positions, now)
+            self._last_pnl_poll_side = side
+        pnls = self._bidirectional_position_pnls(positions, now)
+        self._update_pnl_poll_focus(positions, pnls)
+        return pnls
 
     def _attach_bidirectional_pnls(self, positions_data, position_pnls, now=None):
         now = time.monotonic() if now is None else float(now)
@@ -5958,7 +6125,10 @@ class GridBot:
         # Check sells before reporting so this round's transient attempt state
         # appears immediately rather than one poll late.
         phase_started = time.perf_counter()
+        sells_before_check = self.session_sells
         self.check_sells(price, position_pnls)
+        if self.session_sells > sells_before_check:
+            self._clear_pnl_trigger_latch("sell", "successful execution")
         self._cycle_phase_ms["sells"] = (time.perf_counter() - phase_started) * 1000
 
         # A sell may have broadcast successfully even if every receipt RPC then
@@ -6036,6 +6206,7 @@ class GridBot:
                         'shortfall_eth': gas_reserve_eth - eth_bal,
                     }
 
+                pnl_focus = self._pnl_focus_snapshot()
                 self._reporter.report(
                     price=price,
                     eth_balance=eth_bal,
@@ -6085,6 +6256,9 @@ class GridBot:
                     ),
                     pnl_polling_mode=pnl_polling_mode,
                     pnl_legacy_triggers=self._legacy_pnl_triggers_enabled(),
+                    pnl_focus_side=pnl_focus["side"],
+                    pnl_focus_reason=pnl_focus["reason"],
+                    pnl_focus_directions=pnl_focus["directions"],
                     pnl_trigger_mode=(
                         "minimum_profit"
                         if getattr(self.config, "pnl_trigger_by_min_profit", False)
@@ -6113,7 +6287,10 @@ class GridBot:
         # forever.
         # Then check buys
         phase_started = time.perf_counter()
+        buys_before_check = self.session_buys
         self.check_buys(price, position_pnls)
+        if self.session_buys > buys_before_check:
+            self._clear_pnl_trigger_latch("buy", "successful execution")
         self._cycle_phase_ms["buys"] = (time.perf_counter() - phase_started) * 1000
 
     def _round_summary_mode(self):

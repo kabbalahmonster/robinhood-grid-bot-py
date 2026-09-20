@@ -197,6 +197,7 @@ class BotConfig:
     bidirectional_pnl_enabled: bool = True
     pnl_polling_mode: str = "bidirectional"
     pnl_legacy_triggers: Optional[bool] = None
+    pnl_trigger_focus_margin_percent: float = 2.0
     pnl_trigger_by_min_profit: bool = False
     bidirectional_pnl_quote_timeout_seconds: float = 4.0
     bidirectional_pnl_max_age_seconds: float = 90.0
@@ -261,6 +262,13 @@ class BotConfig:
             raise ValueError(
                 "PNL_POLLING_MODE supports legacy, buy, sell, bidirectional, "
                 "or trilateral"
+            )
+        focus_margin = float(getattr(
+            self, "pnl_trigger_focus_margin_percent", 2
+        ))
+        if not math.isfinite(focus_margin) or not 0 <= focus_margin <= 100:
+            raise ValueError(
+                "PNL_TRIGGER_FOCUS_MARGIN_PERCENT must be between 0 and 100"
             )
         if not math.isfinite(quote_timeout) or not 1 <= quote_timeout <= 30:
             raise ValueError(
@@ -547,6 +555,9 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
             "PNL_POLLING_MODE", "bidirectional"
         ).strip().lower(),
         pnl_legacy_triggers=_optional_bool_env("PNL_LEGACY_TRIGGERS"),
+        pnl_trigger_focus_margin_percent=float(
+            os.getenv("PNL_TRIGGER_FOCUS_MARGIN_PERCENT", "2")
+        ),
         pnl_trigger_by_min_profit=os.getenv(
             "PNL_TRIGGER_BY_MIN_PROFIT", "false"
         ).lower() == "true",

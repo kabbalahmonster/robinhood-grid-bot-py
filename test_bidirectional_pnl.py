@@ -26,6 +26,7 @@ def make_bot():
         bidirectional_pnl_enabled=True,
         pnl_polling_mode="bidirectional",
         pnl_legacy_triggers=None,
+        pnl_trigger_focus_margin_percent=2,
         pnl_trigger_by_min_profit=False,
         bidirectional_pnl_quote_timeout_seconds=4,
         bidirectional_pnl_max_age_seconds=90,
@@ -61,6 +62,11 @@ def make_bot():
     bot.api_client = SimpleNamespace(get_quote=Mock())
     bot._pnl_quotes = {"buy": None, "sell": None, "legacy": None}
     bot._next_pnl_poll_side = "buy"
+    bot._last_pnl_poll_side = None
+    bot._pnl_trigger_latches = {"buy": None, "sell": None}
+    bot._pnl_near_focus_side = None
+    bot._pnl_near_focus_poll_due = True
+    bot._last_pnl_focus_status = None
     bot.get_token_price = Mock(return_value=0.01)
     return bot
 
@@ -321,6 +327,76 @@ class TestBidirectionalPnl(unittest.TestCase):
         decision, reason = should_buy(positions, 12345.0, bot.config, {"1": values})
         self.assertTrue(decision)
         self.assertIn("legacy P&L", reason)
+
+    def test_near_legacy_trigger_is_polled_every_other_cycle(self):
+        bot = make_bot()
+        bot.config.pnl_polling_mode = "trilateral"
+        bot.config.pnl_legacy_triggers = True
+        bot._pnl_quotes = {
+            "buy": {"sampled_monotonic": 100, "price_eth_per_token": 0.01},
+            "sell": {
+                "sampled_monotonic": 100,
+                "sell_amount_raw": 100 * 10**18,
+                "floor_return_wei": 10**18,
+                "projected_gas_wei": 0,
+            },
+            "legacy": {
+                "sampled_monotonic": 100,
+                "price_eth_per_token": 0.0104,
+            },
+        }
+        positions = {"1": {"balance": 100 * 10**18, "cost_wei": 10**18}}
+        pnls = bot._bidirectional_position_pnls(positions, now=100)
+
+        bot._update_pnl_poll_focus(positions, pnls)
+        selected = [bot._select_pnl_poll_side(positions, 100)[0]
+                    for _ in range(4)]
+
+        self.assertEqual(bot._pnl_near_focus_side, "legacy")
+        self.assertEqual(selected, ["legacy", "buy", "legacy", "sell"])
+
+    def test_crossed_legacy_trigger_latches_until_fresh_exit_quote(self):
+        bot = make_bot()
+        bot.config.pnl_polling_mode = "trilateral"
+        bot.config.pnl_legacy_triggers = True
+        bot._pnl_quotes["legacy"] = {
+            "sampled_monotonic": 100,
+            "price_eth_per_token": 0.0106,
+        }
+        positions = {"1": {"balance": 100 * 10**18, "cost_wei": 10**18}}
+
+        bot._update_pnl_poll_focus(
+            positions, bot._bidirectional_position_pnls(positions, now=100)
+        )
+        self.assertEqual(bot._pnl_trigger_latches["sell"], "legacy")
+        self.assertEqual(
+            [bot._select_pnl_poll_side(positions, 100)[0] for _ in range(3)],
+            ["legacy", "legacy", "legacy"],
+        )
+
+        # A missing quote cannot prove the market left trigger range.
+        bot._update_pnl_poll_focus(positions, {})
+        self.assertEqual(bot._pnl_trigger_latches["sell"], "legacy")
+
+        # Only a fresh same-lane mark below the sell threshold releases it.
+        bot._pnl_quotes["legacy"].update({
+            "sampled_monotonic": 110,
+            "price_eth_per_token": 0.0104,
+        })
+        bot._update_pnl_poll_focus(
+            positions, bot._bidirectional_position_pnls(positions, now=110)
+        )
+        self.assertIsNone(bot._pnl_trigger_latches["sell"])
+        self.assertEqual(bot._pnl_focus_snapshot()["reason"], "near")
+
+    def test_successful_execution_clears_only_its_trigger_latch(self):
+        bot = make_bot()
+        bot._pnl_trigger_latches = {"buy": "legacy", "sell": "sell"}
+
+        bot._clear_pnl_trigger_latch("sell", "successful execution")
+
+        self.assertEqual(bot._pnl_trigger_latches["buy"], "legacy")
+        self.assertIsNone(bot._pnl_trigger_latches["sell"])
 
     def test_bidirectional_buy_trigger_fails_closed_without_buy_quote(self):
         bot = make_bot()

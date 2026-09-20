@@ -18,6 +18,9 @@ class TestDashboardReporter(unittest.TestCase):
             sell_point_percent=10.0,
             pnl_polling_mode="bidirectional",
             pnl_legacy_triggers=False,
+            pnl_focus_side="legacy",
+            pnl_focus_reason="triggered",
+            pnl_focus_directions="sell",
             pnl_trigger_mode="minimum_profit",
             poll_interval_seconds=30,
             token_symbol="TENDIES",
@@ -33,6 +36,9 @@ class TestDashboardReporter(unittest.TestCase):
         self.assertEqual(reporter._queue[0]["sell_point_percent"], 10.0)
         self.assertEqual(reporter._queue[0]["pnl_polling_mode"], "bidirectional")
         self.assertFalse(reporter._queue[0]["pnl_legacy_triggers"])
+        self.assertEqual(reporter._queue[0]["pnl_focus_side"], "legacy")
+        self.assertEqual(reporter._queue[0]["pnl_focus_reason"], "triggered")
+        self.assertEqual(reporter._queue[0]["pnl_focus_directions"], "sell")
         self.assertEqual(reporter._queue[0]["pnl_trigger_mode"], "minimum_profit")
         self.assertEqual(reporter._queue[0]["token_symbol"], "TENDIES")
         self.assertEqual(reporter._queue[0]["moonbag_balance"], 42.0)
