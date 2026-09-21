@@ -237,7 +237,10 @@ gas economics, exact token inflow, unallocated inventory, position capacity,
 and the saved ledger before archiving. If an earlier sell repair already applied
 the exact haircut, automatic mode may instead verify that same outflow against
 the latest matching local reconciliation audit. All other cases stay halted.
-`AUTO_RECONCILE_INTERVAL_SECONDS` controls receipt-check cadence.
+Exact transaction and receipt reads check every configured RPC endpoint before
+reporting absence. `AUTO_RECONCILE_INTERVAL_SECONDS` is the initial check
+cadence; consecutive failures back off exponentially to 30 minutes. An exact
+hash absent from every endpoint remains guarded and is never rebroadcast.
 If the isolated helper archives a legacy guard whose recorded error proves a
 definitive pre-broadcast rejection, the parent clears its stale in-memory halt
 only after finding an archive containing that exact transaction hash.
@@ -320,7 +323,10 @@ fallback revisions indicate mixed/older code or duplicated source records.
 All tournament candidates, eligible or rejected, expose only aggregation-safe fields:
 `failure_category`, `provider_error`, `http_status`, `retry_after_seconds`,
 `pair_fingerprint`, `candidate_elapsed_ms`, `stage_elapsed_ms`, and
-`timeout_stage`. The fingerprint is a stable,
+`stage_remaining_ms`, `timeout_stage`, and (for resilient RPC transports)
+`rpc_trace`. The trace contains bounded method/attempt/failure/elapsed/client
+queue-wait data and opaque endpoint ordinals only; `active` identifies the RPC
+still in flight when the aggregate deadline expired. The fingerprint is a stable,
 non-reversible chain/direction/pair/settlement key. Provider response bodies,
 request IDs, credentials, and calldata are not emitted. Selected-winner lines
 repeat the fingerprint so the execution lifecycle can be grouped by pair. Use

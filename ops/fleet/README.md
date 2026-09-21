@@ -107,6 +107,7 @@ sudo apt install tmux git python3 python3-venv
    nano ops/fleet/fleet.conf
    chmod +x ops/fleet/start-fleet ops/fleet/stop-fleet \
      ops/fleet/restart-fleet ops/fleet/start-bot ops/fleet/stop-bot \
+     ops/fleet/restart-stopped \
      ops/fleet/restart-bot ops/fleet/update-fleet \
      ops/fleet/update-this-checkout ops/fleet/update-all ops/fleet/update-bot \
      ops/fleet/usdg-sweep ops/fleet/cleanup-logs ops/fleet/cleanup-logs.py \
@@ -141,6 +142,7 @@ sudo apt install tmux git python3 python3-venv
    ln -sf "$PWD/ops/fleet/start-bot" "$HOME/bin/start-bot"
    ln -sf "$PWD/ops/fleet/stop-bot" "$HOME/bin/stop-bot"
    ln -sf "$PWD/ops/fleet/restart-bot" "$HOME/bin/restart-bot"
+   ln -sf "$PWD/ops/fleet/restart-stopped" "$HOME/bin/restart-stopped"
    ln -sf "$PWD/ops/fleet/update-bot" "$HOME/bin/update-bot"
    ln -sf "$PWD/ops/fleet/update-fleet" "$HOME/bin/update-fleet"
    ln -sf "$PWD/ops/fleet/update-this-checkout" "$HOME/bin/update-this-checkout"
@@ -493,6 +495,7 @@ unless their section explicitly says otherwise.
 | `bundle-logs` | Merge selected-bot logs (all rotations with `--since`) into one redacted report | Writes one report file |
 | `start-fleet` / `stop-fleet` / `restart-fleet` | Manage the configured tmux fleet | Processes only |
 | `start-bot NAME` / `stop-bot NAMES...` / `restart-bot NAMES...` | Durably start, stop, or cleanly restart selected bots | Processes/state marker |
+| `restart-stopped` | Start all intentionally stopped bots, optionally narrowed with `--only`/`--exclude` | Processes/state marker |
 | `update-this-checkout` | Fast-forward the dedicated operations clone | Yes, Git |
 | `update-bot NAME` | Inspect, switch, fast-forward, and conditionally restart one bot checkout | Yes, Git/processes |
 | `update-fleet` / `update-all` | Fast-forward bot clones; full wrapper can restart | Yes, Git/processes |
@@ -532,6 +535,19 @@ Start an intentionally stopped bot:
 ```bash
 ops/fleet/start-bot hookr
 ```
+
+Start every intentionally stopped bot without changing running bots:
+
+```bash
+ops/fleet/restart-stopped
+ops/fleet/restart-stopped --only hookr,earn
+ops/fleet/restart-stopped --exclude archive,retired
+```
+
+`--except` is accepted as an alias for `--exclude`. Both selectors accept
+comma-separated names and can be combined: `--only` narrows first, then the
+exclusion is applied. If the fleet session is absent, it is recreated with the
+selected stopped bots plus any bots already marked desired-running.
 
 Stop one or several bots durably and leave their panes at clean shell prompts:
 
@@ -1056,7 +1072,10 @@ also tries the existing receipt-driven buy recovery using the guard's exact
 transaction hash. That path requires a successful configured-wallet
 transaction, native principal, exact managed-token receipt, confirmed gas
 economics, sufficient unallocated inventory, available position capacity, and
-a verified ledger reload. It resumes only after the exact guard is archived.
+a verified ledger reload. Exact transaction and receipt reads check every
+configured RPC endpoint. Missing exact-hash evidence remains halted without a
+rebroadcast, and repeated failures back off exponentially to 30 minutes. It
+resumes only after the exact guard is archived.
 
 The repair is deliberately one-way and conservative:
 

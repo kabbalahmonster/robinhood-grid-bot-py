@@ -83,9 +83,17 @@ def _log_candidate(row, context, tournament_id):
     stage_summary = ",".join(
         "%s:%s" % (name, stage_elapsed[name]) for name in sorted(stage_elapsed)
     ) or "none"
-    suffix = " · tournament_id=%s candidate_elapsed_ms=%s timeout_stage=%s stage_elapsed_ms=%s" % (
+    stage_remaining = row.get("stage_remaining_ms") or {}
+    remaining_summary = ",".join(
+        "%s:%s" % (name, stage_remaining[name]) for name in sorted(stage_remaining)
+    ) or "none"
+    suffix = (
+        " · tournament_id=%s candidate_elapsed_ms=%s timeout_stage=%s "
+        "stage_elapsed_ms=%s stage_remaining_ms=%s rpc_trace=%s"
+    ) % (
         tournament_id, row.get("candidate_elapsed_ms", "unknown"),
-        row.get("timeout_stage", "none"), stage_summary,
+        row.get("timeout_stage", "none"), stage_summary, remaining_summary,
+        row.get("rpc_trace_summary", "unavailable"),
     )
     if context.get("direction") == "sell" and row.get("projected_profit_percent") is not None:
         LOG.info(
@@ -116,6 +124,45 @@ def _pair_fingerprint(context, settlement):
         str(settlement),
     ))
     return hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
+
+
+def _summarize_rpc_trace(events):
+    """Return a bounded URL/argument-free summary of candidate-thread RPC work."""
+    rows = {}
+    now = time.perf_counter()
+    for event in list(events or ()):
+        method = str(event.get("method") or "unknown")
+        if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,64}", method):
+            method = "unknown"
+        row = rows.setdefault(method, {
+            "attempts": 0, "failures": 0, "elapsed_ms": 0.0,
+            "queue_wait_ms": 0.0, "active": False, "endpoints": [],
+        })
+        row["attempts"] += max(0, int(event.get("attempts") or 0))
+        row["failures"] += max(0, int(event.get("failures") or 0))
+        elapsed = event.get("elapsed_ms")
+        if elapsed is None:
+            elapsed = max(0.0, (now - float(event.get("_started") or now)) * 1000)
+            row["active"] = True
+        row["elapsed_ms"] += float(elapsed)
+        row["queue_wait_ms"] += max(
+            0.0, float(event.get("client_queue_wait_ms") or 0.0)
+        )
+        for label in event.get("endpoint_labels") or ():
+            if re.fullmatch(r"rpc_(?:\d+|unknown)", str(label)) and label not in row["endpoints"]:
+                row["endpoints"].append(label)
+    summaries = []
+    for method in sorted(rows)[:8]:
+        row = rows[method]
+        endpoints = "+".join(row["endpoints"][:3]) or "rpc_unknown"
+        state = "active" if row["active"] else "done"
+        summaries.append(
+            "%s:%d/%d/%.1f/%.1f/%s@%s" % (
+                method, row["attempts"], row["failures"], row["elapsed_ms"],
+                row["queue_wait_ms"], state, endpoints,
+            )
+        )
+    return ",".join(summaries) or "none"
 
 
 def _configured_identities(config):
@@ -656,13 +703,18 @@ def collect(config, address, context, client_factory=None,
         )
 
     stage_elapsed_ms = {}
+    stage_remaining_ms = {}
     active_stages = []
 
     def stage_started(stage):
+        stage_started_at = time.monotonic()
         active_stages.append(stage)
+        stage_remaining_ms[stage] = round(
+            max(0.0, deadline - stage_started_at) * 1000, 1
+        )
         if callable(_stage_callback):
-            _stage_callback(stage, "started", None)
-        return time.monotonic()
+            _stage_callback(stage, "started", None, stage_remaining_ms[stage])
+        return stage_started_at
 
     def stage_finished(stage, stage_started_at):
         elapsed = round((time.monotonic() - stage_started_at) * 1000, 1)
@@ -672,9 +724,10 @@ def collect(config, address, context, client_factory=None,
         elif stage in active_stages:
             active_stages.remove(stage)
         if callable(_stage_callback):
-            _stage_callback(stage, "finished", elapsed)
+            _stage_callback(stage, "finished", elapsed, stage_remaining_ms.get(stage))
             if active_stages:
-                _stage_callback(active_stages[-1], "started", None)
+                active = active_stages[-1]
+                _stage_callback(active, "started", None, stage_remaining_ms.get(active))
 
     def attach_stage_telemetry(row):
         # Execution preflight runs exactly one identity per worker. Shadow mode
@@ -682,6 +735,7 @@ def collect(config, address, context, client_factory=None,
         # timings there would be misleading rather than useful diagnostics.
         if _candidate_filter:
             row["stage_elapsed_ms"] = dict(stage_elapsed_ms)
+            row["stage_remaining_ms"] = dict(stage_remaining_ms)
             if active_stages:
                 row["timeout_stage"] = active_stages[-1]
 
@@ -986,7 +1040,7 @@ def collect_execution_preflight(config, address, context, client_factory=None,
                                 gas_estimate_provider=None,
                                 conversion_gas_estimate_provider=None, max_seconds=4,
                                 approval_gas_estimate_provider=None,
-                                protocol_hints=None):
+                                protocol_hints=None, rpc_trace_scope=None):
     """Collect a complete, bounded read-only comparison for a future gate.
 
     Unlike shadow telemetry, execution preflight has no useful partial result:
@@ -1035,30 +1089,39 @@ def collect_execution_preflight(config, address, context, client_factory=None,
         tournament_id, context.get("direction"), len(identities),
     )
 
-    progress = {identity: {"stage_elapsed_ms": {}, "active_stage": None}
+    progress = {identity: {"stage_elapsed_ms": {}, "stage_remaining_ms": {},
+                          "active_stage": None, "rpc_trace": []}
                 for identity in identities}
     progress_lock = Lock()
 
     def collect_one(identity):
-        def record_stage(stage, state, elapsed_ms):
+        def record_stage(stage, state, elapsed_ms, remaining_ms):
             with progress_lock:
                 if state == "started":
                     progress[identity]["active_stage"] = stage
+                    if remaining_ms is not None:
+                        progress[identity]["stage_remaining_ms"][stage] = remaining_ms
                 else:
                     progress[identity]["stage_elapsed_ms"][stage] = elapsed_ms
                     if progress[identity]["active_stage"] == stage:
                         progress[identity]["active_stage"] = None
 
-        return collect(
-            config, address, context, client_factory=client_factory,
-            gas_price_provider=gas_price_provider, allowance_probe=allowance_probe,
-            gas_estimate_provider=gas_estimate_provider, max_seconds=max_seconds,
-            conversion_gas_estimate_provider=conversion_gas_estimate_provider,
-            approval_gas_estimate_provider=approval_gas_estimate_provider,
-            protocol_hints=protocol_hints, mode="execution_preflight",
-            _candidate_filter=identity, _suppress_summary=True,
-            _suppress_candidate_logs=True, _stage_callback=record_stage,
-        )
+        def run_collection():
+            return collect(
+                config, address, context, client_factory=client_factory,
+                gas_price_provider=gas_price_provider, allowance_probe=allowance_probe,
+                gas_estimate_provider=gas_estimate_provider, max_seconds=max_seconds,
+                conversion_gas_estimate_provider=conversion_gas_estimate_provider,
+                approval_gas_estimate_provider=approval_gas_estimate_provider,
+                protocol_hints=protocol_hints, mode="execution_preflight",
+                _candidate_filter=identity, _suppress_summary=True,
+                _suppress_candidate_logs=True, _stage_callback=record_stage,
+            )
+
+        if callable(rpc_trace_scope):
+            with rpc_trace_scope(progress[identity]["rpc_trace"]):
+                return run_collection()
+        return run_collection()
 
     results = {}
     pool = ThreadPoolExecutor(max_workers=len(identities), thread_name_prefix="route-preflight")
@@ -1091,8 +1154,13 @@ def collect_execution_preflight(config, address, context, client_factory=None,
             with progress_lock:
                 stage_progress = progress[(provider, settlement)]
                 row["stage_elapsed_ms"] = dict(stage_progress["stage_elapsed_ms"])
+                row["stage_remaining_ms"] = dict(stage_progress["stage_remaining_ms"])
                 if stage_progress["active_stage"]:
                     row["timeout_stage"] = stage_progress["active_stage"]
+        with progress_lock:
+            row["rpc_trace_summary"] = _summarize_rpc_trace(
+                progress[(provider, settlement)]["rpc_trace"]
+            )
         row["tournament_id"] = tournament_id
         rows.append(row)
         _log_candidate(row, context, tournament_id)

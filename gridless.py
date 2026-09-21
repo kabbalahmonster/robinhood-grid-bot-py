@@ -81,7 +81,95 @@ def get_top_position(positions: Dict[str, Dict], token_decimals: int = 18) -> Op
     return (top_id, top_pos) if top_id else None
 
 
-def should_buy(positions: Dict[str, Dict], current_price: float, config: Any) -> Tuple[bool, str]:
+def get_sell_trigger_percent(config: Any) -> float:
+    """Return the configured net P&L threshold that wakes a normal sell."""
+    if getattr(config, 'pnl_trigger_by_min_profit', False) is True:
+        return float(getattr(config, 'min_profit_percent', 5.0))
+    return float(getattr(config, 'gridless_sell_threshold', 5.0))
+
+
+def trigger_pnl_candidates(observed: Dict[str, Any], direction: str):
+    """Return named, finite P&L marks authorized for one strategy direction."""
+    configured = observed.get(f"{direction}_trigger_pnls")
+    if isinstance(configured, dict):
+        candidates = []
+        for source, value in configured.items():
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(numeric):
+                candidates.append((str(source), numeric))
+        if candidates:
+            return candidates
+    fallback = observed.get(
+        f"{direction}_trigger_pnl", observed.get(f"{direction}_pnl")
+    )
+    try:
+        numeric = float(fallback)
+    except (TypeError, ValueError):
+        return []
+    return [(direction, numeric)] if math.isfinite(numeric) else []
+
+
+def trigger_focus_candidates(positions: Dict[str, Dict], config: Any,
+                             position_pnls: Dict[str, Dict[str, Any]]):
+    """Describe how close every authorized mark is to an actionable trigger."""
+    result = {"buy": {}, "sell": {}}
+    token_decimals = _configured_token_decimals(config)
+    max_active = int(getattr(config, 'max_active_positions', 10))
+    buy_threshold = float(getattr(config, 'gridless_buy_threshold', -10.0))
+    sell_threshold = get_sell_trigger_percent(config)
+    leading_edge = bool(getattr(config, 'gridless_leading_edge', False))
+    stoploss_enabled = bool(getattr(config, 'gridless_stoploss_enabled', False))
+    stoploss_threshold = float(getattr(
+        config, 'gridless_stoploss_threshold', -25.0
+    ))
+
+    if positions and len(positions) < max_active:
+        top = get_top_position(positions, token_decimals)
+        if top is not None:
+            observed = (position_pnls or {}).get(str(top[0]), {})
+            for source, pnl in trigger_pnl_candidates(observed, "buy"):
+                distances = [max(0.0, pnl - buy_threshold)]
+                triggered = pnl <= buy_threshold
+                if leading_edge and len(positions) == 1:
+                    leading_threshold = sell_threshold * 0.5
+                    distances.append(max(0.0, leading_threshold - pnl))
+                    triggered = triggered or pnl >= leading_threshold
+                result["buy"][source] = {
+                    "triggered": triggered,
+                    "distance": 0.0 if triggered else min(distances),
+                    "pnl": pnl,
+                    "position_id": str(top[0]),
+                }
+
+    for position_id in positions:
+        observed = (position_pnls or {}).get(str(position_id), {})
+        for source, pnl in trigger_pnl_candidates(observed, "sell"):
+            distances = [max(0.0, sell_threshold - pnl)]
+            triggered = pnl >= sell_threshold
+            if stoploss_enabled:
+                distances.append(max(0.0, pnl - stoploss_threshold))
+                triggered = triggered or pnl <= stoploss_threshold
+            candidate = {
+                "triggered": triggered,
+                "distance": 0.0 if triggered else min(distances),
+                "pnl": pnl,
+                "position_id": str(position_id),
+            }
+            previous = result["sell"].get(source)
+            if (previous is None
+                    or (candidate["triggered"] and not previous["triggered"])
+                    or (candidate["triggered"] == previous["triggered"]
+                        and candidate["distance"] < previous["distance"])):
+                result["sell"][source] = candidate
+
+    return result
+
+
+def should_buy(positions: Dict[str, Dict], current_price: float, config: Any,
+               position_pnls: Optional[Dict[str, Dict[str, float]]] = None) -> Tuple[bool, str]:
     """Check buy rules with leading edge support.
     
     Standard buy: no positions OR (under max AND top_pnl <= buy_threshold)
@@ -89,7 +177,7 @@ def should_buy(positions: Dict[str, Dict], current_price: float, config: Any) ->
     """
     max_active = getattr(config, 'max_active_positions', 10)
     buy_threshold = getattr(config, 'gridless_buy_threshold', -10.0)
-    sell_threshold = getattr(config, 'gridless_sell_threshold', 5.0)
+    sell_threshold = get_sell_trigger_percent(config)
     leading_edge_enabled = getattr(config, 'gridless_leading_edge', False)
     token_decimals = _configured_token_decimals(config)
     
@@ -106,23 +194,34 @@ def should_buy(positions: Dict[str, Dict], current_price: float, config: Any) ->
     if top is None:
         return (True, "No holding positions found")
     
-    top_pnl = calculate_pnl(top[1], current_price, token_decimals)
-    if top_pnl <= buy_threshold:
-        return (True, f"Top position P&L {top_pnl:.2f}% <= threshold {buy_threshold}%")
+    observed = (position_pnls or {}).get(str(top[0]), {})
+    candidates = trigger_pnl_candidates(observed, "buy")
+    if not candidates:
+        if (position_pnls is not None
+                and getattr(config, 'bidirectional_pnl_enabled', False)):
+            return (False, "No fresh buy-trigger P&L observation")
+        candidates = [("legacy", calculate_pnl(
+            top[1], current_price, token_decimals
+        ))]
+    dip_source, dip_pnl = min(candidates, key=lambda item: item[1])
+    if dip_pnl <= buy_threshold:
+        return (True, f"Top position {dip_source} P&L {dip_pnl:.2f}% <= threshold {buy_threshold}%")
     
     # Leading edge: buy into strength when single position is climbing
     # Trigger at 50% of sell threshold (e.g., if sell=5%, buy at +2.5%)
     if leading_edge_enabled and len(positions) == 1:
         leading_edge_trigger = sell_threshold * 0.5
-        if top_pnl > leading_edge_trigger or math.isclose(
-            top_pnl, leading_edge_trigger, rel_tol=1e-12, abs_tol=1e-9
+        leading_source, leading_pnl = max(candidates, key=lambda item: item[1])
+        if leading_pnl > leading_edge_trigger or math.isclose(
+            leading_pnl, leading_edge_trigger, rel_tol=1e-12, abs_tol=1e-9
         ):
-            return (True, f"Leading edge: P&L {top_pnl:.2f}% >= 50% of sell ({leading_edge_trigger}%)")
+            return (True, f"Leading edge: {leading_source} P&L {leading_pnl:.2f}% >= 50% of sell ({leading_edge_trigger}%)")
     
-    return (False, f"Top position P&L {top_pnl:.2f}% > threshold {buy_threshold}%")
+    return (False, f"Top position P&L marks remain above threshold {buy_threshold}%")
 
 
-def get_capacity_warning(positions: Dict[str, Dict], current_price: float, config: Any) -> Optional[Dict]:
+def get_capacity_warning(positions: Dict[str, Dict], current_price: float, config: Any,
+                         position_pnls: Optional[Dict[str, Dict[str, float]]] = None) -> Optional[Dict]:
     """Describe a dip buy blocked only because all gridless slots are filled."""
     max_active = getattr(config, 'max_active_positions', 10)
     buy_threshold = getattr(config, 'gridless_buy_threshold', -10.0)
@@ -134,7 +233,16 @@ def get_capacity_warning(positions: Dict[str, Dict], current_price: float, confi
     if top is None:
         return None
 
-    top_pnl = calculate_pnl(top[1], current_price, token_decimals)
+    observed = (position_pnls or {}).get(str(top[0]), {})
+    candidates = trigger_pnl_candidates(observed, "buy")
+    if not candidates:
+        if (position_pnls is not None
+                and getattr(config, 'bidirectional_pnl_enabled', False)):
+            return None
+        candidates = [("legacy", calculate_pnl(
+            top[1], current_price, token_decimals
+        ))]
+    _, top_pnl = min(candidates, key=lambda item: item[1])
     if top_pnl > buy_threshold:
         return None
 
@@ -151,7 +259,7 @@ def get_capacity_warning(positions: Dict[str, Dict], current_price: float, confi
 def should_sell(position: Dict[str, int], current_price: float, config: Any,
                 quote_profit_eth: float = 0.0) -> Tuple[bool, str]:
     """Check sell rules: profit target OR stoploss."""
-    sell_threshold = getattr(config, 'gridless_sell_threshold', 5.0)
+    sell_threshold = get_sell_trigger_percent(config)
     stoploss_threshold = getattr(config, 'gridless_stoploss_threshold', -25.0)
     stoploss_enabled = getattr(config, 'gridless_stoploss_enabled', False)
     min_profit = getattr(config, 'min_profit_percent', 1.5)

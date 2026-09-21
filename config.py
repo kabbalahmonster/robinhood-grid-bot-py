@@ -194,6 +194,13 @@ class BotConfig:
     route_tournament_shadow_timeout_seconds: float = 4.0
     route_tournament_gate_timeout_seconds: float = 12.0
     route_tournament_speculative_fallback_seconds: float = 0.0
+    bidirectional_pnl_enabled: bool = True
+    pnl_polling_mode: str = "bidirectional"
+    pnl_legacy_triggers: Optional[bool] = None
+    pnl_trigger_focus_margin_percent: float = 2.0
+    pnl_trigger_by_min_profit: bool = False
+    bidirectional_pnl_quote_timeout_seconds: float = 4.0
+    bidirectional_pnl_max_age_seconds: float = 90.0
     
     # Derived properties
     @property
@@ -241,6 +248,35 @@ class BotConfig:
             raise ValueError(
                 "ROUTE_TOURNAMENT_SPECULATIVE_FALLBACK_SECONDS must be 0 (disabled) "
                 "or at least 1 second and below ROUTE_TOURNAMENT_GATE_TIMEOUT_SECONDS"
+            )
+        quote_timeout = float(getattr(
+            self, "bidirectional_pnl_quote_timeout_seconds", 4
+        ))
+        max_age = float(getattr(self, "bidirectional_pnl_max_age_seconds", 90))
+        polling_mode = str(getattr(
+            self, "pnl_polling_mode", "bidirectional"
+        )).strip().lower()
+        if polling_mode not in {
+            "legacy", "buy", "sell", "bidirectional", "trilateral"
+        }:
+            raise ValueError(
+                "PNL_POLLING_MODE supports legacy, buy, sell, bidirectional, "
+                "or trilateral"
+            )
+        focus_margin = float(getattr(
+            self, "pnl_trigger_focus_margin_percent", 2
+        ))
+        if not math.isfinite(focus_margin) or not 0 <= focus_margin <= 100:
+            raise ValueError(
+                "PNL_TRIGGER_FOCUS_MARGIN_PERCENT must be between 0 and 100"
+            )
+        if not math.isfinite(quote_timeout) or not 1 <= quote_timeout <= 30:
+            raise ValueError(
+                "BIDIRECTIONAL_PNL_QUOTE_TIMEOUT_SECONDS must be between 1 and 30"
+            )
+        if not math.isfinite(max_age) or not 30 <= max_age <= 600:
+            raise ValueError(
+                "BIDIRECTIONAL_PNL_MAX_AGE_SECONDS must be between 30 and 600"
             )
         # Check required fields
         if not self.private_key or self.private_key == "0x...":
@@ -389,6 +425,16 @@ def _gas_cap_env(name: str, legacy_value: str) -> float:
     return float(value if value else legacy_value)
 
 
+def _optional_bool_env(name: str) -> Optional[bool]:
+    """Parse an optional boolean while rejecting dangerous silent typos."""
+    value = os.getenv(name, "").strip().lower()
+    if not value:
+        return None
+    if value not in {"true", "false"}:
+        raise ValueError(f"{name} must be true, false, or blank")
+    return value == "true"
+
+
 def load_config(env_file: Optional[str] = None) -> BotConfig:
     """
     Load configuration from environment variables.
@@ -501,6 +547,25 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
         ),
         route_tournament_speculative_fallback_seconds=float(
             os.getenv("ROUTE_TOURNAMENT_SPECULATIVE_FALLBACK_SECONDS", "0")
+        ),
+        bidirectional_pnl_enabled=os.getenv(
+            "BIDIRECTIONAL_PNL_ENABLED", "true"
+        ).lower() == "true",
+        pnl_polling_mode=os.getenv(
+            "PNL_POLLING_MODE", "bidirectional"
+        ).strip().lower(),
+        pnl_legacy_triggers=_optional_bool_env("PNL_LEGACY_TRIGGERS"),
+        pnl_trigger_focus_margin_percent=float(
+            os.getenv("PNL_TRIGGER_FOCUS_MARGIN_PERCENT", "2")
+        ),
+        pnl_trigger_by_min_profit=os.getenv(
+            "PNL_TRIGGER_BY_MIN_PROFIT", "false"
+        ).lower() == "true",
+        bidirectional_pnl_quote_timeout_seconds=float(
+            os.getenv("BIDIRECTIONAL_PNL_QUOTE_TIMEOUT_SECONDS", "4")
+        ),
+        bidirectional_pnl_max_age_seconds=float(
+            os.getenv("BIDIRECTIONAL_PNL_MAX_AGE_SECONDS", "90")
         ),
         swap_fallback_provider=os.getenv("SWAP_FALLBACK_PROVIDER", "sushiswap"),
         sushi_api_key=os.getenv("SUSHI_API_KEY", ""),

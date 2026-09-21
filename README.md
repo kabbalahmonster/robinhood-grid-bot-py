@@ -154,10 +154,17 @@ python grid_bot.py
 | `GAS_PRICE_MULTIPLIER` | No | 1.05 | Safety multiplier applied to current/quoted gas price; values below 1 are clamped |
 | **Bot Behavior** ||||
 | `POLL_INTERVAL_SECONDS` | No | 6 | Price check interval in seconds |
+| `BIDIRECTIONAL_PNL_ENABLED` | No | true | Alternate exact buy- and sell-side net P&L observations for gridless triggers and dashboard display |
+| `PNL_POLLING_MODE` | No | bidirectional | P&L observations: `legacy`, `buy`, or `sell` polls only that mark; `bidirectional` alternates buy/sell; `trilateral` rotates buy/sell/legacy while retaining one request per cycle |
+| `PNL_LEGACY_TRIGGERS` | No | mode-dependent | Let the gross legacy mark independently wake both buy and sell tournaments. Defaults to true in `legacy` mode and false in every other mode when blank |
+| `PNL_TRIGGER_FOCUS_MARGIN_PERCENT` | No | 2 | Percentage-point approach window for adaptive polling. An authorized mark inside the window is refreshed every other cycle; a crossed mark is latched and refreshed every cycle until execution succeeds or a fresh quote leaves trigger range. Set 0 to disable near-trigger acceleration without disabling crossed-trigger latching |
+| `PNL_TRIGGER_BY_MIN_PROFIT` | No | false | Use `MIN_PROFIT_PERCENT` instead of `GRIDLESS_SELL_THRESHOLD` to wake normal net-P&L sell checks |
+| `BIDIRECTIONAL_PNL_QUOTE_TIMEOUT_SECONDS` | No | 4 | Per-request timeout for read-only bidirectional P&L quotes |
+| `BIDIRECTIONAL_PNL_MAX_AGE_SECONDS` | No | 90 | Maximum cached quote age allowed to influence a trigger or dashboard P&L |
 | `STARTUP_JITTER_SECONDS` | No | 20 | Random delay before the first provider request so fleet restarts do not stampede |
 | `PERFORMANCE_TELEMETRY_EVERY_CYCLES` | No | 10 | Emit one sanitized cycle/RPC performance record every N cycles (slow/error/halted cycles emit immediately) |
 | `AUTO_RECONCILE_UNRESOLVED_BROADCAST` | No | false | While safety-halted, automatically repair and resume only for an exact receipt-proven successful managed-token outflow |
-| `AUTO_RECONCILE_INTERVAL_SECONDS` | No | 30 | Retry interval for safe unresolved-broadcast receipt/reconciliation checks (minimum 5 seconds) |
+| `AUTO_RECONCILE_INTERVAL_SECONDS` | No | 30 | Base interval for safe unresolved-broadcast checks; failures back off exponentially to 30 minutes (minimum 5 seconds) |
 | `ANTI_MEV_JITTER` | No | true | Enable anti-MEV timing jitter |
 | `LOG_LEVEL` | No | INFO | INFO shows operational events only; DEBUG adds full per-round and quote telemetry |
 | `STATE_FILE` | No | ./data/positions.json | Position state file path |
@@ -179,6 +186,12 @@ python grid_bot.py
 | `GRIDLESS_STOPLOSS_THRESHOLD` | No | -25.0 | Stoploss trigger % |
 | `GRIDLESS_BUY_COOLDOWN_SECONDS` | No | 0 | Cooldown between gridless buys (0 disables cooldown) |
 | `GRIDLESS_BUY_EXECUTION_MARGIN` | No | 50 | Execution margin % - blocks buy if quote P&L recovered past threshold + (abs(threshold) * margin%) (e.g., -10% trigger + 50% = block above -5%) |
+
+Buy-side P&L observations are published only when another gridless position can
+actually be opened and the exact next-buy principal is at least 0.001 ETH/WETH.
+Quotes whose projected gas is greater than or equal to that principal are also
+discarded. This prevents full-capacity reserve dust from becoming a misleading
+gas-dominated buy mark or trigger.
 
 ### Swap providers
 
@@ -361,6 +374,7 @@ option and safety invariant.
 |---|---|---|
 | `start-fleet` / `stop-fleet` / `restart-fleet` | Tmux lifecycle plus durable guardian intent | Processes/state marker |
 | `start-bot NAME` / `stop-bot NAMES...` / `restart-bot NAMES...` | Durably start one bot or stop/restart multiple selected bots without disturbing the rest of the fleet | Processes/state marker |
+| `restart-stopped [--only NAMES] [--exclude NAMES]` | Start intentionally stopped bots while leaving unselected and running bots unchanged | Processes/state marker |
 | `cleanup-logs --older-than AGE` | Preview or delete old logs for the whole fleet, selected bots, or all except selected bots | Log files only |
 | `bundle-logs` | Merge selected bots' logs into one redacted analysis file; `--since` spans current and rotated files | Writes one report file |
 | `update-bot NAME` | List/switch branches, fast-forward one checkout, and restart it only when already running | Git/processes |
@@ -1174,7 +1188,7 @@ Common failures:
 - Verify sufficient ETH for gas
 - Check token approvals haven't expired
 - If `data/unresolved_broadcast.json` exists, stop the bot and verify its recorded transaction on-chain; never delete the guard or retry the trade blindly
-- Optional `AUTO_RECONCILE_UNRESOLVED_BROADCAST=true` keeps the bot paused while it checks the receipt. It resumes only after a successful wallet-sent transaction proves a managed-token outflow exactly equal to either the current position deficit or the latest matching local reconciliation audit for an already-applied haircut, and the exact guard is archived. Pending/reverted transactions, buys, mismatches, missing audits, RPC failures, and corrupt evidence remain halted for manual recovery.
+- Optional `AUTO_RECONCILE_UNRESOLVED_BROADCAST=true` keeps the bot paused while it checks the exact transaction and receipt across every configured RPC endpoint. It resumes only after a successful wallet-sent transaction proves a managed-token outflow exactly equal to either the current position deficit or the latest matching local reconciliation audit for an already-applied haircut, and the exact guard is archived. Pending/reverted transactions, absent exact hashes, buys, mismatches, missing audits, RPC failures, and corrupt evidence remain halted for manual recovery. Failed checks back off exponentially from `AUTO_RECONCILE_INTERVAL_SECONDS` to 30 minutes instead of hammering RPCs every poll.
 
 ### "Position cost seems wrong"
 - Check the transaction on block explorer
@@ -1801,7 +1815,12 @@ initialization, quote retrieval, transaction preparation, gas-price lookup,
 swap/conversion/approval gas estimation, allowance lookup, and scoring. A
 deadline placeholder includes `timeout_stage`, identifying the operation that
 was still active without exposing provider response text, addresses, calldata,
-headers, or credentials.
+headers, or credentials. `stage_remaining_ms` records the remaining absolute
+observation budget when each stage began. When the resilient RPC transport is
+active, `rpc_trace` adds candidate-worker method totals in the bounded form
+`method:attempts/failures/elapsed_ms/client_queue_wait_ms/state@endpoint`.
+Endpoints are process-local ordinals such as `rpc_1`; URLs and RPC arguments are
+never logged. `unavailable` means the transport cannot provide a scoped trace.
 
 `ROUTE_TOURNAMENT_SPECULATIVE_FALLBACK_SECONDS` is an opt-in, sell-only gate
 canary optimization. A positive value starts the ordinary baseline quote on an

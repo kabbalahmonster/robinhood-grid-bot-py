@@ -14,6 +14,7 @@ import uuid
 import sys
 import argparse
 import random
+import math
 import subprocess
 from functools import wraps
 from datetime import datetime
@@ -23,6 +24,9 @@ from urllib.parse import urlsplit
 
 from profit_tracker import ProfitTracker
 from token_tax_detector import TokenTaxDetector
+
+
+MIN_BUY_OBSERVATION_PRINCIPAL_WEI = 10**15  # 0.001 ETH/WETH
 
 
 def _runtime_build_provenance(environ=None, runner=subprocess.run):
@@ -760,6 +764,7 @@ class GridBot:
         self.running = True
         self._safety_halted = False
         self._last_auto_reconcile_attempt = 0.0
+        self._auto_reconcile_failures = 0
         self._exact_approval_guard_path = "data/pending_exact_approval.json"
         self._exact_approval_guard = self._load_exact_approval_guard()
         self.round_count = 0
@@ -772,6 +777,16 @@ class GridBot:
         # handoff must be observed for one full poll before it may authorize a
         # sale; materially divergent providers remain visibly blocked.
         self._last_sell_quotes = {}
+        # Read-only bidirectional market observations. Cached quotes can wake a
+        # strategy check, but can never prepare, approve, sign, or broadcast.
+        # The execution path always obtains and validates a fresh route.
+        self._pnl_quotes = {"buy": None, "sell": None, "legacy": None}
+        self._next_pnl_poll_side = "buy"
+        self._last_pnl_poll_side = None
+        self._pnl_trigger_latches = {"buy": None, "sell": None}
+        self._pnl_near_focus_side = None
+        self._pnl_near_focus_poll_due = True
+        self._last_pnl_focus_status = None
         self.profit_tracker = ProfitTracker()
         self.dashboard_trades_file = "data/dashboard_trades.json"
         self.dashboard_trades = self._load_dashboard_trades()
@@ -1347,6 +1362,7 @@ class GridBot:
                 gas_estimate_provider=gas_estimate_provider,
                 conversion_gas_estimate_provider=conversion_gas_estimate_provider,
                 approval_gas_estimate_provider=approval_gas_estimate_provider,
+                rpc_trace_scope=getattr(self.wallet.w3, "telemetry_scope", None),
                 # Gate-only collection gets twelve seconds: Uniswap indicative
                 # routes require both /quote and read-only /swap preparation
                 # before local gas simulation. Candidates run in parallel, so
@@ -3006,11 +3022,11 @@ class GridBot:
             )
             return raw_price * self.token_unit / 10**18 if raw_price is not None else None
     
-    def check_buys(self, price):
+    def check_buys(self, price, position_pnls=None):
         """Check for buy opportunities."""
         # Gridless mode
         if getattr(self.config, 'use_gridless', False):
-            return self._check_buys_gridless(price)
+            return self._check_buys_gridless(price, position_pnls)
         
         # Get available ETH/WETH
         if getattr(self.config, 'use_eth_trading', False):
@@ -3046,11 +3062,11 @@ class GridBot:
                     self.execute_buy(pos_id, price)
                     return  # One buy per cycle
     
-    def check_sells(self, price):
+    def check_sells(self, price, position_pnls=None):
         """Check for sell opportunities."""
         # Gridless mode
         if getattr(self.config, 'use_gridless', False):
-            return self._check_sells_gridless(price)
+            return self._check_sells_gridless(price, position_pnls)
         
         min_profit_percent = getattr(self.config, 'min_profit_percent', 2.0)  # Default 2% minimum profit
         slippage_buffer = 1.5  # Require extra 1.5% to cover slippage
@@ -3105,6 +3121,577 @@ class GridBot:
         )
         return sell_amount, sold_cost_wei
 
+    def _next_gridless_buy_amount_wei(self, positions, trade_balance_eth):
+        """Return the exact principal the next gridless buy would spend."""
+        slots = self._available_gridless_slots(positions)
+        if slots <= 0:
+            return 0
+        reserve = (
+            float(getattr(self.config, "eth_gas_reserve", 0.001))
+            if getattr(self.config, "use_eth_trading", False) else 0.0
+        )
+        available = max(0.0, float(trade_balance_eth) - reserve)
+        tradeable = float(getattr(
+            self.config, "tradeable_balance_percent", 90.0
+        )) / 100.0
+        return max(0, int(available * tradeable * 10**18 / slots))
+
+    def _fetch_pnl_observation_quote(self, direction, amount):
+        """Fetch one exact-input, read-only quote for bidirectional P&L."""
+        amount = int(amount)
+        if amount <= 0:
+            return None, None
+        used_provider = {"name": str(getattr(self.provider, "name", "unknown"))}
+
+        def fetch():
+            used_provider["name"] = str(getattr(self.provider, "name", "unknown"))
+            kwargs = dict(
+                sell_token=(self.trade_token_address if direction == "buy"
+                            else self.config.token_address),
+                buy_token=(self.config.token_address if direction == "buy"
+                           else self.trade_token_address),
+                sell_amount=amount,
+                taker_address=self.wallet.address,
+                slippage_percentage=self._swap_slippage_fraction(),
+                apply_jitter_to_price=False,
+                quote_timeout_seconds=float(getattr(
+                    self.config, "bidirectional_pnl_quote_timeout_seconds", 4
+                )),
+            )
+            try:
+                return self.api_client.get_quote(**kwargs)
+            except TypeError as exc:
+                if "quote_timeout_seconds" not in str(exc):
+                    raise
+                kwargs.pop("quote_timeout_seconds")
+                return self.api_client.get_quote(**kwargs)
+
+        runner = getattr(self.provider, "run_with_fallback", None)
+        quote = runner(fetch, f"{direction}-side P&L observation") if callable(runner) else fetch()
+        if not getattr(quote, "success", False) or not self._quote_matches_exact_input(
+            quote, amount
+        ):
+            return None, used_provider["name"]
+        return quote, used_provider["name"]
+
+    def _observation_gas_wei(self, quote, direction, amount):
+        """Project swap plus any immediately-required ERC-20 approval gas."""
+        default_gas = 350000 if direction == "buy" else 300000
+        # Polling must never run local calldata simulation. Provider gas plus
+        # the wallet's fresh gas-price oracle gives conservative economics
+        # without turning every observation into an eth_estimateGas call.
+        gas_price = int(self.wallet.normal_gas_price())
+        gas_limit = int(
+            int(getattr(quote, "gas", 0) or default_gas)
+            * float(getattr(self.config, "gas_limit_multiplier", 1.05))
+        )
+        total = gas_limit * gas_price
+        approval_token = None
+        if direction == "sell":
+            approval_token = self.config.token_address
+        elif not getattr(self.config, "use_eth_trading", False):
+            approval_token = self.config.weth_address
+        spender = getattr(quote, "allowance_target", None) or self.config.zero_x_proxy
+        if approval_token and spender:
+            allowance = self.wallet.check_allowance(
+                approval_token, spender, use_permit2=False,
+            )
+            if int(allowance) < int(amount):
+                approval = self.wallet.build_token_approval_transaction(
+                    approval_token, spender, int(amount),
+                )
+                approval_price = int(
+                    approval.get("gasPrice") or approval.get("maxFeePerGas")
+                    or gas_price
+                )
+                total += int(approval["gas"]) * approval_price
+        return int(total)
+
+    def _fresh_pnl_sample(self, direction, now=None):
+        if direction not in self._pnl_polling_sides():
+            return None
+        sample = getattr(self, "_pnl_quotes", {}).get(direction)
+        if not isinstance(sample, dict):
+            return None
+        now = time.monotonic() if now is None else float(now)
+        max_age = float(getattr(
+            self.config, "bidirectional_pnl_max_age_seconds", 90
+        ))
+        return sample if now - float(sample.get("sampled_monotonic", 0)) <= max_age else None
+
+    def _pnl_polling_mode(self):
+        mode = str(getattr(
+            self.config, "pnl_polling_mode", "bidirectional"
+        )).strip().lower()
+        valid = {"legacy", "buy", "sell", "bidirectional", "trilateral"}
+        return mode if mode in valid else "bidirectional"
+
+    def _legacy_pnl_triggers_enabled(self):
+        configured = getattr(self.config, "pnl_legacy_triggers", None)
+        if configured is None:
+            return self._pnl_polling_mode() == "legacy"
+        return configured is True
+
+    def _pnl_polling_sides(self):
+        mode = self._pnl_polling_mode()
+        if mode == "bidirectional":
+            return {"buy", "sell"}
+        if mode == "trilateral":
+            return {"buy", "sell", "legacy"}
+        return {mode}
+
+    def _pnl_sample_for_trigger(self, trigger, now=None):
+        """Return the quote side that is authoritative for one trigger."""
+        mode = self._pnl_polling_mode()
+        side = trigger if mode in {"bidirectional", "trilateral"} else mode
+        return self._fresh_pnl_sample(side, now)
+
+    def _bidirectional_position_pnls(self, positions, now=None):
+        """Return per-position net buy marks and extrapolated net sell exits."""
+        from gridless import calculate_pnl
+        buy_sample = self._fresh_pnl_sample("buy", now)
+        sell_sample = self._fresh_pnl_sample("sell", now)
+        legacy_sample = self._fresh_pnl_sample("legacy", now)
+        result = {}
+        for position_id, position in positions.items():
+            row = {}
+            if buy_sample is not None:
+                economic_position = dict(position)
+                base_cost = int(
+                    position.get("cost_wei", 0)
+                    or int(position.get("cost", 0) or 0) * 10**9
+                )
+                economic_position["cost_wei"] = base_cost + int(
+                    position.get("deferred_sell_gas_wei", 0) or 0
+                )
+                row["buy_pnl"] = calculate_pnl(
+                    economic_position, float(buy_sample["price_eth_per_token"]),
+                    self.token_decimals,
+                )
+            if sell_sample is not None:
+                sell_amount, sold_cost_wei = self._gridless_sell_terms(position)
+                quoted_amount = int(sell_sample["sell_amount_raw"])
+                if sell_amount > 0 and sold_cost_wei > 0 and quoted_amount > 0:
+                    floor_wei = (
+                        int(sell_sample["floor_return_wei"]) * int(sell_amount)
+                        // quoted_amount
+                    )
+                    net_wei = floor_wei - int(sell_sample["projected_gas_wei"])
+                    row["sell_pnl"] = (
+                        (net_wei - sold_cost_wei) * 100 / sold_cost_wei
+                    )
+            if legacy_sample is not None:
+                row["legacy_pnl"] = calculate_pnl(
+                    position,
+                    float(legacy_sample["price_eth_per_token"]),
+                    self.token_decimals,
+                )
+
+            # Single-sided polling intentionally lets both strategy directions
+            # use the same observation. Multi-sided modes keep the directional
+            # marks separate; trilateral can additionally authorize the legacy
+            # mark as an independent candidate for both trigger directions.
+            mode = self._pnl_polling_mode()
+            if mode in {"bidirectional", "trilateral"}:
+                if row.get("buy_pnl") is not None:
+                    row["buy_trigger_pnl"] = row["buy_pnl"]
+                    row.setdefault("buy_trigger_pnls", {})["buy"] = row["buy_pnl"]
+                if row.get("sell_pnl") is not None:
+                    row["sell_trigger_pnl"] = row["sell_pnl"]
+                    row.setdefault("sell_trigger_pnls", {})["sell"] = row["sell_pnl"]
+                if (mode == "trilateral" and self._legacy_pnl_triggers_enabled()
+                        and row.get("legacy_pnl") is not None):
+                    row.setdefault("buy_trigger_pnls", {})["legacy"] = row["legacy_pnl"]
+                    row.setdefault("sell_trigger_pnls", {})["legacy"] = row["legacy_pnl"]
+            elif mode == "buy" and row.get("buy_pnl") is not None:
+                row["buy_trigger_pnl"] = row["buy_pnl"]
+                row["sell_trigger_pnl"] = row["buy_pnl"]
+                row["buy_trigger_pnls"] = {"buy": row["buy_pnl"]}
+                row["sell_trigger_pnls"] = {"buy": row["buy_pnl"]}
+            elif mode == "sell" and row.get("sell_pnl") is not None:
+                row["buy_trigger_pnl"] = row["sell_pnl"]
+                row["sell_trigger_pnl"] = row["sell_pnl"]
+                row["buy_trigger_pnls"] = {"sell": row["sell_pnl"]}
+                row["sell_trigger_pnls"] = {"sell": row["sell_pnl"]}
+            elif (mode == "legacy" and self._legacy_pnl_triggers_enabled()
+                  and row.get("legacy_pnl") is not None):
+                row["buy_trigger_pnl"] = row["legacy_pnl"]
+                row["sell_trigger_pnl"] = row["legacy_pnl"]
+                row["buy_trigger_pnls"] = {"legacy": row["legacy_pnl"]}
+                row["sell_trigger_pnls"] = {"legacy": row["legacy_pnl"]}
+            result[str(position_id)] = row
+        return result
+
+    def _next_sell_observation_position(self, positions, now=None):
+        """Pick the position most likely to sell next using current net marks."""
+        pnls = self._bidirectional_position_pnls(positions, now)
+        ranked = []
+        for position_id, position in positions.items():
+            values = pnls.get(str(position_id), {})
+            sell_amount, sold_cost_wei = self._gridless_sell_terms(position)
+            if sell_amount > 0 and sold_cost_wei > 0:
+                ranking_pnl = values.get("sell_pnl", values.get("buy_pnl"))
+                if ranking_pnl is None:
+                    # Sell-only mode has no buy-side mark for the first sample.
+                    # Lowest cost per sellable token is the position most likely
+                    # to reach the common market-price trigger first.
+                    ranking_pnl = -float(sold_cost_wei) / float(sell_amount)
+                ranked.append((float(ranking_pnl), str(position_id), sell_amount, sold_cost_wei))
+        return max(ranked, default=None, key=lambda item: (item[0], item[1]))
+
+    def _pnl_source_authorized(self, direction, source):
+        mode = self._pnl_polling_mode()
+        if mode == "legacy":
+            return source == "legacy" and self._legacy_pnl_triggers_enabled()
+        if mode in {"buy", "sell"}:
+            return source == mode
+        if mode == "bidirectional":
+            return source == direction
+        return source == direction or (
+            source == "legacy" and self._legacy_pnl_triggers_enabled()
+        )
+
+    def _pnl_poll_sequence(self, positions):
+        mode = self._pnl_polling_mode()
+        sequence = ([mode] if mode in {"legacy", "buy", "sell"}
+                    else ["buy", "sell"] if mode == "bidirectional"
+                    else ["buy", "sell", "legacy"])
+        buy_available = self._available_gridless_slots(positions) > 0
+        return [
+            side for side in sequence
+            if (side != "sell" or positions)
+            and (side != "buy" or buy_available)
+        ]
+
+    def _normal_pnl_poll_side(self, eligible, now):
+        side = getattr(self, "_next_pnl_poll_side", eligible[0])
+        if side not in eligible:
+            side = eligible[0]
+        start = eligible.index(side)
+        rotation = eligible[start:] + eligible[:start]
+        missing = [candidate for candidate in rotation
+                   if self._fresh_pnl_sample(candidate, now) is None]
+        selected = missing[0] if missing else rotation[0]
+        self._next_pnl_poll_side = eligible[
+            (eligible.index(selected) + 1) % len(eligible)
+        ]
+        return selected
+
+    def _select_pnl_poll_side(self, positions, now):
+        eligible = self._pnl_poll_sequence(positions)
+        if not eligible:
+            return None, "unavailable"
+        latches = getattr(
+            self, "_pnl_trigger_latches", {"buy": None, "sell": None}
+        )
+        latched_sides = []
+        for side in eligible:
+            if side in latches.values() and side not in latched_sides:
+                latched_sides.append(side)
+        if latched_sides:
+            last = getattr(self, "_last_pnl_poll_side", None)
+            if last in latched_sides and len(latched_sides) > 1:
+                side = latched_sides[(latched_sides.index(last) + 1)
+                                     % len(latched_sides)]
+            else:
+                side = latched_sides[0]
+            return side, "triggered"
+
+        near = getattr(self, "_pnl_near_focus_side", None)
+        if near in eligible:
+            background = [side for side in eligible if side != near]
+            due = bool(getattr(self, "_pnl_near_focus_poll_due", True))
+            if due or not background:
+                self._pnl_near_focus_poll_due = False if background else True
+                return near, "near"
+            self._pnl_near_focus_poll_due = True
+            return self._normal_pnl_poll_side(background, now), "rotation"
+
+        self._pnl_near_focus_poll_due = True
+        return self._normal_pnl_poll_side(eligible, now), "rotation"
+
+    def _pnl_focus_snapshot(self):
+        latches = getattr(
+            self, "_pnl_trigger_latches", {"buy": None, "sell": None}
+        )
+        sides = []
+        directions = []
+        for direction in ("buy", "sell"):
+            source = latches.get(direction)
+            if source:
+                directions.append(direction)
+                if source not in sides:
+                    sides.append(source)
+        if sides:
+            return {
+                "side": "+".join(sides),
+                "reason": "triggered",
+                "directions": "+".join(directions),
+            }
+        near = getattr(self, "_pnl_near_focus_side", None)
+        if near:
+            return {"side": near, "reason": "near", "directions": ""}
+        return {"side": None, "reason": None, "directions": ""}
+
+    def _log_pnl_focus_transition(self):
+        status = self._pnl_focus_snapshot()
+        state = (status["side"], status["reason"], status["directions"])
+        previous = getattr(self, "_last_pnl_focus_status", None)
+        if state == previous:
+            return
+        self._last_pnl_focus_status = state
+        if status["side"]:
+            logger.info(
+                "P&L polling focus: side=%s reason=%s triggers=%s",
+                status["side"], status["reason"],
+                status["directions"] or "approaching",
+            )
+        elif previous and previous[0]:
+            logger.info("P&L polling focus cleared; normal rotation resumed")
+
+    def _update_pnl_poll_focus(self, positions, position_pnls):
+        from gridless import trigger_focus_candidates
+
+        observations = trigger_focus_candidates(
+            positions, self.config, position_pnls
+        )
+        latches = getattr(
+            self, "_pnl_trigger_latches", {"buy": None, "sell": None}
+        )
+        self._pnl_trigger_latches = latches
+        max_active = int(getattr(self.config, "max_active_positions", 10))
+        actionable = {
+            "buy": bool(positions) and len(positions) < max_active,
+            "sell": bool(positions),
+        }
+
+        for direction in ("buy", "sell"):
+            source = latches.get(direction)
+            if source and (not actionable[direction]
+                           or not self._pnl_source_authorized(direction, source)):
+                latches[direction] = None
+                source = None
+            if source:
+                current = observations[direction].get(source)
+                # Missing/stale/failed samples cannot prove that a crossed mark
+                # left range. Keep focusing until the same lane quotes again.
+                if current is not None and not current["triggered"]:
+                    latches[direction] = None
+                    source = None
+            if source is None and actionable[direction]:
+                for candidate in self._pnl_poll_sequence(positions):
+                    current = observations[direction].get(candidate)
+                    if (current is not None and current["triggered"]
+                            and self._pnl_source_authorized(direction, candidate)):
+                        latches[direction] = candidate
+                        break
+
+        if any(latches.values()):
+            self._pnl_near_focus_side = None
+            self._pnl_near_focus_poll_due = True
+        else:
+            margin = float(getattr(
+                self.config, "pnl_trigger_focus_margin_percent", 2
+            ))
+            near = []
+            for direction in ("buy", "sell"):
+                if not actionable[direction]:
+                    continue
+                for source, current in observations[direction].items():
+                    if (self._pnl_source_authorized(direction, source)
+                            and not current["triggered"]
+                            and current["distance"] <= margin):
+                        near.append((current["distance"], source))
+            current_focus = getattr(self, "_pnl_near_focus_side", None)
+            best_focus = min(
+                near, default=(None, None), key=lambda item: item[0]
+            )[1]
+            if current_focus != best_focus:
+                self._pnl_near_focus_side = best_focus
+                self._pnl_near_focus_poll_due = True
+
+        self._log_pnl_focus_transition()
+
+    def _clear_pnl_trigger_latch(self, direction, reason):
+        latches = getattr(self, "_pnl_trigger_latches", None)
+        if not isinstance(latches, dict) or not latches.get(direction):
+            return
+        source = latches[direction]
+        latches[direction] = None
+        logger.info(
+            "P&L %s trigger focus cleared after %s (source=%s)",
+            direction, reason, source,
+        )
+        self._log_pnl_focus_transition()
+
+    def _refresh_bidirectional_pnl(self, positions, trade_balance_eth, now=None):
+        """Refresh one side per cycle, adapting cadence near active triggers."""
+        if not getattr(self.config, "bidirectional_pnl_enabled", True):
+            return self._bidirectional_position_pnls(positions, now)
+        now = time.monotonic() if now is None else float(now)
+        if self._available_gridless_slots(positions) <= 0:
+            # A full bot has no executable next buy. Never retain a prior buy
+            # mark whose economics no longer describe an actionable trade.
+            self._pnl_quotes["buy"] = None
+        side, _focus_reason = self._select_pnl_poll_side(positions, now)
+
+        try:
+            if side == "buy":
+                amount = self._next_gridless_buy_amount_wei(
+                    positions, trade_balance_eth,
+                )
+                if amount < MIN_BUY_OBSERVATION_PRINCIPAL_WEI:
+                    self._pnl_quotes["buy"] = None
+                    logger.debug(
+                        "Buy-side P&L observation unavailable: next principal "
+                        "%d wei is below the %d wei observation floor",
+                        amount, MIN_BUY_OBSERVATION_PRINCIPAL_WEI,
+                    )
+                    quote, provider = None, None
+                else:
+                    quote, provider = self._fetch_pnl_observation_quote(
+                        "buy", amount,
+                    )
+                if quote is not None:
+                    quoted_output = int(getattr(quote, "buy_amount", 0) or 0)
+                    output_floor = self._taxed_quote_return_wei(quote)
+                    gas_wei = self._observation_gas_wei(quote, "buy", amount)
+                    if gas_wei >= amount:
+                        self._pnl_quotes["buy"] = None
+                        logger.debug(
+                            "Buy-side P&L observation unavailable: projected "
+                            "gas %d wei is not below principal %d wei",
+                            gas_wei, amount,
+                        )
+                    elif quoted_output > 0 and output_floor > 0:
+                        effective_cost_wei = int(amount) + gas_wei
+                        # Keep the ordinary spot/display mark free of configured
+                        # slippage and projected gas. The trigger mark below is
+                        # deliberately conservative and includes both.
+                        market_price = (
+                            int(amount) / 10**18
+                            / (quoted_output / self.token_unit)
+                        )
+                        price = (
+                            effective_cost_wei / 10**18
+                            / (output_floor / self.token_unit)
+                        )
+                        self._pnl_quotes["buy"] = {
+                            "direction": "buy",
+                            "sell_amount_raw": int(amount),
+                            "quoted_output_raw": quoted_output,
+                            "floor_output_raw": int(output_floor),
+                            "projected_gas_wei": gas_wei,
+                            "market_price_eth_per_token": market_price,
+                            "price_eth_per_token": price,
+                            "provider": provider,
+                            "settlement": "native" if self.config.use_eth_trading else "weth",
+                            "basis": "exact_buy_quote_net",
+                            "quoted_at": datetime.now().astimezone().isoformat(),
+                            "sampled_monotonic": now,
+                        }
+            elif side == "sell":
+                target = self._next_sell_observation_position(positions, now)
+                if target is not None:
+                    _, position_id, sell_amount, sold_cost_wei = target
+                    quote, provider = self._fetch_pnl_observation_quote(
+                        "sell", sell_amount,
+                    )
+                    if quote is not None:
+                        quoted_return_wei = int(
+                            getattr(quote, "buy_amount", 0) or 0
+                        )
+                        floor_wei = self._taxed_quote_return_wei(quote)
+                        gas_wei = self._observation_gas_wei(
+                            quote, "sell", sell_amount,
+                        )
+                        if quoted_return_wei > 0 and floor_wei > 0:
+                            net_return_wei = max(0, int(floor_wei) - int(gas_wei))
+                            self._pnl_quotes["sell"] = {
+                                "direction": "sell",
+                                "position_id": position_id,
+                                "sell_amount_raw": int(sell_amount),
+                                "sold_cost_wei": int(sold_cost_wei),
+                                "quoted_return_wei": quoted_return_wei,
+                                "floor_return_wei": int(floor_wei),
+                                "projected_gas_wei": int(gas_wei),
+                                "market_price_eth_per_token": (
+                                    quoted_return_wei / 10**18
+                                    / (int(sell_amount) / self.token_unit)
+                                ),
+                                "price_eth_per_token": (
+                                    net_return_wei / 10**18
+                                    / (int(sell_amount) / self.token_unit)
+                                ),
+                                "provider": provider,
+                                "settlement": "native" if self.config.use_eth_trading else "weth",
+                                "basis": "exact_sell_quote_extrapolated_net",
+                                "quoted_at": datetime.now().astimezone().isoformat(),
+                                "sampled_monotonic": now,
+                            }
+            elif side == "legacy":
+                price = self.get_token_price()
+                if price is not None and float(price) > 0:
+                    self._pnl_quotes["legacy"] = {
+                        "direction": "legacy",
+                        "sell_amount_raw": 10**15,
+                        "market_price_eth_per_token": float(price),
+                        "price_eth_per_token": float(price),
+                        "provider": str(getattr(self.provider, "name", "unknown")),
+                        "settlement": "native" if self.config.use_eth_trading else "weth",
+                        "basis": "legacy_gross_0.001_buy_quote",
+                        "quoted_at": datetime.now().astimezone().isoformat(),
+                        "sampled_monotonic": now,
+                    }
+        except Exception as exc:
+            logger.debug("%s-side P&L observation unavailable: %s", side, exc)
+        finally:
+            self._last_pnl_poll_side = side
+        pnls = self._bidirectional_position_pnls(positions, now)
+        self._update_pnl_poll_focus(positions, pnls)
+        return pnls
+
+    def _attach_bidirectional_pnls(self, positions_data, position_pnls, now=None):
+        now = time.monotonic() if now is None else float(now)
+        buy_sample = self._fresh_pnl_sample("buy", now)
+        sell_sample = self._fresh_pnl_sample("sell", now)
+        legacy_sample = self._fresh_pnl_sample("legacy", now)
+        for row in positions_data:
+            values = position_pnls.get(str(row.get("id")), {})
+            if values.get("buy_pnl") is not None and buy_sample is not None:
+                row.update({
+                    "buy_pnl": round(values["buy_pnl"], 2),
+                    "buy_quote_at": buy_sample["quoted_at"],
+                    "buy_quote_provider": buy_sample["provider"],
+                    "buy_projected_gas_eth": round(
+                        int(buy_sample["projected_gas_wei"]) / 10**18, 10
+                    ),
+                })
+                row["pnl"] = row["buy_pnl"]
+            if values.get("sell_pnl") is not None and sell_sample is not None:
+                row.update({
+                    "sell_pnl": round(values["sell_pnl"], 2),
+                    "sell_quote_at": sell_sample["quoted_at"],
+                    "sell_quote_provider": sell_sample["provider"],
+                    "sell_quote_source_position_id": sell_sample["position_id"],
+                    "sell_projected_gas_eth": round(
+                        int(sell_sample["projected_gas_wei"]) / 10**18, 10
+                    ),
+                    "sell_quote_basis": sell_sample["basis"],
+                })
+                if values.get("buy_pnl") is None:
+                    row["pnl"] = row["sell_pnl"]
+            if values.get("legacy_pnl") is not None and legacy_sample is not None:
+                row.update({
+                    "legacy_pnl": round(values["legacy_pnl"], 2),
+                    "legacy_quote_at": legacy_sample["quoted_at"],
+                    "legacy_quote_provider": legacy_sample["provider"],
+                    "legacy_quote_basis": legacy_sample["basis"],
+                })
+                if values.get("buy_pnl") is None and values.get("sell_pnl") is None:
+                    row["pnl"] = row["legacy_pnl"]
+        return positions_data
+
     def _defer_sell_gas_cost(self, position_id, gas_wei, *, gridless_position):
         """Persist confirmed setup gas until a later successful sell recovers it."""
         gas_wei = int(gas_wei)
@@ -3130,7 +3717,7 @@ class GridBot:
         )
         self.save_positions()
 
-    def _check_buys_gridless(self, price):
+    def _check_buys_gridless(self, price, position_pnls=None):
         """Gridless buy logic - buy when no positions or top position P&L <= threshold."""
         from gridless import should_buy, load_positions, add_position
 
@@ -3155,7 +3742,9 @@ class GridBot:
         gridless_positions = load_positions()
         
         # Check if we should buy
-        should_buy_flag, reason = should_buy(gridless_positions, price, self.config)
+        should_buy_flag, reason = should_buy(
+            gridless_positions, price, self.config, position_pnls
+        )
         if not should_buy_flag:
             logger.debug(f"Gridless: No buy - {reason}")
             return
@@ -3246,7 +3835,19 @@ class GridBot:
                 # the strategy. A route returning more tokens for the principal
                 # is price improvement, not market recovery, and must not veto
                 # an otherwise valid buy.
-                pnl_at_trigger_price = calculate_pnl(top[1], price, self.token_decimals)
+                economic_top = dict(top[1])
+                economic_top["cost_wei"] = int(
+                    top[1].get("cost_wei", 0)
+                    or int(top[1].get("cost", 0) or 0) * 10**9
+                ) + int(top[1].get("deferred_sell_gas_wei", 0) or 0)
+                buy_sample = self._pnl_sample_for_trigger("buy")
+                net_trigger_price = (
+                    float(buy_sample["price_eth_per_token"])
+                    if buy_sample is not None else price
+                )
+                pnl_at_trigger_price = calculate_pnl(
+                    economic_top, net_trigger_price, self.token_decimals
+                )
                 buy_threshold = getattr(self.config, 'gridless_buy_threshold', -10.0)
                 
                 # Calculate block threshold as percentage of threshold distance from 0
@@ -3478,9 +4079,11 @@ class GridBot:
     
     @_with_tournament_terminal("sell")
     @_with_swap_provider_fallback
-    def _check_sells_gridless(self, price):
+    def _check_sells_gridless(self, price, position_pnls=None):
         """Gridless sell logic - sell when P&L >= threshold or stoploss triggered."""
-        from gridless import load_positions, find_sell_candidate, calculate_pnl, remove_position, get_buy_price
+        from gridless import (load_positions, find_sell_candidate, calculate_pnl,
+                              remove_position, get_buy_price,
+                              trigger_pnl_candidates)
         
         # Load gridless positions
         gridless_positions = load_positions()
@@ -3489,7 +4092,8 @@ class GridBot:
         
         # Find best sell candidate based on P&L only (quote checked at execution)
         # This allows profitable positions to sell even when aggregate portfolio is down
-        sell_threshold = getattr(self.config, 'gridless_sell_threshold', 5.0)
+        from gridless import get_sell_trigger_percent
+        sell_threshold = get_sell_trigger_percent(self.config)
         stoploss_enabled = getattr(self.config, 'gridless_stoploss_enabled', False)
         stoploss_threshold = getattr(self.config, 'gridless_stoploss_threshold', -25.0)
         
@@ -3498,20 +4102,35 @@ class GridBot:
         best_pnl = float('-inf')
         
         for pos_id, pos in gridless_positions.items():
-            pnl = calculate_pnl(pos, price, self.token_decimals)
-            
-            # Check stoploss first (highest priority)
-            if stoploss_enabled and pnl <= stoploss_threshold:
-                if best_priority > 0 or pnl > best_pnl:
-                    best_candidate = (pos_id, pos, f"STOPLOSS: {pnl:.1f}%")
-                    best_priority = 0
-                    best_pnl = pnl
-            # Check profit target
-            elif pnl >= sell_threshold:
-                if best_priority > 1 or pnl > best_pnl:
-                    best_candidate = (pos_id, pos, f"PROFIT: {pnl:.1f}%")
-                    best_priority = 1
-                    best_pnl = pnl
+            observed = (position_pnls or {}).get(str(pos_id), {})
+            candidates = trigger_pnl_candidates(observed, "sell")
+            if not candidates:
+                # Net-P&L polling fails closed when its authoritative trigger
+                # quote is missing or stale. Legacy mode retains the old mark.
+                if (getattr(self.config, "bidirectional_pnl_enabled", True)
+                        and hasattr(self, "_pnl_quotes")):
+                    continue
+                candidates = [("legacy", calculate_pnl(
+                    pos, price, self.token_decimals
+                ))]
+
+            for source, pnl in candidates:
+                # Check stoploss first (highest priority)
+                if stoploss_enabled and pnl <= stoploss_threshold:
+                    if best_priority > 0 or pnl > best_pnl:
+                        best_candidate = (
+                            pos_id, pos, f"STOPLOSS ({source}): {pnl:.1f}%"
+                        )
+                        best_priority = 0
+                        best_pnl = pnl
+                # Check profit target
+                elif pnl >= sell_threshold:
+                    if best_priority > 1 or pnl > best_pnl:
+                        best_candidate = (
+                            pos_id, pos, f"PROFIT ({source}): {pnl:.1f}%"
+                        )
+                        best_priority = 1
+                        best_pnl = pnl
         
         if best_candidate is None:
             return
@@ -3656,7 +4275,7 @@ class GridBot:
         
         if projected_net_profit_eth < min_profit_eth:
             buy_price = get_buy_price(pos, self.token_decimals)
-            pnl_at_check = calculate_pnl(pos, price, self.token_decimals)
+            pnl_at_check = best_pnl
             logger.info(
                 "⏸️  Position #%s at %.1f%% P&L but projected net profit "
                 "(%.6f after %.6f gas) < min (%.6f) - skipping",
@@ -5158,7 +5777,9 @@ class GridBot:
         interval = max(5, int(getattr(
             self.config, "auto_reconcile_interval_seconds", 30
         )))
-        if now - self._last_auto_reconcile_attempt < interval:
+        failures = max(0, int(getattr(self, "_auto_reconcile_failures", 0)))
+        retry_interval = min(1800, interval * (2 ** min(failures, 6)))
+        if now - self._last_auto_reconcile_attempt < retry_interval:
             return False
         self._last_auto_reconcile_attempt = now
         tx_hash = self.wallet.unresolved_broadcast.get("tx_hash", "unknown")
@@ -5173,7 +5794,14 @@ class GridBot:
                 text=True, capture_output=True, timeout=max(20, interval), check=False,
             )
         except (OSError, subprocess.SubprocessError) as exc:
-            logger.error("Automatic reconciliation check failed closed: %s", exc)
+            self._auto_reconcile_failures = failures + 1
+            next_interval = min(
+                1800, interval * (2 ** min(self._auto_reconcile_failures, 6))
+            )
+            logger.error(
+                "Automatic reconciliation check failed closed; retry in %ss: %s",
+                next_interval, exc,
+            )
             return False
         if result.returncode != 0:
             # The helper constructs its own Wallet. Legacy definitive-rejection
@@ -5190,6 +5818,7 @@ class GridBot:
             )
             if archive_evidence:
                 self.wallet.unresolved_broadcast = None
+                self._auto_reconcile_failures = 0
                 if not getattr(self.config, "use_gridless", False):
                     self.load_positions()
                 self._safety_halted = False
@@ -5200,15 +5829,30 @@ class GridBot:
                 )
                 return True
             detail = (result.stdout or result.stderr or "no detail").strip()
-            logger.warning("Automatic reconciliation not yet safe: %s", detail[:1000])
+            self._auto_reconcile_failures = failures + 1
+            next_interval = min(
+                1800, interval * (2 ** min(self._auto_reconcile_failures, 6))
+            )
+            logger.warning(
+                "Automatic reconciliation not yet safe; retry in %ss: %s",
+                next_interval, detail[-1000:],
+            )
             return False
         self.wallet.unresolved_broadcast = self.wallet._load_unresolved_broadcast()
         if self.wallet.has_unresolved_broadcast():
-            logger.critical("Automatic reconciliation returned without archiving tx=%s", tx_hash)
+            self._auto_reconcile_failures = failures + 1
+            next_interval = min(
+                1800, interval * (2 ** min(self._auto_reconcile_failures, 6))
+            )
+            logger.critical(
+                "Automatic reconciliation returned without archiving tx=%s; retry in %ss",
+                tx_hash, next_interval,
+            )
             return False
         if not getattr(self.config, "use_gridless", False):
             self.load_positions()
         self._safety_halted = False
+        self._auto_reconcile_failures = 0
         logger.warning("Automatic reconciliation completed; trading resumed tx=%s", tx_hash)
         return True
 
@@ -5316,12 +5960,35 @@ class GridBot:
         # Calculate moonbag (tokens in wallet not in positions)
         moonbag_balance = (int(token_raw) - int(position_balance_raw)) / self.token_unit
         
-        # Get price
+        # Refresh exactly one market side per cycle in gridless mode. Buy and
+        # sell observations alternate, preserving the old one-request cadence.
         phase_started = time.perf_counter()
-        price = self.get_token_price()
+        position_pnls = {}
+        pnl_polling_mode = "legacy"
+        if use_gridless and getattr(self.config, "bidirectional_pnl_enabled", True):
+            pnl_polling_mode = self._pnl_polling_mode()
+            trade_balance = eth_bal if getattr(
+                self.config, "use_eth_trading", False
+            ) else weth_bal
+            position_pnls = self._refresh_bidirectional_pnl(
+                gridless_positions, trade_balance,
+            )
+            buy_sample = self._fresh_pnl_sample("buy")
+            sell_sample = self._fresh_pnl_sample("sell")
+            legacy_sample = self._fresh_pnl_sample("legacy")
+            display_sample = buy_sample or sell_sample or legacy_sample
+            if display_sample is not None:
+                price = float(display_sample.get(
+                    "market_price_eth_per_token",
+                    display_sample["price_eth_per_token"],
+                ))
+            else:
+                price = None
+        else:
+            price = self.get_token_price()
         self._cycle_phase_ms["price"] = (time.perf_counter() - phase_started) * 1000
         if price is None:
-            logger.warning("Could not get price")
+            logger.warning("Could not get a fresh %s-side net price", pnl_polling_mode)
             return
         
         # Check for compact/debug round telemetry. Normal INFO operation is
@@ -5403,7 +6070,8 @@ class GridBot:
                 if use_gridless:
                     # Display gridless positions sorted by buy price ascending
                     from gridless import get_buy_price
-                    sell_threshold = getattr(self.config, 'gridless_sell_threshold', 5.0)
+                    from gridless import get_sell_trigger_percent
+                    sell_threshold = get_sell_trigger_percent(self.config)
                     sorted_positions = sorted(
                         gridless_positions.items(),
                         key=lambda x: get_buy_price(x[1], self.token_decimals)
@@ -5487,7 +6155,10 @@ class GridBot:
         # Check sells before reporting so this round's transient attempt state
         # appears immediately rather than one poll late.
         phase_started = time.perf_counter()
-        self.check_sells(price)
+        sells_before_check = self.session_sells
+        self.check_sells(price, position_pnls)
+        if self.session_sells > sells_before_check:
+            self._clear_pnl_trigger_latch("sell", "successful execution")
         self._cycle_phase_ms["sells"] = (time.perf_counter() - phase_started) * 1000
 
         # A sell may have broadcast successfully even if every receipt RPC then
@@ -5507,12 +6178,16 @@ class GridBot:
                 if use_gridless:
                     from gridless import load_positions, get_capacity_warning
                     gpos = load_positions()
-                    capacity_warning = get_capacity_warning(gpos, price, self.config)
+                    capacity_warning = get_capacity_warning(
+                        gpos, price, self.config, position_pnls
+                    )
                     for pos_id, pos in gpos.items():
                         bal = pos.get('balance', 0)
                         if bal > 0:
                             tokens = bal / self.token_unit
-                            cost_wei = pos.get('cost_wei', pos.get('cost', 0) * 10**9)
+                            cost_wei = int(
+                                pos.get('cost_wei', pos.get('cost', 0) * 10**9)
+                            ) + int(pos.get('deferred_sell_gas_wei', 0) or 0)
                             cost_eth = cost_wei / 10**18
                             if tokens > 0 and cost_eth > 0:
                                 buy_price = cost_eth / tokens
@@ -5524,6 +6199,9 @@ class GridBot:
                                     'pnl': round(pnl, 2),
                                     'timestamp': pos.get('timestamp'),
                                 })
+                    self._attach_bidirectional_pnls(
+                        positions_data, position_pnls
+                    )
                 else:
                     for pos_id, pos in self.positions.items():
                         if pos['balance'] > 0:
@@ -5541,9 +6219,11 @@ class GridBot:
                                 })
 
                 total_cost = sum(p['cost_basis'] for p in positions_data)
-                total_value = sum(p['buy_amount_token'] * price for p in positions_data)
                 profit_percent = (
-                    ((total_value - total_cost) / total_cost) * 100
+                    sum(
+                        p['cost_basis'] * float(p.get('buy_pnl', p.get('pnl', 0)))
+                        for p in positions_data
+                    ) / total_cost
                     if total_cost > 0 else 0.0
                 )
                 
@@ -5556,6 +6236,7 @@ class GridBot:
                         'shortfall_eth': gas_reserve_eth - eth_bal,
                     }
 
+                pnl_focus = self._pnl_focus_snapshot()
                 self._reporter.report(
                     price=price,
                     eth_balance=eth_bal,
@@ -5598,7 +6279,21 @@ class GridBot:
                     display_name=self.config.dashboard_name,
                     group=self.config.dashboard_group,
                     buy_point_percent=self.config.gridless_buy_threshold,
-                    sell_point_percent=self.config.gridless_sell_threshold,
+                    sell_point_percent=(
+                        self.config.min_profit_percent
+                        if getattr(self.config, "pnl_trigger_by_min_profit", False)
+                        else self.config.gridless_sell_threshold
+                    ),
+                    pnl_polling_mode=pnl_polling_mode,
+                    pnl_legacy_triggers=self._legacy_pnl_triggers_enabled(),
+                    pnl_focus_side=pnl_focus["side"],
+                    pnl_focus_reason=pnl_focus["reason"],
+                    pnl_focus_directions=pnl_focus["directions"],
+                    pnl_trigger_mode=(
+                        "minimum_profit"
+                        if getattr(self.config, "pnl_trigger_by_min_profit", False)
+                        else "sell_threshold"
+                    ),
                     poll_interval_seconds=self.config.poll_interval_seconds,
                     trades_history=self.dashboard_trades,
                     events=self.dashboard_events,
@@ -5622,7 +6317,10 @@ class GridBot:
         # forever.
         # Then check buys
         phase_started = time.perf_counter()
-        self.check_buys(price)
+        buys_before_check = self.session_buys
+        self.check_buys(price, position_pnls)
+        if self.session_buys > buys_before_check:
+            self._clear_pnl_trigger_latch("buy", "successful execution")
         self._cycle_phase_ms["buys"] = (time.perf_counter() - phase_started) * 1000
 
     def _round_summary_mode(self):

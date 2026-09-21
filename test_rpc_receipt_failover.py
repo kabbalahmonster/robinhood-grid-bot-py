@@ -5,6 +5,30 @@ from rpc_rotator import ResilientWeb3
 
 
 class TestRPCReceiptFailover(unittest.TestCase):
+    def test_candidate_scope_records_only_sanitized_rpc_metadata(self):
+        first = Mock()
+        first.provider.endpoint_uri = "https://secret-user:key@first.invalid/path"
+        first.eth.get_block.return_value = {"number": 1}
+
+        resilient = ResilientWeb3.__new__(ResilientWeb3)
+        resilient.rotator = Mock()
+        resilient.rotator.endpoint_label.return_value = "rpc_1"
+        resilient._w3 = first
+        resilient._current_url = first.provider.endpoint_uri
+
+        trace = []
+        with resilient.telemetry_scope(trace):
+            result = resilient._execute_with_failover("eth.get_block", "latest")
+
+        self.assertEqual(result, {"number": 1})
+        self.assertEqual(len(trace), 1)
+        self.assertEqual(trace[0]["method"], "eth.get_block")
+        self.assertEqual(trace[0]["attempts"], 1)
+        self.assertEqual(trace[0]["failures"], 0)
+        self.assertEqual(trace[0]["endpoint_labels"], ["rpc_1"])
+        self.assertNotIn("secret-user", repr(trace))
+        self.assertNotIn("first.invalid", repr(trace))
+
     @patch("rpc_rotator.time.sleep", return_value=None)
     def test_method_not_found_fails_over_for_receipt_lookup(self, _sleep):
         first = Mock()
@@ -133,6 +157,27 @@ class TestRPCReceiptFailover(unittest.TestCase):
 
         self.assertEqual(result, receipt)
         second.eth.get_transaction_receipt.assert_called_once_with("0xabc")
+        endpoint_two.record_success.assert_called_once()
+
+    def test_exact_transaction_searches_past_not_found_endpoint(self):
+        first = Mock()
+        first.eth.get_transaction.side_effect = ValueError("transaction not found")
+        second = Mock()
+        transaction = {"hash": "0xabc", "nonce": 456}
+        second.eth.get_transaction.return_value = transaction
+
+        resilient = ResilientWeb3.__new__(ResilientWeb3)
+        endpoint_one = Mock(url="https://first.invalid")
+        endpoint_two = Mock(url="https://second.invalid")
+        resilient.rotator = Mock()
+        resilient.rotator._endpoints = [endpoint_one, endpoint_two]
+        resilient.rotator._get_web3_for_url.side_effect = [first, second]
+
+        result = resilient.find_transaction("0xabc")
+
+        self.assertEqual(result, transaction)
+        first.eth.get_transaction.assert_called_once_with("0xabc")
+        second.eth.get_transaction.assert_called_once_with("0xabc")
         endpoint_two.record_success.assert_called_once()
 
 
