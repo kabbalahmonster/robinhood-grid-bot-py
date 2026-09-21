@@ -374,6 +374,7 @@ option and safety invariant.
 |---|---|---|
 | `start-fleet` / `stop-fleet` / `restart-fleet` | Tmux lifecycle plus durable guardian intent | Processes/state marker |
 | `start-bot NAME` / `stop-bot NAMES...` / `restart-bot NAMES...` | Durably start one bot or stop/restart multiple selected bots without disturbing the rest of the fleet | Processes/state marker |
+| `restart-stopped [--only NAMES] [--exclude NAMES]` | Start intentionally stopped bots while leaving unselected and running bots unchanged | Processes/state marker |
 | `cleanup-logs --older-than AGE` | Preview or delete old logs for the whole fleet, selected bots, or all except selected bots | Log files only |
 | `bundle-logs` | Merge selected bots' logs into one redacted analysis file; `--since` spans current and rotated files | Writes one report file |
 | `update-bot NAME` | List/switch branches, fast-forward one checkout, and restart it only when already running | Git/processes |

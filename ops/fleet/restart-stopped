@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+SCRIPT_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)"
+# shellcheck source=fleet-common.sh
+source "$SCRIPT_DIR/fleet-common.sh"
+
+usage() {
+  cat <<'EOF'
+Usage: restart-stopped [--only NAMES] [--exclude NAMES] [--config PATH]
+
+Start every selected bot that is durably marked intentionally stopped. Running
+bots and stopped bots outside the selection are left unchanged. Names are
+case-insensitive and comma-separated. --except is an alias for --exclude.
+
+If the tmux fleet session is absent, it is recreated with the selected stopped
+bots plus any bots already marked desired-running. The command always detaches.
+EOF
+}
+
+config_path=""
+only=""
+exclude=""
+while (($#)); do
+  case "$1" in
+    --config) (($# >= 2)) || fleet_die "--config requires a path"; config_path="$2"; shift 2 ;;
+    --only) (($# >= 2)) || fleet_die "--only requires comma-separated names"; only="$2"; shift 2 ;;
+    --exclude|--except) (($# >= 2)) || fleet_die "$1 requires comma-separated names"; exclude="$2"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) fleet_die "Unknown option: $1" ;;
+  esac
+done
+
+fleet_load_config "$config_path"
+fleet_require_tmux
+configured_dirs=("${FLEET_BOT_DIRS[@]}")
+fleet_apply_selection "$only" "$exclude"
+
+stopped_dirs=()
+stopped_names=()
+for bot_dir in "${FLEET_BOT_DIRS[@]}"; do
+  if ! fleet_bot_should_run "$bot_dir"; then
+    stopped_dirs+=("$bot_dir")
+    stopped_names+=("$(fleet_bot_name "$bot_dir")")
+  fi
+done
+
+if ((${#stopped_dirs[@]} == 0)); then
+  printf 'No intentionally stopped bots matched the selection; nothing changed.\n'
+  exit 0
+fi
+
+stopped_csv="$(IFS=,; printf '%s' "${stopped_names[*]}")"
+if fleet_session_exists; then
+  exec "$SCRIPT_DIR/restart-bot" "$stopped_csv" --config "$FLEET_CONFIG_PATH"
+fi
+
+# start-fleet's explicit selection defines desired state for the whole fleet.
+# Include bots that were already desired-running so this command never turns
+# an unrelated bot's temporary outage into a durable stop.
+launch_names=()
+for bot_dir in "${configured_dirs[@]}"; do
+  if fleet_bot_should_run "$bot_dir"; then
+    launch_names+=("$(fleet_bot_name "$bot_dir")")
+  fi
+done
+launch_names+=("${stopped_names[@]}")
+launch_csv="$(IFS=,; printf '%s' "${launch_names[*]}")"
+exec "$SCRIPT_DIR/start-fleet" --detach --only "$launch_csv" --config "$FLEET_CONFIG_PATH"

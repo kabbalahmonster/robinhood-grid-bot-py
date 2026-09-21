@@ -162,6 +162,69 @@ class FleetDesiredStateTests(unittest.TestCase):
         self.assertTrue(self.session.exists())
         self.assertEqual(self.bot_markers(), [])
 
+    def test_restart_stopped_starts_every_stopped_bot_when_session_is_absent(self):
+        beta = self.root / "bots" / "beta" / "repo-beta"
+        beta.mkdir(parents=True)
+        (beta / "grid_bot.py").write_text("pass\n")
+        self.config.write_text(
+            'FLEET_SESSION="test_fleet"\nFLEET_WINDOW="fleet"\n'
+            f'FLEET_BOT_DIRS=("{self.bot}" "{beta}")\nFLEET_START_STAGGER=0\n'
+        )
+        self.run_command("stop-bot", "repo", "repo-beta", check=True)
+
+        result = self.run_command("restart-stopped")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(self.session.exists())
+        self.assertEqual(self.bot_markers(), [])
+        self.assertIn("Started 2 bots", result.stdout)
+
+    def test_restart_stopped_only_and_except_leave_unselected_stops_intact(self):
+        beta = self.root / "bots" / "beta" / "repo-beta"
+        gamma = self.root / "bots" / "gamma" / "repo-gamma"
+        for bot in (beta, gamma):
+            bot.mkdir(parents=True)
+            (bot / "grid_bot.py").write_text("pass\n")
+        self.config.write_text(
+            'FLEET_SESSION="test_fleet"\nFLEET_WINDOW="fleet"\n'
+            f'FLEET_BOT_DIRS=("{self.bot}" "{beta}" "{gamma}")\nFLEET_START_STAGGER=0\n'
+        )
+        self.run_command("stop-bot", "repo", "repo-beta", "repo-gamma", check=True)
+
+        result = self.run_command(
+            "restart-stopped", "--only", "repo,repo-beta,repo-gamma",
+            "--except", "repo-beta,repo-gamma",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(self.session.exists())
+        self.assertEqual(len(self.bot_markers()), 2)
+        self.assertIn("Started 1 bots", result.stdout)
+
+    def test_restart_stopped_does_not_touch_running_bot_in_live_session(self):
+        beta = self.root / "bots" / "beta" / "repo-beta"
+        beta.mkdir(parents=True)
+        (beta / "grid_bot.py").write_text("pass\n")
+        self.config.write_text(
+            'FLEET_SESSION="test_fleet"\nFLEET_WINDOW="fleet"\n'
+            f'FLEET_BOT_DIRS=("{self.bot}" "{beta}")\nFLEET_START_STAGGER=0\n'
+        )
+        self.run_command("stop-bot", "repo-beta", check=True)
+        self.session.touch()
+
+        result = self.run_command("restart-stopped")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.bot_markers(), [])
+        self.assertIn("Restarted 1 bot(s)", result.stdout)
+
+    def test_restart_stopped_is_noop_when_selection_has_no_stopped_bots(self):
+        result = self.run_command("restart-stopped")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.session.exists())
+        self.assertIn("nothing changed", result.stdout)
+
     def test_multi_bot_command_rejects_unknown_name_before_changes(self):
         result = self.run_command("stop-bot", "repo", "TYPO")
         self.assertNotEqual(result.returncode, 0)
