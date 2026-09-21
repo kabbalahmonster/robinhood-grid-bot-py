@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+SCRIPT_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)"
+# shellcheck source=fleet-common.sh
+source "$SCRIPT_DIR/fleet-common.sh"
+
+usage() {
+  cat <<'EOF'
+Usage: pass-positions --from SPECS --to SPECS [--positions N] [options]
+       pass-positions --resume PLAN_ID --execute --confirm-plan PLAN_ID
+
+Move whole position-capacity slots and their ETH reserve between fleet bots.
+SPECS are comma-separated BOT or BOT=COUNT entries and may be repeated.
+Unassigned counts are split as evenly as possible. Dry run is the default.
+
+Options:
+  --amount-per-position ETH   Override every donor's default
+  --amount-from BOT=ETH       Override one donor (repeatable)
+  --execute                   Broadcast and apply capacity changes
+  --confirm-plan PLAN_ID      Exact dry-run plan ID required for execution
+  --confirm-fleet-stopped     Required for execution; tmux must be absent
+  --resume PLAN_ID            Resume an interrupted journaled execution
+  --config PATH               Alternate fleet configuration
+EOF
+}
+
+config_path=""; execute=0; fleet_stopped=0; forwarded=()
+while (($#)); do
+  case "$1" in
+    --config) (($# >= 2)) || fleet_die "--config requires a path"; config_path="$2"; shift 2 ;;
+    --execute) execute=1; forwarded+=("$1"); shift ;;
+    --confirm-fleet-stopped) fleet_stopped=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) forwarded+=("$1"); shift ;;
+  esac
+done
+((execute == 0 || fleet_stopped == 1)) || fleet_die "--execute requires --confirm-fleet-stopped"
+
+fleet_load_config "$config_path"
+fleet_validate_bots
+if ((execute)); then
+  fleet_require_tmux
+  fleet_session_exists && fleet_die "Refusing to pass positions while tmux session '$FLEET_SESSION' is running. Stop the fleet first."
+fi
+
+python_bin="$(fleet_python_for "${FLEET_BOT_DIRS[0]}")" || fleet_die "No Python interpreter found"
+state_root="$(dirname -- "$(fleet_desired_state_file)")/position-passes"
+args=("$python_bin" "$SCRIPT_DIR/pass-positions.py" --journal-dir "$state_root")
+for bot_dir in "${FLEET_BOT_DIRS[@]}"; do
+  args+=(--bot "$(fleet_bot_name "$bot_dir")=$bot_dir")
+done
+args+=("${forwarded[@]}")
+exec "${args[@]}"

@@ -113,7 +113,7 @@ sudo apt install tmux git python3 python3-venv
      ops/fleet/usdg-sweep ops/fleet/cleanup-logs ops/fleet/cleanup-logs.py \
      ops/fleet/bundle-logs ops/fleet/bundle-logs.py \
      ops/fleet/treasury-transfer ops/fleet/fund-bots ops/fleet/update-variable \
-     ops/fleet/adjust-positions ops/fleet/fleet-membership \
+     ops/fleet/adjust-positions ops/fleet/pass-positions ops/fleet/fleet-membership \
      ops/fleet/position-capacity.py \
      ops/fleet/backup-private-keys ops/fleet/fleet-discover \
      ops/fleet/liquidate-assets ops/fleet/sell-moonbags ops/fleet/fleet-doctor \
@@ -154,6 +154,7 @@ sudo apt install tmux git python3 python3-venv
    ln -sf "$PWD/ops/fleet/fund-bots" "$HOME/bin/fund-bots"
    ln -sf "$PWD/ops/fleet/update-variable" "$HOME/bin/update-variable"
    ln -sf "$PWD/ops/fleet/adjust-positions" "$HOME/bin/adjust-positions"
+   ln -sf "$PWD/ops/fleet/pass-positions" "$HOME/bin/pass-positions"
    ln -sf "$PWD/ops/fleet/fleet-membership" "$HOME/bin/fleet-membership"
    ln -sf "$PWD/ops/fleet/backup-private-keys" "$HOME/bin/backup-private-keys"
    ln -sf "$PWD/ops/fleet/fleet-discover" "$HOME/bin/fleet-discover"
@@ -503,6 +504,7 @@ unless their section explicitly says otherwise.
 | `fleet-membership` | Add/remove explicit configured bot names | `--apply` only |
 | `update-variable` | Safely update selected bot `.env` values | `--apply` only |
 | `adjust-positions` | Change capacity without rewriting filled positions | `--apply` only |
+| `pass-positions` | Reallocate whole capacity slots and reserve ETH among fleet bots | `--execute` only |
 | `reconcile-position-balances` | Haircut overstated tracked balances to wallet reality | `--apply` only |
 | `fund-bots` | Top selected wallets up from a separate treasury signer | `--execute` only |
 | `usdg-sweep` | Sweep USDG to treasury | `--execute` only |
@@ -1257,6 +1259,94 @@ ops/fleet/treasury-transfer \
   --position-reserve-eth 0.003 \
   --recipient "$TREASURY"
 ```
+
+### Pass positions between bots
+
+`pass-positions` moves unused position-capacity slots and the ETH reserved for
+those slots from one or more donor wallets to one or more recipient wallets.
+It never moves open position records or tokens. Every donor must have at least
+one available slot (`capacity - filled positions`), and its capacity can never
+be reduced below its filled count.
+
+Preview two positions from PRISM to URMOM:
+
+```bash
+pass-positions --from prism --to urmom --positions 2
+```
+
+The default ETH principal for each slot is that donor's
+`TREASURY_POSITION_RESERVE_ETH`, the same per-available-slot reserve protected
+by `treasury-transfer --amount available`. Override it globally or per donor:
+
+```bash
+pass-positions --from prism --to urmom --positions 2 \
+  --amount-per-position 0.0015
+
+pass-positions --from prism,sarn --to urmom --positions 3 \
+  --amount-from prism=0.002 --amount-from sarn=0.0015
+```
+
+Multiple unspecified donors and recipients split whole positions as evenly as
+possible in supplied order. Capacity-limited donors are used only to their
+available count and the remainder spills fairly to the others:
+
+```bash
+pass-positions --from sarn,prism --to urmom,delta --positions 3
+```
+
+Use `BOT=COUNT` for exact assignments. Plain names share whatever remains:
+
+```bash
+# Exactly 2 from PRISM; split the remaining 3 between SARN and DELTA.
+# Exactly 1 to URMOM; split the remaining 4 between EARN and HOOKR.
+pass-positions \
+  --from prism=2,sarn,delta \
+  --to urmom=1,earn,hookr \
+  --positions 5
+```
+
+`--positions` may be omitted when either side specifies a count for every bot;
+that exact side determines the total. If both sides are fully specified, their
+totals must match. A bot cannot appear on both sides. Duplicate names, duplicate
+wallets, cross-chain plans, contract recipients, fractional/zero counts, and
+donations beyond available capacity are refused. A route's amount per position
+must also meet the recipient's own `TREASURY_POSITION_RESERVE_ETH`; raise the
+override when a recipient has a larger configured minimum than its donor.
+
+Execution is deliberately two-stage. Stop the fleet and capture the printed
+plan ID, then repeat the same command with the confirmations:
+
+```bash
+stop-fleet
+pass-positions --from prism --to urmom --positions 2
+pass-positions --from prism --to urmom --positions 2 \
+  --execute --confirm-fleet-stopped --confirm-plan PLAN_ID
+```
+
+Before broadcasting, the command revalidates every capacity/filled-position
+snapshot, wallet, chain, live balance, route gas estimate, remaining-slot
+reserve, and `.env` permission. Transfers are aggregated into at most
+`donors + recipients - 1` transactions. A donor may pay transfer gas from its
+configured `ETH_GAS_RESERVE`; the planner still requires enough value to send
+the full principal, preserve every slot it keeps, and cover the larger of its
+gas reserve or all planned maximum fees.
+
+Every confirmed transfer is journaled under the fleet state directory.
+Capacity files change only after all transfers confirm. If a route or capacity
+commit is interrupted, do not repeat the original command. Resume the journal:
+
+```bash
+pass-positions --resume PLAN_ID \
+  --execute --confirm-fleet-stopped --confirm-plan PLAN_ID
+```
+
+Confirmed routes are skipped. The final capacity commit is recoverable and
+keeps `.bak.position-pass.PLAN_ID` copies of affected `.env` files. Running
+processes are never restarted implicitly; use `restart-bot` or
+`restart-stopped` after reviewing the completed result. A transaction hash is
+journaled immediately after broadcast; if its receipt is still ambiguous, a
+resume refuses to resend it until the existing hash resolves, preventing a
+timeout from turning into a duplicate payment.
 
 The dry run prints filled positions, configured capacity, available slots,
 reserve per slot, total position reserve, estimated maximum gas, and final send
