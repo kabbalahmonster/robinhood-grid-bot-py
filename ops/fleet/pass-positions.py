@@ -465,6 +465,7 @@ def main(argv=None):
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--confirm-plan")
     parser.add_argument("--resume")
+    parser.add_argument("--list-involved", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
 
     bot_dirs = {}
@@ -476,6 +477,20 @@ def main(argv=None):
     if not bot_dirs:
         raise ValueError("At least one fleet --bot mapping is required")
     journal_path = Path(args.journal_dir) / f"{args.resume}.json" if args.resume else None
+    if args.list_involved:
+        if args.resume:
+            if not journal_path.is_file():
+                raise ValueError(f"Unknown position-pass journal: {args.resume}")
+            listed_plan = json.loads(journal_path.read_text())["plan"]
+            names = list(listed_plan["sources"]) + list(listed_plan["destinations"])
+        else:
+            source_specs = resolve_names(parse_specs(args.sources, "--from"), bot_dirs, "--from")
+            destination_specs = resolve_names(parse_specs(args.destinations, "--to"), bot_dirs, "--to")
+            names = [name for name, _count in source_specs + destination_specs]
+        if len({name.lower() for name in names}) != len(names):
+            raise ValueError("Bots cannot be both donors and recipients")
+        print("\n".join(names))
+        return 0
     if args.resume:
         if args.sources or args.destinations or args.positions or args.amount_per_position or args.amount_from:
             raise ValueError("--resume cannot be combined with new allocation arguments")

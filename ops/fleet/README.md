@@ -1323,6 +1323,27 @@ pass-positions --from prism --to urmom --positions 2 \
   --execute --confirm-fleet-stopped --confirm-plan PLAN_ID
 ```
 
+Or let the command manage only the involved bots while the rest of the fleet
+keeps running:
+
+```bash
+pass-positions --from prism --to urmom --positions 2 \
+  --execute --manage-bots --confirm-plan PLAN_ID
+```
+
+`--auto-stop-restart` is an alias for `--manage-bots`. Managed mode discovers
+all donors and recipients from either the supplied allocation or a resumed
+journal. It durably stops those that were desired-running, suppressing guardian
+recovery during the operation, and restarts only that same set after complete
+transfer and capacity success. Involved bots that were already intentionally
+stopped remain stopped, and unrelated bots are never touched. If any transfer,
+validation, capacity commit, or automatic restart fails, affected bots remain
+stopped and the command exits nonzero with recovery instructions; it never
+restarts trading into a partially completed plan. If tmux is unexpectedly
+absent while the fleet is still marked desired-running, managed mode refuses
+execution rather than racing the guardian; restore or intentionally stop the
+fleet first.
+
 Before broadcasting, the command revalidates every capacity/filled-position
 snapshot, wallet, chain, live balance, route gas estimate, remaining-slot
 reserve, and `.env` permission. Transfers are aggregated into at most
@@ -1337,7 +1358,7 @@ commit is interrupted, do not repeat the original command. Resume the journal:
 
 ```bash
 pass-positions --resume PLAN_ID \
-  --execute --confirm-fleet-stopped --confirm-plan PLAN_ID
+  --execute --manage-bots --confirm-plan PLAN_ID
 ```
 
 Confirmed routes are skipped. The final capacity commit is recoverable and

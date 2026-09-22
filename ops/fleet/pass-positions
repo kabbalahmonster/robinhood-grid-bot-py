@@ -20,29 +20,37 @@ Options:
   --amount-from BOT=ETH       Override one donor (repeatable)
   --execute                   Broadcast and apply capacity changes
   --confirm-plan PLAN_ID      Exact dry-run plan ID required for execution
-  --confirm-fleet-stopped     Required for execution; tmux must be absent
+  --confirm-fleet-stopped     Execute against an already-stopped whole fleet
+  --manage-bots               Stop/restart involved running bots automatically
+  --auto-stop-restart         Alias for --manage-bots
   --resume PLAN_ID            Resume an interrupted journaled execution
   --config PATH               Alternate fleet configuration
 EOF
 }
 
-config_path=""; execute=0; fleet_stopped=0; forwarded=()
+config_path=""; execute=0; fleet_stopped=0; manage_bots=0; forwarded=()
 while (($#)); do
   case "$1" in
     --config) (($# >= 2)) || fleet_die "--config requires a path"; config_path="$2"; shift 2 ;;
     --execute) execute=1; forwarded+=("$1"); shift ;;
     --confirm-fleet-stopped) fleet_stopped=1; shift ;;
+    --manage-bots|--auto-stop-restart) manage_bots=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) forwarded+=("$1"); shift ;;
   esac
 done
-((execute == 0 || fleet_stopped == 1)) || fleet_die "--execute requires --confirm-fleet-stopped"
+((manage_bots == 0 || execute == 1)) || fleet_die "--manage-bots requires --execute"
+((manage_bots == 0 || fleet_stopped == 0)) || fleet_die "Use --manage-bots or --confirm-fleet-stopped, not both"
+((execute == 0 || fleet_stopped == 1 || manage_bots == 1)) || \
+  fleet_die "--execute requires --confirm-fleet-stopped or --manage-bots"
 
 fleet_load_config "$config_path"
 fleet_validate_bots
 if ((execute)); then
   fleet_require_tmux
-  fleet_session_exists && fleet_die "Refusing to pass positions while tmux session '$FLEET_SESSION' is running. Stop the fleet first."
+  if ((manage_bots == 0)); then
+    fleet_session_exists && fleet_die "Refusing to pass positions while tmux session '$FLEET_SESSION' is running. Stop the fleet first."
+  fi
 fi
 
 python_bin="$(fleet_python_for "${FLEET_BOT_DIRS[0]}")" || fleet_die "No Python interpreter found"
@@ -52,4 +60,60 @@ for bot_dir in "${FLEET_BOT_DIRS[@]}"; do
   args+=(--bot "$(fleet_bot_name "$bot_dir")=$bot_dir")
 done
 args+=("${forwarded[@]}")
-exec "${args[@]}"
+if ((manage_bots == 0)); then
+  exec "${args[@]}"
+fi
+
+mapfile -t involved_names < <("${args[@]}" --list-involved)
+((${#involved_names[@]} > 0)) || fleet_die "Position plan resolved to no involved bots"
+declare -A configured_dirs=()
+for bot_dir in "${FLEET_BOT_DIRS[@]}"; do
+  configured_dirs["$(fleet_bot_name "$bot_dir" | tr '[:upper:]' '[:lower:]')"]="$bot_dir"
+done
+restart_names=()
+pane_names=()
+if fleet_session_exists; then
+  for name in "${involved_names[@]}"; do
+    normalized="$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')"
+    bot_dir="${configured_dirs[$normalized]:-}"
+    [[ -n "$bot_dir" ]] || fleet_die "Involved bot is no longer configured: $name"
+    if fleet_bot_should_run "$bot_dir"; then
+      restart_names+=("$name")
+      if fleet_pane_for_bot_dir "$bot_dir" >/dev/null 2>&1; then
+        pane_names+=("$name")
+      else
+        # Preserve desired-running intent across a missing/crashed pane, but
+        # suppress the guardian until the position pass finishes.
+        fleet_record_bot_stopped "$bot_dir"
+      fi
+    fi
+  done
+elif fleet_should_run; then
+  fleet_die "Fleet session '$FLEET_SESSION' is absent but desired-running; refusing managed execution because the guardian could restart bots mid-transfer"
+fi
+
+if ((${#pane_names[@]} > 0)); then
+  "$SCRIPT_DIR/stop-bot" "${pane_names[@]}" --config "$FLEET_CONFIG_PATH"
+fi
+if ((${#restart_names[@]} > 0)); then
+  printf 'Automatically stopped %d involved desired-running bot(s).\n' "${#restart_names[@]}"
+else
+  printf 'No involved bots were running; existing stopped state will be preserved.\n'
+fi
+
+if "${args[@]}"; then
+  :
+else
+  status=$?
+  printf 'Position pass did not complete; involved bots remain intentionally stopped for safe resume.\n' >&2
+  exit "$status"
+fi
+
+if ((${#restart_names[@]} > 0)); then
+  if ! "$SCRIPT_DIR/restart-bot" "${restart_names[@]}" --config "$FLEET_CONFIG_PATH"; then
+    printf 'Position pass completed, but automatic restart failed. Restart these bots manually: %s\n' \
+      "${restart_names[*]}" >&2
+    exit 1
+  fi
+  printf 'Automatically restarted %d bot(s) that were desired-running before the pass.\n' "${#restart_names[@]}"
+fi
