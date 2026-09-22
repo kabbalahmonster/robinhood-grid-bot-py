@@ -159,6 +159,24 @@ class PassPositionsTests(unittest.TestCase):
             for route in plan["routes"]:
                 route["amount_wei"] = plan["amounts_wei"][route["source"]] * route["positions"]
                 route["max_fee_wei"] = 21_000
+                route["recipient"] = plan["wallet_addresses"][route["destination"]]
+            plan["feasibility"] = {
+                name: {
+                    "balance_wei": 10**18,
+                    "principal_wei": sum(
+                        route["amount_wei"] for route in plan["routes"]
+                        if route["source"] == name
+                    ),
+                    "maximum_fees_wei": 21_000,
+                    "final_available_slots": 1,
+                    "retained_position_reserve_wei": 1_500_000_000_000_000,
+                    "effective_gas_reserve_wei": 600_000_000_000_000,
+                    "post_fee_gas_reserve_floor_wei": 599_999_999_979_000,
+                    "required_wei": 4_500_000_000_021_000,
+                    "projected_remaining_wei": 995_499_999_979_000_000,
+                }
+                for name in plan["sources"]
+            }
             return {}
 
         with tempfile.TemporaryDirectory() as directory:
@@ -182,6 +200,12 @@ class PassPositionsTests(unittest.TestCase):
             self.assertIn("urmom: receive 3", body)
             self.assertIn("amount/position=0.0015 ETH", body)
             self.assertRegex(body, r"Plan ID: [0-9a-f]{16}")
+            self.assertIn("POSITION PASS ALLOCATION PREVIEW", body)
+            self.assertIn("POSITION PASS APPROVAL PLAN", body)
+            self.assertIn("wallet balance: 1 ETH", body)
+            self.assertIn("Total principal:", body)
+            self.assertIn("Approval status: FEASIBLE", body)
+            self.assertIn("DRY RUN COMPLETE", body)
 
     def test_main_refuses_same_bot_on_both_sides_before_chain_access(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -1352,6 +1352,15 @@ configured `ETH_GAS_RESERVE`; the planner still requires enough value to send
 the full principal, preserve every slot it keeps, and cover the larger of its
 gas reserve or all planned maximum fees.
 
+Dry runs emit progress immediately: first the locally validated allocation,
+then each live RPC/gas/balance check, then a complete approval plan. The final
+plan includes the plan ID, wallet addresses, before/after capacities, filled
+and available slots, per-position amounts, donor balances, principal, maximum
+gas, retained-slot reserve, gas-reserve floor, minimum required balance,
+projected remaining balance, every transfer route, and fleet totals. `--help`
+is available without a fleet config and includes allocation, execution,
+managed lifecycle, override, and resume examples.
+
 Every confirmed transfer is journaled under the fleet state directory.
 Capacity files change only after all transfers confirm. If a route or capacity
 commit is interrupted, do not repeat the original command. Resume the journal:

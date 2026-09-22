@@ -143,6 +143,19 @@ class ManagedPassPositionsTests(unittest.TestCase):
         self.assertIn("absent but desired-running", result.stderr)
         self.assertFalse(self.trace.exists())
 
+    def test_help_is_available_without_config_and_documents_full_workflow(self):
+        result = subprocess.run(
+            [str(self.scripts / "pass-positions"), "--help"],
+            env=self.env, text=True, capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for text in (
+            "Allocation:", "Execution:", "Examples:", "Safety model:",
+            "--manage-bots", "--resume PLAN_ID", "BOT=COUNT",
+        ):
+            with self.subTest(text=text):
+                self.assertIn(text, result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

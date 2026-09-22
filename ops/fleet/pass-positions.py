@@ -7,6 +7,7 @@ import json
 import os
 import re
 import stat
+import sys
 import tempfile
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -319,6 +320,8 @@ def gas_price(w3, floor=0):
 
 def prepare_chain(plan, metadata, execute=False):
     Account, Web3 = chain_imports()
+    print("LIVE PREFLIGHT", flush=True)
+    print("- Resolving and cross-checking selected fleet wallet addresses...", flush=True)
     addresses = {}
     for name in set(plan["sources"]) | set(plan["destinations"]):
         key = metadata[name]["private_key"]
@@ -337,6 +340,7 @@ def prepare_chain(plan, metadata, execute=False):
         rpc = values.get("RPC_URL", "")
         if not rpc:
             raise ValueError(f"{source}: RPC_URL is required")
+        print(f"- {source}: connecting to RPC and checking chain identity...", flush=True)
         w3 = Web3(Web3.HTTPProvider(rpc, request_kwargs={"timeout": 30}))
         if not w3.is_connected():
             raise ConnectionError(f"{source}: could not connect to RPC_URL")
@@ -351,6 +355,10 @@ def prepare_chain(plan, metadata, execute=False):
         source, destination = route["source"], route["destination"]
         w3 = contexts[source]["w3"]
         recipient = Web3.to_checksum_address(addresses[destination])
+        print(
+            f"- {source} -> {destination}: checking recipient code and estimating transfer gas...",
+            flush=True,
+        )
         if w3.eth.get_code(recipient):
             raise ValueError(f"{destination}: recipient wallet address has contract code")
         route["source_address"] = addresses[source]
@@ -380,6 +388,7 @@ def prepare_chain(plan, metadata, execute=False):
         route["gas"] = max(estimate, int(Decimal(estimate) * multiplier))
         route["gas_price"] = gas_price(w3)
         route["max_fee_wei"] = route["gas"] * route["gas_price"]
+    plan["feasibility"] = {}
     for source, count in plan["sources"].items():
         routes = [r for r in plan["routes"] if r["source"] == source and not r.get("tx_hash")]
         principal = sum(r["amount_wei"] for r in routes)
@@ -393,6 +402,23 @@ def prepare_chain(plan, metadata, execute=False):
         )
         effective_gas_reserve = max(0, metadata[source]["gas_reserve_wei"] - confirmed_fees)
         required = principal + retained_positions + max(effective_gas_reserve, fees)
+        projected_remaining = balance - principal - fees
+        post_fee_gas_reserve = max(0, effective_gas_reserve - fees)
+        plan["feasibility"][source] = {
+            "balance_wei": balance,
+            "principal_wei": principal,
+            "maximum_fees_wei": fees,
+            "final_available_slots": final_slots,
+            "retained_position_reserve_wei": retained_positions,
+            "effective_gas_reserve_wei": effective_gas_reserve,
+            "post_fee_gas_reserve_floor_wei": post_fee_gas_reserve,
+            "required_wei": required,
+            "projected_remaining_wei": projected_remaining,
+        }
+        print(
+            f"- {source}: checking balance against principal, retained slots, and gas safety...",
+            flush=True,
+        )
         if balance < required:
             raise ValueError(
                 f"{source}: balance {Decimal(balance)/WEI} ETH cannot cover remaining transfers, "
@@ -433,8 +459,8 @@ def send_route(context, route, chain_id, on_broadcast=None):
     raise AssertionError("unreachable")
 
 
-def print_plan(plan, metadata):
-    print("POSITION PASS PLAN")
+def print_allocation_preview(plan, metadata):
+    print("POSITION PASS ALLOCATION PREVIEW", flush=True)
     print(f"Plan ID: {plan['plan_id']}")
     print(f"Positions: {plan['positions']}")
     print("Donors:")
@@ -447,10 +473,54 @@ def print_plan(plan, metadata):
     for name, count in plan["destinations"].items():
         original = plan["capacity_snapshot"][name]["capacity"]
         print(f"- {name}: receive {count}; capacity {original} -> {original+count}")
+    print("Allocation is locally valid. Running live wallet, balance, and gas preflight...", flush=True)
+
+
+def print_plan(plan, metadata):
+    print("POSITION PASS APPROVAL PLAN")
+    print(f"Plan ID: {plan['plan_id']}")
+    print(f"Positions: {plan['positions']}")
+    print(f"Transactions: {len(plan['routes'])}")
+    print("Donors and feasibility:")
+    for name, count in plan["sources"].items():
+        data = metadata[name]
+        original = plan["capacity_snapshot"][name]["capacity"]
+        feasibility = plan.get("feasibility", {}).get(name, {})
+        print(f"- {name} ({plan.get('wallet_addresses', {}).get(name, 'address unavailable')}):")
+        print(f"    positions: give {count}; capacity {original} -> {original-count}; "
+              f"filled={data['filled']} available_before={original-data['filled']}")
+        print(f"    amount/position: {plan['amounts_eth'][name]} ETH")
+        if feasibility:
+            print(f"    wallet balance: {Decimal(feasibility['balance_wei'])/WEI} ETH")
+            print(f"    principal sent: {Decimal(feasibility['principal_wei'])/WEI} ETH")
+            print(f"    maximum planned gas: {Decimal(feasibility['maximum_fees_wei'])/WEI} ETH")
+            print(f"    retained slots: {feasibility['final_available_slots']} = "
+                  f"{Decimal(feasibility['retained_position_reserve_wei'])/WEI} ETH reserve")
+            print(f"    gas reserve before remaining routes: "
+                  f"{Decimal(feasibility['effective_gas_reserve_wei'])/WEI} ETH")
+            print(f"    minimum required now: {Decimal(feasibility['required_wei'])/WEI} ETH")
+            print(f"    projected remaining after maximum gas: "
+                  f"{Decimal(feasibility['projected_remaining_wei'])/WEI} ETH")
+            print(f"    projected gas-reserve floor after fees: "
+                  f"{Decimal(feasibility['post_fee_gas_reserve_floor_wei'])/WEI} ETH")
+    print("Recipients:")
+    for name, count in plan["destinations"].items():
+        original = plan["capacity_snapshot"][name]["capacity"]
+        print(f"- {name} ({plan.get('wallet_addresses', {}).get(name, 'address unavailable')}): "
+              f"receive {count}; capacity {original} -> {original+count}; "
+              f"minimum reserve/position={metadata[name]['reserve_eth']} ETH")
     print("Transfers:")
+    total_principal = 0
+    total_fees = 0
     for route in plan["routes"]:
+        total_principal += route["amount_wei"]
+        total_fees += route["max_fee_wei"]
         print(f"- {route['source']} -> {route['destination']}: {route['positions']} position(s), "
-              f"{Decimal(route['amount_wei'])/WEI} ETH, max gas {Decimal(route['max_fee_wei'])/WEI} ETH")
+              f"{Decimal(route['amount_wei'])/WEI} ETH, max gas {Decimal(route['max_fee_wei'])/WEI} ETH, "
+              f"recipient={route.get('recipient', 'unavailable')}")
+    print(f"Total principal: {Decimal(total_principal)/WEI} ETH")
+    print(f"Total maximum gas: {Decimal(total_fees)/WEI} ETH")
+    print("Approval status: FEASIBLE — all current preflight checks passed.")
 
 
 def main(argv=None):
@@ -582,10 +652,16 @@ def main(argv=None):
         apply_capacities(journal, journal_path)
         print(f"POSITION PASS COMPLETE: {plan['plan_id']}")
         return 0
+    print_allocation_preview(plan, metadata)
     contexts = prepare_chain(plan, metadata, execute=args.execute)
     print_plan(plan, metadata)
     if not args.execute:
-        print(f"DRY RUN: nothing changed. Execute with --confirm-plan {plan['plan_id']} --execute --confirm-fleet-stopped")
+        print("DRY RUN COMPLETE: no funds sent and no files changed.")
+        print(
+            f"APPROVE: repeat the same allocation with --execute --manage-bots "
+            f"--confirm-plan {plan['plan_id']}"
+        )
+        print("Alternative: use --confirm-fleet-stopped instead of --manage-bots for a stopped whole fleet.")
         return 0
     if not args.resume:
         changes = {}
@@ -637,5 +713,5 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except Exception as exc:
-        print(f"POSITION PASS REFUSED: {exc}")
+        print(f"POSITION PASS REFUSED: {exc}", file=sys.stderr, flush=True)
         raise SystemExit(1)

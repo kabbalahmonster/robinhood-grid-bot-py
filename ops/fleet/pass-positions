@@ -11,20 +11,65 @@ usage() {
 Usage: pass-positions --from SPECS --to SPECS [--positions N] [options]
        pass-positions --resume PLAN_ID --execute --confirm-plan PLAN_ID
 
-Move whole position-capacity slots and their ETH reserve between fleet bots.
-SPECS are comma-separated BOT or BOT=COUNT entries and may be repeated.
-Unassigned counts are split as evenly as possible. Dry run is the default.
+Reallocate whole unused position-capacity slots and their native ETH reserve
+between fleet bots. Dry run is the default and prints a live approval plan;
+no funds or files change unless --execute is supplied.
 
-Options:
-  --amount-per-position ETH   Override every donor's default
-  --amount-from BOT=ETH       Override one donor (repeatable)
-  --execute                   Broadcast and apply capacity changes
-  --confirm-plan PLAN_ID      Exact dry-run plan ID required for execution
-  --confirm-fleet-stopped     Execute against an already-stopped whole fleet
-  --manage-bots               Stop/restart involved running bots automatically
-  --auto-stop-restart         Alias for --manage-bots
-  --resume PLAN_ID            Resume an interrupted journaled execution
-  --config PATH               Alternate fleet configuration
+Allocation:
+  --from SPECS               Donors: BOT or BOT=COUNT, comma-separated/repeatable
+  --to SPECS                 Recipients: same syntax as --from
+  --positions N              Total whole positions to move
+  --amount-per-position ETH  Override every donor's reserve amount
+  --amount-from BOT=ETH      Override one donor's amount (repeatable)
+
+Plain BOT entries share unassigned positions as evenly as possible, in supplied
+order. BOT=COUNT is exact. --positions may be omitted when every bot on either
+side has an exact count; if both sides are exact, their totals must match.
+
+Execution:
+  --execute                  Broadcast ETH and commit capacity changes
+  --confirm-plan PLAN_ID     Exact plan ID printed by the dry run
+  --manage-bots              Stop/restart only involved desired-running bots
+  --auto-stop-restart        Alias for --manage-bots
+  --confirm-fleet-stopped    Alternative for an already-stopped whole fleet
+  --resume PLAN_ID           Safely resume an interrupted journal
+  --config PATH              Alternate fleet configuration
+  -h, --help                 Show this help
+
+Examples:
+  # Preview 2 positions from PRISM to URMOM.
+  pass-positions --from prism --to urmom --positions 2
+
+  # Execute the reviewed plan while unrelated bots keep running.
+  pass-positions --from prism --to urmom --positions 2 \
+    --execute --manage-bots --confirm-plan PLAN_ID
+
+  # Fairly split 3 whole positions across multiple donors and recipients.
+  pass-positions --from sarn,prism --to urmom,delta --positions 3
+
+  # Exact counts mixed with fair remainder allocation.
+  pass-positions --from prism=2,sarn,delta --to urmom=1,earn,hookr \
+    --positions 5
+
+  # Use one amount globally, or donor-specific amounts.
+  pass-positions --from prism,sarn --to urmom --positions 3 \
+    --amount-per-position 0.0015
+  pass-positions --from prism,sarn --to urmom --positions 3 \
+    --amount-from prism=0.002 --amount-from sarn=0.0015
+
+  # Resume without repeating confirmed transfers.
+  pass-positions --resume PLAN_ID --execute --manage-bots \
+    --confirm-plan PLAN_ID
+
+Safety model:
+  * Default amount is each donor's TREASURY_POSITION_RESERVE_ETH.
+  * Donor capacity never drops below filled positions.
+  * Recipient reserve floors, balances, chain, wallets, and gas are preflighted.
+  * The complete plan is validated before the first broadcast.
+  * Broadcast hashes are journaled immediately; ambiguous hashes are not resent.
+  * Capacity files commit only after every transfer confirms and keep backups.
+  * Managed mode restarts involved bots only after complete success; failures
+    leave them intentionally stopped for safe diagnosis or --resume.
 EOF
 }
 
@@ -46,6 +91,8 @@ done
 
 fleet_load_config "$config_path"
 fleet_validate_bots
+printf 'Preparing position-pass %s; validating allocation and live chain state...\n' \
+  "$([[ $execute == 1 ]] && printf execution || printf dry-run)"
 if ((execute)); then
   fleet_require_tmux
   if ((manage_bots == 0)); then
