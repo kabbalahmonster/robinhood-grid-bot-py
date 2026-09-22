@@ -119,8 +119,23 @@ if ((manage_bots == 0)); then
   exec "${args[@]}"
 fi
 
-mapfile -t involved_names < <("${args[@]}" --list-involved)
-((${#involved_names[@]} > 0)) || fleet_die "Position plan resolved to no involved bots"
+# Validate every deterministic local condition, including exact plan
+# confirmation, before stop-bot can mutate tmux or durable desired state.
+# Live wallet/balance/gas checks still run only after involved bots stop.
+if involved_output="$("${args[@]}" --local-preflight)"; then
+  :
+else
+  status=$?
+  exit "$status"
+fi
+involved_names=()
+if [[ -n "$involved_output" ]]; then
+  mapfile -t involved_names <<<"$involved_output"
+fi
+if ((${#involved_names[@]} == 0)); then
+  # A completed resume is a successful no-op and must not stop anything.
+  exec "${args[@]}"
+fi
 declare -A configured_dirs=()
 for bot_dir in "${FLEET_BOT_DIRS[@]}"; do
   configured_dirs["$(fleet_bot_name "$bot_dir" | tr '[:upper:]' '[:lower:]')"]="$bot_dir"

@@ -29,6 +29,7 @@ class PassPositionsTests(unittest.TestCase):
             f"TREASURY_POSITION_RESERVE_ETH={reserve}\n"
             "ETH_GAS_RESERVE=0.0006\n"
             f"{gas_cap_line}"
+            "RPC_URL=http://example.invalid\n"
             "CHAIN_ID=4663\n"
             f"PRIVATE_KEY={name}-key\n"
         )
@@ -417,6 +418,56 @@ class PassPositionsTests(unittest.TestCase):
                     "--journal-dir", str(Path(directory) / "journals"),
                     "--bot", f"prism={prism}",
                 ])
+
+    def test_local_preflight_validates_confirmation_without_rpc_or_mutation(self):
+        class FakeAccount:
+            @staticmethod
+            def from_key(key):
+                return SimpleNamespace(address=f"0x{sum(key.encode()):040x}")
+
+        def fake_prepare(plan, _metadata, execute=False):
+            for route in plan["routes"]:
+                route["amount_wei"] = plan["amounts_wei"][route["source"]] * route["positions"]
+                route["max_fee_wei"] = 1
+            return {}
+
+        with tempfile.TemporaryDirectory() as directory:
+            donor = self.bot(directory, "donor", 4, filled=1)
+            recipient = self.bot(directory, "recipient", 3, filled=2)
+            journal_dir = Path(directory) / "journals"
+            base = [
+                "--from", "donor", "--to", "recipient", "--positions", "1",
+                "--journal-dir", str(journal_dir),
+                "--bot", f"donor={donor}", "--bot", f"recipient={recipient}",
+            ]
+            preview = StringIO()
+            with patch.object(module, "chain_imports", return_value=(FakeAccount, object())), \
+                    patch.object(module, "prepare_chain", side_effect=fake_prepare), \
+                    redirect_stdout(preview):
+                module.main(base)
+            plan_id = re.search(r"Plan ID: ([0-9a-f]{16})", preview.getvalue()).group(1)
+
+            for confirmation in (None, "stale-plan-id"):
+                args = base + ["--execute", "--local-preflight"]
+                if confirmation is not None:
+                    args += ["--confirm-plan", confirmation]
+                with self.subTest(confirmation=confirmation), \
+                        patch.object(module, "chain_imports", return_value=(FakeAccount, object())), \
+                        patch.object(module, "prepare_chain", side_effect=AssertionError("RPC must not run")), \
+                        self.assertRaisesRegex(ValueError, f"--confirm-plan {plan_id}"):
+                    module.main(args)
+
+            output = StringIO()
+            with patch.object(module, "chain_imports", return_value=(FakeAccount, object())), \
+                    patch.object(module, "prepare_chain", side_effect=AssertionError("RPC must not run")), \
+                    redirect_stdout(output):
+                self.assertEqual(module.main(
+                    base + ["--execute", "--local-preflight", "--confirm-plan", plan_id]
+                ), 0)
+            self.assertEqual(output.getvalue().splitlines(), ["donor", "recipient"])
+            self.assertFalse(journal_dir.exists())
+            self.assertEqual(module.capacity_value(donor / ".env"), 4)
+            self.assertEqual(module.capacity_value(recipient / ".env"), 3)
 
     def test_full_donor_is_not_an_active_transfer_participant(self):
         with tempfile.TemporaryDirectory() as directory:

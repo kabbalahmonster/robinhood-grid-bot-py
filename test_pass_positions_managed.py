@@ -43,6 +43,7 @@ class ManagedPassPositionsTests(unittest.TestCase):
             "TEST_GAMMA_DIR": str(self.bots["gamma"]),
             "PASS_TRACE": str(self.trace),
             "PASS_RESULT": "0",
+            "PASS_PLAN_ID": "test-plan-id",
         }
 
     def tearDown(self):
@@ -66,17 +67,30 @@ class ManagedPassPositionsTests(unittest.TestCase):
         script.write_text(
             "#!/usr/bin/env python3\n"
             "import os, pathlib, sys\n"
+            "if '--local-preflight' in sys.argv:\n"
+            "    if os.environ.get('PASS_COMPLETE') == '1':\n"
+            "        raise SystemExit(0)\n"
+            "    expected = os.environ['PASS_PLAN_ID']\n"
+            "    supplied = sys.argv[sys.argv.index('--confirm-plan') + 1] if '--confirm-plan' in sys.argv else None\n"
+            "    if supplied != expected:\n"
+            "        print(f'Execution requires --confirm-plan {expected}', file=sys.stderr)\n"
+            "        raise SystemExit(1)\n"
+            "    print('alpha\\nbeta')\n"
+            "    raise SystemExit(0)\n"
             "if '--list-involved' in sys.argv:\n"
             "    print('alpha\\nbeta')\n"
+            "    raise SystemExit(0)\n"
+            "if os.environ.get('PASS_COMPLETE') == '1':\n"
+            "    print('Position pass test-plan-id is already complete; nothing changed.')\n"
             "    raise SystemExit(0)\n"
             "pathlib.Path(os.environ['PASS_TRACE']).write_text('executed\\n')\n"
             "raise SystemExit(int(os.environ.get('PASS_RESULT', '0')))\n"
         )
 
-    def run_command(self, *args, result="0"):
+    def run_command(self, *args, result="0", complete="0"):
         return subprocess.run(
             [str(self.scripts / "pass-positions"), *args, "--config", str(self.config)],
-            env={**self.env, "PASS_RESULT": result},
+            env={**self.env, "PASS_RESULT": result, "PASS_COMPLETE": complete},
             text=True,
             capture_output=True,
         )
@@ -101,7 +115,7 @@ class ManagedPassPositionsTests(unittest.TestCase):
 
         result = self.run_command(
             "--from", "alpha", "--to", "beta", "--positions", "1",
-            "--execute", "--manage-bots",
+            "--execute", "--manage-bots", "--confirm-plan", "test-plan-id",
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -113,7 +127,8 @@ class ManagedPassPositionsTests(unittest.TestCase):
     def test_failure_leaves_every_previously_running_involved_bot_stopped(self):
         result = self.run_command(
             "--from", "alpha", "--to", "beta", "--positions", "1",
-            "--execute", "--auto-stop-restart", result="7",
+            "--execute", "--auto-stop-restart", "--confirm-plan", "test-plan-id",
+            result="7",
         )
 
         self.assertEqual(result.returncode, 7, result.stderr)
@@ -137,11 +152,47 @@ class ManagedPassPositionsTests(unittest.TestCase):
         self.session.unlink()
         result = self.run_command(
             "--from", "alpha", "--to", "beta", "--positions", "1",
-            "--execute", "--manage-bots",
+            "--execute", "--manage-bots", "--confirm-plan", "test-plan-id",
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("absent but desired-running", result.stderr)
         self.assertFalse(self.trace.exists())
+
+    def test_missing_confirmation_refuses_before_stopping_bots(self):
+        result = self.run_command(
+            "--from", "alpha", "--to", "beta", "--positions", "1",
+            "--execute", "--manage-bots",
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Execution requires --confirm-plan test-plan-id", result.stderr)
+        self.assertEqual(self.marker_names(), [])
+        self.assertFalse(self.trace.exists())
+        self.assertNotIn("Automatically stopped", result.stdout)
+
+    def test_stale_confirmation_refuses_before_stopping_bots(self):
+        result = self.run_command(
+            "--from", "alpha", "--to", "beta", "--positions", "1",
+            "--execute", "--manage-bots", "--confirm-plan", "stale-plan-id",
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Execution requires --confirm-plan test-plan-id", result.stderr)
+        self.assertEqual(self.marker_names(), [])
+        self.assertFalse(self.trace.exists())
+        self.assertNotIn("Automatically stopped", result.stdout)
+
+    def test_completed_resume_is_noop_without_stopping_bots(self):
+        result = self.run_command(
+            "--resume", "test-plan-id", "--execute", "--manage-bots",
+            "--confirm-plan", "test-plan-id", complete="1",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("already complete", result.stdout)
+        self.assertEqual(self.marker_names(), [])
+        self.assertFalse(self.trace.exists())
+        self.assertNotIn("Automatically stopped", result.stdout)
 
     def test_help_is_available_without_config_and_documents_full_workflow(self):
         result = subprocess.run(

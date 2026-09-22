@@ -75,13 +75,13 @@ def filled_positions(bot_dir):
     return max(counts, default=0)
 
 
-def bot_metadata(name, directory, *, require_key=False):
+def bot_metadata(name, directory, *, require_key=False, warn_permissions=True):
     root = Path(directory).resolve()
     env_path = root / ".env"
     if not env_path.is_file():
         raise ValueError(f"{name}: missing {env_path}")
     mode = stat.S_IMODE(env_path.stat().st_mode)
-    if mode & 0o077:
+    if warn_permissions and mode & 0o077:
         warning_key = str(env_path)
         if warning_key not in WARNED_ENV_PERMISSIONS:
             print(
@@ -351,6 +351,39 @@ def chain_imports():
     return Account, Web3
 
 
+def validate_local_plan(plan, metadata):
+    """Validate deterministic execution inputs without contacting an RPC."""
+    Account, _Web3 = chain_imports()
+    addresses = {}
+    for name in set(plan["sources"]) | set(plan["destinations"]):
+        key = metadata[name]["private_key"]
+        if not key:
+            raise ValueError(f"{name}: PRIVATE_KEY is required to resolve its fleet wallet")
+        addresses[name] = Account.from_key(key).address
+        planned = plan.get("wallet_addresses", {}).get(name)
+        if planned and planned.lower() != addresses[name].lower():
+            raise ValueError(f"{name}: wallet address changed since this plan was created")
+    if len({address.lower() for address in addresses.values()}) != len(addresses):
+        raise ValueError("Selected bots do not have unique wallet addresses")
+
+    configured_chain_ids = set()
+    for name in plan["sources"]:
+        values = metadata[name]["values"]
+        if not values.get("RPC_URL"):
+            raise ValueError(f"{name}: RPC_URL is required")
+        chain_text = values.get("CHAIN_ID")
+        if chain_text:
+            configured_chain_ids.add(int(chain_text))
+        try:
+            multiplier = Decimal(values.get("GAS_LIMIT_MULTIPLIER", "1.05"))
+        except InvalidOperation as exc:
+            raise ValueError(f"{name}: GAS_LIMIT_MULTIPLIER must be at least 1") from exc
+        if not multiplier.is_finite() or multiplier < 1:
+            raise ValueError(f"{name}: GAS_LIMIT_MULTIPLIER must be at least 1")
+    if len(configured_chain_ids) > 1:
+        raise ValueError("All donor bots must use the same chain")
+
+
 def gas_price(w3, floor=0):
     latest = w3.eth.get_block("latest")
     pending = w3.eth.get_block("pending")
@@ -606,6 +639,7 @@ def main(argv=None):
     parser.add_argument("--confirm-plan")
     parser.add_argument("--resume")
     parser.add_argument("--list-involved", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--local-preflight", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
 
     bot_dirs = {}
@@ -639,8 +673,12 @@ def main(argv=None):
         if not journal_path.is_file():
             raise ValueError(f"Unknown position-pass journal: {args.resume}")
         journal = json.loads(journal_path.read_text())
+        if (journal.get("plan_id") != args.resume
+                or journal.get("plan", {}).get("plan_id") != args.resume):
+            raise ValueError(f"Position-pass journal identity does not match --resume {args.resume}")
         if journal["status"] == "complete":
-            print(f"Position pass {args.resume} is already complete; nothing changed.")
+            if not args.local_preflight:
+                print(f"Position pass {args.resume} is already complete; nothing changed.")
             return 0
         plan = journal["plan"]
     else:
@@ -650,7 +688,13 @@ def main(argv=None):
         if overlap:
             raise ValueError(f"Bots cannot be both donors and recipients: {', '.join(sorted(overlap))}")
         selected_names = {name for name, _ in source_specs} | {name for name, _ in destination_specs}
-        metadata = {name: bot_metadata(name, bot_dirs[name], require_key=True) for name in selected_names}
+        metadata = {
+            name: bot_metadata(
+                name, bot_dirs[name], require_key=True,
+                warn_permissions=not args.local_preflight,
+            )
+            for name in selected_names
+        }
         total = infer_total(args.positions, source_specs, destination_specs)
         source_counts = fair_allocate(
             source_specs, total,
@@ -728,7 +772,13 @@ def main(argv=None):
         static["plan_id"] = canonical_id(static)
         plan = static
     selected_names = set(plan["sources"]) | set(plan["destinations"])
-    metadata = {name: bot_metadata(name, bot_dirs[name], require_key=True) for name in selected_names if name in bot_dirs}
+    metadata = {
+        name: bot_metadata(
+            name, bot_dirs[name], require_key=True,
+            warn_permissions=not args.local_preflight,
+        )
+        for name in selected_names if name in bot_dirs
+    }
     # Journals made by the original implementation predate explicit transfer
     # gas caps. Derive those caps from the current donor environment so an
     # interrupted, possibly partially paid plan remains safely resumable.
@@ -757,8 +807,22 @@ def main(argv=None):
                     and metadata[name]["transfer_gas_cap_wei"]
                     != safety["configured_transfer_gas_cap_wei"])):
             raise ValueError(f"{name}: position or gas reserve changed since this plan was created")
+    if not commit_resume:
+        validate_local_plan(plan, metadata)
+    if args.execute and not args.resume:
+        pending_journal = Path(args.journal_dir) / f"{plan['plan_id']}.json"
+        if pending_journal.exists():
+            raise ValueError(f"Journal already exists; resume with --resume {plan['plan_id']}")
     if args.execute and args.confirm_plan != plan["plan_id"]:
         raise ValueError(f"Execution requires --confirm-plan {plan['plan_id']}")
+    if args.local_preflight:
+        # The managed shell wrapper calls this before touching tmux or durable
+        # desired-state markers. Everything above is deterministic and local:
+        # allocation, env/state metadata, wallet identity, journal snapshot,
+        # and exact confirmation. Live RPC checks intentionally remain after
+        # the involved bots have stopped.
+        print("\n".join(list(plan["sources"]) + list(plan["destinations"])))
+        return 0
     if commit_resume:
         print_plan(plan, metadata)
         apply_capacities(journal, journal_path)
