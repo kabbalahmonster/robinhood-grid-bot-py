@@ -1346,7 +1346,7 @@ fleet first.
 
 Before broadcasting, the command revalidates every capacity/filled-position
 snapshot, wallet, chain, live balance, route gas estimate, remaining-slot
-reserve, and `.env` permission. Transfers are aggregated into at most
+reserve, and `.env` readability. Transfers are aggregated into at most
 `donors + recipients - 1` transactions. A donor may pay transfer gas from its
 configured `ETH_GAS_RESERVE`; the planner still requires enough value to send
 the full principal, preserve every slot it keeps, and cover the larger of its
@@ -1357,6 +1357,11 @@ They follow the bot's normal `python-dotenv` behavior: the final assignment
 wins. `MAX_ACTIVE_POSITIONS` must remain unique because the capacity commit
 edits that setting; a duplicate is refused during preflight, before any funds
 can move.
+
+An involved `.env` with group/other permission bits emits a prominent warning
+and the exact `chmod 600` repair command, but does not invalidate a dry run or
+execution. File mode is security hygiene rather than allocation correctness;
+the warning is emitted once per involved file without changing it.
 
 Dry runs emit progress immediately: first the locally validated allocation,
 then each live RPC/gas/balance check, then a complete approval plan. The final

@@ -15,6 +15,7 @@ from pathlib import Path
 
 WEI = Decimal(10**18)
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+WARNED_ENV_PERMISSIONS = set()
 
 
 def decimal_eth(value, label, *, allow_zero=False):
@@ -81,7 +82,16 @@ def bot_metadata(name, directory, *, require_key=False):
         raise ValueError(f"{name}: missing {env_path}")
     mode = stat.S_IMODE(env_path.stat().st_mode)
     if mode & 0o077:
-        raise ValueError(f"{name}: .env permissions are too broad ({mode:o}); run chmod 600 {env_path}")
+        warning_key = str(env_path)
+        if warning_key not in WARNED_ENV_PERMISSIONS:
+            print(
+                f"POSITION PASS WARNING: {name}: .env permissions are broader than "
+                f"recommended ({mode:o}); continuing because this does not affect "
+                f"plan validity. Repair with: chmod 600 {env_path}",
+                file=sys.stderr,
+                flush=True,
+            )
+            WARNED_ENV_PERMISSIONS.add(warning_key)
     # python-dotenv, used by the bot itself, resolves repeated assignments with
     # the final value winning. Match that behavior instead of refusing an
     # unrelated legacy duplicate. MAX_ACTIVE_POSITIONS is the one exception:

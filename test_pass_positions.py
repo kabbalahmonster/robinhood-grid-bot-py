@@ -3,7 +3,7 @@ import json
 import re
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -160,15 +160,21 @@ class PassPositionsTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "must be unique.*MAX_ACTIVE_POSITIONS"):
                 module.bot_metadata("earn", root, require_key=True)
 
-    def test_metadata_refuses_exposed_private_env(self):
+    def test_metadata_warns_but_continues_for_broad_env_permissions(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "data").mkdir()
             env = root / ".env"
             env.write_text("MAX_ACTIVE_POSITIONS=1\nPRIVATE_KEY=test\n")
-            env.chmod(0o644)
-            with self.assertRaisesRegex(ValueError, "chmod 600"):
+            env.chmod(0o664)
+            warnings = StringIO()
+            with redirect_stderr(warnings):
+                data = module.bot_metadata("prism", root, require_key=True)
                 module.bot_metadata("prism", root, require_key=True)
+            self.assertEqual(data["capacity"], 1)
+            self.assertIn("permissions are broader than recommended (664)", warnings.getvalue())
+            self.assertIn(f"chmod 600 {env}", warnings.getvalue())
+            self.assertEqual(warnings.getvalue().count("POSITION PASS WARNING"), 1)
 
     def test_dry_run_builds_reproducible_many_to_many_plan_with_defaults(self):
         class FakeAccount:
