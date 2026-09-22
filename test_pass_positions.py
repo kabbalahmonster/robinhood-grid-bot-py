@@ -39,6 +39,29 @@ class PassPositionsTests(unittest.TestCase):
         )
         return root
 
+    def treasury(self, parent):
+        path = Path(parent) / "treasury.env"
+        path.write_text(
+            "PRIVATE_KEY=treasury-key\n"
+            "RPC_URL=http://example.invalid\n"
+            "CHAIN_ID=4663\n"
+            "ETH_GAS_RESERVE=0.0005\n"
+            "TREASURY_POSITION_RESERVE_ETH=0.0015\n"
+            "MAX_FEE_TRANSFER_GAS_ETH=0.0001\n"
+        )
+        path.chmod(0o600)
+        return path
+
+    def test_treasury_metadata_warns_but_accepts_broad_permissions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.treasury(directory)
+            path.chmod(0o664)
+            warnings = StringIO()
+            with redirect_stderr(warnings):
+                data = module.treasury_metadata(path)
+            self.assertEqual(data["private_key"], "treasury-key")
+            self.assertIn("Treasury: .env permissions are broader", warnings.getvalue())
+
     def test_fair_source_and_destination_splits_use_whole_units(self):
         sources = module.fair_allocate(
             [("sarn", None), ("prism", None)], 3,
@@ -125,6 +148,19 @@ class PassPositionsTests(unittest.TestCase):
             {"source": "a", "destination": "y", "positions": 1},
             {"source": "b", "destination": "y", "positions": 1},
         ])
+
+    def test_treasury_affordability_preserves_reserve_and_route_gas(self):
+        self.assertEqual(
+            module.treasury_affordable_positions(
+                6,
+                1_500_000_000_000_000,
+                7_000_000_000_000_000,
+                500_000_000_000_000,
+                100_000_000_000_000,
+                {"x": 3, "y": 3},
+            ),
+            4,
+        )
 
     def test_send_route_records_broadcast_hash_before_receipt_timeout(self):
         w3 = SimpleNamespace(eth=Mock())
@@ -408,6 +444,119 @@ class PassPositionsTests(unittest.TestCase):
             self.assertIn("Total principal:", body)
             self.assertIn("Approval status: FEASIBLE", body)
             self.assertIn("DRY RUN COMPLETE", body)
+
+    def test_treasury_funds_maximum_first_then_bots_level_remainder(self):
+        class FakeAccount:
+            @staticmethod
+            def from_key(key):
+                return SimpleNamespace(address=f"0x{sum(key.encode()):040x}")
+
+        def fake_prepare(plan, _metadata, execute=False):
+            for route in plan["routes"]:
+                route["amount_wei"] = plan["amounts_wei"][route["source"]] * route["positions"]
+                route["max_fee_wei"] = 21_000
+                route["recipient"] = plan["wallet_addresses"][route["destination"]]
+            plan["feasibility"] = {
+                name: {
+                    "balance_wei": 10**18,
+                    "principal_wei": sum(
+                        route["amount_wei"] for route in plan["routes"]
+                        if route["source"] == name
+                    ),
+                    "maximum_fees_wei": 21_000,
+                    "final_available_slots": None if name == module.TREASURY_SOURCE else 4,
+                    "effective_gas_reserve_wei": 500_000_000_000_000,
+                    "post_fee_gas_reserve_floor_wei": 499_999_999_979_000,
+                    "required_wei": 1,
+                    "projected_remaining_wei": 10**18,
+                }
+                for name in plan["sources"]
+            }
+            return {}
+
+        with tempfile.TemporaryDirectory() as directory:
+            a = self.bot(directory, "a", 5)
+            b = self.bot(directory, "b", 5)
+            x = self.bot(directory, "x", 3)
+            y = self.bot(directory, "y", 3)
+            treasury = self.treasury(directory)
+            captured = {}
+
+            def capture(plan, metadata, execute=False):
+                captured.update(plan)
+                return fake_prepare(plan, metadata, execute)
+
+            with patch.object(module, "chain_imports", return_value=(FakeAccount, object())), \
+                    patch.object(module, "treasury_live_balance", return_value=("0xtreasury", 7_000_000_000_000_000)), \
+                    patch.object(module, "prepare_chain", side_effect=capture), \
+                    redirect_stdout(StringIO()):
+                self.assertEqual(module.main([
+                    "--from-treasury", "--treasury-env", str(treasury),
+                    "--from", "a,b", "--to", "x,y", "--positions", "6",
+                    "--journal-dir", str(Path(directory) / "journals"),
+                    "--bot", f"a={a}", "--bot", f"b={b}",
+                    "--bot", f"x={x}", "--bot", f"y={y}",
+                ]), 0)
+            self.assertEqual(captured["sources"], {"Treasury": 4, "a": 1, "b": 1})
+            self.assertEqual(captured["destinations"], {"x": 3, "y": 3})
+            self.assertNotIn("Treasury", captured["capacity_snapshot"])
+            self.assertEqual(
+                [(route["source"], route["destination"], route["positions"])
+                 for route in captured["routes"]],
+                [("Treasury", "x", 3), ("Treasury", "y", 1),
+                 ("a", "y", 1), ("b", "y", 1)],
+            )
+
+    def test_exact_bot_source_count_is_reserved_before_treasury(self):
+        self.assertEqual(
+            module.fair_allocate([("fixed", 2), ("plain", None)], 2,
+                                 {"fixed": 2, "plain": 5}, "source"),
+            {"fixed": 2, "plain": 0},
+        )
+
+    def test_treasury_only_execution_increases_recipient_without_donor_capacity(self):
+        class FakeAccount:
+            @staticmethod
+            def from_key(key):
+                return SimpleNamespace(address=f"0x{sum(key.encode()):040x}")
+
+        def fake_prepare(plan, _metadata, execute=False):
+            route = plan["routes"][0]
+            route["amount_wei"] = plan["amounts_wei"][module.TREASURY_SOURCE]
+            route["max_fee_wei"] = 21_000
+            return {module.TREASURY_SOURCE: {}}
+
+        with tempfile.TemporaryDirectory() as directory:
+            recipient = self.bot(directory, "recipient", 3, filled=1)
+            treasury = self.treasury(directory)
+            journal_dir = Path(directory) / "journals"
+            base = [
+                "--from-treasury", "--treasury-env", str(treasury),
+                "--to", "recipient", "--positions", "1",
+                "--journal-dir", str(journal_dir),
+                "--bot", f"recipient={recipient}",
+            ]
+            output = StringIO()
+            patches = (
+                patch.object(module, "chain_imports", return_value=(FakeAccount, object())),
+                patch.object(module, "treasury_live_balance", return_value=("0xtreasury", 10**18)),
+                patch.object(module, "prepare_chain", side_effect=fake_prepare),
+            )
+            with patches[0], patches[1], patches[2], redirect_stdout(output):
+                self.assertEqual(module.main(base), 0)
+            plan_id = re.search(r"Plan ID: ([0-9a-f]{16})", output.getvalue()).group(1)
+            with patch.object(module, "chain_imports", return_value=(FakeAccount, object())), \
+                    patch.object(module, "treasury_live_balance", return_value=("0xtreasury", 10**18)), \
+                    patch.object(module, "prepare_chain", side_effect=fake_prepare), \
+                    patch.object(module, "send_route", return_value=("0xtreasury", {"gas": 21_000, "gasPrice": 1})), \
+                    redirect_stdout(StringIO()):
+                self.assertEqual(
+                    module.main(base + ["--execute", "--confirm-plan", plan_id]), 0
+                )
+            self.assertEqual(module.capacity_value(recipient / ".env"), 4)
+            self.assertFalse(Path(str(treasury) + f".bak.position-pass.{plan_id}").exists())
+            journal = json.loads((journal_dir / f"{plan_id}.json").read_text())
+            self.assertEqual(set(journal["capacity_changes"]), {"recipient"})
 
     def test_main_refuses_same_bot_on_both_sides_before_chain_access(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -16,6 +16,7 @@ from pathlib import Path
 WEI = Decimal(10**18)
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 WARNED_ENV_PERMISSIONS = set()
+TREASURY_SOURCE = "Treasury"
 
 
 def decimal_eth(value, label, *, allow_zero=False):
@@ -133,6 +134,53 @@ def bot_metadata(name, directory, *, require_key=False, warn_permissions=True):
     }
 
 
+def treasury_metadata(path, *, warn_permissions=True):
+    env_path = Path(path).expanduser().resolve()
+    if not env_path.is_file():
+        raise ValueError(f"Treasury env not found: {env_path}")
+    mode = stat.S_IMODE(env_path.stat().st_mode)
+    if warn_permissions and mode & 0o077:
+        warning_key = str(env_path)
+        if warning_key not in WARNED_ENV_PERMISSIONS:
+            print(
+                f"POSITION PASS WARNING: Treasury: .env permissions are broader than "
+                f"recommended ({mode:o}); continuing because this does not affect plan "
+                f"validity. Repair with: chmod 600 {env_path}",
+                file=sys.stderr,
+                flush=True,
+            )
+            WARNED_ENV_PERMISSIONS.add(warning_key)
+    values = dotenv(env_path)
+    if not values.get("PRIVATE_KEY") or not values.get("RPC_URL"):
+        raise ValueError("Treasury env requires PRIVATE_KEY and RPC_URL")
+    reserve, reserve_wei = decimal_eth(
+        values.get("ETH_GAS_RESERVE", ""), "Treasury ETH_GAS_RESERVE"
+    )
+    raw_position_amount = values.get("TREASURY_POSITION_RESERVE_ETH", "")
+    position_amount = position_amount_wei = None
+    if raw_position_amount:
+        position_amount, position_amount_wei = decimal_eth(
+            raw_position_amount, "Treasury TREASURY_POSITION_RESERVE_ETH"
+        )
+    raw_transfer_gas_cap = values.get("MAX_FEE_TRANSFER_GAS_ETH") or "0.0001"
+    transfer_gas_cap, transfer_gas_cap_wei = decimal_eth(
+        raw_transfer_gas_cap, "Treasury MAX_FEE_TRANSFER_GAS_ETH"
+    )
+    return {
+        "name": TREASURY_SOURCE,
+        "kind": "treasury",
+        "env": str(env_path),
+        "values": values,
+        "private_key": values["PRIVATE_KEY"],
+        "reserve_eth": str(position_amount) if position_amount is not None else None,
+        "reserve_wei": position_amount_wei,
+        "gas_reserve_eth": str(reserve),
+        "gas_reserve_wei": reserve_wei,
+        "transfer_gas_cap_eth": str(transfer_gas_cap),
+        "transfer_gas_cap_wei": transfer_gas_cap_wei,
+    }
+
+
 def parse_specs(raw_values, label):
     items = []
     seen = set()
@@ -247,9 +295,12 @@ def build_routes(source_counts, destination_counts):
     return routes
 
 
-def parse_amount_overrides(values, bots, *, option="--amount-from", label="amount per position"):
+def parse_amount_overrides(values, bots, *, option="--amount-from", label="amount per position",
+                           allow_treasury=False):
     overrides = {}
     known = {name.lower(): name for name in bots}
+    if allow_treasury:
+        known[TREASURY_SOURCE.lower()] = TREASURY_SOURCE
     for raw in values or []:
         name, separator, amount = raw.partition("=")
         if not separator or name.lower() not in known:
@@ -259,6 +310,19 @@ def parse_amount_overrides(values, bots, *, option="--amount-from", label="amoun
             raise ValueError(f"Duplicate {option} override: {canonical}")
         overrides[canonical] = decimal_eth(amount, f"{canonical} {label}")[0]
     return overrides
+
+
+def treasury_affordable_positions(total, amount_wei, balance_wei, reserve_wei,
+                                  gas_cap_wei, destination_counts):
+    """Return the largest slot count safe under the treasury's configured caps."""
+    for count in range(total, -1, -1):
+        route_count = len(build_routes(
+            {TREASURY_SOURCE: count}, destination_counts
+        )) if count else 0
+        required = count * amount_wei + route_count * gas_cap_wei + reserve_wei
+        if required <= balance_wei:
+            return count
+    return 0
 
 
 def canonical_id(plan):
@@ -384,6 +448,19 @@ def validate_local_plan(plan, metadata):
         raise ValueError("All donor bots must use the same chain")
 
 
+def treasury_live_balance(data):
+    Account, Web3 = chain_imports()
+    values = data["values"]
+    w3 = Web3(Web3.HTTPProvider(values["RPC_URL"], request_kwargs={"timeout": 30}))
+    if not w3.is_connected():
+        raise ConnectionError("Treasury: could not connect to RPC_URL")
+    expected = int(values.get("CHAIN_ID", str(w3.eth.chain_id)))
+    if int(w3.eth.chain_id) != expected:
+        raise ValueError(f"Treasury: RPC chain {w3.eth.chain_id} != CHAIN_ID={expected}")
+    address = Account.from_key(values["PRIVATE_KEY"]).address
+    return address, int(w3.eth.get_balance(address))
+
+
 def gas_price(w3, floor=0):
     latest = w3.eth.get_block("latest")
     pending = w3.eth.get_block("pending")
@@ -473,14 +550,25 @@ def prepare_chain(plan, metadata, execute=False):
         routes = [r for r in plan["routes"] if r["source"] == source and not r.get("tx_hash")]
         principal = sum(r["amount_wei"] for r in routes)
         fees = sum(r["max_fee_wei"] for r in routes)
-        final_slots = metadata[source]["available"] - count
+        final_slots = (
+            None if source == TREASURY_SOURCE
+            else metadata[source]["available"] - count
+        )
         balance = int(contexts[source]["w3"].eth.get_balance(addresses[source]))
         confirmed_fees = sum(
             int(r.get("actual_max_fee_wei", 0)) for r in plan["routes"]
             if r["source"] == source and r.get("tx_hash")
         )
-        effective_gas_reserve = max(0, metadata[source]["gas_reserve_wei"] - confirmed_fees)
-        required = principal + max(effective_gas_reserve, fees)
+        effective_gas_reserve = (
+            metadata[source]["gas_reserve_wei"]
+            if source == TREASURY_SOURCE
+            else max(0, metadata[source]["gas_reserve_wei"] - confirmed_fees)
+        )
+        required = (
+            principal + fees + effective_gas_reserve
+            if source == TREASURY_SOURCE
+            else principal + max(effective_gas_reserve, fees)
+        )
         projected_remaining = balance - principal - fees
         post_fee_gas_reserve = max(0, effective_gas_reserve - fees)
         plan["feasibility"][source] = {
@@ -548,9 +636,19 @@ def print_allocation_preview(plan, metadata):
     print("POSITION PASS ALLOCATION PREVIEW", flush=True)
     print(f"Plan ID: {plan['plan_id']}")
     print(f"Positions: {plan['positions']}")
+    if "treasury_priority" in plan:
+        funded = plan["treasury_priority"]["positions"]
+        print(f"Treasury priority: {funded} funded; {plan['positions'] - funded} from bot donors")
     print("Donors:")
     for name, count in plan["sources"].items():
         data = metadata[name]
+        if name == TREASURY_SOURCE:
+            print(f"- Treasury: fund {count}; no bot capacity removed; "
+                  f"principal={plan['amounts_eth'][name]} ETH/position "
+                  f"({Decimal(plan['amounts_eth'][name]) * count} ETH total); "
+                  f"gas cap={plan['gas_caps_eth'][name]} ETH/transfer; "
+                  f"preserved reserve={data['gas_reserve_eth']} ETH")
+            continue
         original = plan["capacity_snapshot"][name]["capacity"]
         available_before = original - data["filled"]
         print(f"- {name}: give {count}; capacity {original} -> {original-count}; "
@@ -575,6 +673,23 @@ def print_plan(plan, metadata):
     print("Donors and feasibility:")
     for name, count in plan["sources"].items():
         data = metadata[name]
+        if name == TREASURY_SOURCE:
+            feasibility = plan.get("feasibility", {}).get(name, {})
+            print(f"- Treasury ({plan.get('wallet_addresses', {}).get(name, 'address unavailable')}):")
+            print(f"    positions: fund {count}; no bot capacity removed")
+            print(f"    principal/position: {plan['amounts_eth'][name]} ETH; "
+                  f"total principal: {Decimal(plan['amounts_eth'][name]) * count} ETH")
+            print(f"    gas cap/transfer: {plan['gas_caps_eth'][name]} ETH")
+            if feasibility:
+                print(f"    wallet balance: {Decimal(feasibility['balance_wei'])/WEI} ETH")
+                print(f"    principal sent: {Decimal(feasibility['principal_wei'])/WEI} ETH")
+                print(f"    maximum planned gas: {Decimal(feasibility['maximum_fees_wei'])/WEI} ETH")
+                print(f"    preserved treasury reserve: "
+                      f"{Decimal(feasibility['effective_gas_reserve_wei'])/WEI} ETH")
+                print(f"    minimum required now: {Decimal(feasibility['required_wei'])/WEI} ETH")
+                print(f"    projected remaining after maximum gas: "
+                      f"{Decimal(feasibility['projected_remaining_wei'])/WEI} ETH")
+            continue
         original = plan["capacity_snapshot"][name]["capacity"]
         feasibility = plan.get("feasibility", {}).get(name, {})
         print(f"- {name} ({plan.get('wallet_addresses', {}).get(name, 'address unavailable')}):")
@@ -621,6 +736,8 @@ def print_plan(plan, metadata):
 def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--from", dest="sources", action="append")
+    parser.add_argument("--from-treasury", "--from-Treasury", action="store_true")
+    parser.add_argument("--treasury-env")
     parser.add_argument("--to", dest="destinations", action="append")
     parser.add_argument("--positions", type=int)
     parser.add_argument("--amount-per-position")
@@ -656,9 +773,17 @@ def main(argv=None):
             if not journal_path.is_file():
                 raise ValueError(f"Unknown position-pass journal: {args.resume}")
             listed_plan = json.loads(journal_path.read_text())["plan"]
-            names = list(listed_plan["sources"]) + list(listed_plan["destinations"])
+            names = [
+                name for name in listed_plan["sources"]
+                if name != TREASURY_SOURCE
+            ] + list(listed_plan["destinations"])
         else:
-            source_specs = resolve_names(parse_specs(args.sources, "--from"), bot_dirs, "--from")
+            source_specs = (
+                resolve_names(parse_specs(args.sources, "--from"), bot_dirs, "--from")
+                if args.sources else []
+            )
+            if not source_specs and not args.from_treasury:
+                raise ValueError("At least one --from bot or --from-treasury is required")
             destination_specs = resolve_names(parse_specs(args.destinations, "--to"), bot_dirs, "--to")
             names = [name for name, _count in source_specs + destination_specs]
         if len({name.lower() for name in names}) != len(names):
@@ -668,7 +793,8 @@ def main(argv=None):
     if args.resume:
         if (args.sources or args.destinations or args.positions
                 or args.amount_per_position or args.amount_from
-                or args.max_gas or args.max_gas_from):
+                or args.max_gas or args.max_gas_from or args.from_treasury
+                or args.treasury_env):
             raise ValueError("--resume cannot be combined with new allocation arguments")
         if not journal_path.is_file():
             raise ValueError(f"Unknown position-pass journal: {args.resume}")
@@ -682,7 +808,12 @@ def main(argv=None):
             return 0
         plan = journal["plan"]
     else:
-        source_specs = resolve_names(parse_specs(args.sources, "--from"), bot_dirs, "--from")
+        source_specs = (
+            resolve_names(parse_specs(args.sources, "--from"), bot_dirs, "--from")
+            if args.sources else []
+        )
+        if not source_specs and not args.from_treasury:
+            raise ValueError("At least one --from bot or --from-treasury is required")
         destination_specs = resolve_names(parse_specs(args.destinations, "--to"), bot_dirs, "--to")
         overlap = {name.lower() for name, _ in source_specs} & {name.lower() for name, _ in destination_specs}
         if overlap:
@@ -690,39 +821,22 @@ def main(argv=None):
         selected_names = {name for name, _ in source_specs} | {name for name, _ in destination_specs}
         metadata = {
             name: bot_metadata(
-                name, bot_dirs[name], require_key=True,
+                name, bot_dirs[name], require_key=False,
                 warn_permissions=not args.local_preflight,
             )
             for name in selected_names
         }
         total = infer_total(args.positions, source_specs, destination_specs)
-        source_counts = fair_allocate(
-            source_specs, total,
-            capacities={n: metadata[n]["available"] for n, _ in source_specs},
-            label="source",
-        )
         destination_counts = fair_allocate(
             destination_specs, total,
             initial_availability={n: metadata[n]["available"] for n, _ in destination_specs},
             label="destination",
         )
-        # Bots assigned no slots are not participants in the transfer plan.
-        # In particular, a full donor may be listed but must not face wallet,
-        # gas, or capacity mutations when it has nothing available to give.
-        source_counts = {name: count for name, count in source_counts.items() if count}
         destination_counts = {name: count for name, count in destination_counts.items() if count}
-        selected_names = set(source_counts) | set(destination_counts)
         global_amount = decimal_eth(args.amount_per_position, "amount per position")[0] if args.amount_per_position else None
-        per_source = parse_amount_overrides(args.amount_from, bot_dirs)
-        unknown_overrides = set(per_source) - set(source_counts)
-        if unknown_overrides:
-            raise ValueError(f"Amount override supplied for non-donor: {', '.join(sorted(unknown_overrides))}")
-        amounts = {}
-        for name in source_counts:
-            amount = per_source.get(name, global_amount if global_amount is not None else Decimal(metadata[name]["reserve_eth"]))
-            if amount <= 0:
-                raise ValueError(f"{name}: default TREASURY_POSITION_RESERVE_ETH is zero; pass --amount-per-position")
-            amounts[name] = amount
+        per_source = parse_amount_overrides(
+            args.amount_from, bot_dirs, allow_treasury=args.from_treasury,
+        )
         global_gas_cap = (
             decimal_eth(args.max_gas, "maximum gas per transfer")[0]
             if args.max_gas else None
@@ -730,7 +844,87 @@ def main(argv=None):
         per_source_gas_cap = parse_amount_overrides(
             args.max_gas_from, bot_dirs,
             option="--max-gas-from", label="maximum gas per transfer",
+            allow_treasury=args.from_treasury,
         )
+
+        treasury_data = None
+        treasury_count = 0
+        fixed_bot_count = sum(count or 0 for _name, count in source_specs)
+        if fixed_bot_count > total:
+            raise ValueError(
+                f"Manual source counts total {fixed_bot_count}, exceeding {total}"
+            )
+        if args.from_treasury:
+            treasury_path = args.treasury_env or os.environ.get(
+                "FLEET_TREASURY_ENV", str(Path.home() / "bot-farm" / "treasury.env")
+            )
+            treasury_data = treasury_metadata(
+                treasury_path, warn_permissions=not args.local_preflight,
+            )
+            metadata[TREASURY_SOURCE] = treasury_data
+            treasury_amount = per_source.get(
+                TREASURY_SOURCE,
+                global_amount if global_amount is not None
+                else (Decimal(treasury_data["reserve_eth"])
+                      if treasury_data["reserve_eth"] is not None else None),
+            )
+            if treasury_amount is None:
+                raise ValueError(
+                    "Treasury needs --amount-per-position, --amount-from Treasury=ETH, "
+                    "or TREASURY_POSITION_RESERVE_ETH in its env"
+                )
+            treasury_gas_cap = per_source_gas_cap.get(
+                TREASURY_SOURCE,
+                global_gas_cap if global_gas_cap is not None
+                else Decimal(treasury_data["transfer_gas_cap_eth"]),
+            )
+            _treasury_address, treasury_balance = treasury_live_balance(treasury_data)
+            treasury_count = treasury_affordable_positions(
+                total - fixed_bot_count,
+                int(treasury_amount * WEI),
+                treasury_balance,
+                treasury_data["gas_reserve_wei"],
+                int(treasury_gas_cap * WEI),
+                destination_counts,
+            )
+
+        bot_total = total - treasury_count
+        if bot_total and not source_specs:
+            raise ValueError(
+                f"Treasury can safely fund {treasury_count} of {total} position(s); "
+                "add --from bots for the remainder"
+            )
+        bot_source_counts = fair_allocate(
+            source_specs, bot_total,
+            capacities={n: metadata[n]["available"] for n, _ in source_specs},
+            label="source",
+        ) if source_specs else {}
+        source_counts = {}
+        if treasury_count:
+            source_counts[TREASURY_SOURCE] = treasury_count
+        source_counts.update({
+            name: count for name, count in bot_source_counts.items() if count
+        })
+        # Bots assigned no slots are not participants in the transfer plan.
+        # In particular, a full donor may be listed but must not face wallet,
+        # gas, or capacity mutations when it has nothing available to give.
+        selected_names = set(source_counts) | set(destination_counts)
+        unknown_overrides = set(per_source) - set(source_counts)
+        if unknown_overrides:
+            raise ValueError(f"Amount override supplied for non-donor: {', '.join(sorted(unknown_overrides))}")
+        amounts = {}
+        for name in source_counts:
+            if name == TREASURY_SOURCE:
+                amount = treasury_amount
+            else:
+                amount = per_source.get(
+                    name,
+                    global_amount if global_amount is not None
+                    else Decimal(metadata[name]["reserve_eth"]),
+                )
+            if amount <= 0:
+                raise ValueError(f"{name}: default TREASURY_POSITION_RESERVE_ETH is zero; pass --amount-per-position")
+            amounts[name] = amount
         unknown_gas_overrides = set(per_source_gas_cap) - set(source_counts)
         if unknown_gas_overrides:
             raise ValueError(
@@ -746,6 +940,12 @@ def main(argv=None):
             for name in source_counts
         }
         routes = build_routes(source_counts, destination_counts)
+        for name in selected_names:
+            if name != TREASURY_SOURCE:
+                metadata[name] = bot_metadata(
+                    name, bot_dirs[name], require_key=True,
+                    warn_permissions=not args.local_preflight,
+                )
         Account, _Web3 = chain_imports()
         wallet_addresses = {
             name: Account.from_key(metadata[name]["private_key"]).address
@@ -761,7 +961,8 @@ def main(argv=None):
             "gas_caps_wei": {n: int(v * WEI) for n, v in gas_caps.items()},
             "routes": routes,
             "capacity_snapshot": {n: {"capacity": metadata[n]["capacity"], "filled": metadata[n]["filled"]}
-                                  for n in set(source_counts) | set(destination_counts)},
+                                  for n in (set(source_counts) | set(destination_counts))
+                                  if n != TREASURY_SOURCE},
             "wallet_addresses": wallet_addresses,
             "donor_safety": {n: {
                 "position_reserve_wei": metadata[n]["reserve_wei"],
@@ -769,6 +970,9 @@ def main(argv=None):
                 "configured_transfer_gas_cap_wei": metadata[n]["transfer_gas_cap_wei"],
             } for n in source_counts},
         }
+        if treasury_data:
+            static["treasury_env"] = treasury_data["env"]
+            static["treasury_priority"] = {"positions": treasury_count}
         static["plan_id"] = canonical_id(static)
         plan = static
     selected_names = set(plan["sources"]) | set(plan["destinations"])
@@ -779,6 +983,13 @@ def main(argv=None):
         )
         for name in selected_names if name in bot_dirs
     }
+    if TREASURY_SOURCE in selected_names:
+        treasury_env = plan.get("treasury_env")
+        if not treasury_env:
+            raise ValueError("Treasury-backed plan is missing its treasury env path")
+        metadata[TREASURY_SOURCE] = treasury_metadata(
+            treasury_env, warn_permissions=not args.local_preflight,
+        )
     # Journals made by the original implementation predate explicit transfer
     # gas caps. Derive those caps from the current donor environment so an
     # interrupted, possibly partially paid plan remains safely resumable.
@@ -817,11 +1028,13 @@ def main(argv=None):
         raise ValueError(f"Execution requires --confirm-plan {plan['plan_id']}")
     if args.local_preflight:
         # The managed shell wrapper calls this before touching tmux or durable
-        # desired-state markers. Everything above is deterministic and local:
-        # allocation, env/state metadata, wallet identity, journal snapshot,
-        # and exact confirmation. Live RPC checks intentionally remain after
-        # the involved bots have stopped.
-        print("\n".join(list(plan["sources"]) + list(plan["destinations"])))
+        # desired-state markers. Treasury-backed allocations may make one
+        # read-only balance query here so plan confirmation is still checked
+        # before any bot lifecycle state changes.
+        involved = [
+            name for name in plan["sources"] if name != TREASURY_SOURCE
+        ] + list(plan["destinations"])
+        print("\n".join(involved))
         return 0
     if commit_resume:
         print_plan(plan, metadata)
@@ -842,6 +1055,8 @@ def main(argv=None):
     if not args.resume:
         changes = {}
         for name, count in plan["sources"].items():
+            if name == TREASURY_SOURCE:
+                continue
             changes[name] = {"env": metadata[name]["env"], "before": metadata[name]["capacity"], "after": metadata[name]["capacity"] - count}
         for name, count in plan["destinations"].items():
             changes[name] = {"env": metadata[name]["env"], "before": metadata[name]["capacity"], "after": metadata[name]["capacity"] + count}

@@ -1296,6 +1296,36 @@ can therefore remain in the donor list but contributes zero:
 pass-positions --from sarn,prism --to urmom,delta --positions 3
 ```
 
+Add `--from-treasury` to fund as many positions as the central Treasury can
+safely cover before taking any automatically allocated slots from bot donors:
+
+```bash
+pass-positions \
+  --from-treasury \
+  --from sarn,prism \
+  --to urmom,delta \
+  --positions 6 \
+  --amount-per-position 0.0015
+```
+
+The signer defaults to `$FLEET_TREASURY_ENV` or
+`~/bot-farm/treasury.env`, matching the Treasury signer used with
+`fund-bots --from-env`; override it with `--treasury-env PATH`. Treasury
+preserves its configured `ETH_GAS_RESERVE` after principal and the maximum gas
+for every Treasury route. Its per-position amount comes from
+`--amount-per-position`, `--amount-from Treasury=ETH`, or
+`TREASURY_POSITION_RESERVE_ETH` in the Treasury env. Its transfer gas cap uses
+`--max-gas`, `--max-gas-from Treasury=ETH`, or
+`MAX_FEE_TRANSFER_GAS_ETH` (default `0.0001`). Treasury routes are placed first
+and may be aggregated by recipient. Treasury-funded positions increase the
+recipient capacities without reducing any bot capacity; remaining positions
+continue through the normal donor-leveling allocator.
+
+Exact `BOT=COUNT` donors remain manual overrides and are reserved before
+Treasury calculates the automatic remainder. This allows an operator to force
+a particular bot contribution while still using Treasury first for every
+otherwise unassigned position.
+
 Use `BOT=COUNT` for exact assignments. Plain names share whatever remains:
 
 ```bash

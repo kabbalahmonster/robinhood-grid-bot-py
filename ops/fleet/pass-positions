@@ -8,15 +8,20 @@ source "$SCRIPT_DIR/fleet-common.sh"
 
 usage() {
   cat <<'EOF'
-Usage: pass-positions --from SPECS --to SPECS [--positions N] [options]
+Usage: pass-positions [--from SPECS] [--from-treasury] --to SPECS [--positions N] [options]
        pass-positions --resume PLAN_ID --execute --confirm-plan PLAN_ID
 
 Reallocate whole unused position-capacity slots and their native ETH reserve
-between fleet bots. Dry run is the default and prints a live approval plan;
-no funds or files change unless --execute is supplied.
+between fleet bots, optionally funding new recipient capacity from Treasury.
+Dry run is the default and prints a live approval plan; no funds or files
+change unless --execute is supplied.
 
 Allocation:
   --from SPECS               Donors: BOT or BOT=COUNT, comma-separated/repeatable
+  --from-treasury            Fund as many remaining positions as safely possible
+                             before using plain --from bots
+  --treasury-env PATH        Treasury signer env (default:
+                             $FLEET_TREASURY_ENV or ~/bot-farm/treasury.env)
   --to SPECS                 Recipients: same syntax as --from
   --positions N              Total whole positions to move
   --amount-per-position ETH  Override every donor's reserve amount
@@ -26,8 +31,10 @@ Allocation:
 
 Plain donors are chosen from greatest remaining open capacity; plain recipients
 are chosen from least current open capacity. Supplied order breaks ties.
-BOT=COUNT is exact. --positions may be omitted when every bot on either side has
-an exact count; if both sides are exact, their totals must match.
+BOT=COUNT is exact and reserved before Treasury allocation. Treasury-funded
+positions add recipient capacity without reducing any bot's capacity.
+--positions may be omitted when every bot on either side has an exact count; if
+both sides are exact, their totals must match.
 
 Execution:
   --execute                  Broadcast ETH and commit capacity changes
@@ -49,6 +56,10 @@ Examples:
 
   # Fairly split 3 whole positions across multiple donors and recipients.
   pass-positions --from sarn,prism --to urmom,delta --positions 3
+
+  # Fund from Treasury first, then level any remainder across bot donors.
+  pass-positions --from-treasury --from sarn,prism \
+    --to urmom,delta --positions 6 --amount-per-position 0.0015
 
   # Exact counts mixed with fair remainder allocation.
   pass-positions --from prism=2,sarn,delta --to urmom=1,earn,hookr \
@@ -72,6 +83,7 @@ Safety model:
   * Default amount is each donor's TREASURY_POSITION_RESERVE_ETH.
   * Default gas cap is each donor's MAX_FEE_TRANSFER_GAS_ETH, or 0.0001 ETH.
   * Donor capacity never drops below filled positions.
+  * Treasury preserves its ETH_GAS_RESERVE after principal and maximum gas.
   * Balances, chain identity, wallet identity, and transfer gas are preflighted.
   * The complete plan is validated before the first broadcast.
   * Broadcast hashes are journaled immediately; ambiguous hashes are not resent.
@@ -98,6 +110,10 @@ done
   fleet_die "--execute requires --confirm-fleet-stopped or --manage-bots"
 
 fleet_load_config "$config_path"
+# Allow fleet.conf to define the same Treasury signer path used by fund-bots.
+if [[ -n "${FLEET_TREASURY_ENV:-}" ]]; then
+  export FLEET_TREASURY_ENV
+fi
 fleet_validate_bots
 printf 'Preparing position-pass %s; validating allocation and live chain state...\n' \
   "$([[ $execute == 1 ]] && printf execution || printf dry-run)"
