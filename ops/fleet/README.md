@@ -1352,6 +1352,12 @@ configured `ETH_GAS_RESERVE`; the planner still requires enough value to send
 the full principal, preserve every slot it keeps, and cover the larger of its
 gas reserve or all planned maximum fees.
 
+Repeated `.env` settings unrelated to position passing do not block planning.
+They follow the bot's normal `python-dotenv` behavior: the final assignment
+wins. `MAX_ACTIVE_POSITIONS` must remain unique because the capacity commit
+edits that setting; a duplicate is refused during preflight, before any funds
+can move.
+
 Dry runs emit progress immediately: first the locally validated allocation,
 then each live RPC/gas/balance check, then a complete approval plan. The final
 plan includes the plan ID, wallet addresses, before/after capacities, filled

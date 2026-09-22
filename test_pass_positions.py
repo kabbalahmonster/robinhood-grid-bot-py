@@ -138,6 +138,28 @@ class PassPositionsTests(unittest.TestCase):
             self.assertEqual(data["available"], 4)
             self.assertEqual(data["reserve_wei"], 1_500_000_000_000_000)
 
+    def test_metadata_allows_unrelated_duplicate_env_values_with_last_value_winning(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.bot(directory, "earn", 5)
+            env = root / ".env"
+            with env.open("a", encoding="utf-8") as handle:
+                handle.write(
+                    "GRIDLESS_LEADING_EDGE=false\n"
+                    "GRIDLESS_LEADING_EDGE=true\n"
+                )
+            data = module.bot_metadata("earn", root, require_key=True)
+            self.assertEqual(data["capacity"], 5)
+            self.assertEqual(data["values"]["GRIDLESS_LEADING_EDGE"], "true")
+
+    def test_metadata_refuses_duplicate_capacity_target_before_transfers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.bot(directory, "earn", 5)
+            env = root / ".env"
+            with env.open("a", encoding="utf-8") as handle:
+                handle.write("MAX_ACTIVE_POSITIONS=6\n")
+            with self.assertRaisesRegex(ValueError, "must be unique.*MAX_ACTIVE_POSITIONS"):
+                module.bot_metadata("earn", root, require_key=True)
+
     def test_metadata_refuses_exposed_private_env(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

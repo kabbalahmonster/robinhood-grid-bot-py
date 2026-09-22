@@ -31,7 +31,7 @@ def decimal_eth(value, label, *, allow_zero=False):
     return result, wei
 
 
-def dotenv(path):
+def dotenv(path, *, require_unique=()):
     values = {}
     duplicates = set()
     pattern = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$")
@@ -44,8 +44,12 @@ def dotenv(path):
         if key in values:
             duplicates.add(key)
         values[key] = value
-    if duplicates:
-        raise ValueError(f"{path}: duplicate variable(s): {', '.join(sorted(duplicates))}")
+    unsafe_duplicates = duplicates & set(require_unique)
+    if unsafe_duplicates:
+        raise ValueError(
+            f"{path}: variable(s) must be unique for safe capacity updates: "
+            f"{', '.join(sorted(unsafe_duplicates))}"
+        )
     return values
 
 
@@ -78,7 +82,12 @@ def bot_metadata(name, directory, *, require_key=False):
     mode = stat.S_IMODE(env_path.stat().st_mode)
     if mode & 0o077:
         raise ValueError(f"{name}: .env permissions are too broad ({mode:o}); run chmod 600 {env_path}")
-    values = dotenv(env_path)
+    # python-dotenv, used by the bot itself, resolves repeated assignments with
+    # the final value winning. Match that behavior instead of refusing an
+    # unrelated legacy duplicate. MAX_ACTIVE_POSITIONS is the one exception:
+    # pass-positions edits it and must not leave another assignment overriding
+    # the committed capacity later in the file.
+    values = dotenv(env_path, require_unique={"MAX_ACTIVE_POSITIONS"})
     raw_capacity = values.get("MAX_ACTIVE_POSITIONS", values.get("MAX_POSITIONS"))
     if raw_capacity is None:
         raise ValueError(f"{name}: MAX_ACTIVE_POSITIONS or MAX_POSITIONS is required")
@@ -259,7 +268,7 @@ def replace_capacity_text(text, updated):
 
 
 def capacity_value(path):
-    values = dotenv(path)
+    values = dotenv(path, require_unique={"MAX_ACTIVE_POSITIONS"})
     raw = values.get("MAX_ACTIVE_POSITIONS", values.get("MAX_POSITIONS"))
     return int(raw) if raw is not None else None
 
