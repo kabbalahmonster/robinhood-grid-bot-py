@@ -1286,9 +1286,11 @@ pass-positions --from prism,sarn --to urmom --positions 3 \
   --amount-from prism=0.002 --amount-from sarn=0.0015
 ```
 
-Multiple unspecified donors and recipients split whole positions as evenly as
-possible in supplied order. Capacity-limited donors are used only to their
-available count and the remainder spills fairly to the others:
+Automatic allocation evens open capacity rather than merely round-robining.
+For each slot, the donor with the greatest remaining availability gives next,
+while the recipient with the least current availability receives next. Supplied
+order breaks ties. A donor can give only `capacity - filled` slots; a full bot
+can therefore remain in the donor list but contributes zero:
 
 ```bash
 pass-positions --from sarn,prism --to urmom,delta --positions 3
@@ -1309,9 +1311,9 @@ pass-positions \
 that exact side determines the total. If both sides are fully specified, their
 totals must match. A bot cannot appear on both sides. Duplicate names, duplicate
 wallets, cross-chain plans, contract recipients, fractional/zero counts, and
-donations beyond available capacity are refused. A route's amount per position
-must also meet the recipient's own `TREASURY_POSITION_RESERVE_ETH`; raise the
-override when a recipient has a larger configured minimum than its donor.
+donations beyond available capacity are refused. Each transferred slot carries
+exactly the giving bot's per-position principal. The recipient's configured
+reserve does not replace or raise that donor-owned amount.
 
 Execution is deliberately two-stage. Stop the fleet and capture the printed
 plan ID, then repeat the same command with the confirmations:
@@ -1345,12 +1347,20 @@ execution rather than racing the guardian; restore or intentionally stop the
 fleet first.
 
 Before broadcasting, the command revalidates every capacity/filled-position
-snapshot, wallet, chain, live balance, route gas estimate, remaining-slot
-reserve, and `.env` readability. Transfers are aggregated into at most
+snapshot, wallet, chain, live balance, route gas estimate, gas cap, and `.env`
+readability. Transfers are aggregated into at most
 `donors + recipients - 1` transactions. A donor may pay transfer gas from its
-configured `ETH_GAS_RESERVE`; the planner still requires enough value to send
-the full principal, preserve every slot it keeps, and cover the larger of its
-gas reserve or all planned maximum fees.
+configured `ETH_GAS_RESERVE`; the planner requires enough value to send exactly
+its donated-slot principal and cover the larger of its gas reserve or all
+planned maximum fees. Open slots retained by the donor do not create an
+additional wallet-balance requirement.
+
+Each route's maximum estimated gas must fit the donor's
+`MAX_FEE_TRANSFER_GAS_ETH`; an unset or empty value defaults to `0.0001` ETH.
+Override the cap globally with `--max-gas ETH` (also accepted as
+`--max-gas-per-transfer`) or per donor with repeated
+`--max-gas-from BOT=ETH`. The cap is checked again with the refreshed gas price
+immediately before broadcast.
 
 Repeated `.env` settings unrelated to position passing do not block planning.
 They follow the bot's normal `python-dotenv` behavior: the final assignment
@@ -1367,7 +1377,7 @@ Dry runs emit progress immediately: first the locally validated allocation,
 then each live RPC/gas/balance check, then a complete approval plan. The final
 plan includes the plan ID, wallet addresses, before/after capacities, filled
 and available slots, per-position amounts, donor balances, principal, maximum
-gas, retained-slot reserve, gas-reserve floor, minimum required balance,
+gas, per-transfer gas cap, gas-reserve floor, minimum required balance,
 projected remaining balance, every transfer route, and fleet totals. `--help`
 is available without a fleet config and includes allocation, execution,
 managed lifecycle, override, and resume examples.

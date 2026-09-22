@@ -115,6 +115,10 @@ def bot_metadata(name, directory, *, require_key=False):
     gas_reserve, gas_reserve_wei = decimal_eth(
         values.get("ETH_GAS_RESERVE", "0"), f"{name} ETH_GAS_RESERVE", allow_zero=True,
     )
+    raw_transfer_gas_cap = values.get("MAX_FEE_TRANSFER_GAS_ETH") or "0.0001"
+    transfer_gas_cap, transfer_gas_cap_wei = decimal_eth(
+        raw_transfer_gas_cap, f"{name} MAX_FEE_TRANSFER_GAS_ETH",
+    )
     private_key = values.get("PRIVATE_KEY", "")
     if require_key and not private_key:
         raise ValueError(f"{name}: PRIVATE_KEY is required for a donor")
@@ -123,6 +127,8 @@ def bot_metadata(name, directory, *, require_key=False):
         "capacity": capacity, "filled": filled, "available": capacity - filled,
         "reserve_eth": str(reserve), "reserve_wei": reserve_wei,
         "gas_reserve_eth": str(gas_reserve), "gas_reserve_wei": gas_reserve_wei,
+        "transfer_gas_cap_eth": str(transfer_gas_cap),
+        "transfer_gas_cap_wei": transfer_gas_cap_wei,
         "private_key": private_key,
     }
 
@@ -179,7 +185,8 @@ def infer_total(requested, sources, destinations):
     return totals[0]
 
 
-def fair_allocate(specs, total, capacities=None, label="allocation"):
+def fair_allocate(specs, total, capacities=None, label="allocation",
+                  initial_availability=None):
     result = {name: (count or 0) for name, count in specs}
     fixed = sum(result.values())
     if fixed > total:
@@ -192,18 +199,30 @@ def fair_allocate(specs, total, capacities=None, label="allocation"):
     remaining = total - fixed
     if remaining and not flexible:
         raise ValueError(f"Manual {label} counts total {fixed}, but {total} positions were requested")
-    index = 0
-    stalled = 0
     while remaining:
-        name = flexible[index % len(flexible)]
-        index += 1
-        if capacities and result[name] >= capacities[name]:
-            stalled += 1
-            if stalled >= len(flexible):
-                available = sum(capacities[n] - result[n] for n in flexible)
-                raise ValueError(f"Not enough available donor positions; {remaining} still needed ({available} allocatable)")
-            continue
-        stalled = 0
+        candidates = [
+            name for name in flexible
+            if not capacities or result[name] < capacities[name]
+        ]
+        if not candidates:
+            available = sum(capacities[n] - result[n] for n in flexible)
+            raise ValueError(
+                f"Not enough available donor positions; {remaining} still needed "
+                f"({available} allocatable)"
+            )
+        if capacities:
+            # Give from the donor that will have the most open capacity left.
+            # max() deliberately keeps the first supplied name on ties.
+            name = max(candidates, key=lambda item: capacities[item] - result[item])
+        elif initial_availability is not None:
+            # Add to the recipient with the least open capacity. min() keeps
+            # supplied order on ties, making the plan stable and reproducible.
+            name = min(
+                candidates,
+                key=lambda item: initial_availability[item] + result[item],
+            )
+        else:
+            name = min(candidates, key=lambda item: result[item])
         result[name] += 1
         remaining -= 1
     return result
@@ -216,8 +235,10 @@ def build_routes(source_counts, destination_counts):
     for source, amount in source_counts.items():
         left = amount
         while left:
-            while destinations[cursor][1] == 0:
+            while cursor < len(destinations) and destinations[cursor][1] == 0:
                 cursor += 1
+            if cursor >= len(destinations):
+                raise ValueError("Source and destination allocation totals differ")
             destination, needed = destinations[cursor]
             units = min(left, needed)
             routes.append({"source": source, "destination": destination, "positions": units})
@@ -226,17 +247,17 @@ def build_routes(source_counts, destination_counts):
     return routes
 
 
-def parse_amount_overrides(values, bots):
+def parse_amount_overrides(values, bots, *, option="--amount-from", label="amount per position"):
     overrides = {}
     known = {name.lower(): name for name in bots}
     for raw in values or []:
         name, separator, amount = raw.partition("=")
         if not separator or name.lower() not in known:
-            raise ValueError(f"--amount-from must be a fleet BOT=ETH assignment: {raw}")
+            raise ValueError(f"{option} must be a fleet BOT=ETH assignment: {raw}")
         canonical = known[name.lower()]
         if canonical in overrides:
-            raise ValueError(f"Duplicate --amount-from override: {canonical}")
-        overrides[canonical] = decimal_eth(amount, f"{canonical} amount per position")[0]
+            raise ValueError(f"Duplicate {option} override: {canonical}")
+        overrides[canonical] = decimal_eth(amount, f"{canonical} {label}")[0]
     return overrides
 
 
@@ -407,20 +428,26 @@ def prepare_chain(plan, metadata, execute=False):
         route["gas"] = max(estimate, int(Decimal(estimate) * multiplier))
         route["gas_price"] = gas_price(w3)
         route["max_fee_wei"] = route["gas"] * route["gas_price"]
+        route["gas_cap_wei"] = int(plan["gas_caps_wei"][source])
+        if route["max_fee_wei"] > route["gas_cap_wei"]:
+            raise ValueError(
+                f"{source} -> {destination}: estimated transfer gas "
+                f"{Decimal(route['max_fee_wei'])/WEI} ETH exceeds gas cap "
+                f"{Decimal(route['gas_cap_wei'])/WEI} ETH"
+            )
     plan["feasibility"] = {}
     for source, count in plan["sources"].items():
         routes = [r for r in plan["routes"] if r["source"] == source and not r.get("tx_hash")]
         principal = sum(r["amount_wei"] for r in routes)
         fees = sum(r["max_fee_wei"] for r in routes)
         final_slots = metadata[source]["available"] - count
-        retained_positions = final_slots * metadata[source]["reserve_wei"]
         balance = int(contexts[source]["w3"].eth.get_balance(addresses[source]))
         confirmed_fees = sum(
             int(r.get("actual_max_fee_wei", 0)) for r in plan["routes"]
             if r["source"] == source and r.get("tx_hash")
         )
         effective_gas_reserve = max(0, metadata[source]["gas_reserve_wei"] - confirmed_fees)
-        required = principal + retained_positions + max(effective_gas_reserve, fees)
+        required = principal + max(effective_gas_reserve, fees)
         projected_remaining = balance - principal - fees
         post_fee_gas_reserve = max(0, effective_gas_reserve - fees)
         plan["feasibility"][source] = {
@@ -428,20 +455,20 @@ def prepare_chain(plan, metadata, execute=False):
             "principal_wei": principal,
             "maximum_fees_wei": fees,
             "final_available_slots": final_slots,
-            "retained_position_reserve_wei": retained_positions,
+            "transfer_gas_cap_wei": int(plan["gas_caps_wei"][source]),
             "effective_gas_reserve_wei": effective_gas_reserve,
             "post_fee_gas_reserve_floor_wei": post_fee_gas_reserve,
             "required_wei": required,
             "projected_remaining_wei": projected_remaining,
         }
         print(
-            f"- {source}: checking balance against principal, retained slots, and gas safety...",
+            f"- {source}: checking balance against principal and its own gas safety...",
             flush=True,
         )
         if balance < required:
             raise ValueError(
                 f"{source}: balance {Decimal(balance)/WEI} ETH cannot cover remaining transfers, "
-                f"{final_slots} retained slot reserve(s), and gas safety; needs {Decimal(required)/WEI} ETH"
+                f"and gas safety; needs {Decimal(required)/WEI} ETH"
             )
         plan.setdefault("balances_wei", {})[source] = balance
     return contexts
@@ -457,6 +484,12 @@ def send_route(context, route, chain_id, on_broadcast=None):
             "nonce": w3.eth.get_transaction_count(account.address, "pending"),
             "chainId": chain_id, "gas": route["gas"], "gasPrice": price,
         }
+        maximum_fee = tx["gas"] * tx["gasPrice"]
+        if maximum_fee > int(route["gas_cap_wei"]):
+            raise ValueError(
+                f"transfer gas {Decimal(maximum_fee)/WEI} ETH exceeds gas cap "
+                f"{Decimal(route['gas_cap_wei'])/WEI} ETH"
+            )
         signed = account.sign_transaction(tx)
         raw = getattr(signed, "raw_transaction", getattr(signed, "rawTransaction", None))
         try:
@@ -486,12 +519,18 @@ def print_allocation_preview(plan, metadata):
     for name, count in plan["sources"].items():
         data = metadata[name]
         original = plan["capacity_snapshot"][name]["capacity"]
+        available_before = original - data["filled"]
         print(f"- {name}: give {count}; capacity {original} -> {original-count}; "
-              f"filled={data['filled']} available={original-data['filled']}; amount/position={plan['amounts_eth'][name]} ETH")
+              f"filled={data['filled']} availability {available_before} -> {available_before-count}; "
+              f"principal={plan['amounts_eth'][name]} ETH/position "
+              f"({Decimal(plan['amounts_eth'][name]) * count} ETH total); "
+              f"gas cap={plan['gas_caps_eth'][name]} ETH/transfer")
     print("Recipients:")
     for name, count in plan["destinations"].items():
         original = plan["capacity_snapshot"][name]["capacity"]
-        print(f"- {name}: receive {count}; capacity {original} -> {original+count}")
+        available_before = original - metadata[name]["filled"]
+        print(f"- {name}: receive {count}; capacity {original} -> {original+count}; "
+              f"availability {available_before} -> {available_before+count}")
     print("Allocation is locally valid. Running live wallet, balance, and gas preflight...", flush=True)
 
 
@@ -507,14 +546,17 @@ def print_plan(plan, metadata):
         feasibility = plan.get("feasibility", {}).get(name, {})
         print(f"- {name} ({plan.get('wallet_addresses', {}).get(name, 'address unavailable')}):")
         print(f"    positions: give {count}; capacity {original} -> {original-count}; "
-              f"filled={data['filled']} available_before={original-data['filled']}")
-        print(f"    amount/position: {plan['amounts_eth'][name]} ETH")
+              f"filled={data['filled']} availability {original-data['filled']} -> "
+              f"{original-data['filled']-count}")
+        print(f"    principal/position: {plan['amounts_eth'][name]} ETH; "
+              f"total principal: {Decimal(plan['amounts_eth'][name]) * count} ETH")
+        print(f"    gas cap/transfer: {plan['gas_caps_eth'][name]} ETH")
         if feasibility:
             print(f"    wallet balance: {Decimal(feasibility['balance_wei'])/WEI} ETH")
             print(f"    principal sent: {Decimal(feasibility['principal_wei'])/WEI} ETH")
             print(f"    maximum planned gas: {Decimal(feasibility['maximum_fees_wei'])/WEI} ETH")
-            print(f"    retained slots: {feasibility['final_available_slots']} = "
-                  f"{Decimal(feasibility['retained_position_reserve_wei'])/WEI} ETH reserve")
+            print(f"    open slots remaining: {feasibility['final_available_slots']} "
+                  "(no additional balance reserve required)")
             print(f"    gas reserve before remaining routes: "
                   f"{Decimal(feasibility['effective_gas_reserve_wei'])/WEI} ETH")
             print(f"    minimum required now: {Decimal(feasibility['required_wei'])/WEI} ETH")
@@ -525,9 +567,10 @@ def print_plan(plan, metadata):
     print("Recipients:")
     for name, count in plan["destinations"].items():
         original = plan["capacity_snapshot"][name]["capacity"]
+        available_before = original - metadata[name]["filled"]
         print(f"- {name} ({plan.get('wallet_addresses', {}).get(name, 'address unavailable')}): "
               f"receive {count}; capacity {original} -> {original+count}; "
-              f"minimum reserve/position={metadata[name]['reserve_eth']} ETH")
+              f"availability {available_before} -> {available_before+count}")
     print("Transfers:")
     total_principal = 0
     total_fees = 0
@@ -549,6 +592,14 @@ def main(argv=None):
     parser.add_argument("--positions", type=int)
     parser.add_argument("--amount-per-position")
     parser.add_argument("--amount-from", action="append", default=[])
+    parser.add_argument(
+        "--max-gas", "--max-gas-eth", "--max-gas-per-transfer",
+        "--max-fee-transfer-gas", dest="max_gas",
+    )
+    parser.add_argument(
+        "--max-gas-from", "--max-fee-transfer-gas-from",
+        dest="max_gas_from", action="append", default=[],
+    )
     parser.add_argument("--bot", action="append", default=[])
     parser.add_argument("--journal-dir", required=True)
     parser.add_argument("--execute", action="store_true")
@@ -581,7 +632,9 @@ def main(argv=None):
         print("\n".join(names))
         return 0
     if args.resume:
-        if args.sources or args.destinations or args.positions or args.amount_per_position or args.amount_from:
+        if (args.sources or args.destinations or args.positions
+                or args.amount_per_position or args.amount_from
+                or args.max_gas or args.max_gas_from):
             raise ValueError("--resume cannot be combined with new allocation arguments")
         if not journal_path.is_file():
             raise ValueError(f"Unknown position-pass journal: {args.resume}")
@@ -598,12 +651,23 @@ def main(argv=None):
             raise ValueError(f"Bots cannot be both donors and recipients: {', '.join(sorted(overlap))}")
         selected_names = {name for name, _ in source_specs} | {name for name, _ in destination_specs}
         metadata = {name: bot_metadata(name, bot_dirs[name], require_key=True) for name in selected_names}
-        for name, _ in source_specs:
-            if metadata[name]["available"] < 1:
-                raise ValueError(f"{name}: donor has no available positions")
         total = infer_total(args.positions, source_specs, destination_specs)
-        source_counts = fair_allocate(source_specs, total, {n: metadata[n]["available"] for n, _ in source_specs}, "source")
-        destination_counts = fair_allocate(destination_specs, total, label="destination")
+        source_counts = fair_allocate(
+            source_specs, total,
+            capacities={n: metadata[n]["available"] for n, _ in source_specs},
+            label="source",
+        )
+        destination_counts = fair_allocate(
+            destination_specs, total,
+            initial_availability={n: metadata[n]["available"] for n, _ in destination_specs},
+            label="destination",
+        )
+        # Bots assigned no slots are not participants in the transfer plan.
+        # In particular, a full donor may be listed but must not face wallet,
+        # gas, or capacity mutations when it has nothing available to give.
+        source_counts = {name: count for name, count in source_counts.items() if count}
+        destination_counts = {name: count for name, count in destination_counts.items() if count}
+        selected_names = set(source_counts) | set(destination_counts)
         global_amount = decimal_eth(args.amount_per_position, "amount per position")[0] if args.amount_per_position else None
         per_source = parse_amount_overrides(args.amount_from, bot_dirs)
         unknown_overrides = set(per_source) - set(source_counts)
@@ -615,16 +679,29 @@ def main(argv=None):
             if amount <= 0:
                 raise ValueError(f"{name}: default TREASURY_POSITION_RESERVE_ETH is zero; pass --amount-per-position")
             amounts[name] = amount
+        global_gas_cap = (
+            decimal_eth(args.max_gas, "maximum gas per transfer")[0]
+            if args.max_gas else None
+        )
+        per_source_gas_cap = parse_amount_overrides(
+            args.max_gas_from, bot_dirs,
+            option="--max-gas-from", label="maximum gas per transfer",
+        )
+        unknown_gas_overrides = set(per_source_gas_cap) - set(source_counts)
+        if unknown_gas_overrides:
+            raise ValueError(
+                "Gas override supplied for non-donor: "
+                f"{', '.join(sorted(unknown_gas_overrides))}"
+            )
+        gas_caps = {
+            name: per_source_gas_cap.get(
+                name,
+                global_gas_cap if global_gas_cap is not None
+                else Decimal(metadata[name]["transfer_gas_cap_eth"]),
+            )
+            for name in source_counts
+        }
         routes = build_routes(source_counts, destination_counts)
-        for route in routes:
-            source, destination = route["source"], route["destination"]
-            destination_minimum = Decimal(metadata[destination]["reserve_eth"])
-            if amounts[source] < destination_minimum:
-                raise ValueError(
-                    f"{source} amount per position {amounts[source]} ETH is below "
-                    f"{destination}'s TREASURY_POSITION_RESERVE_ETH={destination_minimum}; "
-                    "raise it with --amount-per-position or --amount-from"
-                )
         Account, _Web3 = chain_imports()
         wallet_addresses = {
             name: Account.from_key(metadata[name]["private_key"]).address
@@ -636,6 +713,8 @@ def main(argv=None):
             "positions": total, "sources": source_counts, "destinations": destination_counts,
             "amounts_eth": {n: str(v) for n, v in amounts.items()},
             "amounts_wei": {n: int(v * WEI) for n, v in amounts.items()},
+            "gas_caps_eth": {n: str(v) for n, v in gas_caps.items()},
+            "gas_caps_wei": {n: int(v * WEI) for n, v in gas_caps.items()},
             "routes": routes,
             "capacity_snapshot": {n: {"capacity": metadata[n]["capacity"], "filled": metadata[n]["filled"]}
                                   for n in set(source_counts) | set(destination_counts)},
@@ -643,12 +722,23 @@ def main(argv=None):
             "donor_safety": {n: {
                 "position_reserve_wei": metadata[n]["reserve_wei"],
                 "gas_reserve_wei": metadata[n]["gas_reserve_wei"],
+                "configured_transfer_gas_cap_wei": metadata[n]["transfer_gas_cap_wei"],
             } for n in source_counts},
         }
         static["plan_id"] = canonical_id(static)
         plan = static
     selected_names = set(plan["sources"]) | set(plan["destinations"])
     metadata = {name: bot_metadata(name, bot_dirs[name], require_key=True) for name in selected_names if name in bot_dirs}
+    # Journals made by the original implementation predate explicit transfer
+    # gas caps. Derive those caps from the current donor environment so an
+    # interrupted, possibly partially paid plan remains safely resumable.
+    if "gas_caps_wei" not in plan or "gas_caps_eth" not in plan:
+        plan["gas_caps_eth"] = {
+            name: metadata[name]["transfer_gas_cap_eth"] for name in plan["sources"]
+        }
+        plan["gas_caps_wei"] = {
+            name: metadata[name]["transfer_gas_cap_wei"] for name in plan["sources"]
+        }
     commit_resume = bool(
         args.resume and args.execute
         and journal["status"] in ("transfers_confirmed", "committing")
@@ -662,7 +752,10 @@ def main(argv=None):
             raise ValueError(f"{name}: capacity or filled positions changed since this plan was created")
     for name, safety in plan.get("donor_safety", {}).items():
         if (metadata[name]["reserve_wei"] != safety["position_reserve_wei"]
-                or metadata[name]["gas_reserve_wei"] != safety["gas_reserve_wei"]):
+                or metadata[name]["gas_reserve_wei"] != safety["gas_reserve_wei"]
+                or ("configured_transfer_gas_cap_wei" in safety
+                    and metadata[name]["transfer_gas_cap_wei"]
+                    != safety["configured_transfer_gas_cap_wei"])):
             raise ValueError(f"{name}: position or gas reserve changed since this plan was created")
     if args.execute and args.confirm_plan != plan["plan_id"]:
         raise ValueError(f"Execution requires --confirm-plan {plan['plan_id']}")

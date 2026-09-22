@@ -17,14 +17,18 @@ SPEC.loader.exec_module(module)
 
 
 class PassPositionsTests(unittest.TestCase):
-    def bot(self, parent, name, capacity, filled=0, reserve="0.0015"):
+    def bot(self, parent, name, capacity, filled=0, reserve="0.0015", gas_cap=None):
         root = Path(parent) / name
         (root / "data").mkdir(parents=True)
         env = root / ".env"
+        gas_cap_line = (
+            f"MAX_FEE_TRANSFER_GAS_ETH={gas_cap}\n" if gas_cap is not None else ""
+        )
         env.write_text(
             f"MAX_ACTIVE_POSITIONS={capacity}\n"
             f"TREASURY_POSITION_RESERVE_ETH={reserve}\n"
             "ETH_GAS_RESERVE=0.0006\n"
+            f"{gas_cap_line}"
             "CHAIN_ID=4663\n"
             f"PRIVATE_KEY={name}-key\n"
         )
@@ -51,6 +55,43 @@ class PassPositionsTests(unittest.TestCase):
             {"small": 1, "large": 4}, "source",
         )
         self.assertEqual(result, {"small": 1, "large": 3})
+
+    def test_donors_are_drained_to_even_remaining_availability(self):
+        specs = [("a", None), ("b", None)]
+        capacities = {"a": 2, "b": 5}
+        self.assertEqual(
+            module.fair_allocate(specs, 3, capacities, "source"),
+            {"a": 0, "b": 3},
+        )
+        self.assertEqual(
+            module.fair_allocate(specs, 4, capacities, "source"),
+            {"a": 1, "b": 3},
+        )
+        self.assertEqual(
+            module.fair_allocate(specs, 5, capacities, "source"),
+            {"a": 1, "b": 4},
+        )
+
+    def test_recipients_are_filled_to_even_open_availability(self):
+        result = module.fair_allocate(
+            [("c", None), ("d", None)], 3,
+            initial_availability={"c": 1, "d": 0},
+            label="destination",
+        )
+        self.assertEqual(result, {"c": 1, "d": 2})
+
+    def test_explicit_counts_are_preserved_before_balancing_remainder(self):
+        donors = module.fair_allocate(
+            [("fixed", 2), ("a", None), ("b", None)], 5,
+            {"fixed": 2, "a": 2, "b": 5}, "source",
+        )
+        recipients = module.fair_allocate(
+            [("fixed", 2), ("c", None), ("d", None)], 5,
+            initial_availability={"fixed": 9, "c": 1, "d": 0},
+            label="destination",
+        )
+        self.assertEqual(donors, {"fixed": 2, "a": 0, "b": 3})
+        self.assertEqual(recipients, {"fixed": 2, "c": 1, "d": 2})
 
     def test_manual_counts_are_exact_and_remainder_is_fair(self):
         result = module.fair_allocate(
@@ -103,12 +144,31 @@ class PassPositionsTests(unittest.TestCase):
                 {
                     "recipient": "0x0000000000000000000000000000000000000002",
                     "amount_wei": 1000, "gas": 21_000,
+                    "gas_cap_wei": 10**18,
                 },
                 4663,
                 on_broadcast=lambda transaction_hash, tx: broadcasts.append((transaction_hash, tx)),
             )
         self.assertEqual(broadcasts[0][0], "0xambiguous")
         self.assertEqual(broadcasts[0][1]["nonce"], 3)
+
+    def test_send_route_rechecks_gas_cap_at_broadcast(self):
+        w3 = SimpleNamespace(eth=Mock())
+        w3.eth.gas_price = 2_000_000_000
+        w3.eth.get_block.return_value = {"baseFeePerGas": 2_000_000_000}
+        w3.eth.get_transaction_count.return_value = 3
+        account = Mock(address="0x0000000000000000000000000000000000000001")
+        with self.assertRaisesRegex(ValueError, "exceeds gas cap"):
+            module.send_route(
+                {"w3": w3, "account": account},
+                {
+                    "recipient": "0x0000000000000000000000000000000000000002",
+                    "amount_wei": 1000, "gas": 21_000,
+                    "gas_cap_wei": 40_000_000_000_000,
+                },
+                4663,
+            )
+        w3.eth.send_raw_transaction.assert_not_called()
 
     def test_capacity_text_preserves_comment_and_legacy_setting(self):
         updated = module.replace_capacity_text(
@@ -137,6 +197,118 @@ class PassPositionsTests(unittest.TestCase):
             self.assertEqual(data["filled"], 1)
             self.assertEqual(data["available"], 4)
             self.assertEqual(data["reserve_wei"], 1_500_000_000_000_000)
+            self.assertEqual(data["transfer_gas_cap_wei"], 100_000_000_000_000)
+
+    def test_metadata_uses_env_fee_transfer_gas_cap(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.bot(directory, "prism", 5, gas_cap="0.00007")
+            data = module.bot_metadata("prism", root)
+            self.assertEqual(data["transfer_gas_cap_eth"], "0.00007")
+            self.assertEqual(data["transfer_gas_cap_wei"], 70_000_000_000_000)
+
+    def test_live_preflight_requires_only_donor_principal_and_gas_reserve(self):
+        source_address = "0x0000000000000000000000000000000000000001"
+        recipient_address = "0x0000000000000000000000000000000000000002"
+
+        class FakeAccount:
+            @staticmethod
+            def from_key(key):
+                address = source_address if key == "source-key" else recipient_address
+                return SimpleNamespace(address=address)
+
+        class FakeEth:
+            chain_id = 4663
+            gas_price = 1_000_000_000
+
+            def get_block(self, _which):
+                return {"baseFeePerGas": 1_000_000_000}
+
+            def get_code(self, _address):
+                return b""
+
+            def estimate_gas(self, _tx):
+                return 21_000
+
+            def get_balance(self, _address):
+                # Principal plus gas reserve, with nothing for retained slots.
+                return 1_600_000_000_000_000
+
+        class FakeWeb3:
+            @staticmethod
+            def HTTPProvider(url, request_kwargs=None):
+                return url
+
+            @staticmethod
+            def to_checksum_address(address):
+                return address
+
+            def __init__(self, _provider):
+                self.eth = FakeEth()
+
+            def is_connected(self):
+                return True
+
+        plan = {
+            "sources": {"source": 1},
+            "destinations": {"recipient": 1},
+            "routes": [{"source": "source", "destination": "recipient", "positions": 1}],
+            "amounts_wei": {"source": 1_500_000_000_000_000},
+            "gas_caps_wei": {"source": 100_000_000_000_000},
+            "wallet_addresses": {
+                "source": source_address, "recipient": recipient_address,
+            },
+        }
+        metadata = {
+            "source": {
+                "private_key": "source-key",
+                "values": {"RPC_URL": "rpc", "CHAIN_ID": "4663", "GAS_LIMIT_MULTIPLIER": "1", "PRIVATE_KEY": "source-key"},
+                "available": 10,
+                "reserve_wei": 1_500_000_000_000_000,
+                "gas_reserve_wei": 100_000_000_000_000,
+            },
+            "recipient": {"private_key": "recipient-key", "values": {}},
+        }
+        with patch.object(module, "chain_imports", return_value=(FakeAccount, FakeWeb3)), \
+                redirect_stdout(StringIO()):
+            module.prepare_chain(plan, metadata)
+        self.assertEqual(plan["feasibility"]["source"]["required_wei"], 1_600_000_000_000_000)
+        self.assertNotIn("retained_position_reserve_wei", plan["feasibility"]["source"])
+
+    def test_live_preflight_enforces_fee_transfer_gas_cap(self):
+        class FakeAccount:
+            @staticmethod
+            def from_key(key):
+                suffix = 1 if key == "source" else 2
+                return SimpleNamespace(address=f"0x{suffix:040x}")
+
+        class FakeEth:
+            chain_id = 4663
+            gas_price = 1_000_000_000
+
+            def get_block(self, _which): return {"baseFeePerGas": 1_000_000_000}
+            def get_code(self, _address): return b""
+            def estimate_gas(self, _tx): return 21_000
+
+        class FakeWeb3:
+            HTTPProvider = staticmethod(lambda url, request_kwargs=None: url)
+            to_checksum_address = staticmethod(lambda address: address)
+            def __init__(self, _provider): self.eth = FakeEth()
+            def is_connected(self): return True
+
+        plan = {
+            "sources": {"source": 1}, "destinations": {"recipient": 1},
+            "routes": [{"source": "source", "destination": "recipient", "positions": 1}],
+            "amounts_wei": {"source": 1}, "gas_caps_wei": {"source": 20_000_000_000_000},
+            "wallet_addresses": {"source": f"0x{1:040x}", "recipient": f"0x{2:040x}"},
+        }
+        metadata = {
+            "source": {"private_key": "source", "values": {"RPC_URL": "rpc", "CHAIN_ID": "4663", "GAS_LIMIT_MULTIPLIER": "1", "PRIVATE_KEY": "source"}},
+            "recipient": {"private_key": "recipient", "values": {}},
+        }
+        with patch.object(module, "chain_imports", return_value=(FakeAccount, FakeWeb3)), \
+                redirect_stdout(StringIO()), \
+                self.assertRaisesRegex(ValueError, "exceeds gas cap"):
+            module.prepare_chain(plan, metadata)
 
     def test_metadata_allows_unrelated_duplicate_env_values_with_last_value_winning(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -226,7 +398,8 @@ class PassPositionsTests(unittest.TestCase):
             self.assertIn("sarn: give 2", body)
             self.assertIn("prism: give 1", body)
             self.assertIn("urmom: receive 3", body)
-            self.assertIn("amount/position=0.0015 ETH", body)
+            self.assertIn("principal=0.0015 ETH/position", body)
+            self.assertIn("gas cap=0.0001 ETH/transfer", body)
             self.assertRegex(body, r"Plan ID: [0-9a-f]{16}")
             self.assertIn("POSITION PASS ALLOCATION PREVIEW", body)
             self.assertIn("POSITION PASS APPROVAL PLAN", body)
@@ -245,16 +418,67 @@ class PassPositionsTests(unittest.TestCase):
                     "--bot", f"prism={prism}",
                 ])
 
-    def test_main_refuses_amount_below_recipient_position_reserve(self):
+    def test_full_donor_is_not_an_active_transfer_participant(self):
+        with tempfile.TemporaryDirectory() as directory:
+            full = self.bot(directory, "full", 12, filled=12, reserve="0")
+            open_bot = self.bot(directory, "open", 12, filled=7)
+            recipient = self.bot(directory, "recipient", 10, filled=10)
+            captured = {}
+
+            class FakeAccount:
+                @staticmethod
+                def from_key(key):
+                    return SimpleNamespace(address=f"0x{sum(key.encode()):040x}")
+
+            def fake_prepare(plan, _metadata, execute=False):
+                captured.update(plan)
+                for route in plan["routes"]:
+                    route["amount_wei"] = plan["amounts_wei"][route["source"]] * route["positions"]
+                    route["max_fee_wei"] = 1
+                return {}
+
+            with patch.object(module, "chain_imports", return_value=(FakeAccount, object())), \
+                    patch.object(module, "prepare_chain", side_effect=fake_prepare), \
+                    redirect_stdout(StringIO()):
+                module.main([
+                    "--from", "full,open", "--to", "recipient", "--positions", "3",
+                    "--journal-dir", str(Path(directory) / "journals"),
+                    "--bot", f"full={full}", "--bot", f"open={open_bot}",
+                    "--bot", f"recipient={recipient}",
+                ])
+            self.assertEqual(captured["sources"], {"open": 3})
+            self.assertNotIn("full", captured["wallet_addresses"])
+
+    def test_donor_principal_is_not_replaced_by_recipient_reserve(self):
         with tempfile.TemporaryDirectory() as directory:
             donor = self.bot(directory, "donor", 4, reserve="0.001")
             recipient = self.bot(directory, "recipient", 4, reserve="0.002")
-            with self.assertRaisesRegex(ValueError, "below recipient's"):
+            captured = {}
+
+            class FakeAccount:
+                @staticmethod
+                def from_key(key):
+                    return SimpleNamespace(address=f"0x{sum(key.encode()):040x}")
+
+            def fake_prepare(plan, _metadata, execute=False):
+                captured.update(plan)
+                for route in plan["routes"]:
+                    route["amount_wei"] = plan["amounts_wei"][route["source"]] * route["positions"]
+                    route["max_fee_wei"] = 1
+                return {}
+
+            with patch.object(module, "chain_imports", return_value=(FakeAccount, object())), \
+                    patch.object(module, "prepare_chain", side_effect=fake_prepare), \
+                    redirect_stdout(StringIO()):
                 module.main([
                     "--from", "donor", "--to", "recipient", "--positions", "1",
+                    "--max-gas", "0.00008", "--max-gas-from", "donor=0.00006",
                     "--journal-dir", str(Path(directory) / "journals"),
                     "--bot", f"donor={donor}", "--bot", f"recipient={recipient}",
                 ])
+            self.assertEqual(captured["amounts_eth"], {"donor": "0.001"})
+            self.assertEqual(captured["routes"][0]["amount_wei"], 10**15)
+            self.assertEqual(captured["gas_caps_eth"], {"donor": "0.00006"})
 
     def test_execute_journals_transfer_then_commits_both_capacities(self):
         class FakeAccount:
@@ -350,6 +574,13 @@ class PassPositionsTests(unittest.TestCase):
             interrupted = json.loads((journal_dir / f"{plan_id}.json").read_text())
             self.assertEqual(interrupted["status"], "interrupted")
             self.assertEqual(interrupted["plan"]["routes"][0]["tx_hash"], "0xfirst")
+            # Compatibility: journals created before transfer gas caps were
+            # persisted must remain resumable after partial execution.
+            interrupted["plan"].pop("gas_caps_eth")
+            interrupted["plan"].pop("gas_caps_wei")
+            for safety in interrupted["plan"]["donor_safety"].values():
+                safety.pop("configured_transfer_gas_cap_wei")
+            module.atomic_json(journal_dir / f"{plan_id}.json", interrupted)
             with patch.object(module, "chain_imports", return_value=(FakeAccount, object())), \
                     patch.object(module, "prepare_chain", side_effect=fake_prepare), \
                     patch.object(module, "send_route", return_value=("0xsecond", {"gas": 21_000, "gasPrice": 1})) as sender, \
