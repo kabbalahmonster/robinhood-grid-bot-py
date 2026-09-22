@@ -245,6 +245,28 @@ def parse_positions(value):
     return int(value)
 
 
+def nonnegative_integer(value, label):
+    if not str(value).isdigit():
+        raise ValueError(f"{label} must be a non-negative integer")
+    return int(value)
+
+
+def parse_reserve_overrides(values, bots):
+    overrides = {}
+    known = {name.lower(): name for name in bots}
+    for raw in values or []:
+        name, separator, count_text = raw.partition("=")
+        if not separator or name.lower() not in known:
+            raise ValueError(f"--reserve-from must be a fleet BOT=N assignment: {raw}")
+        canonical = known[name.lower()]
+        if canonical in overrides:
+            raise ValueError(f"Duplicate --reserve-from override: {canonical}")
+        overrides[canonical] = nonnegative_integer(
+            count_text, f"{canonical} reserve"
+        )
+    return overrides
+
+
 def maximum_source_total(specs, capacities):
     total = 0
     for name, count in specs:
@@ -287,7 +309,7 @@ def infer_total(requested, sources, destinations):
 
 
 def fair_allocate(specs, total, capacities=None, label="allocation",
-                  initial_availability=None):
+                  initial_availability=None, source_availability=None):
     result = {name: (count or 0) for name, count in specs}
     fixed = sum(result.values())
     if fixed > total:
@@ -314,7 +336,8 @@ def fair_allocate(specs, total, capacities=None, label="allocation",
         if capacities:
             # Give from the donor that will have the most open capacity left.
             # max() deliberately keeps the first supplied name on ties.
-            name = max(candidates, key=lambda item: capacities[item] - result[item])
+            balancing = source_availability or capacities
+            name = max(candidates, key=lambda item: balancing[item] - result[item])
         elif initial_availability is not None:
             # Add to the recipient with the least open capacity. min() keeps
             # supplied order on ties, making the plan stable and reproducible.
@@ -704,8 +727,10 @@ def print_allocation_preview(plan, metadata):
             continue
         original = plan["capacity_snapshot"][name]["capacity"]
         available_before = original - data["filled"]
+        reserve_floor = plan.get("availability_reserves", {}).get(name, 0)
         print(f"- {name}: give {count}; capacity {original} -> {original-count}; "
               f"filled={data['filled']} availability {available_before} -> {available_before-count}; "
+              f"reserve floor={reserve_floor}; "
               f"principal={plan['amounts_eth'][name]} ETH/position "
               f"({Decimal(plan['amounts_eth'][name]) * count} ETH total); "
               f"gas cap={plan['gas_caps_eth'][name]} ETH/transfer")
@@ -745,10 +770,11 @@ def print_plan(plan, metadata):
             continue
         original = plan["capacity_snapshot"][name]["capacity"]
         feasibility = plan.get("feasibility", {}).get(name, {})
+        reserve_floor = plan.get("availability_reserves", {}).get(name, 0)
         print(f"- {name} ({plan.get('wallet_addresses', {}).get(name, 'address unavailable')}):")
         print(f"    positions: give {count}; capacity {original} -> {original-count}; "
               f"filled={data['filled']} availability {original-data['filled']} -> "
-              f"{original-data['filled']-count}")
+              f"{original-data['filled']-count}; reserve floor={reserve_floor}")
         print(f"    principal/position: {plan['amounts_eth'][name]} ETH; "
               f"total principal: {Decimal(plan['amounts_eth'][name]) * count} ETH")
         print(f"    gas cap/transfer: {plan['gas_caps_eth'][name]} ETH")
@@ -793,6 +819,10 @@ def main(argv=None):
     parser.add_argument("--treasury-env")
     parser.add_argument("--to", dest="destinations", action="append")
     parser.add_argument("--positions")
+    parser.add_argument("--reserve", default="0")
+    parser.add_argument(
+        "--reserve-from", "--reserve-bot", action="append", default=[]
+    )
     parser.add_argument("--amount-per-position")
     parser.add_argument("--amount-from", action="append", default=[])
     parser.add_argument(
@@ -812,6 +842,7 @@ def main(argv=None):
     parser.add_argument("--local-preflight", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     args.positions = parse_positions(args.positions)
+    args.reserve = nonnegative_integer(args.reserve, "--reserve")
 
     bot_dirs = {}
     for item in args.bot:
@@ -845,7 +876,7 @@ def main(argv=None):
         if (args.sources or args.destinations or args.positions
                 or args.amount_per_position or args.amount_from
                 or args.max_gas or args.max_gas_from or args.from_treasury
-                or args.treasury_env):
+                or args.treasury_env or args.reserve or args.reserve_from):
             raise ValueError("--resume cannot be combined with new allocation arguments")
         if not journal_path.is_file():
             raise ValueError(f"Unknown position-pass journal: {args.resume}")
@@ -873,6 +904,18 @@ def main(argv=None):
                 warn_permissions=not args.local_preflight,
             )
             for name in selected_names
+        }
+        reserve_overrides = parse_reserve_overrides(args.reserve_from, bot_dirs)
+        selected_source_names = {name for name, _count in source_specs}
+        unknown_reserve_overrides = set(reserve_overrides) - selected_source_names
+        if unknown_reserve_overrides:
+            raise ValueError(
+                "Reserve override supplied for non-source: "
+                f"{', '.join(sorted(unknown_reserve_overrides))}"
+            )
+        reserve_floors = {
+            name: reserve_overrides.get(name, args.reserve)
+            for name, _count in source_specs
         }
         maximum_requested = args.positions == "available"
         total = None if maximum_requested else infer_total(
@@ -925,7 +968,16 @@ def main(argv=None):
             )
             _treasury_address, treasury_balance = treasury_live_balance(treasury_data)
 
-        bot_capacities = {n: metadata[n]["available"] for n, _ in source_specs}
+        bot_capacities = {
+            name: max(0, metadata[name]["available"] - reserve_floors[name])
+            for name, _count in source_specs
+        }
+        for name, count in source_specs:
+            if count is not None and count > bot_capacities[name]:
+                raise ValueError(
+                    f"{name} can give at most {bot_capacities[name]} position(s) "
+                    f"while reserving {reserve_floors[name]} open slot(s), not {count}"
+                )
         if maximum_requested:
             bot_total = maximum_source_total(source_specs, bot_capacities)
             if treasury_data:
@@ -1018,6 +1070,9 @@ def main(argv=None):
             source_specs, bot_total,
             capacities=bot_capacities,
             label="source",
+            source_availability={
+                name: metadata[name]["available"] for name, _count in source_specs
+            },
         ) if source_specs else {}
         source_counts = {}
         if treasury_count:
@@ -1084,6 +1139,10 @@ def main(argv=None):
                                   for n in (set(source_counts) | set(destination_counts))
                                   if n != TREASURY_SOURCE},
             "wallet_addresses": wallet_addresses,
+            "availability_reserves": {
+                name: reserve_floors[name]
+                for name in source_counts if name != TREASURY_SOURCE
+            },
             "donor_safety": {n: {
                 "position_reserve_wei": metadata[n]["reserve_wei"],
                 "gas_reserve_wei": metadata[n]["gas_reserve_wei"],

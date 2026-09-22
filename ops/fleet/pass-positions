@@ -27,6 +27,8 @@ Allocation:
   --to SPECS                 Recipients: same syntax as --from
   --positions N|all|available
                              Exact total, or maximum available from the sources
+  --reserve N                Keep at least N open slots on every bot donor
+  --reserve-from BOT=N       Per-donor reserve override (repeatable)
   --amount-per-position ETH  Override every donor's reserve amount
   --amount-from BOT=ETH      Override one donor's amount (repeatable)
   --max-gas ETH              Override every donor's per-transfer gas cap
@@ -39,6 +41,8 @@ positions add recipient capacity without reducing any bot's capacity.
 --from all uses every configured fleet bot except those named by --to.
 --positions all and --positions available are equivalent and transfer the
 maximum open capacity offered by the selected sources using normal leveling.
+--reserve subtracts a retained open-slot floor before donor leveling;
+--reserve-from overrides that floor for one selected bot.
 --positions may be omitted when every bot on either side has an exact count; if
 both sides are exact, their totals must match.
 
@@ -66,6 +70,10 @@ Examples:
   # Drain every available slot across the fleet except the recipients.
   pass-positions --from all --to urmom,delta --positions available
 
+  # Sweep only slots above a two-slot reserve, with one bot-specific floor.
+  pass-positions --from all --to urmom,delta --positions all \
+    --reserve 2 --reserve-from prism=4
+
   # Fund from Treasury first, then level any remainder across bot donors.
   pass-positions --from-treasury --from sarn,prism \
     --to urmom,delta --positions 6 --amount-per-position 0.0015
@@ -92,6 +100,7 @@ Safety model:
   * Default amount is each donor's TREASURY_POSITION_RESERVE_ETH.
   * Default gas cap is each donor's MAX_FEE_TRANSFER_GAS_ETH, or 0.0001 ETH.
   * Donor capacity never drops below filled positions.
+  * Requested donor reserve floors are enforced before allocation.
   * Treasury preserves its ETH_GAS_RESERVE after principal and maximum gas.
   * Balances, chain identity, wallet identity, and transfer gas are preflighted.
   * The complete plan is validated before the first broadcast.

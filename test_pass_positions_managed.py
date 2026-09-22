@@ -202,7 +202,7 @@ class ManagedPassPositionsTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         for text in (
             "Allocation:", "Execution:", "Examples:", "Safety model:",
-            "--manage-bots", "--resume PLAN_ID", "BOT=COUNT",
+            "--manage-bots", "--resume PLAN_ID", "BOT=COUNT", "--reserve-from",
         ):
             with self.subTest(text=text):
                 self.assertIn(text, result.stdout)

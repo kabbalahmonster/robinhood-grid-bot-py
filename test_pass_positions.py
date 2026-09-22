@@ -96,6 +96,18 @@ class PassPositionsTests(unittest.TestCase):
             {"a": 1, "b": 4},
         )
 
+    def test_custom_reserve_limits_do_not_replace_raw_availability_leveling(self):
+        self.assertEqual(
+            module.fair_allocate(
+                [("high_floor", None), ("low_floor", None)],
+                2,
+                capacities={"high_floor": 1, "low_floor": 5},
+                label="source",
+                source_availability={"high_floor": 5, "low_floor": 5},
+            ),
+            {"high_floor": 1, "low_floor": 1},
+        )
+
     def test_recipients_are_filled_to_even_open_availability(self):
         result = module.fair_allocate(
             [("c", None), ("d", None)], 3,
@@ -145,6 +157,16 @@ class PassPositionsTests(unittest.TestCase):
         self.assertEqual(module.parse_positions("3"), 3)
         with self.assertRaisesRegex(ValueError, "positive integer, all, or available"):
             module.parse_positions("everything")
+
+    def test_reserve_overrides_are_nonnegative_and_canonicalized(self):
+        self.assertEqual(
+            module.parse_reserve_overrides(["ALPHA=2", "beta=0"], {
+                "alpha": "a", "beta": "b",
+            }),
+            {"alpha": 2, "beta": 0},
+        )
+        with self.assertRaisesRegex(ValueError, "non-negative integer"):
+            module.parse_reserve_overrides(["alpha=-1"], {"alpha": "a"})
 
     def test_maximum_source_total_preserves_exact_overrides(self):
         self.assertEqual(
@@ -568,6 +590,54 @@ class PassPositionsTests(unittest.TestCase):
             self.assertEqual(captured["positions"], 7)
             self.assertEqual(captured["sources"], {"alpha": 2, "beta": 5})
             self.assertEqual(captured["destinations"], {"recipient": 7})
+
+    def test_positions_all_respects_global_and_per_bot_reserve_floors(self):
+        class FakeAccount:
+            @staticmethod
+            def from_key(key):
+                return SimpleNamespace(address=f"0x{sum(key.encode()):040x}")
+
+        captured = {}
+
+        def fake_prepare(plan, _metadata, execute=False):
+            captured.update(plan)
+            for route in plan["routes"]:
+                route["amount_wei"] = plan["amounts_wei"][route["source"]] * route["positions"]
+                route["max_fee_wei"] = 1
+                route["recipient"] = plan["wallet_addresses"][route["destination"]]
+            return {}
+
+        with tempfile.TemporaryDirectory() as directory:
+            alpha = self.bot(directory, "alpha", 5, filled=1)  # available 4
+            beta = self.bot(directory, "beta", 7, filled=2)    # available 5
+            recipient = self.bot(directory, "recipient", 3, filled=3)
+            with patch.object(module, "chain_imports", return_value=(FakeAccount, object())), \
+                    patch.object(module, "prepare_chain", side_effect=fake_prepare), \
+                    redirect_stdout(StringIO()):
+                self.assertEqual(module.main([
+                    "--from", "all", "--to", "recipient", "--positions", "all",
+                    "--reserve", "2", "--reserve-from", "beta=4",
+                    "--journal-dir", str(Path(directory) / "journals"),
+                    "--bot", f"alpha={alpha}", "--bot", f"beta={beta}",
+                    "--bot", f"recipient={recipient}",
+                ]), 0)
+            self.assertEqual(captured["positions"], 3)
+            self.assertEqual(captured["sources"], {"alpha": 2, "beta": 1})
+            self.assertEqual(
+                captured["availability_reserves"], {"alpha": 2, "beta": 4}
+            )
+
+    def test_exact_source_count_cannot_cross_reserve_floor(self):
+        with tempfile.TemporaryDirectory() as directory:
+            donor = self.bot(directory, "donor", 5, filled=1)  # available 4
+            recipient = self.bot(directory, "recipient", 3, filled=3)
+            with self.assertRaisesRegex(ValueError, "while reserving 2 open slot"):
+                module.main([
+                    "--from", "donor=3", "--to", "recipient", "--positions", "3",
+                    "--reserve", "2",
+                    "--journal-dir", str(Path(directory) / "journals"),
+                    "--bot", f"donor={donor}", "--bot", f"recipient={recipient}",
+                ])
 
     def test_positions_available_adds_treasury_max_to_all_bot_capacity(self):
         class FakeAccount:

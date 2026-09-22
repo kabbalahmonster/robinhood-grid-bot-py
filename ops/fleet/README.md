@@ -1354,6 +1354,37 @@ source bots contribute zero, recipients can never become donors through the
 `all` expansion, and a zero-capacity result is refused without live transfers
 or file changes.
 
+Add `--reserve N` to retain at least that many open slots on every bot donor.
+The floor is subtracted from each donor's `capacity - filled` availability
+before maximum calculation and standard leveling. Bots already at or below the
+floor contribute zero; the command never reduces them further:
+
+```bash
+pass-positions \
+  --from all \
+  --to robinvault,scopl \
+  --positions all \
+  --reserve 2
+```
+
+Use repeated `--reserve-from BOT=N` assignments for per-bot floors. They
+override the global value for that donor:
+
+```bash
+pass-positions \
+  --from all \
+  --to robinvault,scopl \
+  --positions available \
+  --reserve 2 \
+  --reserve-from bun=4 \
+  --reserve-from earn=0
+```
+
+Reserve floors apply to exact `BOT=COUNT` donors too. An exact contribution
+that would cross its effective floor is refused rather than silently reduced;
+use a per-bot zero override when that is deliberately intended. Treasury uses
+its separate ETH reserve rules and is not affected by open-slot reserve flags.
+
 Use `BOT=COUNT` for exact assignments. Plain names share whatever remains:
 
 ```bash
