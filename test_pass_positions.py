@@ -139,6 +139,35 @@ class PassPositionsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "totals differ"):
             module.infer_total(None, [("a", 2)], [("b", 3)])
 
+    def test_positions_accepts_all_and_available_aliases(self):
+        self.assertEqual(module.parse_positions("all"), "available")
+        self.assertEqual(module.parse_positions("AVAILABLE"), "available")
+        self.assertEqual(module.parse_positions("3"), 3)
+        with self.assertRaisesRegex(ValueError, "positive integer, all, or available"):
+            module.parse_positions("everything")
+
+    def test_maximum_source_total_preserves_exact_overrides(self):
+        self.assertEqual(
+            module.maximum_source_total(
+                [("fixed", 2), ("flexible", None)],
+                {"fixed": 5, "flexible": 4},
+            ),
+            6,
+        )
+
+    def test_from_all_expands_fleet_in_order_and_excludes_recipients(self):
+        bots = {"alpha": "a", "beta": "b", "gamma": "c"}
+        self.assertEqual(
+            module.resolve_source_specs(
+                ["all"], bots, [("beta", None)]
+            ),
+            [("alpha", None), ("gamma", None)],
+        )
+        with self.assertRaisesRegex(ValueError, "must be used alone"):
+            module.resolve_source_specs(
+                ["all,alpha"], bots, [("beta", None)]
+            )
+
     def test_routes_aggregate_into_at_most_sources_plus_destinations_minus_one(self):
         routes = module.build_routes(
             {"a": 2, "b": 1}, {"x": 1, "y": 2}
@@ -506,6 +535,75 @@ class PassPositionsTests(unittest.TestCase):
                 [("Treasury", "x", 3), ("Treasury", "y", 1),
                  ("a", "y", 1), ("b", "y", 1)],
             )
+
+    def test_positions_all_drains_every_available_slot_from_whole_fleet(self):
+        class FakeAccount:
+            @staticmethod
+            def from_key(key):
+                return SimpleNamespace(address=f"0x{sum(key.encode()):040x}")
+
+        captured = {}
+
+        def fake_prepare(plan, _metadata, execute=False):
+            captured.update(plan)
+            for route in plan["routes"]:
+                route["amount_wei"] = plan["amounts_wei"][route["source"]] * route["positions"]
+                route["max_fee_wei"] = 1
+                route["recipient"] = plan["wallet_addresses"][route["destination"]]
+            return {}
+
+        with tempfile.TemporaryDirectory() as directory:
+            alpha = self.bot(directory, "alpha", 4, filled=2)
+            beta = self.bot(directory, "beta", 7, filled=2)
+            recipient = self.bot(directory, "recipient", 3, filled=3)
+            with patch.object(module, "chain_imports", return_value=(FakeAccount, object())), \
+                    patch.object(module, "prepare_chain", side_effect=fake_prepare), \
+                    redirect_stdout(StringIO()):
+                self.assertEqual(module.main([
+                    "--from", "all", "--to", "recipient", "--positions", "all",
+                    "--journal-dir", str(Path(directory) / "journals"),
+                    "--bot", f"alpha={alpha}", "--bot", f"beta={beta}",
+                    "--bot", f"recipient={recipient}",
+                ]), 0)
+            self.assertEqual(captured["positions"], 7)
+            self.assertEqual(captured["sources"], {"alpha": 2, "beta": 5})
+            self.assertEqual(captured["destinations"], {"recipient": 7})
+
+    def test_positions_available_adds_treasury_max_to_all_bot_capacity(self):
+        class FakeAccount:
+            @staticmethod
+            def from_key(key):
+                return SimpleNamespace(address=f"0x{sum(key.encode()):040x}")
+
+        captured = {}
+
+        def fake_prepare(plan, _metadata, execute=False):
+            captured.update(plan)
+            for route in plan["routes"]:
+                route["amount_wei"] = plan["amounts_wei"][route["source"]] * route["positions"]
+                route["max_fee_wei"] = 1
+                route["recipient"] = plan["wallet_addresses"][route["destination"]]
+            return {}
+
+        with tempfile.TemporaryDirectory() as directory:
+            donor = self.bot(directory, "donor", 4, filled=2)
+            recipient = self.bot(directory, "recipient", 3, filled=3)
+            treasury = self.treasury(directory)
+            # Treasury safely covers four slots: 4*0.0015 + one 0.0001 route
+            # plus its preserved 0.0005 reserve = 0.0066 ETH.
+            with patch.object(module, "chain_imports", return_value=(FakeAccount, object())), \
+                    patch.object(module, "treasury_live_balance", return_value=("0xtreasury", 6_700_000_000_000_000)), \
+                    patch.object(module, "prepare_chain", side_effect=fake_prepare), \
+                    redirect_stdout(StringIO()):
+                self.assertEqual(module.main([
+                    "--from-treasury", "--treasury-env", str(treasury),
+                    "--from", "donor", "--to", "recipient",
+                    "--positions", "available",
+                    "--journal-dir", str(Path(directory) / "journals"),
+                    "--bot", f"donor={donor}", "--bot", f"recipient={recipient}",
+                ]), 0)
+            self.assertEqual(captured["positions"], 6)
+            self.assertEqual(captured["sources"], {"Treasury": 4, "donor": 2})
 
     def test_exact_bot_source_count_is_reserved_before_treasury(self):
         self.assertEqual(

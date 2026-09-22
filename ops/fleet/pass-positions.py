@@ -217,6 +217,59 @@ def resolve_names(specs, bots, label):
     return resolved
 
 
+def resolve_source_specs(raw_values, bots, destination_specs):
+    if not raw_values:
+        return []
+    specs = parse_specs(raw_values, "--from")
+    all_specs = [item for item in specs if item[0].lower() == "all"]
+    if all_specs:
+        if len(specs) != 1 or all_specs[0][1] is not None:
+            raise ValueError("--from all must be used alone without an exact count")
+        excluded = {name.lower() for name, _count in destination_specs}
+        expanded = [
+            (name, None) for name in bots if name.lower() not in excluded
+        ]
+        if not expanded:
+            raise ValueError("--from all has no fleet bots left after excluding recipients")
+        return expanded
+    return resolve_names(specs, bots, "--from")
+
+
+def parse_positions(value):
+    if value is None:
+        return None
+    if str(value).lower() in {"all", "available"}:
+        return "available"
+    if not str(value).isdigit() or int(value) < 1:
+        raise ValueError("--positions must be a positive integer, all, or available")
+    return int(value)
+
+
+def maximum_source_total(specs, capacities):
+    total = 0
+    for name, count in specs:
+        available = capacities[name]
+        if count is not None:
+            if count > available:
+                raise ValueError(
+                    f"{name} can give at most {available} available position(s), not {count}"
+                )
+            total += count
+        else:
+            total += available
+    return total
+
+
+def allocate_destinations(specs, total, metadata):
+    counts = fair_allocate(
+        specs,
+        total,
+        initial_availability={name: metadata[name]["available"] for name, _ in specs},
+        label="destination",
+    )
+    return {name: count for name, count in counts.items() if count}
+
+
 def infer_total(requested, sources, destinations):
     if requested is not None:
         if requested < 1:
@@ -739,7 +792,7 @@ def main(argv=None):
     parser.add_argument("--from-treasury", "--from-Treasury", action="store_true")
     parser.add_argument("--treasury-env")
     parser.add_argument("--to", dest="destinations", action="append")
-    parser.add_argument("--positions", type=int)
+    parser.add_argument("--positions")
     parser.add_argument("--amount-per-position")
     parser.add_argument("--amount-from", action="append", default=[])
     parser.add_argument(
@@ -758,6 +811,7 @@ def main(argv=None):
     parser.add_argument("--list-involved", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--local-preflight", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
+    args.positions = parse_positions(args.positions)
 
     bot_dirs = {}
     for item in args.bot:
@@ -778,13 +832,10 @@ def main(argv=None):
                 if name != TREASURY_SOURCE
             ] + list(listed_plan["destinations"])
         else:
-            source_specs = (
-                resolve_names(parse_specs(args.sources, "--from"), bot_dirs, "--from")
-                if args.sources else []
-            )
+            destination_specs = resolve_names(parse_specs(args.destinations, "--to"), bot_dirs, "--to")
+            source_specs = resolve_source_specs(args.sources, bot_dirs, destination_specs)
             if not source_specs and not args.from_treasury:
                 raise ValueError("At least one --from bot or --from-treasury is required")
-            destination_specs = resolve_names(parse_specs(args.destinations, "--to"), bot_dirs, "--to")
             names = [name for name, _count in source_specs + destination_specs]
         if len({name.lower() for name in names}) != len(names):
             raise ValueError("Bots cannot be both donors and recipients")
@@ -808,13 +859,10 @@ def main(argv=None):
             return 0
         plan = journal["plan"]
     else:
-        source_specs = (
-            resolve_names(parse_specs(args.sources, "--from"), bot_dirs, "--from")
-            if args.sources else []
-        )
+        destination_specs = resolve_names(parse_specs(args.destinations, "--to"), bot_dirs, "--to")
+        source_specs = resolve_source_specs(args.sources, bot_dirs, destination_specs)
         if not source_specs and not args.from_treasury:
             raise ValueError("At least one --from bot or --from-treasury is required")
-        destination_specs = resolve_names(parse_specs(args.destinations, "--to"), bot_dirs, "--to")
         overlap = {name.lower() for name, _ in source_specs} & {name.lower() for name, _ in destination_specs}
         if overlap:
             raise ValueError(f"Bots cannot be both donors and recipients: {', '.join(sorted(overlap))}")
@@ -826,13 +874,10 @@ def main(argv=None):
             )
             for name in selected_names
         }
-        total = infer_total(args.positions, source_specs, destination_specs)
-        destination_counts = fair_allocate(
-            destination_specs, total,
-            initial_availability={n: metadata[n]["available"] for n, _ in destination_specs},
-            label="destination",
+        maximum_requested = args.positions == "available"
+        total = None if maximum_requested else infer_total(
+            args.positions, source_specs, destination_specs
         )
-        destination_counts = {name: count for name, count in destination_counts.items() if count}
         global_amount = decimal_eth(args.amount_per_position, "amount per position")[0] if args.amount_per_position else None
         per_source = parse_amount_overrides(
             args.amount_from, bot_dirs, allow_treasury=args.from_treasury,
@@ -850,7 +895,7 @@ def main(argv=None):
         treasury_data = None
         treasury_count = 0
         fixed_bot_count = sum(count or 0 for _name, count in source_specs)
-        if fixed_bot_count > total:
+        if total is not None and fixed_bot_count > total:
             raise ValueError(
                 f"Manual source counts total {fixed_bot_count}, exceeding {total}"
             )
@@ -879,16 +924,91 @@ def main(argv=None):
                 else Decimal(treasury_data["transfer_gas_cap_eth"]),
             )
             _treasury_address, treasury_balance = treasury_live_balance(treasury_data)
-            treasury_count = treasury_affordable_positions(
-                total - fixed_bot_count,
-                int(treasury_amount * WEI),
-                treasury_balance,
-                treasury_data["gas_reserve_wei"],
-                int(treasury_gas_cap * WEI),
-                destination_counts,
-            )
 
-        bot_total = total - treasury_count
+        bot_capacities = {n: metadata[n]["available"] for n, _ in source_specs}
+        if maximum_requested:
+            bot_total = maximum_source_total(source_specs, bot_capacities)
+            if treasury_data:
+                spendable = max(0, treasury_balance - treasury_data["gas_reserve_wei"])
+                upper = spendable // int(treasury_amount * WEI)
+                allocation_error = None
+                funding_shortfall = False
+                exact_destination_total = (
+                    sum(count for _name, count in destination_specs)
+                    if all(count is not None for _name, count in destination_specs)
+                    else None
+                )
+                if exact_destination_total is not None:
+                    exact_treasury_count = exact_destination_total - bot_total
+                    if exact_treasury_count < 0:
+                        raise ValueError(
+                            "Exact destination counts are smaller than the maximum "
+                            "available bot-source total"
+                        )
+                    candidates = (exact_treasury_count,)
+                else:
+                    candidates = range(upper, -1, -1)
+                for candidate in candidates:
+                    candidate_total = bot_total + candidate
+                    if candidate_total < 1:
+                        continue
+                    try:
+                        candidate_destinations = allocate_destinations(
+                            destination_specs, candidate_total, metadata
+                        )
+                    except ValueError as exc:
+                        allocation_error = exc
+                        continue
+                    route_count = len(build_routes(
+                        {TREASURY_SOURCE: candidate}, candidate_destinations
+                    )) if candidate else 0
+                    required = (
+                        candidate * int(treasury_amount * WEI)
+                        + route_count * int(treasury_gas_cap * WEI)
+                        + treasury_data["gas_reserve_wei"]
+                    )
+                    if candidate == 0 or required <= treasury_balance:
+                        treasury_count = candidate
+                        total = candidate_total
+                        destination_counts = candidate_destinations
+                        break
+                    funding_shortfall = True
+                else:
+                    if funding_shortfall:
+                        detail = (
+                            "the exact destination total"
+                            if exact_destination_total is not None else "any position"
+                        )
+                        raise ValueError(
+                            f"Treasury cannot fund {detail} while preserving its "
+                            "reserve and maximum route gas"
+                        )
+                    if allocation_error:
+                        raise allocation_error
+                    raise ValueError("No positions are available from the selected sources")
+            else:
+                total = bot_total
+                if total < 1:
+                    raise ValueError("No positions are available from the selected sources")
+                destination_counts = allocate_destinations(
+                    destination_specs, total, metadata
+                )
+        else:
+            destination_counts = allocate_destinations(
+                destination_specs, total, metadata
+            )
+            if treasury_data:
+                treasury_count = treasury_affordable_positions(
+                    total - fixed_bot_count,
+                    int(treasury_amount * WEI),
+                    treasury_balance,
+                    treasury_data["gas_reserve_wei"],
+                    int(treasury_gas_cap * WEI),
+                    destination_counts,
+                )
+
+        if not maximum_requested:
+            bot_total = total - treasury_count
         if bot_total and not source_specs:
             raise ValueError(
                 f"Treasury can safely fund {treasury_count} of {total} position(s); "
@@ -896,7 +1016,7 @@ def main(argv=None):
             )
         bot_source_counts = fair_allocate(
             source_specs, bot_total,
-            capacities={n: metadata[n]["available"] for n, _ in source_specs},
+            capacities=bot_capacities,
             label="source",
         ) if source_specs else {}
         source_counts = {}

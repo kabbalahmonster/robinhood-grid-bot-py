@@ -1326,6 +1326,34 @@ Treasury calculates the automatic remainder. This allows an operator to force
 a particular bot contribution while still using Treasury first for every
 otherwise unassigned position.
 
+Use `--positions all` or its equivalent alias `--positions available` to move
+the maximum transferable open capacity from the selected sources. Flexible bot
+donors contribute all of their current `capacity - filled` slots; exact
+`BOT=COUNT` donors still contribute only their explicit counts. Normal leveling
+determines the order in which those slots are assigned. With
+`--from-treasury`, the maximum additionally includes every position Treasury
+can fund while preserving its reserve and maximum route gas:
+
+```bash
+pass-positions \
+  --from bun,earn,bow,hookr,many \
+  --to robinvault,scopl \
+  --positions available
+```
+
+`--from all` selects the entire configured fleet as flexible donors, excluding
+every bot named on the recipient side. It must be used alone rather than mixed
+with named or exact donor specs:
+
+```bash
+pass-positions --from all --to robinvault,scopl --positions all
+```
+
+The recipient side is still leveled from its least current availability. Full
+source bots contribute zero, recipients can never become donors through the
+`all` expansion, and a zero-capacity result is refused without live transfers
+or file changes.
+
 Use `BOT=COUNT` for exact assignments. Plain names share whatever remains:
 
 ```bash

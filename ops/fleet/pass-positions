@@ -8,7 +8,8 @@ source "$SCRIPT_DIR/fleet-common.sh"
 
 usage() {
   cat <<'EOF'
-Usage: pass-positions [--from SPECS] [--from-treasury] --to SPECS [--positions N] [options]
+Usage: pass-positions [--from SPECS] [--from-treasury] --to SPECS
+                      [--positions N|all|available] [options]
        pass-positions --resume PLAN_ID --execute --confirm-plan PLAN_ID
 
 Reallocate whole unused position-capacity slots and their native ETH reserve
@@ -17,13 +18,15 @@ Dry run is the default and prints a live approval plan; no funds or files
 change unless --execute is supplied.
 
 Allocation:
-  --from SPECS               Donors: BOT or BOT=COUNT, comma-separated/repeatable
+  --from SPECS               Donors: BOT or BOT=COUNT, comma-separated/repeatable;
+                             use all alone for the whole fleet except recipients
   --from-treasury            Fund as many remaining positions as safely possible
                              before using plain --from bots
   --treasury-env PATH        Treasury signer env (default:
                              $FLEET_TREASURY_ENV or ~/bot-farm/treasury.env)
   --to SPECS                 Recipients: same syntax as --from
-  --positions N              Total whole positions to move
+  --positions N|all|available
+                             Exact total, or maximum available from the sources
   --amount-per-position ETH  Override every donor's reserve amount
   --amount-from BOT=ETH      Override one donor's amount (repeatable)
   --max-gas ETH              Override every donor's per-transfer gas cap
@@ -33,6 +36,9 @@ Plain donors are chosen from greatest remaining open capacity; plain recipients
 are chosen from least current open capacity. Supplied order breaks ties.
 BOT=COUNT is exact and reserved before Treasury allocation. Treasury-funded
 positions add recipient capacity without reducing any bot's capacity.
+--from all uses every configured fleet bot except those named by --to.
+--positions all and --positions available are equivalent and transfer the
+maximum open capacity offered by the selected sources using normal leveling.
 --positions may be omitted when every bot on either side has an exact count; if
 both sides are exact, their totals must match.
 
@@ -56,6 +62,9 @@ Examples:
 
   # Fairly split 3 whole positions across multiple donors and recipients.
   pass-positions --from sarn,prism --to urmom,delta --positions 3
+
+  # Drain every available slot across the fleet except the recipients.
+  pass-positions --from all --to urmom,delta --positions available
 
   # Fund from Treasury first, then level any remainder across bot donors.
   pass-positions --from-treasury --from sarn,prism \
