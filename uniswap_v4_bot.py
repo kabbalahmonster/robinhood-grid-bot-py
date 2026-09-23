@@ -8,7 +8,7 @@ import json
 import time
 import logging
 from web3 import Web3
-from config import load_config
+from config import ROBINHOOD_UNIVERSAL_ROUTER, load_config
 from wallet import Wallet
 from rpc_rotator import create_web3
 
@@ -19,9 +19,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger('uniswap_v4_bot')
 
-# Uniswap V4 Universal Router on Robinhood Chain
-# Need to find actual address - using standard for now
-UNISWAP_V4_ROUTER = "0x66a9893cC07ee8d7D8516a4E0904F84e4c6E4f68"  # TODO: Verify
+# Universal Router v2.1.2 on Robinhood Chain.
+UNISWAP_V4_ROUTER = ROBINHOOD_UNIVERSAL_ROUTER
 
 # Universal Router ABI (minimal for swap)
 ROUTER_ABI = [

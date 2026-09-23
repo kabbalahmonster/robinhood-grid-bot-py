@@ -45,16 +45,17 @@ def main():
     }
     variants = [
         ("bare", {}),
-        ("official-defaults", {
+        ("legacy-router-2.0", {
             "x-universal-router-version": "2.0",
             "x-erc20eth-enabled": "false",
             "x-permit2-disabled": "false",
         }),
-        ("router-2.1.1-only", {"x-universal-router-version": "2.1.1"}),
+        ("legacy-router-2.1.1-only", {"x-universal-router-version": "2.1.1"}),
+        ("router-2.1.2-only", {"x-universal-router-version": "2.1.2"}),
         ("erc20eth-only", {"x-erc20eth-enabled": "true"}),
         ("permit2-disabled-only", {"x-permit2-disabled": "true"}),
         ("current", {
-            "x-universal-router-version": "2.1.1",
+            "x-universal-router-version": "2.1.2",
             "x-erc20eth-enabled": "true",
             "x-permit2-disabled": "true",
         }),
@@ -68,7 +69,7 @@ def main():
             "tokenIn": "0x0000000000000000000000000000000000000000",
         }
         production_headers = {
-            "x-universal-router-version": "2.1.1",
+            "x-universal-router-version": "2.1.2",
             "x-erc20eth-enabled": "true",
             "x-permit2-disabled": "true",
             "User-Agent": "curl/8.0",
@@ -86,7 +87,7 @@ def main():
         ]
     elif args.transport:
         integration_headers = {
-            "x-universal-router-version": "2.1.1",
+            "x-universal-router-version": "2.1.2",
             "x-erc20eth-enabled": "true",
             "x-permit2-disabled": "true",
         }
@@ -132,7 +133,7 @@ def main():
         control_swapper = "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045"
         bot_swapper = body["swapper"]
         common_headers = {
-            "x-universal-router-version": "2.1.1",
+            "x-universal-router-version": "2.1.2",
             "x-erc20eth-enabled": "true",
             "x-permit2-disabled": "true",
         }

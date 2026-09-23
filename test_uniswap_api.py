@@ -5,10 +5,44 @@ import json
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from config import (
+    BASE_UNIVERSAL_ROUTER,
+    CHAIN_CONFIG,
+    MAINNET_UNIVERSAL_ROUTER,
+    ROBINHOOD_UNIVERSAL_ROUTER,
+    UNISWAP_UNIVERSAL_ROUTER_VERSION,
+)
 from uniswap_api import UniswapAPIClient
 
 
 class TestUniswapAPIClient(unittest.TestCase):
+    def test_supported_chains_use_universal_router_2_1_2(self):
+        config = SimpleNamespace(
+            uniswap_api_key="test-key", uniswap_permit2_disabled=True,
+            chain_id=4663, anti_mev_jitter=False,
+        )
+
+        client = UniswapAPIClient(config)
+
+        self.assertEqual(UNISWAP_UNIVERSAL_ROUTER_VERSION, "2.1.2")
+        self.assertEqual(
+            ROBINHOOD_UNIVERSAL_ROUTER,
+            "0x204FAca1764B154221e35c0d20aBb3c525710498",
+        )
+        self.assertEqual(
+            CHAIN_CONFIG[4663]["uniswap_router"], ROBINHOOD_UNIVERSAL_ROUTER
+        )
+        self.assertEqual(
+            CHAIN_CONFIG[8453]["uniswap_router"], BASE_UNIVERSAL_ROUTER
+        )
+        self.assertEqual(
+            CHAIN_CONFIG[1]["uniswap_router"], MAINNET_UNIVERSAL_ROUTER
+        )
+        self.assertEqual(
+            client.headers["x-universal-router-version"],
+            UNISWAP_UNIVERSAL_ROUTER_VERSION,
+        )
+
     def test_protocol_hint_lookup_does_not_evict_expired_execution_cache_entry(self):
         config = SimpleNamespace(
             uniswap_api_key="test-key", uniswap_permit2_disabled=True,

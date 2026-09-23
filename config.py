@@ -12,6 +12,11 @@ from dataclasses import dataclass
 from typing import Optional
 from dotenv import load_dotenv
 
+UNISWAP_UNIVERSAL_ROUTER_VERSION = "2.1.2"
+ROBINHOOD_UNIVERSAL_ROUTER = "0x204FAca1764B154221e35c0d20aBb3c525710498"
+BASE_UNIVERSAL_ROUTER = "0xd6145b2D3F379919E8CdEda7B97e37c4b2Ca9c40"
+MAINNET_UNIVERSAL_ROUTER = "0x23617e59A5925b2A4Bf75d73ff6711cD0b29De85"
+
 # Contract addresses for supported chains
 CHAIN_CONFIG = {
     4663: {  # Robinhood Chain
@@ -19,7 +24,7 @@ CHAIN_CONFIG = {
         "weth": "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73",
         "permit2": "0x000000000022d473030f116ddee9f6b43ac78ba3",
         "zero_x_proxy": "0x0000000000001ff3684f28c67538d4d072c22734",  # 0x AllowanceHolder
-        "uniswap_router": "0x8876789976decbfcbbbe364623c63652db8c0904",  # Universal Router v2.1.1
+        "uniswap_router": ROBINHOOD_UNIVERSAL_ROUTER,
         "default_max_positions": 20,
     },
     8453: {  # Base
@@ -27,7 +32,7 @@ CHAIN_CONFIG = {
         "weth": "0x4200000000000000000000000000000000000006",
         "permit2": "0x000000000022d473030f116ddee9f6b43ac78ba3",
         "zero_x_proxy": "0xDef1C0ded9bec7F1a1670819833240f027b25EfF",
-        "uniswap_router": "0xEf1c6E67703c7BD7107eed8303Fbe6EC2554BF6B",  # Universal Router v2
+        "uniswap_router": BASE_UNIVERSAL_ROUTER,
         "default_max_positions": 10,
     },
     1: {  # Ethereum Mainnet
@@ -35,7 +40,7 @@ CHAIN_CONFIG = {
         "weth": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
         "permit2": "0x000000000022d473030f116ddee9f6b43ac78ba3",
         "zero_x_proxy": "0xDef1C0ded9bec7F1a1670819833240f027b25EfF",
-        "uniswap_router": "0xEf1c6E67703c7BD7107eed8303Fbe6EC2554BF6B",  # Universal Router v2
+        "uniswap_router": MAINNET_UNIVERSAL_ROUTER,
         "default_max_positions": 10,
     },
 }

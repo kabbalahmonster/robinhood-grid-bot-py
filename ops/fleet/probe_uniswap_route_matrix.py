@@ -232,7 +232,7 @@ def main(argv=None):
     if args.slippage is not None:
         body["slippageTolerance"] = round(float(args.slippage), 2)
     headers = {
-        "x-universal-router-version": "2.1.1", "x-erc20eth-enabled": "true",
+        "x-universal-router-version": "2.1.2", "x-erc20eth-enabled": "true",
         "x-permit2-disabled": str(values.get("UNISWAP_PERMIT2_DISABLED", "true")).lower(),
         "User-Agent": "curl/8.0", "Connection": "close", "Accept": "application/json",
     }

@@ -203,6 +203,12 @@ SWAP_PROVIDER=sushiswap  # sushiswap, uniswap, lifi, or 0x
 
 Explicit `SWAP_PROVIDER` takes precedence. `sushi` is accepted as an alias for `sushiswap`. When the setting is empty, backward-compatible selection checks `USE_UNISWAP_API=true`, then `USE_LI_FI=true`, otherwise 0x. The normalized templates currently select Uniswap through the legacy flag and configure Sushi as the fallback. On a retryable primary failure (HTTP 404/408/425/429/5xx, timeout, or connection failure), the current pre-broadcast operation stops and immediately restarts from the beginning with the fallback. A valid regular-sell quote that misses the gas-aware minimum-profit floor also triggers one alternate-provider quote before allowance inspection; that route is selected only if it independently clears both the same profit floor and the sell-gas cap. The next operation gives the configured primary the first opportunity again. This avoids mixing approvals and calldata from different routers inside one transaction flow. When Sushi is primary and the default Sushi fallback value is unchanged, the bot automatically uses Uniswap as the reverse fallback if `UNISWAP_API_KEY` is configured; set `SWAP_FALLBACK_PROVIDER` empty to disable fallback. Sushi uses its v7 quote/swap API and supports an optional `SUSHI_API_KEY`; the other providers require their matching credentials. When Sushi returns HTTP 429, that bot honors `Retry-After` when supplied and otherwise enters a jittered exponential cooldown (30 seconds up to 15 minutes). Requests are skipped locally during the cooldown and a successful response resets the backoff.
 
+Uniswap requests pin Universal Router `2.1.2`. Robinhood's corresponding
+router/allowance address is `0x204FAca1764B154221e35c0d20aBb3c525710498`;
+Base and mainnet use their official chain-specific v2.1.2 deployments. The API
+header, chain configuration, and read-only gateway probes are kept on that same
+version so approvals and returned swap calldata cannot drift apart.
+
 For actionable Uniswap operations, transient upstream timeouts and inconsistent
 no-route responses receive bounded fresh-discovery retries. Passive price
 polling remains single-attempt to avoid multiplying fleet traffic. If all

@@ -19,7 +19,7 @@ class ProbeUniswapRouteMatrixTests(unittest.TestCase):
             "type": "EXACT_INPUT",
         }
         self.headers = {
-            "x-universal-router-version": "2.1.1",
+            "x-universal-router-version": "2.1.2",
             "x-erc20eth-enabled": "true",
             "x-permit2-disabled": "true",
             "User-Agent": "curl/8.0",
@@ -53,7 +53,7 @@ class ProbeUniswapRouteMatrixTests(unittest.TestCase):
             "baseline_round_1", "baseline_round_2", "baseline_round_3", "baseline_round_4",
         ])
         self.assertEqual({item["body"]["amount"] for item in series}, {"100"})
-        self.assertEqual({item["headers"]["x-universal-router-version"] for item in series}, {"2.1.1"})
+        self.assertEqual({item["headers"]["x-universal-router-version"] for item in series}, {"2.1.2"})
 
     def test_select_variants_preserves_requested_ab_order(self):
         selected = select_variants(build_variants(self.body, self.headers), ["baseline", "v4_only"])

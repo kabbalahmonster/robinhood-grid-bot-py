@@ -17,7 +17,7 @@ from dataclasses import dataclass
 import requests
 from web3 import Web3
 
-from config import BotConfig
+from config import BotConfig, UNISWAP_UNIVERSAL_ROUTER_VERSION
 from shared_rate_limit import SharedRateLimiter
 from utils import apply_jitter
 
@@ -83,7 +83,7 @@ class UniswapAPIClient:
         self.headers = {
             "x-api-key": self.api_key,
             "Content-Type": "application/json",
-            "x-universal-router-version": "2.1.1",
+            "x-universal-router-version": UNISWAP_UNIVERSAL_ROUTER_VERSION,
             "x-erc20eth-enabled": "true",
         }
         
