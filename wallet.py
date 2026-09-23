@@ -232,6 +232,28 @@ class Wallet:
             "value_wei": int((tx or {}).get("value") or 0),
             "error": error,
         }
+        self._persist_transaction_guard(record)
+
+    def _record_unsubmitted_guard(self, guard_type: str, tx: Optional[dict], error: str) -> None:
+        """Persist a retryable safety guard for a transaction never broadcast."""
+        record = {
+            # Keep a stable identifier in tx_hash for compatibility with the
+            # existing startup halt and parent/child reconciliation protocol.
+            "tx_hash": guard_type,
+            "guard_type": guard_type,
+            "broadcast_state": "not_attempted",
+            "recorded_at_unix": int(time.time()),
+            "chain_id": getattr(self.config, "chain_id", None),
+            "wallet": getattr(self, "address", None),
+            "nonce": (tx or {}).get("nonce"),
+            "to": str((tx or {}).get("to") or ""),
+            "value_wei": int((tx or {}).get("value") or 0),
+            "error": error,
+        }
+        self._persist_transaction_guard(record)
+
+    def _persist_transaction_guard(self, record: dict) -> None:
+        """Atomically persist a broadcast or pre-broadcast safety guard."""
         path = getattr(
             self, "unresolved_broadcast_path",
             os.path.join("data", "unresolved_broadcast.json"),
@@ -277,6 +299,44 @@ class Wallet:
         )
         return archived
 
+    def archive_unsubmitted_guard(self, guard_type: str) -> Optional[str]:
+        """Archive an explicitly pre-broadcast guard after its check recovers."""
+        record = getattr(self, "unresolved_broadcast", None)
+        if not isinstance(record, dict):
+            return None
+        recorded_type = str(record.get("guard_type") or record.get("tx_hash") or "")
+        if recorded_type != str(guard_type or ""):
+            return None
+        if not (
+            record.get("broadcast_state") == "not_attempted"
+            or (
+                recorded_type == "pre-sell-balance-unavailable"
+                and str(record.get("error") or "").startswith(
+                    "cannot snapshot token balance before sell"
+                )
+            )
+        ):
+            return None
+
+        path = getattr(
+            self, "unresolved_broadcast_path",
+            os.path.join("data", "unresolved_broadcast.json"),
+        )
+        timestamp = int(time.time())
+        archived = f"{path}.not-broadcast.{timestamp}"
+        suffix = 1
+        while os.path.exists(archived):
+            archived = f"{path}.not-broadcast.{timestamp}.{suffix}"
+            suffix += 1
+        os.replace(path, archived)
+        self.unresolved_broadcast = None
+        self.logger.warning(
+            "Archived recovered pre-broadcast safety guard type=%s: %s",
+            recorded_type,
+            archived,
+        )
+        return archived
+
     def matching_archived_broadcast(self, tx_hash: str) -> Optional[dict]:
         """Return durable evidence that this exact guard was safely archived."""
         expected = str(tx_hash or "").strip().lower()
@@ -291,6 +351,7 @@ class Wallet:
         prefixes = {
             f"{basename}.reconciled.": "receipt_reconciled",
             f"{basename}.definitive-rejection.": "definitive_prebroadcast_rejection",
+            f"{basename}.not-broadcast.": "recovered_prebroadcast_guard",
         }
         try:
             names = sorted(os.listdir(directory), reverse=True)

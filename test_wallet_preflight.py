@@ -267,6 +267,41 @@ class TestWalletPreflight(unittest.TestCase):
             self.assertTrue(os.path.exists(path))
             self.assertEqual(wallet.unresolved_broadcast["tx_hash"], "0xabc123")
 
+    def test_unsubmitted_guard_records_state_and_archives_after_recovery(self):
+        wallet = self.make_wallet()
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "unresolved_broadcast.json")
+            wallet.config = SimpleNamespace(chain_id=4663)
+            wallet.address = "0x1"
+            wallet.unresolved_broadcast_path = path
+
+            wallet._record_unsubmitted_guard(
+                "pre-sell-balance-unavailable", {"nonce": 42},
+                "cannot snapshot token balance before sell for position 7: RPC unavailable",
+            )
+
+            self.assertEqual(wallet.unresolved_broadcast["broadcast_state"], "not_attempted")
+            archived = wallet.archive_unsubmitted_guard("pre-sell-balance-unavailable")
+            self.assertFalse(os.path.exists(path))
+            self.assertTrue(os.path.exists(archived))
+            self.assertIsNone(wallet.unresolved_broadcast)
+            evidence = wallet.matching_archived_broadcast("pre-sell-balance-unavailable")
+            self.assertEqual(evidence["reason"], "recovered_prebroadcast_guard")
+
+    def test_unsubmitted_guard_rejects_unknown_or_outcome_unknown_record(self):
+        wallet = self.make_wallet()
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "unresolved_broadcast.json")
+            wallet.unresolved_broadcast_path = path
+            wallet.unresolved_broadcast = {
+                "tx_hash": "0xabc123", "broadcast_state": "outcome_unknown",
+            }
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump(wallet.unresolved_broadcast, handle)
+
+            self.assertIsNone(wallet.archive_unsubmitted_guard("0xabc123"))
+            self.assertTrue(os.path.exists(path))
+
     def test_matching_archived_broadcast_requires_exact_hash(self):
         wallet = self.make_wallet()
         with tempfile.TemporaryDirectory() as directory:

@@ -11,6 +11,7 @@ from pathlib import Path
 
 POSITION_FILES = (Path("data/positions.json"), Path("data/gridless_positions.json"))
 TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+PRE_SELL_BALANCE_GUARD = "pre-sell-balance-unavailable"
 
 
 def _hex(value):
@@ -74,6 +75,22 @@ def atomic_json(path, value):
     os.replace(temporary, path)
 
 
+def recovered_prebroadcast_guard(record):
+    """Return a known never-submitted guard once prerequisite RPC reads work."""
+    if not isinstance(record, dict):
+        return None
+    guard_type = str(record.get("guard_type") or record.get("tx_hash") or "")
+    if guard_type != PRE_SELL_BALANCE_GUARD:
+        return None
+    if record.get("broadcast_state") == "not_attempted":
+        return guard_type
+    # Backward compatibility for guards written before broadcast_state existed.
+    if str(record.get("error") or "").startswith(
+            "cannot snapshot token balance before sell"):
+        return guard_type
+    return None
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--apply", action="store_true")
@@ -109,10 +126,27 @@ def main():
         "wallet_raw": wallet_raw, "tracked_raw": tracked_raw, "deficit_raw": deficit_raw,
         "apply": args.apply, "changes": [],
     }
+    guard = getattr(wallet, "unresolved_broadcast", None)
+    prebroadcast_guard = recovered_prebroadcast_guard(guard)
+    if args.automatic and prebroadcast_guard:
+        archived = wallet.archive_unsubmitted_guard(prebroadcast_guard)
+        if not archived:
+            result["unresolved_broadcast_match"] = {
+                "tx_hash": prebroadcast_guard,
+                "status": "prebroadcast_guard_archive_failed",
+            }
+            print(json.dumps(result, separators=(",", ":")))
+            return 2
+        result["unresolved_broadcast_match"] = {
+            "tx_hash": prebroadcast_guard,
+            "status": "recovered_prebroadcast_guard",
+            "archived_path": archived,
+        }
+        print(json.dumps(result, separators=(",", ":")))
+        return 0
     if deficit_raw == 0:
         # Recovery for a haircut applied by an older release: re-check the most
         # recent local audit and archive only an exact receipt-proven match.
-        guard = getattr(wallet, "unresolved_broadcast", None)
         audit_path = Path("data/position_balance_reconciliations.json")
         recovered_prior_reconciliation = False
         if args.apply and isinstance(guard, dict) and guard.get("tx_hash"):

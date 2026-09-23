@@ -946,7 +946,7 @@ class GridBot:
             existing = getattr(self.wallet, "unresolved_broadcast", None)
             if not existing:
                 try:
-                    self.wallet._record_unresolved_broadcast(
+                    self.wallet._record_unsubmitted_guard(
                         "pre-sell-balance-unavailable", tx, reason
                     )
                 except Exception as journal_exc:

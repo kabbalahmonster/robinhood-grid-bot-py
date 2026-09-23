@@ -55,7 +55,10 @@ class PositionBalanceGuardTests(unittest.TestCase):
         self.assertIsNone(balance)
         self.assertTrue(bot.running)
         self.assertTrue(bot._safety_halted)
-        bot.wallet._record_unresolved_broadcast.assert_called_once()
+        bot.wallet._record_unsubmitted_guard.assert_called_once_with(
+            "pre-sell-balance-unavailable", {"nonce": 42},
+            "cannot snapshot token balance before sell for position 7: RPC unavailable",
+        )
 
     def test_halts_and_journals_when_failed_sell_reduces_token_balance(self):
         bot = self.bot(6_726)
