@@ -12,6 +12,7 @@ from pathlib import Path
 POSITION_FILES = (Path("data/positions.json"), Path("data/gridless_positions.json"))
 TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 PRE_SELL_BALANCE_GUARD = "pre-sell-balance-unavailable"
+POSITION_BALANCE_GUARD = "position-balance-mismatch"
 
 
 def _hex(value):
@@ -91,6 +92,23 @@ def recovered_prebroadcast_guard(record):
     return None
 
 
+def recovered_position_balance_guard(record):
+    """Return the synthetic guard created from an observed position deficit."""
+    if not isinstance(record, dict):
+        return None
+    guard_type = str(record.get("guard_type") or record.get("tx_hash") or "")
+    if guard_type != POSITION_BALANCE_GUARD:
+        return None
+    if record.get("broadcast_state") == "not_attempted":
+        return guard_type
+    # Backward compatibility for guards written before the mismatch was
+    # correctly classified as a non-broadcast state-reconciliation guard.
+    if str(record.get("error") or "").startswith(
+            "gridless tracked balance exceeds wallet balance"):
+        return guard_type
+    return None
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--apply", action="store_true")
@@ -128,6 +146,7 @@ def main():
     }
     guard = getattr(wallet, "unresolved_broadcast", None)
     prebroadcast_guard = recovered_prebroadcast_guard(guard)
+    position_balance_guard = recovered_position_balance_guard(guard)
     if args.automatic and prebroadcast_guard:
         archived = wallet.archive_unsubmitted_guard(prebroadcast_guard)
         if not archived:
@@ -145,6 +164,19 @@ def main():
         print(json.dumps(result, separators=(",", ":")))
         return 0
     if deficit_raw == 0:
+        if args.automatic and position_balance_guard:
+            archived = wallet.archive_unsubmitted_guard(position_balance_guard)
+            result["unresolved_broadcast_match"] = {
+                "tx_hash": position_balance_guard,
+                "status": (
+                    "state_guard_recovered_no_deficit"
+                    if archived else "state_guard_archive_failed"
+                ),
+            }
+            if archived:
+                result["unresolved_broadcast_match"]["archived_path"] = archived
+            print(json.dumps(result, separators=(",", ":")))
+            return 0 if archived else 2
         # Recovery for a haircut applied by an older release: re-check the most
         # recent local audit and archive only an exact receipt-proven match.
         audit_path = Path("data/position_balance_reconciliations.json")
@@ -242,7 +274,8 @@ def main():
 
     matching_guard_hash = None
     guard = getattr(wallet, "unresolved_broadcast", None)
-    if args.apply and isinstance(guard, dict) and guard.get("tx_hash"):
+    if (args.apply and isinstance(guard, dict) and guard.get("tx_hash")
+            and not position_balance_guard):
         candidate_hash = str(guard["tx_hash"])
         try:
             outgoing_raw = verified_outgoing_tokens(
@@ -265,7 +298,7 @@ def main():
                 "error": str(exc),
             }
 
-    if args.automatic and not matching_guard_hash:
+    if args.automatic and not (matching_guard_hash or position_balance_guard):
         result["automatic_reconciliation"] = "refused_without_exact_receipt_match"
         print(json.dumps(result, separators=(",", ":")))
         return 2
@@ -278,9 +311,25 @@ def main():
             backup = path.with_name(path.name + f".bak.reconcile.{timestamp}")
             backup.write_bytes(path.read_bytes())
             atomic_json(path, positions)
+        state_guard_archived = None
         if matching_guard_hash:
             archived = wallet.archive_reconciled_broadcast(matching_guard_hash)
             result["unresolved_broadcast_match"]["archived_path"] = archived
+        elif position_balance_guard:
+            state_guard_archived = wallet.archive_unsubmitted_guard(
+                position_balance_guard
+            )
+            result["unresolved_broadcast_match"] = {
+                "tx_hash": position_balance_guard,
+                "status": (
+                    "state_verified_position_haircut"
+                    if state_guard_archived else "state_guard_archive_failed"
+                ),
+            }
+            if state_guard_archived:
+                result["unresolved_broadcast_match"]["archived_path"] = (
+                    state_guard_archived
+                )
         audit_path = Path("data/position_balance_reconciliations.json")
         try:
             audit = json.loads(audit_path.read_text())
@@ -292,6 +341,10 @@ def main():
         result["method"] = "proportional_wallet_haircut_cost_basis_preserved"
         audit.append(result)
         atomic_json(audit_path, audit[-1000:])
+
+        if position_balance_guard and not state_guard_archived:
+            print(json.dumps(result, separators=(",", ":")))
+            return 2
 
     print(json.dumps(result, separators=(",", ":")))
     return 0

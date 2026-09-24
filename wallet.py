@@ -315,6 +315,12 @@ class Wallet:
                     "cannot snapshot token balance before sell"
                 )
             )
+            or (
+                recorded_type == "position-balance-mismatch"
+                and str(record.get("error") or "").startswith(
+                    "gridless tracked balance exceeds wallet balance"
+                )
+            )
         ):
             return None
 

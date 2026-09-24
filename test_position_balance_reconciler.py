@@ -212,6 +212,118 @@ def test_automatic_recovers_prebroadcast_balance_guard_after_balance_read(
     assert not guard_path.exists()
 
 
+@pytest.mark.parametrize("guard", [
+    {
+        "tx_hash": "position-balance-mismatch",
+        "guard_type": "position-balance-mismatch",
+        "broadcast_state": "not_attempted",
+        "error": "gridless tracked balance exceeds wallet balance by 25 raw units; receipt audit required",
+    },
+    {
+        "tx_hash": "position-balance-mismatch",
+        "error": "gridless tracked balance exceeds wallet balance by 25 raw units; receipt audit required",
+    },
+])
+def test_automatic_archives_position_mismatch_guard_when_deficit_recovered(
+        monkeypatch, tmp_path, guard, capsys):
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "gridless_positions.json").write_text('{"1":{"balance":100}}')
+    guard_path = data / "unresolved_broadcast.json"
+    guard_path.write_text(json.dumps(guard))
+
+    class FakeWallet:
+        def __init__(self, _config):
+            self.unresolved_broadcast = guard
+
+        def get_token_balance(self, _token):
+            return 150, 150
+
+        def archive_unsubmitted_guard(self, guard_type):
+            assert guard_type == "position-balance-mismatch"
+            archived = guard_path.with_name(guard_path.name + ".not-broadcast.1")
+            guard_path.replace(archived)
+            self.unresolved_broadcast = None
+            return str(archived)
+
+    config_module = ModuleType("config")
+    config_module.load_config = lambda: SimpleNamespace(
+        token_address=TOKEN, token_symbol="TOKEN", use_gridless=True,
+    )
+    wallet_module = ModuleType("wallet")
+    wallet_module.Wallet = FakeWallet
+    gridless_reconciler_module = ModuleType("gridless_reconciler")
+    gridless_reconciler_module.run_gridless_reconciliation = (
+        lambda *_args, **_kwargs: pytest.fail("synthetic guard used as tx hash")
+    )
+    monkeypatch.setitem(sys.modules, "config", config_module)
+    monkeypatch.setitem(sys.modules, "wallet", wallet_module)
+    monkeypatch.setitem(sys.modules, "gridless_reconciler", gridless_reconciler_module)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "argv", ["reconcile-position-balances", "--automatic"])
+
+    assert reconciler.main() == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["unresolved_broadcast_match"]["status"] == (
+        "state_guard_recovered_no_deficit"
+    )
+    assert not guard_path.exists()
+
+
+def test_automatic_position_mismatch_haircuts_to_verified_wallet_balance(
+        monkeypatch, tmp_path, capsys):
+    data = tmp_path / "data"
+    data.mkdir()
+    positions_path = data / "gridless_positions.json"
+    positions_path.write_text(json.dumps({
+        "1": {"balance": 60, "cost": 600},
+        "2": {"balance": 40, "cost": 400},
+    }))
+    guard = {
+        "tx_hash": "position-balance-mismatch",
+        "guard_type": "position-balance-mismatch",
+        "broadcast_state": "not_attempted",
+        "error": "gridless tracked balance exceeds wallet balance by 25 raw units; receipt audit required",
+    }
+    guard_path = data / "unresolved_broadcast.json"
+    guard_path.write_text(json.dumps(guard))
+
+    class FakeWallet:
+        def __init__(self, _config):
+            self.unresolved_broadcast = guard
+
+        def get_token_balance(self, _token):
+            return 75, 75
+
+        def archive_unsubmitted_guard(self, guard_type):
+            assert guard_type == "position-balance-mismatch"
+            archived = guard_path.with_name(guard_path.name + ".not-broadcast.1")
+            guard_path.replace(archived)
+            self.unresolved_broadcast = None
+            return str(archived)
+
+    config_module = ModuleType("config")
+    config_module.load_config = lambda: SimpleNamespace(
+        token_address=TOKEN, token_symbol="TOKEN", use_gridless=True,
+    )
+    wallet_module = ModuleType("wallet")
+    wallet_module.Wallet = FakeWallet
+    monkeypatch.setitem(sys.modules, "config", config_module)
+    monkeypatch.setitem(sys.modules, "wallet", wallet_module)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "argv", ["reconcile-position-balances", "--automatic"])
+
+    assert reconciler.main() == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["unresolved_broadcast_match"]["status"] == (
+        "state_verified_position_haircut"
+    )
+    positions = json.loads(positions_path.read_text())
+    assert positions["1"] == {"balance": 45, "cost": 600}
+    assert positions["2"] == {"balance": 30, "cost": 400}
+    assert not guard_path.exists()
+
+
 def test_automatic_zero_deficit_recovers_receipt_proven_gridless_buy(
         monkeypatch, tmp_path):
     data = tmp_path / "data"

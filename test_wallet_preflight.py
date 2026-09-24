@@ -302,6 +302,26 @@ class TestWalletPreflight(unittest.TestCase):
             self.assertIsNone(wallet.archive_unsubmitted_guard("0xabc123"))
             self.assertTrue(os.path.exists(path))
 
+    def test_archives_legacy_position_balance_mismatch_as_unsubmitted(self):
+        wallet = self.make_wallet()
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "unresolved_broadcast.json")
+            wallet.unresolved_broadcast_path = path
+            wallet.unresolved_broadcast = {
+                "tx_hash": "position-balance-mismatch",
+                "error": "gridless tracked balance exceeds wallet balance by 25 raw units; receipt audit required",
+            }
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump(wallet.unresolved_broadcast, handle)
+
+            archived = wallet.archive_unsubmitted_guard(
+                "position-balance-mismatch"
+            )
+
+            self.assertFalse(os.path.exists(path))
+            self.assertTrue(os.path.exists(archived))
+            self.assertIsNone(wallet.unresolved_broadcast)
+
     def test_matching_archived_broadcast_requires_exact_hash(self):
         wallet = self.make_wallet()
         with tempfile.TemporaryDirectory() as directory:
