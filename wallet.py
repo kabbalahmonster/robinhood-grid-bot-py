@@ -10,6 +10,7 @@ import logging
 import re
 import json
 import os
+from urllib.parse import urlsplit
 from typing import Optional, Any
 from dataclasses import dataclass
 from eth_account import Account
@@ -174,7 +175,13 @@ class Wallet:
         self.w3 = create_web3(config)
         
         if not self.w3.is_connected():
-            raise ConnectionError(f"Failed to connect to RPC: {config.rpc_url}")
+            rpc_urls = list(getattr(config, "rpc_urls", None) or [])
+            if rpc_urls:
+                target = f"configured RPC_URLS pool ({len(rpc_urls)} endpoints)"
+            else:
+                hostname = urlsplit(str(getattr(config, "rpc_url", ""))).hostname
+                target = f"RPC_URL host {hostname}" if hostname else "configured RPC_URL"
+            raise ConnectionError(f"Failed to connect to {target}")
         
         # Load account from private key
         self.account = Account.from_key(config.private_key)

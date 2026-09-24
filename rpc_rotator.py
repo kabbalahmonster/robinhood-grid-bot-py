@@ -14,6 +14,7 @@ from contextlib import contextmanager
 from copy import deepcopy
 from typing import Optional, List
 from dataclasses import dataclass, field
+from urllib.parse import urlsplit
 from web3 import Web3
 
 logger = logging.getLogger("grid_bot.rpc")
@@ -80,7 +81,7 @@ class RPCEndpoint:
             self.is_healthy = False
             logger.warning(
                 f"RPC endpoint marked unhealthy after {self.consecutive_failures} "
-                f"consecutive failures: {self.url}"
+                f"consecutive failures: {self.display_url}"
             )
     
     def should_retry(self) -> bool:
@@ -92,10 +93,9 @@ class RPCEndpoint:
     
     @property
     def display_url(self) -> str:
-        """Truncated URL for logging."""
-        if len(self.url) > 50:
-            return self.url[:30] + "..." + self.url[-15:]
-        return self.url
+        """Return a host-only endpoint label without credentials or API paths."""
+        parsed = urlsplit(self.url)
+        return parsed.hostname or "configured-rpc-endpoint"
 
 
 class RPCRotator:
@@ -135,7 +135,10 @@ class RPCRotator:
             # Backward-compatible: single RPC mode (original behavior)
             self._endpoints = [RPCEndpoint(url=single_rpc_url)]
             self._rotation_enabled = False
-            logger.info(f"RPC: single-endpoint mode ({single_rpc_url[:40]}...)")
+            logger.info(
+                "RPC: single-endpoint mode (%s)",
+                self._endpoints[0].display_url,
+            )
         elif custom_rpcs:
             self._endpoints = [RPCEndpoint(url=url) for url in custom_rpcs]
             self._rotation_enabled = len(custom_rpcs) > 1
@@ -512,11 +515,31 @@ class ResilientWeb3:
         return _ResilientNamespace(self, "eth")
     
     def is_connected(self) -> bool:
-        """Check if current connection is alive."""
-        try:
-            return self._w3.is_connected()
-        except Exception:
-            return False
+        """Select the first reachable configured endpoint, not just the first one."""
+        endpoints = list(self.rotator._endpoints)
+        for index, endpoint in enumerate(endpoints):
+            candidate = self.rotator._get_web3_for_url(endpoint.url)
+            try:
+                connected = bool(candidate.is_connected())
+            except Exception as exc:
+                connected = False
+                logger.warning(
+                    "RPC startup probe failed on %s: %s",
+                    endpoint.display_url, exc,
+                )
+            if not connected:
+                endpoint.record_failure()
+                continue
+            endpoint.record_success()
+            self._w3 = candidate
+            self._current_url = str(getattr(
+                getattr(candidate, "provider", None), "endpoint_uri", "unknown"
+            ))
+            # Continue round-robin after the endpoint selected by startup.
+            with self.rotator._lock:
+                self.rotator._current_index = (index + 1) % len(endpoints)
+            return True
+        return False
     
     def get_status(self) -> dict:
         """Get RPC endpoint status."""
@@ -598,8 +621,8 @@ def create_web3(config) -> Web3:
     """
     Factory function to create the appropriate Web3 instance based on config.
     
-    If config has rpc_urls list with multiple entries, returns ResilientWeb3.
-    Otherwise returns standard Web3 (backward-compatible).
+    If config has any rpc_urls entries, returns ResilientWeb3. Otherwise returns
+    standard Web3 for the legacy singular RPC_URL.
     
     Args:
         config: BotConfig instance.
@@ -609,7 +632,7 @@ def create_web3(config) -> Web3:
     """
     rpc_urls = getattr(config, 'rpc_urls', None)
     
-    if rpc_urls and len(rpc_urls) > 1:
+    if rpc_urls:
         logger.info(f"Creating resilient Web3 with {len(rpc_urls)} RPC endpoints")
         return ResilientWeb3(
             chain_id=config.chain_id,
@@ -618,7 +641,10 @@ def create_web3(config) -> Web3:
     else:
         # Backward-compatible: single RPC
         rpc_url = config.rpc_url
-        logger.info(f"Creating standard Web3 with single RPC: {rpc_url[:40]}...")
+        logger.info(
+            "Creating standard Web3 with single RPC host: %s",
+            urlsplit(rpc_url).hostname or "configured-rpc-endpoint",
+        )
         return Web3(Web3.HTTPProvider(
             rpc_url,
             request_kwargs={"timeout": 15},

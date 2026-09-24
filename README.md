@@ -39,7 +39,7 @@ A production-grade grid trading bot for Robinhood Chain and other EVM networks, 
 - pip
 - A wallet with ETH/WETH for trading
 - Credentials for the selected swap provider when required; Sushi's public v7 API works without a key
-- Alchemy or other RPC provider API key
+- One or more reachable RPC endpoints; the supplied chain templates use free public pools
 
 ### Installation
 
@@ -66,7 +66,7 @@ nano .env
 **Required .env settings for grid generation:**
 - `TOKEN_ADDRESS` - The token you want to trade (needed to fetch current price)
 - `PRIVATE_KEY` - Your wallet private key
-- `RPC_URL` - RPC endpoint URL
+- `RPC_URLS` - Comma-separated RPC endpoint pool (or `RPC_URL` for legacy single-endpoint mode)
 - `ZEROX_API_KEY` - 0x API key
 
 4. Generate grid positions (requires .env to be configured):
@@ -93,8 +93,8 @@ python grid_bot.py
 |----------|----------|---------|-------------|
 | **Wallet & Connection** ||||
 | `PRIVATE_KEY` | Yes | - | Wallet private key (with 0x prefix) |
-| `RPC_URL` | Yes | - | RPC endpoint URL (Alchemy recommended) |
-| `RPC_URLS` | No | empty | Comma-separated RPC rotation/failover list; overrides `RPC_URL` when set |
+| `RPC_URL` | Conditional | - | Legacy single RPC endpoint; used only when `RPC_URLS` is empty |
+| `RPC_URLS` | Conditional | empty | Comma-separated RPC rotation/failover list; overrides `RPC_URL` when set |
 | `CHAIN_ID` | Yes | 4663 | Chain ID (4663=Robinhood, 8453=Base, 1=Mainnet) |
 | `ZEROX_API_KEY` | Yes* | - | 0x API key from 0x.org (if using 0x) |
 | `LI_FI_API_KEY` | Yes* | - | LI.FI API key from li.fi (if using LI.FI) |
@@ -304,7 +304,8 @@ Three template files are provided:
 #### Robinhood Chain (4663) - `.env.robinhood`
 ```bash
 CHAIN_ID=4663
-RPC_URL=https://robinhood-mainnet.g.alchemy.com/v2/YOUR_KEY
+RPC_URL=https://rpc.mainnet.chain.robinhood.com
+RPC_URLS=https://rpc.mainnet.chain.robinhood.com,https://robinhood-rpc.publicnode.com,https://robinhood.api.pocket.network
 WETH_ADDRESS=0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73
 USDG_ADDRESS=0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168
 POLL_INTERVAL_SECONDS=6
@@ -314,7 +315,8 @@ MAX_POSITIONS=24             # More positions for volatile tokens
 #### Base (8453) - `.env.base`
 ```bash
 CHAIN_ID=8453
-RPC_URL=https://base-mainnet.g.alchemy.com/v2/YOUR_KEY
+RPC_URL=https://mainnet.base.org
+RPC_URLS=https://mainnet.base.org,https://base-rpc.publicnode.com,https://base.api.pocket.network
 WETH_ADDRESS=0x4200000000000000000000000000000000000006
 USDG_ADDRESS=0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913
 POLL_INTERVAL_SECONDS=6
@@ -324,7 +326,8 @@ MAX_POSITIONS=10
 #### Ethereum Mainnet (1) - `.env.mainnet`
 ```bash
 CHAIN_ID=1
-RPC_URL=https://eth-mainnet.g.alchemy.com/v2/YOUR_KEY
+RPC_URL=https://eth-rpc.publicnode.com
+RPC_URLS=https://eth-rpc.publicnode.com,https://eth.api.pocket.network,https://rpc.ankr.com/eth
 WETH_ADDRESS=0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2
 USDG_ADDRESS=0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48
 POLL_INTERVAL_SECONDS=6
@@ -1175,9 +1178,9 @@ Common failures:
 - Bot absent: confirm `DASHBOARD_URL` ends with `/api/status`, restart the bot, and test connectivity from the bot host.
 
 ### "Failed to connect to RPC"
-- Verify RPC URL in .env file
+- Verify `RPC_URLS` (or legacy `RPC_URL`) in the `.env` file
 - Check network connectivity
-- Try alternative RPC endpoint (Alchemy, QuickNode, etc.)
+- Try another endpoint or a different public/private RPC provider
 
 ### "Insufficient allowance"
 - The bot will auto-approve tokens on first use
@@ -1616,9 +1619,9 @@ quote = client.build_swap_transaction(
 
 ## Performance Tips
 
-1. **Use Private RPCs**: Public RPCs have strict rate limits
-   - Alchemy, Infura, QuickNode recommended
-   - Set in `.env`: `RPC_URL=https://...`
+1. **Use a Diverse RPC Pool**: Public RPCs can have strict rate limits or missing methods
+   - Configure multiple independent endpoints in `RPC_URLS`
+   - The bot probes the pool at startup and fails over retryable calls automatically
 
 2. **Optimize Polling**:
    - Robinhood: 1-5 seconds (fast chain)
