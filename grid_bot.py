@@ -3105,6 +3105,149 @@ class GridBot:
         """Return non-negative capacity from the current gridless state."""
         return max(0, self.config.max_active_positions - len(positions))
 
+    def _drawdown_ladder_enabled(self):
+        return (
+            str(getattr(
+                self.config, "gridless_allocation_mode", "threshold"
+            )).lower() == "drawdown_ladder"
+        )
+
+    def _prepare_gridless_ladder(self, price, positions, spendable_balance_wei, now=None):
+        """Load, recover, expire, re-arm, or create the persisted entry ladder."""
+        from drawdown_ladder import (
+            LadderStateError,
+            build_plan,
+            load_plan,
+            reconcile_confirmed_positions,
+            save_plan,
+            validate_context,
+        )
+
+        now = time.time() if now is None else now
+        plan = load_plan()
+        if plan is None:
+            if positions:
+                raise LadderStateError(
+                    "drawdown-ladder mode cannot adopt open positions without "
+                    "persisted ladder provenance; use a fresh bot state or close them first"
+                )
+            plan = build_plan(price, spendable_balance_wei, self.config, now)
+            if plan is None:
+                return None
+            save_plan(plan)
+            logger.info(
+                "Armed %s drawdown ladder %s: reference=%.10f, levels=%d, "
+                "budget=%.8f %s, terminal=-%.2f%%",
+                plan.spacing, plan.id, plan.reference_price,
+                len(plan.level_prices), plan.budget_wei / 10**18,
+                self.trade_token_name, plan.terminal_drawdown_percent,
+            )
+            return plan
+
+        validate_context(plan, positions, self.config)
+        if reconcile_confirmed_positions(plan, positions):
+            save_plan(plan)
+            logger.warning(
+                "Recovered ladder %s progress from confirmed position provenance (%d/%d)",
+                plan.id, plan.next_level_index, len(plan.level_prices),
+            )
+
+        if plan.status == "active" and now >= plan.expires_at:
+            plan.status = "expired"
+            save_plan(plan)
+            logger.warning(
+                "Drawdown ladder %s expired after %d/%d fills; remaining entries disabled",
+                plan.id, plan.next_level_index, len(plan.level_prices),
+            )
+
+        cooldown_elapsed = (
+            plan.last_exit_at is not None
+            and now - plan.last_exit_at
+            >= self.config.gridless_ladder_rearm_cooldown_seconds
+        )
+        should_rearm = (
+            plan.status == "closed"
+            and not positions
+            and self.config.gridless_ladder_rearm_policy == "after_exit"
+            and cooldown_elapsed
+        )
+        if should_rearm:
+            replacement = build_plan(price, spendable_balance_wei, self.config, now)
+            if replacement is None:
+                return plan
+            save_plan(replacement)
+            logger.info(
+                "Re-armed drawdown ladder %s after completed exit cycle: "
+                "reference=%.10f, levels=%d, budget=%.8f %s",
+                replacement.id, replacement.reference_price,
+                len(replacement.level_prices), replacement.budget_wei / 10**18,
+                self.trade_token_name,
+            )
+            return replacement
+        return plan
+
+    def _gridless_ladder_status(self, positions=None):
+        """Return fail-closed dashboard telemetry for the active ladder."""
+        if not self._drawdown_ladder_enabled():
+            return None
+        from drawdown_ladder import load_plan, status_payload, validate_context
+        from gridless import load_positions
+
+        positions = load_positions() if positions is None else positions
+        plan = load_plan()
+        if plan is None:
+            if positions:
+                raise RuntimeError("open gridless positions have no drawdown ladder state")
+            return None
+        validate_context(plan, positions, self.config)
+        return status_payload(plan)
+
+    def _ladder_execution_price_allowed(self, quote, buy_amount_wei, ladder_context):
+        """Revalidate the final executable output against the frozen ladder rung."""
+        if ladder_context is None:
+            return True
+        quoted_output = int(getattr(quote, "buy_amount", 0) or 0)
+        if quoted_output <= 0:
+            logger.error("Buy aborted: executable ladder quote has no token output")
+            return False
+        token_output = quoted_output / self.token_unit
+        execution_price = (int(buy_amount_wei) / 10**18) / token_output
+        trigger_price = float(ladder_context["trigger_price"])
+        reference_price = float(ladder_context["reference_price"])
+        execution_margin_pct = float(getattr(
+            self.config, "gridless_buy_execution_margin", 50.0
+        ))
+        allowed_recovery = trigger_price + (
+            (reference_price - trigger_price) * execution_margin_pct / 100
+        )
+        if math.isfinite(execution_price) and execution_price <= allowed_recovery:
+            return True
+
+        trigger_drawdown = (
+            (trigger_price / reference_price - 1) * 100
+            if reference_price > 0 else 0
+        )
+        allowed_drawdown = (
+            (allowed_recovery / reference_price - 1) * 100
+            if reference_price > 0 else 0
+        )
+        execution_drawdown = (
+            (execution_price / reference_price - 1) * 100
+            if reference_price > 0 and math.isfinite(execution_price) else 0
+        )
+        self._mark_buy_tournament_aborted(
+            reason="ladder_trigger_recovered",
+            market_pnl_percent=execution_drawdown,
+            block_threshold_percent=allowed_drawdown,
+            trigger_threshold_percent=trigger_drawdown,
+        )
+        logger.info(
+            "Buy aborted: executable ladder price %.10f exceeds allowed %.10f "
+            "for trigger %.10f",
+            execution_price, allowed_recovery, trigger_price,
+        )
+        return False
+
     def _gridless_sell_terms(self, position):
         """Return the exact post-moonbag sell amount and proportional cost."""
         balance = int(position.get("balance", 0) or 0)
@@ -3718,8 +3861,8 @@ class GridBot:
         self.save_positions()
 
     def _check_buys_gridless(self, price, position_pnls=None):
-        """Gridless buy logic - buy when no positions or top position P&L <= threshold."""
-        from gridless import should_buy, load_positions, add_position
+        """Evaluate threshold or persisted drawdown-ladder gridless entries."""
+        from gridless import should_buy, load_positions
 
         if self._taxed_token_active():
             failure_cooldown = self.config.taxed_token_failure_cooldown_seconds
@@ -3740,14 +3883,22 @@ class GridBot:
         
         # Load gridless positions
         gridless_positions = load_positions()
-        
-        # Check if we should buy
-        should_buy_flag, reason = should_buy(
-            gridless_positions, price, self.config, position_pnls
-        )
-        if not should_buy_flag:
-            logger.debug(f"Gridless: No buy - {reason}")
-            return
+        ladder_mode = self._drawdown_ladder_enabled()
+
+        if not ladder_mode:
+            from drawdown_ladder import load_plan
+
+            if load_plan() is not None:
+                raise RuntimeError(
+                    "threshold allocation cannot adopt persisted drawdown-ladder state; "
+                    "use the matching mode or archive the ladder and positions together"
+                )
+            should_buy_flag, reason = should_buy(
+                gridless_positions, price, self.config, position_pnls
+            )
+            if not should_buy_flag:
+                logger.debug(f"Gridless: No buy - {reason}")
+                return
         
         # Get available ETH/WETH
         if getattr(self.config, 'use_eth_trading', False):
@@ -3757,38 +3908,127 @@ class GridBot:
         else:
             trade_balance, _ = self.wallet.get_token_balance(self.config.weth_address)
         
-        if trade_balance < 0.001:
+        minimum_trade = (
+            self.config.gridless_min_position_eth if ladder_mode else 0.001
+        )
+        if trade_balance < minimum_trade and not ladder_mode:
             logger.warning(f"Gridless: Low {self.trade_token_name} balance: {trade_balance:.6f}")
             self._funding_warning = {
                 "asset": self.trade_token_name,
                 "trade_balance": trade_balance,
-                "minimum_trade_balance": 0.001,
+                "minimum_trade_balance": minimum_trade,
                 "available_slots": self._available_gridless_slots(gridless_positions),
-                "reason": reason,
+                "reason": (
+                    "drawdown ladder cannot fund one minimum position"
+                    if ladder_mode else reason
+                ),
             }
             return
         
         # Calculate buy amount
         active_count = len(gridless_positions)
         available_slots = self._available_gridless_slots(gridless_positions)
-        if available_slots <= 0:
+        if available_slots <= 0 and not ladder_mode:
             logger.debug(f"Gridless: Max positions reached ({active_count}/{self.config.max_active_positions})")
             return
         
-        tradeable_pct = getattr(self.config, 'tradeable_balance_percent', 90.0) / 100.0
-        buy_amount_eth = (trade_balance * tradeable_pct) / available_slots
-        buy_amount_wei = int(buy_amount_eth * 10**18)
+        ladder_context = None
+        if ladder_mode:
+            from drawdown_ladder import level_is_crossed
+
+            spendable_balance_wei = int(
+                Decimal(str(trade_balance)) * Decimal(10**18)
+            )
+            plan = self._prepare_gridless_ladder(
+                price, gridless_positions, spendable_balance_wei
+            )
+            if plan is None:
+                self._funding_warning = {
+                    "asset": self.trade_token_name,
+                    "trade_balance": trade_balance,
+                    "minimum_trade_balance": self.config.gridless_min_position_eth,
+                    "available_slots": available_slots,
+                    "reason": "drawdown ladder budget cannot fund one minimum position",
+                }
+                return
+            if available_slots <= 0:
+                logger.debug(
+                    "Gridless: Max positions reached (%d/%d); ladder state "
+                    "was reconciled but no entry can execute",
+                    active_count, self.config.max_active_positions,
+                )
+                return
+            if plan.status != "active":
+                logger.debug("Gridless: ladder %s is %s", plan.id, plan.status)
+                return
+            if not level_is_crossed(plan, price):
+                logger.debug(
+                    "Gridless: ladder waiting at %.10f; current %.10f",
+                    plan.next_level_price, price,
+                )
+                return
+            level_index = plan.next_level_index
+            buy_amount_wei = plan.amount_for_level(level_index)
+            if buy_amount_wei > spendable_balance_wei:
+                logger.warning(
+                    "Gridless ladder level %d/%d deferred: needs %.8f %s, "
+                    "only %.8f remains spendable",
+                    level_index + 1, len(plan.level_prices),
+                    buy_amount_wei / 10**18, self.trade_token_name,
+                    spendable_balance_wei / 10**18,
+                )
+                self._funding_warning = {
+                    "asset": self.trade_token_name,
+                    "trade_balance": trade_balance,
+                    "minimum_trade_balance": buy_amount_wei / 10**18,
+                    "available_slots": available_slots,
+                    "reason": "frozen drawdown ladder level is temporarily unaffordable",
+                }
+                return
+            buy_amount_eth = buy_amount_wei / 10**18
+            reason = (
+                f"Drawdown ladder {plan.spacing} level "
+                f"{level_index + 1}/{len(plan.level_prices)} at "
+                f"{plan.level_prices[level_index]:.10f}"
+            )
+            ladder_context = {
+                "ladder_id": plan.id,
+                "level_index": level_index,
+                "trigger_price": plan.level_prices[level_index],
+                "reference_price": plan.reference_price,
+                "principal_wei": buy_amount_wei,
+            }
+        else:
+            tradeable_pct = getattr(
+                self.config, 'tradeable_balance_percent', 90.0
+            ) / 100.0
+            buy_amount_eth = (trade_balance * tradeable_pct) / available_slots
+            buy_amount_wei = int(buy_amount_eth * 10**18)
         
         logger.info(f"🎯 Gridless buy triggered: {reason}")
-        logger.info(f"   Amount: {buy_amount_eth:.6f} {self.trade_token_name} ({trade_balance:.6f} × {tradeable_pct*100:.0f}% / {available_slots} slots)")
+        if ladder_mode:
+            logger.info(
+                "   Amount: %.8f %s (frozen ladder budget; %d levels remain)",
+                buy_amount_eth, self.trade_token_name,
+                len(plan.level_prices) - plan.next_level_index,
+            )
+        else:
+            logger.info(f"   Amount: {buy_amount_eth:.6f} {self.trade_token_name} ({trade_balance:.6f} × {tradeable_pct*100:.0f}% / {available_slots} slots)")
         
         # Execute the buy via execute_buy_gridless
-        is_leading_edge_buy = "Leading edge" in reason
-        self._execute_buy_gridless(buy_amount_eth, buy_amount_wei, price, is_leading_edge_buy)
+        is_leading_edge_buy = not ladder_mode and "Leading edge" in reason
+        self._execute_buy_gridless(
+            buy_amount_eth,
+            buy_amount_wei,
+            price,
+            is_leading_edge_buy,
+            ladder_context=ladder_context,
+        )
     
     @_with_tournament_terminal("buy")
     @_with_swap_provider_fallback
-    def _execute_buy_gridless(self, buy_amount_eth, buy_amount_wei, price, is_leading_edge_buy=False):
+    def _execute_buy_gridless(self, buy_amount_eth, buy_amount_wei, price,
+                              is_leading_edge_buy=False, ladder_context=None):
         """Execute a gridless buy order."""
         from gridless import add_position
         
@@ -3813,13 +4053,41 @@ class GridBot:
         # local variables.  It also makes the dashboard attempt reflect the
         # latest position count if state changed while the quote was prepared.
         available_slots = self._available_gridless_slots(gridless_positions)
+        active_ladder = None
+        if ladder_context is not None:
+            from drawdown_ladder import load_plan, validate_context
+
+            active_ladder = load_plan()
+            if active_ladder is None:
+                logger.critical("Buy aborted: drawdown ladder state disappeared")
+                self._safety_halted = True
+                return
+            validate_context(active_ladder, gridless_positions, self.config)
+            expected_context = (
+                active_ladder.id == ladder_context.get("ladder_id")
+                and active_ladder.status == "active"
+                and active_ladder.next_level_index == ladder_context.get("level_index")
+                and active_ladder.amount_for_level(active_ladder.next_level_index)
+                == int(ladder_context.get("principal_wei", 0))
+            )
+            if not expected_context:
+                logger.critical(
+                    "Buy aborted: drawdown ladder changed after trigger evaluation"
+                )
+                self._safety_halted = True
+                return
         
         # Validate execution price is still within buy threshold margin
         # Skip for leading edge buys (buying into strength with single position)
         execution_margin_pct = getattr(self.config, 'gridless_buy_execution_margin', 50.0)  # Default 50%
         
-        # Skip execution margin check for leading edge buys
-        if not is_leading_edge_buy and quote.buy_amount and quote.buy_amount > 0:
+        if ladder_context is not None:
+            if not self._ladder_execution_price_allowed(
+                quote, buy_amount_wei, ladder_context
+            ):
+                return
+        # Skip legacy execution margin check for leading edge buys.
+        elif not is_leading_edge_buy and quote.buy_amount and quote.buy_amount > 0:
             from gridless import get_buy_price, calculate_pnl
             top = None
             if gridless_positions:
@@ -3877,6 +4145,13 @@ class GridBot:
             "available_slots": available_slots,
             "phase": "initial_quote",
         }
+        if ladder_context is not None:
+            buy_attempt_context.update({
+                "allocation_mode": "drawdown_ladder",
+                "ladder_id": ladder_context["ladder_id"],
+                "ladder_level": ladder_context["level_index"] + 1,
+                "ladder_trigger_price": ladder_context["trigger_price"],
+            })
         if not self._gas_within_hard_cap(
             initial_gas_limit, initial_gas_price, "buy", buy_attempt_context,
         ):
@@ -3973,6 +4248,10 @@ class GridBot:
         if not self._quote_matches_exact_input(quote, buy_amount_wei):
             logger.error("Buy aborted: executable quote input/output amounts are not exact")
             return
+        if not self._ladder_execution_price_allowed(
+            quote, buy_amount_wei, ladder_context
+        ):
+            return
 
         # Execute swap with configurable gas multipliers
         # Use API's gas price estimate if available (more accurate than network average)
@@ -4049,7 +4328,32 @@ class GridBot:
             )
             logger.debug(f"Quote buy_amount: {quote.buy_amount}, sell_amount: {quote.sell_amount}")
             
-            pos_id = add_position(cost_wei, tokens_received)
+            add_kwargs = {}
+            if ladder_context is not None:
+                add_kwargs = {
+                    "ladder_id": ladder_context["ladder_id"],
+                    "ladder_level_index": ladder_context["level_index"],
+                    "ladder_principal_wei": ladder_context["principal_wei"],
+                }
+            pos_id = add_position(cost_wei, tokens_received, **add_kwargs)
+            if ladder_context is not None:
+                from drawdown_ladder import record_fill, save_plan
+
+                try:
+                    record_fill(
+                        active_ladder,
+                        ladder_context["level_index"],
+                        ladder_context["principal_wei"],
+                    )
+                    save_plan(active_ladder)
+                except Exception as exc:
+                    logger.critical(
+                        "Buy confirmed and position #%s persisted, but ladder progress "
+                        "could not be checkpointed; trading halted for restart recovery: %s",
+                        pos_id, exc,
+                    )
+                    self._safety_halted = True
+                    return
             self._clear_exact_approval_guard()
             if weth_fallback:
                 self._clear_settlement_guard()
@@ -4299,7 +4603,7 @@ class GridBot:
     @_with_tournament_terminal("sell")
     def _execute_sell_gridless(self, pos_id, pos, price, pre_fetched_quote=None):
         """Execute a gridless sell order."""
-        from gridless import remove_position, calculate_pnl
+        from gridless import remove_position, calculate_pnl, load_positions
         
         balance = pos.get('balance', 0)
         # Support both cost_wei (new) and cost (legacy nano-ETH)
@@ -4805,6 +5109,25 @@ class GridBot:
             
             # Remove position
             remove_position(pos_id)
+            if self._drawdown_ladder_enabled():
+                from drawdown_ladder import load_plan, mark_exit, save_plan
+
+                try:
+                    plan = load_plan()
+                    if plan is None or pos.get("ladder_id") != plan.id:
+                        raise RuntimeError(
+                            "sold position does not match persisted drawdown ladder"
+                        )
+                    mark_exit(plan, cycle_closed=not load_positions())
+                    save_plan(plan)
+                except Exception as exc:
+                    logger.critical(
+                        "Sell confirmed and position #%s removed, but ladder exit state "
+                        "could not be checkpointed; trading halted: %s",
+                        pos_id, exc,
+                    )
+                    self._safety_halted = True
+                    return
             self._clear_exact_approval_guard()
             
             if moonbag_tokens > 0:
@@ -6175,12 +6498,38 @@ class GridBot:
             try:
                 positions_data = []
                 capacity_warning = None
+                ladder_status = None
                 if use_gridless:
                     from gridless import load_positions, get_capacity_warning
                     gpos = load_positions()
-                    capacity_warning = get_capacity_warning(
-                        gpos, price, self.config, position_pnls
-                    )
+                    if self._drawdown_ladder_enabled():
+                        from drawdown_ladder import level_is_crossed, load_plan
+
+                        ladder_plan = load_plan()
+                        if ladder_plan is not None:
+                            ladder_status = self._gridless_ladder_status(gpos)
+                            if (len(gpos) >= self.config.max_active_positions
+                                    and level_is_crossed(ladder_plan, price)):
+                                capacity_warning = {
+                                    "code": "ladder_buy_blocked_at_capacity",
+                                    "message": (
+                                        "Drawdown ladder level crossed, but all active "
+                                        "position slots are filled"
+                                    ),
+                                    "filled_positions": len(gpos),
+                                    "max_positions": self.config.max_active_positions,
+                                    "ladder_level": ladder_plan.next_level_index + 1,
+                                    "ladder_levels": len(ladder_plan.level_prices),
+                                    "trigger_price": ladder_plan.next_level_price,
+                                }
+                        elif gpos:
+                            raise RuntimeError(
+                                "drawdown-ladder mode has positions but no ladder state"
+                            )
+                    else:
+                        capacity_warning = get_capacity_warning(
+                            gpos, price, self.config, position_pnls
+                        )
                     for pos_id, pos in gpos.items():
                         bal = pos.get('balance', 0)
                         if bal > 0:
@@ -6257,6 +6606,10 @@ class GridBot:
                     sells=self.session_sells,
                     filled_positions=active,
                     max_positions=self.config.max_active_positions,
+                    entry_allocation_mode=getattr(
+                        self.config, "gridless_allocation_mode", "threshold"
+                    ),
+                    drawdown_ladder=ladder_status,
                     capacity_warning=capacity_warning,
                     needs_gas=needs_gas,
                     funding_warning=self._funding_warning,

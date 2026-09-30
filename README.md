@@ -186,12 +186,26 @@ python grid_bot.py
 | `GRIDLESS_STOPLOSS_THRESHOLD` | No | -25.0 | Stoploss trigger % |
 | `GRIDLESS_BUY_COOLDOWN_SECONDS` | No | 0 | Cooldown between gridless buys (0 disables cooldown) |
 | `GRIDLESS_BUY_EXECUTION_MARGIN` | No | 50 | Execution margin % - blocks buy if quote P&L recovered past threshold + (abs(threshold) * margin%) (e.g., -10% trigger + 50% = block above -5%) |
+| `GRIDLESS_ALLOCATION_MODE` | No | threshold | `threshold` preserves legacy P&L-triggered entries; `drawdown_ladder` freezes a capital budget across falling-price levels |
+| `GRIDLESS_MIN_POSITION_ETH` | No | 0.001 | Minimum principal used to derive ladder position count |
+| `GRIDLESS_LADDER_TERMINAL_DRAWDOWN_PERCENT` | No | 90 | Final ladder level below its frozen reference price; must be greater than 0 and less than 100 |
+| `GRIDLESS_LADDER_SPACING` | No | linear | `linear` for equal drawdown intervals or `log` for equal price ratios |
+| `GRIDLESS_LADDER_MAX_BUDGET_ETH` | No | 0 | Optional hard principal cap per ladder; 0 disables the extra cap |
+| `GRIDLESS_LADDER_EXPIRY_SECONDS` | No | 2592000 | Stop new fills after this frozen ladder lifetime (30 days by default) |
+| `GRIDLESS_LADDER_REARM_POLICY` | No | after_exit | `after_exit` creates a fresh ladder only after all positions exit; `never` requires operator intervention |
+| `GRIDLESS_LADDER_REARM_COOLDOWN_SECONDS` | No | 3600 | Delay after the latest confirmed exit before a fresh ladder can arm |
+| `GRIDLESS_LADDER_INCLUDE_REFERENCE_ENTRY` | No | false | Make the first rung equal the reference; otherwise every rung is below it |
 
 Buy-side P&L observations are published only when another gridless position can
 actually be opened and the exact next-buy principal is at least 0.001 ETH/WETH.
 Quotes whose projected gas is greater than or equal to that principal are also
 discarded. This prevents full-capacity reserve dust from becoming a misleading
 gas-dominated buy mark or trigger.
+
+For the opt-in capital-stretching entry mode, see
+[Drawdown Ladder Allocation](docs/DRAWDOWN_LADDER.md). The sell, stop-loss,
+moonbag, banking, gas, route, tax, and receipt-reconciliation systems are not
+replaced by the ladder.
 
 ### Swap providers
 

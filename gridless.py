@@ -126,7 +126,11 @@ def trigger_focus_candidates(positions: Dict[str, Dict], config: Any,
         config, 'gridless_stoploss_threshold', -25.0
     ))
 
-    if positions and len(positions) < max_active:
+    allocation_mode = str(getattr(
+        config, 'gridless_allocation_mode', 'threshold'
+    )).lower()
+    if (allocation_mode != 'drawdown_ladder'
+            and positions and len(positions) < max_active):
         top = get_top_position(positions, token_decimals)
         if top is not None:
             observed = (position_pnls or {}).get(str(top[0]), {})
@@ -343,6 +347,16 @@ def load_positions() -> Dict[str, Dict[str, int]]:
                     positions[k]['deferred_sell_gas_wei'] = int(
                         v['deferred_sell_gas_wei']
                     )
+                if v.get('ladder_id'):
+                    positions[k]['ladder_id'] = str(v['ladder_id'])
+                if v.get('ladder_level_index') is not None:
+                    positions[k]['ladder_level_index'] = int(
+                        v['ladder_level_index']
+                    )
+                if int(v.get('ladder_principal_wei', 0) or 0) > 0:
+                    positions[k]['ladder_principal_wei'] = int(
+                        v['ladder_principal_wei']
+                    )
         return positions
     except (json.JSONDecodeError, IOError):
         return {}
@@ -357,7 +371,10 @@ def save_positions(positions: Dict[str, Dict[str, int]]) -> None:
     os.replace(temp_file, POSITIONS_FILE)
 
 
-def add_position(cost_wei: int, balance: int) -> str:
+def add_position(cost_wei: int, balance: int,
+                 ladder_id: Optional[str] = None,
+                 ladder_level_index: Optional[int] = None,
+                 ladder_principal_wei: Optional[int] = None) -> str:
     """Add new position with lowest available ID (fills gaps).
     
     Args:
@@ -372,7 +389,18 @@ def add_position(cost_wei: int, balance: int) -> str:
     while next_id in existing_ids:
         next_id += 1
     
-    positions[str(next_id)] = {'cost_wei': cost_wei, 'balance': balance}
+    position = {'cost_wei': cost_wei, 'balance': balance}
+    ladder_values = (ladder_id, ladder_level_index, ladder_principal_wei)
+    if any(value is not None for value in ladder_values):
+        if (not ladder_id or ladder_level_index is None
+                or ladder_principal_wei is None or ladder_principal_wei <= 0):
+            raise ValueError("ladder position provenance must be complete")
+        position.update({
+            'ladder_id': str(ladder_id),
+            'ladder_level_index': int(ladder_level_index),
+            'ladder_principal_wei': int(ladder_principal_wei),
+        })
+    positions[str(next_id)] = position
     save_positions(positions)
     return str(next_id)
 

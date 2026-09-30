@@ -161,6 +161,15 @@ class BotConfig:
     gridless_stoploss_threshold: float  # P&L % for stoploss (default: -25.0)
     gridless_stoploss_enabled: bool  # Enable stoploss sells
     gridless_leading_edge: bool  # Enable leading edge buys (buy into strength)
+    gridless_allocation_mode: str  # threshold or drawdown_ladder
+    gridless_min_position_eth: float
+    gridless_ladder_terminal_drawdown_percent: float
+    gridless_ladder_spacing: str
+    gridless_ladder_max_budget_eth: float
+    gridless_ladder_expiry_seconds: int
+    gridless_ladder_rearm_policy: str
+    gridless_ladder_rearm_cooldown_seconds: int
+    gridless_ladder_include_reference_entry: bool
     
     # ETH Trading Mode
     use_eth_trading: bool  # If True, trade native ETH instead of WETH
@@ -422,6 +431,37 @@ class BotConfig:
 
         if not 0 <= self.gridless_buy_execution_margin <= 100:
             raise ValueError("GRIDLESS_BUY_EXECUTION_MARGIN must be between 0 and 100")
+        if self.gridless_allocation_mode not in {"threshold", "drawdown_ladder"}:
+            raise ValueError(
+                "GRIDLESS_ALLOCATION_MODE must be threshold or drawdown_ladder"
+            )
+        if self.gridless_allocation_mode == "drawdown_ladder" and not self.use_gridless:
+            raise ValueError("GRIDLESS_ALLOCATION_MODE=drawdown_ladder requires USE_GRIDLESS=true")
+        if (self.gridless_allocation_mode == "drawdown_ladder"
+                and (not math.isfinite(self.tradeable_balance_percent)
+                     or not 0 < self.tradeable_balance_percent <= 100)):
+            raise ValueError(
+                "TRADEABLE_BALANCE_PERCENT must be greater than 0 and at most 100 "
+                "in drawdown-ladder mode"
+            )
+        if not math.isfinite(self.gridless_min_position_eth) or self.gridless_min_position_eth <= 0:
+            raise ValueError("GRIDLESS_MIN_POSITION_ETH must be positive and finite")
+        if (not math.isfinite(self.gridless_ladder_terminal_drawdown_percent)
+                or not 0 < self.gridless_ladder_terminal_drawdown_percent < 100):
+            raise ValueError(
+                "GRIDLESS_LADDER_TERMINAL_DRAWDOWN_PERCENT must be between 0 and 100"
+            )
+        if self.gridless_ladder_spacing not in {"linear", "log"}:
+            raise ValueError("GRIDLESS_LADDER_SPACING must be linear or log")
+        if (not math.isfinite(self.gridless_ladder_max_budget_eth)
+                or self.gridless_ladder_max_budget_eth < 0):
+            raise ValueError("GRIDLESS_LADDER_MAX_BUDGET_ETH must be non-negative and finite")
+        if self.gridless_ladder_expiry_seconds <= 0:
+            raise ValueError("GRIDLESS_LADDER_EXPIRY_SECONDS must be positive")
+        if self.gridless_ladder_rearm_policy not in {"never", "after_exit"}:
+            raise ValueError("GRIDLESS_LADDER_REARM_POLICY must be never or after_exit")
+        if self.gridless_ladder_rearm_cooldown_seconds < 0:
+            raise ValueError("GRIDLESS_LADDER_REARM_COOLDOWN_SECONDS must be non-negative")
 
 
 def _gas_cap_env(name: str, legacy_value: str) -> float:
@@ -437,6 +477,14 @@ def _optional_bool_env(name: str) -> Optional[bool]:
         return None
     if value not in {"true", "false"}:
         raise ValueError(f"{name} must be true, false, or blank")
+    return value == "true"
+
+
+def _bool_env(name: str, default: bool) -> bool:
+    """Parse a required boolean default while rejecting silent typos."""
+    value = os.getenv(name, str(default)).strip().lower()
+    if value not in {"true", "false"}:
+        raise ValueError(f"{name} must be true or false")
     return value == "true"
 
 
@@ -594,6 +642,31 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
         gridless_stoploss_threshold=float(os.getenv("GRIDLESS_STOPLOSS_THRESHOLD", "-25.0")),
         gridless_stoploss_enabled=os.getenv("GRIDLESS_STOPLOSS_ENABLED", "false").lower() == "true",
         gridless_leading_edge=os.getenv("GRIDLESS_LEADING_EDGE", "true").lower() == "true",
+        gridless_allocation_mode=os.getenv(
+            "GRIDLESS_ALLOCATION_MODE", "threshold"
+        ).strip().lower(),
+        gridless_min_position_eth=float(os.getenv("GRIDLESS_MIN_POSITION_ETH", "0.001")),
+        gridless_ladder_terminal_drawdown_percent=float(os.getenv(
+            "GRIDLESS_LADDER_TERMINAL_DRAWDOWN_PERCENT", "90"
+        )),
+        gridless_ladder_spacing=os.getenv(
+            "GRIDLESS_LADDER_SPACING", "linear"
+        ).strip().lower(),
+        gridless_ladder_max_budget_eth=float(os.getenv(
+            "GRIDLESS_LADDER_MAX_BUDGET_ETH", "0"
+        )),
+        gridless_ladder_expiry_seconds=int(os.getenv(
+            "GRIDLESS_LADDER_EXPIRY_SECONDS", "2592000"
+        )),
+        gridless_ladder_rearm_policy=os.getenv(
+            "GRIDLESS_LADDER_REARM_POLICY", "after_exit"
+        ).strip().lower(),
+        gridless_ladder_rearm_cooldown_seconds=int(os.getenv(
+            "GRIDLESS_LADDER_REARM_COOLDOWN_SECONDS", "3600"
+        )),
+        gridless_ladder_include_reference_entry=_bool_env(
+            "GRIDLESS_LADDER_INCLUDE_REFERENCE_ENTRY", False
+        ),
         
         # ETH Trading Mode
         use_eth_trading=os.getenv("USE_ETH_TRADING", "false").lower() == "true",

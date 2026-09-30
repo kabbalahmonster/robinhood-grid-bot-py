@@ -70,6 +70,26 @@ class TestDashboardReporter(unittest.TestCase):
         self.assertEqual(reporter._queue[0]["funding_warning"], warning)
 
     @patch("dashboard_reporter.threading.Thread.start")
+    def test_drawdown_ladder_state_is_in_status_payload(self, _start):
+        reporter = DashboardReporter("https://doomdash.ca/api/status")
+        ladder = {
+            "id": "ladder-1",
+            "status": "active",
+            "levels_total": 50,
+            "levels_filled": 7,
+            "reserved_eth": 0.043,
+        }
+
+        reporter.report(
+            entry_allocation_mode="drawdown_ladder",
+            drawdown_ladder=ladder,
+        )
+
+        payload = reporter._queue[0]
+        self.assertEqual(payload["entry_allocation_mode"], "drawdown_ladder")
+        self.assertEqual(payload["drawdown_ladder"], ladder)
+
+    @patch("dashboard_reporter.threading.Thread.start")
     def test_sell_attempt_is_round_scoped_payload_field(self, _start):
         reporter = DashboardReporter("https://doomdash.ca/api/status")
         attempt = {
