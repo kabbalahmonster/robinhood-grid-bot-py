@@ -148,7 +148,7 @@ python grid_bot.py
 | `FAST_PROFIT` | No | true | Sell above minimum profit without waiting for the classic sell range |
 | `TRADEABLE_BALANCE_PERCENT` | No | 100 | Percentage of ETH/WETH balance available for trading |
 | `ETH_GAS_RESERVE` | No | 0.0005 | Native ETH retained for transaction gas and protected by guarded ETH treasury transfers |
-| `TREASURY_POSITION_RESERVE_ETH` | No | 0 | Additional native ETH retained per available buy slot (configured capacity minus filled positions) by `treasury-transfer --amount available` |
+| `TREASURY_POSITION_RESERVE_ETH` | No | 0 | Native ETH retained per protected available buy slot by `treasury-transfer --amount available`; `--preserve-positions` can limit the protected slot count |
 | `USE_ETH_TRADING` | No | false | Trade native ETH rather than WETH; chain templates may override this to true |
 | `GAS_LIMIT_MULTIPLIER` | No | 1.05 | Safety multiplier applied to estimated transaction gas limits; values below 1 are clamped |
 | `GAS_PRICE_MULTIPLIER` | No | 1.05 | Safety multiplier applied to current/quoted gas price; values below 1 are clamped |
@@ -1462,8 +1462,10 @@ for previewed, backed-up, atomic `.env` changes such as
 `ETH_GAS_RESERVE=0.0005`. Native ETH `--amount available` retains both that gas
 reserve and `TREASURY_POSITION_RESERVE_ETH` for each available buy slot
 (`MAX_ACTIVE_POSITIONS - filled` in gridless mode, otherwise
-`MAX_POSITIONS - filled`). Pass
-`--position-reserve-eth ETH` to override the per-slot value for one run
+`MAX_POSITIONS - filled`). Pass `--preserve-positions N` to retain only N
+available slots. In adaptive drawdown mode, when no explicit treasury reserve
+is configured, that flag uses `GRIDLESS_MIN_POSITION_ETH` as the per-position
+amount. Pass `--position-reserve-eth ETH` to override the amount for one run
 without editing any bot `.env`.
 
 `scripts/sweep_fleet_usdg.sh` runs the USDG sweep command in every checkout

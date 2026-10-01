@@ -23,6 +23,8 @@ Destination:
   --recipient ADDRESS         Override FLEET_TREASURY_RECIPIENT for this run
   --position-reserve-eth ETH  Override each bot's TREASURY_POSITION_RESERVE_ETH
                               for this native ETH "available" execution
+  --preserve-positions COUNT  Retain principal for at most COUNT currently
+                              available buy positions during an ETH sweep
 
 Guards:
   --confirm-recipient ADDRESS Exact repeat for a non-allowlisted recipient
@@ -43,7 +45,10 @@ as durably stopped. Native
 Exact transfers retain each bot's ETH_GAS_RESERVE. ETH "available" additionally
 retains TREASURY_POSITION_RESERVE_ETH for every available buy slot
 (configured capacity minus filled positions), after the maximum transfer fee;
---position-reserve-eth overrides that setting for one run. ETH
+--preserve-positions limits that reserve to COUNT slots. In adaptive drawdown
+mode, COUNT can infer per-slot principal from GRIDLESS_MIN_POSITION_ETH when
+no treasury position reserve is configured. --position-reserve-eth overrides
+the per-slot amount for one run. ETH
 "all" intentionally bypasses both reserves and requires --confirm-liquidate.
 When --recipient is omitted, FLEET_TREASURY_RECIPIENT from fleet.conf is used.
 Every run ends with a per-bot contribution summary and an exact aggregate;
@@ -63,6 +68,7 @@ confirm_liquidate=0
 only=""
 exclude=""
 position_reserve_eth=""
+preserve_positions=""
 
 while (($#)); do
   case "$1" in
@@ -78,6 +84,7 @@ while (($#)); do
     --only) (($# >= 2)) || fleet_die "--only requires comma-separated names"; only="$2"; shift 2 ;;
     --exclude) (($# >= 2)) || fleet_die "--exclude requires comma-separated names"; exclude="$2"; shift 2 ;;
     --position-reserve-eth) (($# >= 2)) || fleet_die "--position-reserve-eth requires an ETH amount"; position_reserve_eth="$2"; shift 2 ;;
+    --preserve-positions) (($# >= 2)) || fleet_die "--preserve-positions requires a count"; preserve_positions="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) fleet_die "Unknown option: $1" ;;
   esac
@@ -129,6 +136,10 @@ if [[ -n "$position_reserve_eth" ]]; then
   [[ "$asset_upper" == "ETH" && "$amount" == "available" ]] || fleet_die "--position-reserve-eth is valid only with --asset ETH --amount available"
   [[ "$position_reserve_eth" =~ ^[0-9]+([.][0-9]+)?$ ]] || fleet_die "--position-reserve-eth must be a non-negative decimal ETH amount"
 fi
+if [[ -n "$preserve_positions" ]]; then
+  [[ "$asset_upper" == "ETH" && "$amount" == "available" ]] || fleet_die "--preserve-positions is valid only with --asset ETH --amount available"
+  [[ "$preserve_positions" =~ ^[0-9]+$ ]] || fleet_die "--preserve-positions must be a non-negative integer"
+fi
 
 fleet_validate_bots
 if ((execute)); then
@@ -158,6 +169,7 @@ for bot_dir in "${FLEET_BOT_DIRS[@]}"; do
   if [[ "$asset_upper" == "ETH" ]]; then
     command_args=("$python_bin" "$FLEET_ENTRYPOINT" --transfer-eth --recipient "$recipient" --amount "$amount")
     [[ -z "$position_reserve_eth" ]] || command_args+=(--position-reserve-eth "$position_reserve_eth")
+    [[ -z "$preserve_positions" ]] || command_args+=(--preserve-positions "$preserve_positions")
     ((confirm_liquidate == 0)) || command_args+=(--confirm-liquidate)
   elif [[ "$asset_upper" == "USDG" ]]; then
     command_args=("$python_bin" "$FLEET_ENTRYPOINT" --sweep-usdg "$recipient" --amount "$amount")

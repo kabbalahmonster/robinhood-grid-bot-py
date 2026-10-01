@@ -346,6 +346,68 @@ class TestCliCommands(unittest.TestCase):
 
     @patch("grid_bot.Wallet")
     @patch("grid_bot.load_config")
+    def test_native_eth_available_preserves_requested_adaptive_positions(
+        self, load_config, wallet_class
+    ):
+        load_config.return_value = SimpleNamespace(
+            treasury_allowed_recipients=["0x0000000000000000000000000000000000000004"],
+            eth_gas_reserve=0.0005,
+            treasury_position_reserve_eth=0,
+            use_gridless=True,
+            gridless_allocation_mode="drawdown_ladder",
+            gridless_min_position_eth=0.001,
+            max_active_positions=50,
+        )
+        wallet = wallet_class.return_value
+        wallet.address = "0x0000000000000000000000000000000000000002"
+        wallet.get_eth_balance_wei.return_value = 5_000_000_000_000_000
+        wallet.address_has_code.return_value = False
+        wallet.build_eth_transfer_transaction.return_value = {
+            "gas": 21_000, "gasPrice": 1_000_000_000, "value": 1,
+        }
+        args = SimpleNamespace(
+            recipient="0x0000000000000000000000000000000000000004",
+            amount="available", position_reserve_eth=None, preserve_positions=3,
+            confirm_recipient=None, confirm_liquidate=False,
+            execute=False, confirm_bot_stopped=False,
+        )
+
+        with patch("builtins.open", mock_open(read_data='{"0": {"balance": 1}, "1": {"balance": 2}}')):
+            self.assertEqual(run_native_treasury_transfer(args), 0)
+
+        # 0.005 balance - 0.0005 gas reserve - 0.000021 fee - 3 × 0.001 positions.
+        self.assertEqual(
+            wallet.build_eth_transfer_transaction.return_value["value"],
+            1_479_000_000_000_000,
+        )
+
+    @patch("grid_bot.Wallet")
+    @patch("grid_bot.load_config")
+    def test_preserve_positions_requires_explicit_size_outside_adaptive_mode(
+        self, load_config, wallet_class
+    ):
+        load_config.return_value = SimpleNamespace(
+            treasury_allowed_recipients=["0x0000000000000000000000000000000000000004"],
+            eth_gas_reserve=0.0005,
+            treasury_position_reserve_eth=0,
+            use_gridless=True,
+            gridless_allocation_mode="threshold",
+        )
+        wallet = wallet_class.return_value
+        wallet.address = "0x0000000000000000000000000000000000000002"
+        wallet.address_has_code.return_value = False
+        args = SimpleNamespace(
+            recipient="0x0000000000000000000000000000000000000004",
+            amount="available", position_reserve_eth=None, preserve_positions=2,
+            confirm_recipient=None, confirm_liquidate=False,
+            execute=False, confirm_bot_stopped=False,
+        )
+
+        self.assertEqual(run_native_treasury_transfer(args), 2)
+        wallet.build_eth_transfer_transaction.assert_not_called()
+
+    @patch("grid_bot.Wallet")
+    @patch("grid_bot.load_config")
     def test_native_eth_available_uses_classic_empty_capacity(
         self, load_config, wallet_class
     ):

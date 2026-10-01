@@ -25,7 +25,8 @@ class TreasuryTransferSummaryTests(unittest.TestCase):
                 bot_dir = root / name / "robinhood-grid-bot-py"
                 bot_dir.mkdir(parents=True)
                 (bot_dir / "grid_bot.py").write_text(
-                    "import os\n"
+                    "import os, sys\n"
+                    "assert sys.argv[sys.argv.index('--preserve-positions') + 1] == '2'\n"
                     f"print('Send:         {amount} ETH')\n"
                     f"print('FLEET_TREASURY_SUMMARY|planned|{amount}')\n",
                     encoding="utf-8",
@@ -40,7 +41,8 @@ class TreasuryTransferSummaryTests(unittest.TestCase):
 
             result = subprocess.run(
                 [str(SCRIPT), "--config", str(config), "--asset", "ETH",
-                 "--amount", "available", "--position-reserve-eth", "0.002"],
+                 "--amount", "available", "--position-reserve-eth", "0.002",
+                 "--preserve-positions", "2"],
                 cwd=root, env={**os.environ, "HOME": str(root)},
                 text=True, capture_output=True,
             )

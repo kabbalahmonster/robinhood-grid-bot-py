@@ -1236,7 +1236,7 @@ Each wallet independently sends:
 ```text
 balance
 − ETH_GAS_RESERVE
-− (available buy slots × TREASURY_POSITION_RESERVE_ETH)
+− (preserved available buy slots × per-position reserve)
 − estimated maximum transfer fee
 ```
 
@@ -1250,12 +1250,29 @@ in classic mode. When a positive per-slot reserve applies, missing, malformed,
 or structurally invalid position/capacity state refuses that bot's transfer
 rather than risking an undersized reserve.
 
+Preserve only a chosen number of future buys:
+
+```bash
+ops/fleet/treasury-transfer \
+  --asset ETH \
+  --amount available \
+  --preserve-positions 10 \
+  --recipient "$TREASURY"
+```
+
+The count is capped at the wallet's actual available slots. In adaptive
+drawdown mode, if `TREASURY_POSITION_RESERVE_ETH` is zero and no
+`--position-reserve-eth` override is supplied, the command infers the amount
+per protected slot from `GRIDLESS_MIN_POSITION_ETH`. Other modes require an
+explicit nonzero reserve amount.
+
 Override the per-position amount for this run only (the `.env` is not changed):
 
 ```bash
 ops/fleet/treasury-transfer \
   --asset ETH \
   --amount available \
+  --preserve-positions 10 \
   --position-reserve-eth 0.003 \
   --recipient "$TREASURY"
 ```

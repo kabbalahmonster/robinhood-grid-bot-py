@@ -315,14 +315,39 @@ def run_native_treasury_transfer(args):
         liquidate = args.amount == "all"
         sweep_available = args.amount == "available"
         reserve_override = getattr(args, "position_reserve_eth", None)
+        preserve_positions = getattr(args, "preserve_positions", None)
         if reserve_override is not None and not sweep_available:
             raise ValueError("--position-reserve-eth is valid only with --amount available")
+        if preserve_positions is not None and not sweep_available:
+            raise ValueError("--preserve-positions is valid only with --amount available")
+        if (isinstance(preserve_positions, bool)
+                or (preserve_positions is not None and preserve_positions < 0)):
+            raise ValueError("--preserve-positions must be a non-negative integer")
         configured_position_reserve = getattr(config, "treasury_position_reserve_eth", 0)
         reserve_per_position = Decimal(
             str(configured_position_reserve if reserve_override is None else reserve_override)
         ) if sweep_available else Decimal(0)
         if not reserve_per_position.is_finite() or reserve_per_position < 0:
             raise ValueError("Position reserve must be a non-negative ETH amount")
+        if preserve_positions and reserve_per_position == 0:
+            adaptive_ladder = (
+                getattr(config, "use_gridless", False)
+                and getattr(config, "gridless_allocation_mode", "threshold")
+                == "drawdown_ladder"
+            )
+            if not adaptive_ladder:
+                raise ValueError(
+                    "--preserve-positions requires TREASURY_POSITION_RESERVE_ETH or "
+                    "--position-reserve-eth outside drawdown-ladder mode"
+                )
+            reserve_per_position = Decimal(
+                str(getattr(config, "gridless_min_position_eth", 0))
+            )
+            if not reserve_per_position.is_finite() or reserve_per_position <= 0:
+                raise ValueError(
+                    "GRIDLESS_MIN_POSITION_ETH must be positive to infer the "
+                    "preserved position amount"
+                )
         filled_position_count = 0
         position_capacity = 0
         available_position_slots = 0
@@ -363,8 +388,13 @@ def run_native_treasury_transfer(args):
                     f"exceed configured capacity {position_capacity}"
                 )
             available_position_slots = position_capacity - filled_position_count
+        reserved_position_slots = (
+            available_position_slots
+            if preserve_positions is None
+            else min(preserve_positions, available_position_slots)
+        )
         position_reserve_wei = int(
-            reserve_per_position * Decimal(available_position_slots) * Decimal(10**18)
+            reserve_per_position * Decimal(reserved_position_slots) * Decimal(10**18)
         )
         if liquidate and not args.confirm_liquidate:
             raise ValueError("Native ETH 'all' requires --confirm-liquidate")
@@ -425,7 +455,7 @@ def run_native_treasury_transfer(args):
                 "NATIVE ETH TREASURY TRANSFER SKIPPED: balance does not exceed "
                 "the estimated maximum transfer fee plus "
                 f"ETH_GAS_RESERVE={config.eth_gas_reserve} and position reserve="
-                f"{reserve_per_position} × {available_position_slots} available slots"
+                f"{reserve_per_position} × {reserved_position_slots} preserved slots"
             )
             _emit_fleet_treasury_summary("skipped", Decimal(0))
             return 0
@@ -446,8 +476,8 @@ def run_native_treasury_transfer(args):
             f"({available_position_slots} available)"
         )
         print(
-            f"Position reserve: {reserve_per_position} ETH × {available_position_slots} "
-            f"available slots ({Decimal(position_reserve_wei) / Decimal(10**18)} ETH total)"
+            f"Position reserve: {reserve_per_position} ETH × {reserved_position_slots} "
+            f"preserved slots ({Decimal(position_reserve_wei) / Decimal(10**18)} ETH total)"
         )
         print(f"Min remaining after gas: {remaining} ETH")
         print(f"Liquidation:  {'YES — configured reserve intentionally bypassed' if liquidate else 'no'}")
@@ -6735,6 +6765,7 @@ if __name__ == "__main__":
     parser.add_argument("--confirm-recipient", help="Required exact recipient for a non-allowlisted address")
     parser.add_argument("--confirm-liquidate", action="store_true", help="Required to send all native ETH minus its maximum fee")
     parser.add_argument("--position-reserve-eth", help="Override TREASURY_POSITION_RESERVE_ETH for native-ETH --amount available")
+    parser.add_argument("--preserve-positions", type=int, help="With native-ETH --amount available, retain principal for at most this many available buy positions")
     parser.add_argument("--liquidate-assets", action="store_true", help="Convert all configured bot-managed tokens to native ETH")
     parser.add_argument("--confirm-liquidate-assets", action="store_true", help="Required acknowledgement for --liquidate-assets")
     parser.add_argument("--keep-usdg", action="store_true", help="Exclude configured USDG from --liquidate-assets")
@@ -6754,6 +6785,7 @@ if __name__ == "__main__":
             args.amount != "all", args.confirm_liquidate, args.confirm_liquidate_assets,
             args.keep_usdg, args.confirm_sell_moonbag, args.send_to_treasury,
             args.confirm_send_to_treasury, args.position_reserve_eth,
+            args.preserve_positions is not None,
         ])
         if incompatible:
             parser.error("--reconcile-gridless-buy cannot be combined with another maintenance command")
@@ -6773,19 +6805,22 @@ if __name__ == "__main__":
                 args.liquidate_assets, args.confirm_liquidate_assets, args.keep_usdg,
                 args.sell_moonbag, args.confirm_sell_moonbag, args.send_to_treasury,
                 args.confirm_send_to_treasury, args.position_reserve_eth,
+                args.preserve_positions is not None,
                 args.confirm_bot_stopped, args.execute]):
             parser.error("--check-config cannot be combined with a maintenance command")
         raise SystemExit(check_config())
     if args.liquidate_assets:
         if any([args.sweep_usdg, args.transfer_token, args.transfer_eth, args.recipient, args.confirm_liquidate,
                 args.confirm_recipient, args.amount != "all", args.sell_moonbag, args.confirm_sell_moonbag,
-                args.send_to_treasury, args.confirm_send_to_treasury, args.position_reserve_eth]):
+                args.send_to_treasury, args.confirm_send_to_treasury, args.position_reserve_eth,
+                args.preserve_positions is not None]):
             parser.error("--liquidate-assets cannot be combined with treasury transfer commands")
         from asset_liquidator import run_asset_liquidation
         raise SystemExit(run_asset_liquidation(args))
     if args.sell_moonbag:
         if any([args.sweep_usdg, args.transfer_token, args.transfer_eth, args.confirm_liquidate,
-                args.amount != "all", args.confirm_liquidate_assets, args.keep_usdg, args.position_reserve_eth]):
+                args.amount != "all", args.confirm_liquidate_assets, args.keep_usdg,
+                args.position_reserve_eth, args.preserve_positions is not None]):
             parser.error("--sell-moonbag cannot be combined with another maintenance command")
         if args.send_to_treasury != bool(args.recipient):
             parser.error("--send-to-treasury and --recipient must be supplied together for --sell-moonbag")
@@ -6799,6 +6834,8 @@ if __name__ == "__main__":
         parser.error("--keep-usdg requires --liquidate-assets")
     if args.position_reserve_eth is not None and not args.transfer_eth:
         parser.error("--position-reserve-eth requires --transfer-eth --amount available")
+    if args.preserve_positions is not None and not args.transfer_eth:
+        parser.error("--preserve-positions requires --transfer-eth --amount available")
     if args.sweep_usdg:
         if args.transfer_token or args.transfer_eth or args.recipient:
             parser.error("--sweep-usdg cannot be combined with --transfer-token, --transfer-eth, or --recipient")
@@ -6814,7 +6851,8 @@ if __name__ == "__main__":
         raise SystemExit(run_treasury_transfer(args))
     if any([args.amount != "all", args.confirm_recipient, args.confirm_liquidate, args.confirm_liquidate_assets,
             args.keep_usdg, args.confirm_sell_moonbag, args.send_to_treasury,
-            args.confirm_send_to_treasury, args.position_reserve_eth, args.confirm_bot_stopped, args.execute]):
+            args.confirm_send_to_treasury, args.position_reserve_eth,
+            args.preserve_positions is not None, args.confirm_bot_stopped, args.execute]):
         parser.error("transfer options require --sweep-usdg, --transfer-token, or --transfer-eth with --recipient")
     bot = GridBot()
     bot.run()

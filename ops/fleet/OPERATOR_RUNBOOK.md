@@ -132,6 +132,8 @@ ops/fleet/adjust-positions --set-to-filled --all
 ops/fleet/adjust-positions --set-to-filled --all --apply
 ops/fleet/treasury-transfer --asset ETH --amount available
 ops/fleet/treasury-transfer --asset ETH --amount available \
+  --preserve-positions 10
+ops/fleet/treasury-transfer --asset ETH --amount available \
   --execute --confirm-fleet-stopped
 ```
 
@@ -144,6 +146,7 @@ The freeze preserves filled positions while preventing new buys. The sweep
 retains each bot's `ETH_GAS_RESERVE`, live estimated transfer gas, and
 `TREASURY_POSITION_RESERVE_ETH` multiplied by its available buy-slot count
 (configured capacity minus filled positions). Use
+`--preserve-positions COUNT` to protect only that many available slots and
 `--position-reserve-eth ETH` to override the per-slot reserve for one run.
 The footer shows each bot's planned contribution plus the exact fleet total;
 execution uses the same layout but totals confirmed transfers only.
