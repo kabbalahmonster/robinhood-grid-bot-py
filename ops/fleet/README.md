@@ -2087,9 +2087,11 @@ target fails.
   `fleet.conf`; private keys and API credentials never should.
 - `treasury-transfer` applies the same batch guards to native ETH, USDG, and
   arbitrary ERC-20 contracts. Exact native transfers preserve the gas reserve.
-  Native `available` also preserves `TREASURY_POSITION_RESERVE_ETH` for every
-  available buy slot after live maximum transfer gas; `--position-reserve-eth`
-  overrides it for one run. Native liquidation bypasses both reserves only with
+  Native `available` preserves the configured per-slot reserve after live
+  maximum transfer gas; `--preserve-positions` limits how many available slots
+  are protected and `--position-reserve-eth` overrides the amount for one run.
+  Without either a configured or requested position reserve, it sweeps all
+  liquid above gas. Native liquidation bypasses both reserves only with
   `--amount all --confirm-liquidate`.
 - `update-variable` is preview-only without `--apply`; backups are intentionally
   retained for operator recovery and gitignored.

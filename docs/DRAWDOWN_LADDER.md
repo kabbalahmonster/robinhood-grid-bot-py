@@ -178,6 +178,30 @@ The status payload includes:
 - average target position size;
 - completed buy/sell cycles and recorded realized rung profit.
 
+## Treasury sweeps and future buys
+
+Native `treasury-transfer --amount available` intentionally sends every liquid
+wei above `ETH_GAS_RESERVE` and the estimated transfer fee when no position
+reserve is requested. That leaves open token positions intact but prevents new
+buys until more settlement asset arrives.
+
+Use `--preserve-positions N` to retain principal for at most N currently
+available future positions. When `TREASURY_POSITION_RESERVE_ETH=0`, adaptive
+drawdown mode infers the protected amount per slot from
+`GRIDLESS_MIN_POSITION_ETH`. Use `--position-reserve-eth ETH` when the reserve
+should reflect a larger, already-grown rung target.
+
+```bash
+ops/fleet/treasury-transfer \
+  --only BOT \
+  --asset ETH \
+  --amount available \
+  --preserve-positions 10
+```
+
+The transfer remains dry-run by default and retains normal stopped-bot,
+recipient, fee, and execution guards.
+
 ## Safety notes
 
 - Use a dedicated wallet or a conservative `TRADEABLE_BALANCE_PERCENT`; wallet
