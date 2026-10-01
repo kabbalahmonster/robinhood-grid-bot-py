@@ -186,14 +186,14 @@ python grid_bot.py
 | `GRIDLESS_STOPLOSS_THRESHOLD` | No | -25.0 | Stoploss trigger % |
 | `GRIDLESS_BUY_COOLDOWN_SECONDS` | No | 0 | Cooldown between gridless buys (0 disables cooldown) |
 | `GRIDLESS_BUY_EXECUTION_MARGIN` | No | 50 | Execution margin % - blocks buy if quote P&L recovered past threshold + (abs(threshold) * margin%) (e.g., -10% trigger + 50% = block above -5%) |
-| `GRIDLESS_ALLOCATION_MODE` | No | threshold | `threshold` preserves legacy P&L-triggered entries; `drawdown_ladder` freezes a capital budget across falling-price levels |
-| `GRIDLESS_MIN_POSITION_ETH` | No | 0.001 | Minimum principal used to derive ladder position count |
-| `GRIDLESS_LADDER_TERMINAL_DRAWDOWN_PERCENT` | No | 90 | Final ladder level below its frozen reference price; must be greater than 0 and less than 100 |
+| `GRIDLESS_ALLOCATION_MODE` | No | threshold | `threshold` preserves legacy P&L-triggered entries; `drawdown_ladder` dynamically funds reusable drawdown triggers |
+| `GRIDLESS_MIN_POSITION_ETH` | No | 0.001 | Initial principal per funded rung; capital adds coverage to the maximum before increasing rung size |
+| `GRIDLESS_LADDER_TERMINAL_DRAWDOWN_PERCENT` | No | 95 | Deepest trigger below the stable reference price; must be greater than 0 and less than 100 |
 | `GRIDLESS_LADDER_SPACING` | No | linear | `linear` for equal drawdown intervals or `log` for equal price ratios |
-| `GRIDLESS_LADDER_MAX_BUDGET_ETH` | No | 0 | Optional hard principal cap per ladder; 0 disables the extra cap |
-| `GRIDLESS_LADDER_EXPIRY_SECONDS` | No | 2592000 | Stop new fills after this frozen ladder lifetime (30 days by default) |
-| `GRIDLESS_LADDER_REARM_POLICY` | No | after_exit | `after_exit` creates a fresh ladder only after all positions exit; `never` requires operator intervention |
-| `GRIDLESS_LADDER_REARM_COOLDOWN_SECONDS` | No | 3600 | Delay after the latest confirmed exit before a fresh ladder can arm |
+| `GRIDLESS_LADDER_MAX_BUDGET_ETH` | No | 0 | Optional hard cap on total assigned rung principal; 0 disables the extra cap |
+| `GRIDLESS_LADDER_EXPIRY_SECONDS` | No | 0 | Stop new rung fills after this many seconds; 0 keeps the adaptive field active indefinitely |
+| `GRIDLESS_LADDER_REARM_POLICY` | No | after_exit | `after_exit` recycles each sold rung; `never` retires a rung after its first completed trade |
+| `GRIDLESS_LADDER_REARM_COOLDOWN_SECONDS` | No | 0 | Minimum delay after a confirmed sell before that rung may reset; price must also move above its trigger first |
 | `GRIDLESS_LADDER_INCLUDE_REFERENCE_ENTRY` | No | false | Make the first rung equal the reference; otherwise every rung is below it |
 
 Buy-side P&L observations are published only when another gridless position can

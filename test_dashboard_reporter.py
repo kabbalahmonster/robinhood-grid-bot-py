@@ -76,7 +76,8 @@ class TestDashboardReporter(unittest.TestCase):
             "id": "ladder-1",
             "status": "active",
             "levels_total": 50,
-            "levels_filled": 7,
+            "levels_funded": 17,
+            "levels_open": 7,
             "reserved_eth": 0.043,
         }
 

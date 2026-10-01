@@ -1,4 +1,4 @@
-"""Tests for the opt-in gridless drawdown-ladder allocator."""
+"""Tests for adaptive reusable gridless drawdown allocation."""
 
 import json
 import os
@@ -8,15 +8,16 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from drawdown_ladder import (
-    DrawdownLadderPlan,
     LadderStateError,
+    advance_rearms,
     build_plan,
+    eligible_level,
     generate_levels,
-    level_is_crossed,
     load_plan,
     mark_exit,
     reconcile_confirmed_positions,
     record_fill,
+    refresh_plan_funding,
     save_plan,
     status_payload,
     validate_context,
@@ -33,15 +34,15 @@ def ladder_config(**overrides):
         "chain_id": 4663,
         "token_address": "0x0000000000000000000000000000000000000001",
         "tradeable_balance_percent": 100.0,
-        "max_active_positions": 50,
+        "max_active_positions": 20,
         "gridless_min_position_eth": 0.001,
         "gridless_ladder_max_budget_eth": 0.0,
-        "gridless_ladder_terminal_drawdown_percent": 90.0,
+        "gridless_ladder_terminal_drawdown_percent": 95.0,
         "gridless_ladder_spacing": "linear",
         "gridless_ladder_include_reference_entry": False,
-        "gridless_ladder_expiry_seconds": 3600,
+        "gridless_ladder_expiry_seconds": 0,
         "gridless_ladder_rearm_policy": "after_exit",
-        "gridless_ladder_rearm_cooldown_seconds": 60,
+        "gridless_ladder_rearm_cooldown_seconds": 0,
         "gridless_allocation_mode": "drawdown_ladder",
         "gridless_buy_execution_margin": 50.0,
     }
@@ -49,108 +50,161 @@ def ladder_config(**overrides):
     return SimpleNamespace(**values)
 
 
+def funded_indices(plan):
+    return [r.index for r in plan.rungs if r.principal_wei > 0]
+
+
 class DrawdownLadderGeometryTests(unittest.TestCase):
     def test_linear_levels_reach_terminal_drawdown(self):
-        levels = generate_levels(1.0, 3, 90, "linear")
-        for actual, expected in zip(levels, [0.7, 0.4, 0.1]):
-            self.assertAlmostEqual(actual, expected)
+        levels = generate_levels(1.0, 5, 95, "linear")
+        self.assertAlmostEqual(levels[0], 0.81)
+        self.assertAlmostEqual(levels[-1], 0.05)
 
     def test_log_levels_are_equal_price_ratios(self):
-        levels = generate_levels(1.0, 3, 90, "log")
-        self.assertAlmostEqual(levels[-1], 0.1)
-        self.assertAlmostEqual(levels[1] / levels[0], levels[2] / levels[1])
+        levels = generate_levels(1.0, 5, 95, "log")
+        self.assertAlmostEqual(levels[-1], 0.05)
+        self.assertAlmostEqual(levels[1] / levels[0], levels[4] / levels[3])
 
     def test_reference_entry_includes_both_endpoints(self):
         levels = generate_levels(1.0, 3, 90, "linear", True)
         for actual, expected in zip(levels, [1.0, 0.55, 0.1]):
             self.assertAlmostEqual(actual, expected)
 
-    def test_single_level_still_targets_terminal(self):
-        self.assertAlmostEqual(generate_levels(1.0, 1, 90, "log", True)[0], 0.1)
 
-
-class DrawdownLadderStateTests(unittest.TestCase):
-    def test_build_plan_snapshots_budget_count_and_remainder(self):
-        config = ladder_config(
-            tradeable_balance_percent=50,
-            max_active_positions=4,
-            gridless_min_position_eth=0.01,
-            gridless_ladder_max_budget_eth=0.035,
+class AdaptiveLadderStateTests(unittest.TestCase):
+    def test_initial_capital_funds_minimum_sized_even_coverage(self):
+        plan = build_plan(
+            1.0,
+            int(0.005 * WEI),
+            ladder_config(max_active_positions=20),
+            now=100,
         )
-        plan = build_plan(2.0, int(0.1 * WEI), config, now=100)
-        self.assertEqual(plan.budget_wei, 35_000_000_000_000_000)
-        self.assertEqual(len(plan.level_prices), 3)
-        self.assertEqual(
-            sum(plan.amount_for_level(i) for i in range(3)), plan.budget_wei
-        )
-        self.assertEqual(plan.expires_at, 3700)
+        self.assertEqual(plan.funded_count, 5)
+        self.assertEqual(funded_indices(plan), [3, 7, 11, 15, 19])
+        self.assertEqual(plan.allocated_wei, int(0.005 * WEI))
+        self.assertAlmostEqual(plan.rungs[19].price, 0.05)
 
     def test_budget_too_small_does_not_arm(self):
         self.assertIsNone(build_plan(1.0, int(0.0009 * WEI), ladder_config()))
 
-    def test_fill_advances_exactly_one_level_and_terminal_state(self):
-        plan = build_plan(
-            1.0,
-            int(0.002 * WEI),
-            ladder_config(max_active_positions=2),
-            now=100,
-        )
-        self.assertTrue(level_is_crossed(plan, plan.level_prices[0]))
-        record_fill(plan, 0, plan.amount_for_level(0))
-        self.assertEqual(plan.next_level_index, 1)
-        with self.assertRaises(LadderStateError):
-            record_fill(plan, 1, plan.amount_for_level(1) - 1)
-        record_fill(plan, 1, plan.amount_for_level(1))
-        self.assertEqual(plan.status, "terminal")
-        self.assertEqual(plan.spent_wei, plan.budget_wei)
+    def test_deposit_adds_positions_without_moving_existing_triggers(self):
+        config = ladder_config(max_active_positions=20)
+        plan = build_plan(1.0, int(0.005 * WEI), config, now=100)
+        old_prices = {i: plan.rungs[i].price for i in funded_indices(plan)}
+        self.assertTrue(refresh_plan_funding(plan, int(0.015 * WEI), config, now=200))
+        self.assertEqual(plan.funded_count, 15)
+        for index, price in old_prices.items():
+            self.assertEqual(plan.rungs[index].price, price)
 
-    def test_persistence_round_trip_and_corruption_fail_closed(self):
+    def test_five_open_plus_ten_new_positions_becomes_fifteen(self):
+        config = ladder_config(max_active_positions=20)
+        plan = build_plan(1.0, int(0.005 * WEI), config, now=100)
+        positions = {}
+        for sequence, index in enumerate(funded_indices(plan)):
+            principal = plan.amount_for_level(index)
+            position_id = str(sequence)
+            record_fill(plan, index, principal, position_id, filled_at=110)
+            positions[position_id] = {
+                "ladder_id": plan.id,
+                "ladder_level_index": index,
+                "ladder_principal_wei": principal,
+            }
+        # Deployed 0.005 plus a new 0.010 wallet deposit is 0.015 strategy capital.
+        self.assertTrue(refresh_plan_funding(plan, int(0.010 * WEI), config, now=200))
+        self.assertEqual(plan.funded_count, 15)
+        self.assertEqual(plan.allocated_wei, int(0.015 * WEI))
+        validate_context(plan, positions, config)
+
+    def test_after_maximum_coverage_surplus_grows_position_targets(self):
+        config = ladder_config(max_active_positions=5)
+        plan = build_plan(1.0, int(0.005 * WEI), config, now=100)
+        self.assertEqual(plan.funded_count, 5)
+        refresh_plan_funding(plan, int(0.010 * WEI), config, now=200)
+        self.assertEqual(plan.funded_count, 5)
+        self.assertEqual({r.principal_wei for r in plan.rungs}, {int(0.002 * WEI)})
+
+    def test_tradeable_fraction_and_hard_cap_remain_authoritative(self):
+        config = ladder_config(
+            tradeable_balance_percent=50,
+            max_active_positions=5,
+            gridless_ladder_max_budget_eth=0.004,
+        )
+        plan = build_plan(1.0, int(0.1 * WEI), config, now=100)
+        self.assertEqual(plan.allocated_wei, int(0.004 * WEI))
+        self.assertEqual(plan.funded_count, 4)
+
+    def test_rung_recycles_only_after_exit_and_reset_above_trigger(self):
+        plan = build_plan(
+            1.0, int(0.001 * WEI), ladder_config(max_active_positions=1), now=100
+        )
+        principal = plan.amount_for_level(0)
+        record_fill(plan, 0, principal, "7", filled_at=110)
+        mark_exit(plan, 0, "7", exited_at=120, realized_profit_wei=10)
+        self.assertEqual(plan.rungs[0].state, "waiting_reset")
+        self.assertFalse(advance_rearms(plan, plan.rungs[0].price, 0, now=121))
+        self.assertTrue(advance_rearms(plan, plan.rungs[0].price * 1.05, 0, now=122))
+        self.assertEqual(plan.rungs[0].state, "ready")
+        self.assertEqual(eligible_level(plan, plan.rungs[0].price), 0)
+        record_fill(plan, 0, principal, "8", filled_at=130)
+        self.assertEqual(plan.rungs[0].fill_count, 2)
+        self.assertEqual(plan.rungs[0].exit_count, 1)
+
+    def test_stoploss_below_rung_cannot_immediately_rebuy(self):
+        plan = build_plan(
+            1.0, int(0.001 * WEI), ladder_config(max_active_positions=1), now=100
+        )
+        record_fill(plan, 0, plan.amount_for_level(0), "1", filled_at=110)
+        mark_exit(plan, 0, "1", exited_at=120, realized_profit_wei=-100)
+        self.assertFalse(advance_rearms(plan, plan.rungs[0].price * 0.5, 0, now=130))
+        self.assertIsNone(eligible_level(plan, plan.rungs[0].price * 0.5))
+
+    def test_reconcile_buy_checkpoint_crash(self):
+        plan = build_plan(
+            1.0, int(0.001 * WEI), ladder_config(max_active_positions=1), now=100
+        )
+        position = {
+            "0": {
+                "ladder_id": plan.id,
+                "ladder_level_index": 0,
+                "ladder_principal_wei": plan.amount_for_level(0),
+            }
+        }
+        self.assertTrue(reconcile_confirmed_positions(plan, position))
+        validate_context(plan, position, ladder_config(max_active_positions=1))
+        self.assertEqual(plan.rungs[0].state, "open")
+
+    def test_missing_open_position_fails_closed(self):
+        plan = build_plan(
+            1.0, int(0.001 * WEI), ladder_config(max_active_positions=1), now=100
+        )
+        record_fill(plan, 0, plan.amount_for_level(0), "0")
+        with self.assertRaises(LadderStateError):
+            validate_context(plan, {}, ladder_config(max_active_positions=1))
+
+    def test_persistence_and_v1_state_fail_closed(self):
         plan = build_plan(1.0, int(0.003 * WEI), ladder_config(), now=100)
         with tempfile.TemporaryDirectory() as directory:
             path = os.path.join(directory, "ladder.json")
             save_plan(plan, path)
             self.assertEqual(load_plan(path).to_dict(), plan.to_dict())
             with open(path, "w", encoding="utf-8") as handle:
-                json.dump({"version": 999}, handle)
+                json.dump({"version": 1}, handle)
             with self.assertRaises(LadderStateError):
                 load_plan(path)
 
-    def test_context_rejects_foreign_and_duplicate_positions(self):
-        plan = build_plan(1.0, int(0.003 * WEI), ladder_config(), now=100)
-        foreign = {"0": {"ladder_id": "wrong", "ladder_level_index": 0}}
-        with self.assertRaises(LadderStateError):
-            validate_context(plan, foreign, ladder_config())
-        duplicate = {
-            "0": {"ladder_id": plan.id, "ladder_level_index": 0},
-            "1": {"ladder_id": plan.id, "ladder_level_index": 0},
-        }
-        with self.assertRaises(LadderStateError):
-            validate_context(plan, duplicate, ladder_config())
-
-    def test_reconciles_confirmed_position_after_checkpoint_crash(self):
-        plan = build_plan(1.0, int(0.002 * WEI), ladder_config(), now=100)
-        principal = plan.amount_for_level(0)
-        positions = {
-            "0": {
-                "ladder_id": plan.id,
-                "ladder_level_index": 0,
-                "ladder_principal_wei": principal,
-            }
-        }
-        validate_context(plan, positions, ladder_config())
-        self.assertTrue(reconcile_confirmed_positions(plan, positions))
-        self.assertEqual(plan.next_level_index, 1)
-        self.assertFalse(reconcile_confirmed_positions(plan, positions))
-
-    def test_status_exposes_spent_and_reserved_capital(self):
-        plan = build_plan(1.0, int(0.002 * WEI), ladder_config(), now=100)
-        record_fill(plan, 0, plan.amount_for_level(0))
+    def test_status_reports_density_cycles_and_size(self):
+        plan = build_plan(
+            1.0, int(0.002 * WEI), ladder_config(max_active_positions=2), now=100
+        )
+        record_fill(plan, 0, plan.amount_for_level(0), "0")
+        mark_exit(plan, 0, "0", exited_at=120, realized_profit_wei=100)
         payload = status_payload(plan)
-        self.assertEqual(payload["levels_filled"], 1)
-        self.assertAlmostEqual(payload["spent_eth"] + payload["reserved_eth"], 0.002)
+        self.assertEqual(payload["levels_funded"], 2)
+        self.assertEqual(payload["completed_cycles"], 1)
+        self.assertEqual(payload["realized_profit_eth"], 100 / WEI)
 
 
-class DrawdownLadderBotLifecycleTests(unittest.TestCase):
+class AdaptiveLadderBotTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.previous_cwd = os.getcwd()
@@ -164,58 +218,18 @@ class DrawdownLadderBotLifecycleTests(unittest.TestCase):
         os.chdir(self.previous_cwd)
         self.temporary.cleanup()
 
-    def test_arms_frozen_plan_and_reloads_same_plan(self):
-        first = self.bot._prepare_gridless_ladder(1.0, {}, int(0.05 * WEI), now=100)
-        second = self.bot._prepare_gridless_ladder(0.5, {}, int(0.02 * WEI), now=200)
+    def test_prepare_preserves_reference_and_grows_density_after_deposit(self):
+        first = self.bot._prepare_gridless_ladder(1.0, {}, int(0.005 * WEI), now=100)
+        second = self.bot._prepare_gridless_ladder(0.5, {}, int(0.015 * WEI), now=200)
         self.assertEqual(first.id, second.id)
         self.assertEqual(second.reference_price, 1.0)
-        self.assertEqual(second.budget_wei, int(0.05 * WEI))
+        self.assertEqual(second.funded_count, 15)
 
-    def test_expired_never_filled_plan_does_not_silently_rearm(self):
-        plan = self.bot._prepare_gridless_ladder(1.0, {}, int(0.05 * WEI), now=100)
-        expired = self.bot._prepare_gridless_ladder(0.5, {}, int(0.05 * WEI), now=4000)
-        self.assertEqual(expired.id, plan.id)
-        self.assertEqual(expired.status, "expired")
-
-    def test_completed_exit_rearms_only_after_cooldown(self):
-        plan = build_plan(
-            1.0,
-            int(0.001 * WEI),
-            ladder_config(max_active_positions=1),
-            now=100,
-        )
-        record_fill(plan, 0, plan.amount_for_level(0))
-        mark_exit(plan, 200, cycle_closed=True)
-        save_plan(plan)
-        same = self.bot._prepare_gridless_ladder(0.8, {}, int(0.01 * WEI), now=250)
-        replacement = self.bot._prepare_gridless_ladder(
-            0.8, {}, int(0.01 * WEI), now=261
-        )
+    def test_indefinite_plan_does_not_expire(self):
+        plan = self.bot._prepare_gridless_ladder(1.0, {}, int(0.005 * WEI), now=100)
+        same = self.bot._prepare_gridless_ladder(0.5, {}, int(0.005 * WEI), now=10**9)
         self.assertEqual(same.id, plan.id)
-        self.assertNotEqual(replacement.id, plan.id)
-        self.assertEqual(replacement.reference_price, 0.8)
-
-    def test_final_exit_closes_partially_filled_cycle(self):
-        plan = build_plan(1.0, int(0.002 * WEI), ladder_config(), now=100)
-        record_fill(plan, 0, plan.amount_for_level(0))
-        mark_exit(plan, 200, cycle_closed=True)
-        self.assertEqual(plan.status, "closed")
-        self.assertEqual(plan.next_level_index, 1)
-
-    def test_terminal_without_confirmed_final_exit_does_not_rearm(self):
-        plan = build_plan(
-            1.0,
-            int(0.001 * WEI),
-            ladder_config(max_active_positions=1),
-            now=100,
-        )
-        record_fill(plan, 0, plan.amount_for_level(0))
-        # This represents ambiguous cross-file state after a hard stop. Safety
-        # requires an explicit closed checkpoint, not merely an empty ledger.
-        save_plan(plan)
-        same = self.bot._prepare_gridless_ladder(0.8, {}, int(0.01 * WEI), now=1000)
-        self.assertEqual(same.id, plan.id)
-        self.assertEqual(same.status, "terminal")
+        self.assertEqual(same.status, "active")
 
     def test_open_positions_without_plan_are_rejected(self):
         with self.assertRaises(LadderStateError):
@@ -224,47 +238,31 @@ class DrawdownLadderBotLifecycleTests(unittest.TestCase):
             )
 
     def test_execution_price_guard_blocks_recovered_route(self):
-        context = {
-            "trigger_price": 0.5,
-            "reference_price": 1.0,
-        }
-        # 1 ETH / 1 token = 1.0 execution price, above the 0.75 allowance.
+        context = {"trigger_price": 0.5, "reference_price": 1.0}
         quote = SimpleNamespace(buy_amount=WEI)
         self.bot.token_unit = WEI
-        self.assertFalse(
-            self.bot._ladder_execution_price_allowed(quote, WEI, context)
-        )
-        self.bot._mark_buy_tournament_aborted.assert_called_once()
+        self.assertFalse(self.bot._ladder_execution_price_allowed(quote, WEI, context))
 
-    def test_execution_price_guard_accepts_price_below_margin(self):
-        context = {"trigger_price": 0.5, "reference_price": 1.0}
-        quote = SimpleNamespace(buy_amount=2 * WEI)
-        self.bot.token_unit = WEI
-        self.assertTrue(self.bot._ladder_execution_price_allowed(quote, WEI, context))
-
-    def test_polling_arms_then_attempts_only_next_crossed_rung(self):
+    def test_polling_attempts_highest_crossed_ready_rung(self):
         self.bot.config.use_eth_trading = True
         self.bot.config.eth_gas_reserve = 0.001
         self.bot.config.weth_address = "0x0000000000000000000000000000000000000002"
         self.bot.wallet = MagicMock()
-        self.bot.wallet.get_eth_balance.return_value = 0.051
+        self.bot.wallet.get_eth_balance.return_value = 0.006
         self.bot._taxed_token_active = MagicMock(return_value=False)
         self.bot.last_taxed_token_failure_time = 0
         self.bot.last_buy_time = 0
         self.bot.gridless_buy_cooldown = 0
         self.bot._execute_buy_gridless = MagicMock()
         self.bot._funding_warning = None
-
         with patch("gridless.load_positions", return_value={}):
             self.bot._check_buys_gridless(1.0)
-            self.bot._execute_buy_gridless.assert_not_called()
             plan = load_plan()
-            self.bot._check_buys_gridless(plan.level_prices[0])
-
+            first_index = min(funded_indices(plan))
+            self.bot._check_buys_gridless(plan.rungs[first_index].price)
         self.bot._execute_buy_gridless.assert_called_once()
-        args = self.bot._execute_buy_gridless.call_args
-        self.assertEqual(args.args[1], plan.amount_for_level(0))
-        self.assertEqual(args.kwargs["ladder_context"]["level_index"], 0)
+        call = self.bot._execute_buy_gridless.call_args
+        self.assertEqual(call.kwargs["ladder_context"]["level_index"], first_index)
 
 
 class DrawdownLadderPositionIntegrationTests(unittest.TestCase):
@@ -305,9 +303,7 @@ class DrawdownLadderPositionIntegrationTests(unittest.TestCase):
             token_decimals=18,
         )
         positions = {"0": {"cost_wei": WEI, "balance": 10 * WEI}}
-        observations = {
-            "0": {"buy_pnl": -20, "sell_pnl": 6},
-        }
+        observations = {"0": {"buy_pnl": -20, "sell_pnl": 6}}
         focus = gridless.trigger_focus_candidates(positions, config, observations)
         self.assertEqual(focus["buy"], {})
         self.assertTrue(focus["sell"]["sell"]["triggered"])

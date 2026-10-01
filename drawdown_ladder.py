@@ -1,8 +1,8 @@
-"""Persistent drawdown-ladder planning for gridless entry allocation.
+"""Adaptive persistent drawdown allocation for gridless trading.
 
-The ladder owns entry geometry and a frozen principal budget. Swap execution,
-gas reserves, route selection, token-tax handling, receipt reconciliation, and
-position exits remain the responsibility of ``GridTradingBot``.
+The plan freezes only its reference and maximum trigger geometry.  Rungs are
+funded as strategy capital becomes available, recycle after confirmed exits,
+and grow in principal only after maximum trigger coverage is funded.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ import math
 import os
 import tempfile
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -20,7 +20,8 @@ from uuid import uuid4
 
 
 LADDER_FILE = "data/gridless_ladder.json"
-LADDER_VERSION = 1
+LADDER_VERSION = 2
+RUNG_STATES = {"inactive", "ready", "open", "waiting_reset", "retired"}
 
 
 class LadderStateError(RuntimeError):
@@ -28,122 +29,148 @@ class LadderStateError(RuntimeError):
 
 
 @dataclass
+class DrawdownRung:
+    index: int
+    price: float
+    principal_wei: int = 0
+    state: str = "inactive"
+    position_id: Optional[str] = None
+    open_principal_wei: int = 0
+    fill_count: int = 0
+    exit_count: int = 0
+    realized_profit_wei: int = 0
+    last_buy_at: Optional[float] = None
+    last_sell_at: Optional[float] = None
+
+    @classmethod
+    def from_dict(cls, value: dict) -> "DrawdownRung":
+        try:
+            return cls(
+                index=int(value["index"]),
+                price=float(value["price"]),
+                principal_wei=int(value.get("principal_wei", 0)),
+                state=str(value.get("state", "inactive")),
+                position_id=(
+                    str(value["position_id"])
+                    if value.get("position_id") is not None
+                    else None
+                ),
+                open_principal_wei=int(value.get("open_principal_wei", 0)),
+                fill_count=int(value.get("fill_count", 0)),
+                exit_count=int(value.get("exit_count", 0)),
+                realized_profit_wei=int(value.get("realized_profit_wei", 0)),
+                last_buy_at=(
+                    float(value["last_buy_at"])
+                    if value.get("last_buy_at") is not None
+                    else None
+                ),
+                last_sell_at=(
+                    float(value["last_sell_at"])
+                    if value.get("last_sell_at") is not None
+                    else None
+                ),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise LadderStateError(f"invalid ladder rung: {exc}") from exc
+
+
+@dataclass
 class DrawdownLadderPlan:
-    """Frozen entry levels and capital allocation for one token/wallet cycle."""
+    """Stable maximum geometry with dynamically funded, reusable rungs."""
 
     id: str
     chain_id: int
     token_address: str
     reference_price: float
-    level_prices: list[float]
-    budget_wei: int
-    position_size_wei: int
-    remainder_wei: int
     terminal_drawdown_percent: float
     spacing: str
     created_at: float
-    expires_at: float
+    expires_at: Optional[float]
+    minimum_position_wei: int
+    max_levels: int
     include_reference_entry: bool = False
-    next_level_index: int = 0
-    spent_wei: int = 0
     status: str = "active"
-    last_exit_at: Optional[float] = None
+    rungs: list[DrawdownRung] = field(default_factory=list)
+    last_funding_at: Optional[float] = None
     version: int = LADDER_VERSION
 
-    def amount_for_level(self, index: int) -> int:
-        if not 0 <= index < len(self.level_prices):
-            raise LadderStateError("ladder level index is outside the plan")
-        return self.position_size_wei + (
-            self.remainder_wei if index == len(self.level_prices) - 1 else 0
-        )
+    @property
+    def level_prices(self) -> list[float]:
+        return [rung.price for rung in self.rungs]
+
+    @property
+    def funded_count(self) -> int:
+        return sum(rung.principal_wei > 0 for rung in self.rungs)
+
+    @property
+    def allocated_wei(self) -> int:
+        return sum(rung.principal_wei for rung in self.rungs)
+
+    @property
+    def deployed_wei(self) -> int:
+        return sum(rung.open_principal_wei for rung in self.rungs)
+
+    @property
+    def reserved_wei(self) -> int:
+        return max(0, self.allocated_wei - self.deployed_wei)
 
     @property
     def next_level_price(self) -> Optional[float]:
-        if self.status != "active" or self.next_level_index >= len(self.level_prices):
-            return None
-        return self.level_prices[self.next_level_index]
+        ready = [rung.price for rung in self.rungs if rung.state == "ready"]
+        return max(ready) if self.status == "active" and ready else None
+
+    def amount_for_level(self, index: int) -> int:
+        try:
+            amount = self.rungs[index].principal_wei
+        except IndexError as exc:
+            raise LadderStateError("ladder level index is outside the plan") from exc
+        if amount <= 0:
+            raise LadderStateError("ladder level is not funded")
+        return amount
 
     def to_dict(self) -> dict:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, value: dict) -> "DrawdownLadderPlan":
+        version = int(value.get("version", 0))
+        if version != LADDER_VERSION:
+            raise LadderStateError(
+                f"unsupported ladder version {version}; expected {LADDER_VERSION}; "
+                "archive the v1 one-shot plan before enabling adaptive mode"
+            )
         try:
             plan = cls(
                 id=str(value["id"]),
                 chain_id=int(value["chain_id"]),
                 token_address=str(value["token_address"]),
                 reference_price=float(value["reference_price"]),
-                level_prices=[float(level) for level in value["level_prices"]],
-                budget_wei=int(value["budget_wei"]),
-                position_size_wei=int(value["position_size_wei"]),
-                remainder_wei=int(value.get("remainder_wei", 0)),
                 terminal_drawdown_percent=float(value["terminal_drawdown_percent"]),
                 spacing=str(value["spacing"]),
                 created_at=float(value["created_at"]),
-                expires_at=float(value["expires_at"]),
-                include_reference_entry=bool(value.get("include_reference_entry", False)),
-                next_level_index=int(value.get("next_level_index", 0)),
-                spent_wei=int(value.get("spent_wei", 0)),
-                status=str(value.get("status", "active")),
-                last_exit_at=(
-                    float(value["last_exit_at"])
-                    if value.get("last_exit_at") is not None else None
+                expires_at=(
+                    float(value["expires_at"])
+                    if value.get("expires_at") is not None
+                    else None
                 ),
-                version=int(value.get("version", LADDER_VERSION)),
+                minimum_position_wei=int(value["minimum_position_wei"]),
+                max_levels=int(value["max_levels"]),
+                include_reference_entry=bool(
+                    value.get("include_reference_entry", False)
+                ),
+                status=str(value.get("status", "active")),
+                rungs=[DrawdownRung.from_dict(rung) for rung in value["rungs"]],
+                last_funding_at=(
+                    float(value["last_funding_at"])
+                    if value.get("last_funding_at") is not None
+                    else None
+                ),
+                version=version,
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise LadderStateError(f"invalid ladder state: {exc}") from exc
         validate_plan(plan)
         return plan
-
-
-def validate_plan(plan: DrawdownLadderPlan) -> None:
-    """Validate all invariants needed to avoid duplicate or oversized buys."""
-    if plan.version != LADDER_VERSION:
-        raise LadderStateError(
-            f"unsupported ladder version {plan.version}; expected {LADDER_VERSION}"
-        )
-    if not plan.id or plan.chain_id <= 0 or not plan.token_address:
-        raise LadderStateError("ladder identity is incomplete")
-    if not math.isfinite(plan.reference_price) or plan.reference_price <= 0:
-        raise LadderStateError("ladder reference price must be positive and finite")
-    if not plan.level_prices or any(
-        not math.isfinite(level) or level <= 0 for level in plan.level_prices
-    ):
-        raise LadderStateError("ladder levels must be positive and finite")
-    if any(
-        current <= following
-        for current, following in zip(plan.level_prices, plan.level_prices[1:])
-    ):
-        raise LadderStateError("ladder levels must be strictly descending")
-    if plan.level_prices[0] > plan.reference_price:
-        raise LadderStateError("ladder level cannot exceed its reference price")
-    if not 0 <= plan.next_level_index <= len(plan.level_prices):
-        raise LadderStateError("ladder next level is outside the plan")
-    if plan.budget_wei <= 0 or plan.position_size_wei <= 0:
-        raise LadderStateError("ladder budget and position size must be positive")
-    if plan.remainder_wei < 0 or plan.spent_wei < 0:
-        raise LadderStateError("ladder remainder and spend must be non-negative")
-    if plan.position_size_wei * len(plan.level_prices) + plan.remainder_wei != plan.budget_wei:
-        raise LadderStateError("ladder position sizes do not equal its frozen budget")
-    expected_spend = plan.position_size_wei * plan.next_level_index
-    if plan.next_level_index == len(plan.level_prices):
-        expected_spend += plan.remainder_wei
-    if plan.spent_wei != expected_spend:
-        raise LadderStateError("ladder spend does not match filled levels")
-    if plan.status not in {"active", "terminal", "expired", "closed"}:
-        raise LadderStateError("ladder status is invalid")
-    if plan.status == "active" and plan.next_level_index == len(plan.level_prices):
-        raise LadderStateError("completed ladder cannot remain active")
-    if plan.status == "terminal" and plan.next_level_index != len(plan.level_prices):
-        raise LadderStateError("terminal ladder must have every level filled")
-    if plan.spacing not in {"linear", "log"}:
-        raise LadderStateError("ladder spacing must be linear or log")
-    if not 0 < plan.terminal_drawdown_percent < 100:
-        raise LadderStateError("terminal drawdown must be between 0 and 100")
-    if plan.expires_at <= plan.created_at:
-        raise LadderStateError("ladder expiry must follow creation")
 
 
 def generate_levels(
@@ -166,13 +193,12 @@ def generate_levels(
         fractions = [index / (count - 1) for index in range(count)]
     else:
         fractions = [index / count for index in range(1, count + 1)]
-
     levels = []
     for fraction in fractions:
         multiplier = (
             1 - (1 - terminal_multiplier) * fraction
             if spacing == "linear"
-            else terminal_multiplier ** fraction
+            else terminal_multiplier**fraction
         )
         level = reference_price * multiplier
         if levels and not level < levels[-1]:
@@ -185,146 +211,353 @@ def _eth_to_wei(value: Any) -> int:
     return int(Decimal(str(value)) * (Decimal(10) ** 18))
 
 
+def _target_budget_wei(
+    plan: Optional[DrawdownLadderPlan], spendable_balance_wei: int, config: Any
+) -> int:
+    deployed = plan.deployed_wei if plan is not None else 0
+    capital = max(0, int(spendable_balance_wei)) + deployed
+    fraction = Decimal(str(config.tradeable_balance_percent)) / Decimal(100)
+    target = int(Decimal(capital) * fraction)
+    maximum = _eth_to_wei(config.gridless_ladder_max_budget_eth)
+    return min(target, maximum) if maximum > 0 else target
+
+
+def _initial_indices(
+    max_levels: int, count: int, include_reference_entry: bool = False
+) -> list[int]:
+    """Select evenly distributed stable triggers, always including the floor."""
+    if include_reference_entry and count > 1:
+        return sorted(
+            {round(step * (max_levels - 1) / (count - 1)) for step in range(count)}
+        )
+    return sorted(
+        {math.ceil((step + 1) * max_levels / count) - 1 for step in range(count)}
+    )
+
+
+def _next_density_index(plan: DrawdownLadderPlan) -> Optional[int]:
+    inactive = [r.index for r in plan.rungs if r.state == "inactive"]
+    if not inactive:
+        return None
+    funded = [r.index for r in plan.rungs if r.principal_wei > 0]
+    anchors = [-1, *funded]
+    # Split the largest uncovered interval in normalized ladder-index space.
+    return max(
+        inactive,
+        key=lambda index: (min(abs(index - anchor) for anchor in anchors), -index),
+    )
+
+
 def build_plan(
     reference_price: float,
     spendable_balance_wei: int,
     config: Any,
     now: Optional[float] = None,
 ) -> Optional[DrawdownLadderPlan]:
-    """Freeze available liquid into a bounded set of minimum-safe positions."""
-    tradeable_fraction = Decimal(str(config.tradeable_balance_percent)) / Decimal(100)
-    budget_wei = int(Decimal(max(0, spendable_balance_wei)) * tradeable_fraction)
-    maximum_wei = _eth_to_wei(config.gridless_ladder_max_budget_eth)
-    if maximum_wei > 0:
-        budget_wei = min(budget_wei, maximum_wei)
-    minimum_wei = _eth_to_wei(config.gridless_min_position_eth)
-    requested_count = min(
-        int(config.max_active_positions),
-        budget_wei // minimum_wei if minimum_wei > 0 else 0,
-    )
-    if requested_count < 1:
+    """Create stable maximum geometry and fund the coverage currently affordable."""
+    minimum = _eth_to_wei(config.gridless_min_position_eth)
+    target = _target_budget_wei(None, spendable_balance_wei, config)
+    count = min(int(config.max_active_positions), target // minimum)
+    if count < 1:
         return None
-
-    levels = generate_levels(
+    created_at = time.time() if now is None else now
+    expiry_seconds = int(config.gridless_ladder_expiry_seconds)
+    max_levels = int(config.max_active_positions)
+    prices = generate_levels(
         reference_price,
-        requested_count,
+        max_levels,
         config.gridless_ladder_terminal_drawdown_percent,
         config.gridless_ladder_spacing,
         config.gridless_ladder_include_reference_entry,
     )
-    position_size_wei, remainder_wei = divmod(budget_wei, len(levels))
-    created_at = time.time() if now is None else now
+    selected = set(
+        _initial_indices(
+            max_levels, int(count), config.gridless_ladder_include_reference_entry
+        )
+    )
     plan = DrawdownLadderPlan(
         id=uuid4().hex[:12],
         chain_id=int(config.chain_id),
         token_address=str(config.token_address).lower(),
         reference_price=reference_price,
-        level_prices=levels,
-        budget_wei=budget_wei,
-        position_size_wei=position_size_wei,
-        remainder_wei=remainder_wei,
         terminal_drawdown_percent=config.gridless_ladder_terminal_drawdown_percent,
         spacing=config.gridless_ladder_spacing,
         created_at=created_at,
-        expires_at=created_at + config.gridless_ladder_expiry_seconds,
+        expires_at=created_at + expiry_seconds if expiry_seconds > 0 else None,
+        minimum_position_wei=minimum,
+        max_levels=max_levels,
         include_reference_entry=config.gridless_ladder_include_reference_entry,
+        rungs=[
+            DrawdownRung(
+                index=index,
+                price=price,
+                principal_wei=minimum if index in selected else 0,
+                state="ready" if index in selected else "inactive",
+            )
+            for index, price in enumerate(prices)
+        ],
+        last_funding_at=created_at,
     )
+    refresh_plan_funding(plan, spendable_balance_wei, config, created_at)
     validate_plan(plan)
     return plan
 
 
+def refresh_plan_funding(
+    plan: DrawdownLadderPlan,
+    spendable_balance_wei: int,
+    config: Any,
+    now: Optional[float] = None,
+) -> bool:
+    """Add stable coverage first, then water-fill rung targets at maximum density."""
+    if plan.status != "active":
+        return False
+    target = _target_budget_wei(plan, spendable_balance_wei, config)
+    available = target - plan.allocated_wei
+    changed = False
+    while (
+        plan.funded_count < plan.max_levels and available >= plan.minimum_position_wei
+    ):
+        index = _next_density_index(plan)
+        if index is None:
+            break
+        rung = plan.rungs[index]
+        rung.principal_wei = plan.minimum_position_wei
+        rung.state = "ready"
+        available -= plan.minimum_position_wei
+        changed = True
+    if plan.funded_count == plan.max_levels and available > 0:
+        quotient, remainder = divmod(available, plan.max_levels)
+        if quotient or remainder:
+            for offset, rung in enumerate(plan.rungs):
+                rung.principal_wei += quotient + (1 if offset < remainder else 0)
+            changed = True
+    if changed:
+        plan.last_funding_at = time.time() if now is None else now
+        validate_plan(plan)
+    return changed
+
+
+def advance_rearms(
+    plan: DrawdownLadderPlan,
+    current_price: float,
+    cooldown_seconds: int,
+    now: Optional[float] = None,
+) -> bool:
+    """Re-enable sold rungs only after price is back above their trigger."""
+    if plan.status != "active" or not math.isfinite(current_price):
+        return False
+    now = time.time() if now is None else now
+    changed = False
+    for rung in plan.rungs:
+        elapsed = now - rung.last_sell_at if rung.last_sell_at is not None else 0
+        if (
+            rung.state == "waiting_reset"
+            and elapsed >= cooldown_seconds
+            and current_price > rung.price
+        ):
+            rung.state = "ready"
+            changed = True
+    if changed:
+        validate_plan(plan)
+    return changed
+
+
+def eligible_level(plan: DrawdownLadderPlan, current_price: float) -> Optional[int]:
+    if plan.status != "active" or not math.isfinite(current_price):
+        return None
+    crossed = [
+        rung.index
+        for rung in plan.rungs
+        if rung.state == "ready" and current_price <= rung.price
+    ]
+    return min(crossed) if crossed else None
+
+
 def level_is_crossed(plan: DrawdownLadderPlan, current_price: float) -> bool:
-    return (
-        plan.next_level_price is not None
-        and math.isfinite(current_price)
-        and current_price <= plan.next_level_price
-    )
+    return eligible_level(plan, current_price) is not None
 
 
 def record_fill(
     plan: DrawdownLadderPlan,
     level_index: int,
     principal_wei: int,
+    position_id: Optional[str] = None,
+    filled_at: Optional[float] = None,
 ) -> None:
-    """Advance exactly one level after a confirmed, reconciled position write."""
-    if plan.status != "active" or level_index != plan.next_level_index:
-        raise LadderStateError("ladder fill does not match the next active level")
-    expected = plan.amount_for_level(level_index)
-    if int(principal_wei) != expected:
-        raise LadderStateError(
-            f"ladder principal {principal_wei} does not match planned amount {expected}"
-        )
-    plan.next_level_index += 1
-    plan.spent_wei += expected
-    if plan.next_level_index == len(plan.level_prices):
-        plan.status = "terminal"
+    if plan.status != "active":
+        raise LadderStateError("ladder is not active")
+    rung = plan.rungs[level_index]
+    if rung.state != "ready":
+        raise LadderStateError("ladder rung is not ready")
+    if int(principal_wei) != rung.principal_wei:
+        raise LadderStateError("ladder principal does not match the funded rung")
+    rung.state = "open"
+    rung.position_id = str(position_id) if position_id is not None else None
+    rung.open_principal_wei = int(principal_wei)
+    rung.fill_count += 1
+    rung.last_buy_at = time.time() if filled_at is None else filled_at
     validate_plan(plan)
 
 
 def mark_exit(
     plan: DrawdownLadderPlan,
+    level_index: int,
+    position_id: Optional[str] = None,
     exited_at: Optional[float] = None,
-    cycle_closed: bool = False,
+    realized_profit_wei: int = 0,
+    recycle: bool = True,
 ) -> None:
-    plan.last_exit_at = time.time() if exited_at is None else exited_at
-    if cycle_closed:
-        plan.status = "closed"
+    rung = plan.rungs[level_index]
+    if rung.state != "open":
+        raise LadderStateError("sold ladder rung is not open")
+    if position_id is not None and rung.position_id not in {None, str(position_id)}:
+        raise LadderStateError("sold position does not match its ladder rung")
+    rung.state = "waiting_reset" if recycle and plan.status == "active" else "retired"
+    rung.position_id = None
+    rung.open_principal_wei = 0
+    rung.exit_count += 1
+    rung.realized_profit_wei += int(realized_profit_wei)
+    rung.last_sell_at = time.time() if exited_at is None else exited_at
     validate_plan(plan)
 
 
+def reconcile_confirmed_positions(
+    plan: DrawdownLadderPlan, positions: Dict[str, Dict]
+) -> bool:
+    """Recover a confirmed position written before its rung checkpoint."""
+    changed = False
+    for position_id, position in positions.items():
+        if position.get("ladder_id") != plan.id:
+            continue
+        index = int(position.get("ladder_level_index", -1))
+        if not 0 <= index < len(plan.rungs):
+            raise LadderStateError("open position references an invalid ladder level")
+        rung = plan.rungs[index]
+        if rung.state == "ready":
+            principal = int(position.get("ladder_principal_wei", 0) or 0)
+            if principal != rung.principal_wei:
+                raise LadderStateError(
+                    "recovered position principal does not match rung"
+                )
+            record_fill(plan, index, principal, position_id)
+            changed = True
+    return changed
+
+
+def validate_plan(plan: DrawdownLadderPlan) -> None:
+    if plan.version != LADDER_VERSION:
+        raise LadderStateError("unsupported ladder version")
+    if not plan.id or plan.chain_id <= 0 or not plan.token_address:
+        raise LadderStateError("ladder identity is incomplete")
+    if not math.isfinite(plan.reference_price) or plan.reference_price <= 0:
+        raise LadderStateError("ladder reference price must be positive and finite")
+    if plan.spacing not in {"linear", "log"}:
+        raise LadderStateError("ladder spacing must be linear or log")
+    if not 0 < plan.terminal_drawdown_percent < 100:
+        raise LadderStateError("ladder terminal drawdown must be between 0 and 100")
+    if plan.minimum_position_wei <= 0 or plan.max_levels <= 0:
+        raise LadderStateError("ladder sizing must be positive")
+    if len(plan.rungs) != plan.max_levels:
+        raise LadderStateError("ladder rung count does not match maximum coverage")
+    if plan.status not in {"active", "expired", "cancelled"}:
+        raise LadderStateError("ladder status is invalid")
+    if plan.expires_at is not None and plan.expires_at <= plan.created_at:
+        raise LadderStateError("ladder expiry must follow creation")
+    prices = [rung.price for rung in plan.rungs]
+    if any(not math.isfinite(price) or price <= 0 for price in prices):
+        raise LadderStateError("ladder levels must be positive and finite")
+    if any(a <= b for a, b in zip(prices, prices[1:])):
+        raise LadderStateError("ladder levels must be strictly descending")
+    for index, rung in enumerate(plan.rungs):
+        if rung.index != index or rung.state not in RUNG_STATES:
+            raise LadderStateError("ladder rung identity or state is invalid")
+        if (
+            min(
+                rung.principal_wei,
+                rung.open_principal_wei,
+                rung.fill_count,
+                rung.exit_count,
+            )
+            < 0
+        ):
+            raise LadderStateError("ladder rung accounting cannot be negative")
+        if rung.state == "inactive" and rung.principal_wei != 0:
+            raise LadderStateError("inactive rung cannot reserve principal")
+        if rung.state != "inactive" and rung.principal_wei < plan.minimum_position_wei:
+            raise LadderStateError("funded rung is below the minimum principal")
+        if rung.state == "open":
+            if (
+                rung.open_principal_wei <= 0
+                or rung.open_principal_wei > rung.principal_wei
+            ):
+                raise LadderStateError("open rung principal is invalid")
+        elif rung.open_principal_wei or rung.position_id is not None:
+            raise LadderStateError("non-open rung cannot retain an open position")
+        if rung.exit_count > rung.fill_count:
+            raise LadderStateError("rung exits exceed fills")
+
+
 def validate_context(
-    plan: DrawdownLadderPlan,
-    positions: Dict[str, Dict],
-    config: Any,
+    plan: DrawdownLadderPlan, positions: Dict[str, Dict], config: Any
 ) -> None:
-    """Tie all open positions to unique, already-filled levels in this plan."""
     validate_plan(plan)
     if plan.chain_id != int(config.chain_id):
         raise LadderStateError("ladder chain does not match this bot")
     if plan.token_address != str(config.token_address).lower():
         raise LadderStateError("ladder token does not match this bot")
-    if len(plan.level_prices) > int(config.max_active_positions):
-        raise LadderStateError("persisted ladder exceeds MAX_ACTIVE_POSITIONS")
-
+    if plan.max_levels != int(config.max_active_positions):
+        raise LadderStateError(
+            "persisted ladder maximum does not match MAX_ACTIVE_POSITIONS"
+        )
+    if plan.minimum_position_wei != _eth_to_wei(config.gridless_min_position_eth):
+        raise LadderStateError(
+            "persisted ladder minimum does not match GRIDLESS_MIN_POSITION_ETH"
+        )
+    if plan.spacing != str(config.gridless_ladder_spacing):
+        raise LadderStateError("persisted ladder spacing does not match configuration")
+    if not math.isclose(
+        plan.terminal_drawdown_percent,
+        float(config.gridless_ladder_terminal_drawdown_percent),
+        rel_tol=0,
+        abs_tol=1e-12,
+    ):
+        raise LadderStateError(
+            "persisted ladder terminal drawdown does not match configuration"
+        )
+    if plan.include_reference_entry != bool(
+        config.gridless_ladder_include_reference_entry
+    ):
+        raise LadderStateError(
+            "persisted reference-entry mode does not match configuration"
+        )
     seen = set()
     for position_id, position in positions.items():
         if position.get("ladder_id") != plan.id:
+            raise LadderStateError("open position does not belong to persisted ladder")
+        index = int(position.get("ladder_level_index", -1))
+        if not 0 <= index < len(plan.rungs) or index in seen:
             raise LadderStateError(
-                f"open position {position_id} does not belong to the persisted ladder"
+                "open position has invalid or duplicate ladder level"
             )
-        try:
-            level_index = int(position["ladder_level_index"])
-        except (KeyError, TypeError, ValueError) as exc:
-            raise LadderStateError(
-                f"open position {position_id} has no valid ladder level"
-            ) from exc
-        if not 0 <= level_index <= plan.next_level_index:
-            raise LadderStateError(
-                f"open position {position_id} references an invalid ladder level"
-            )
-        if level_index in seen:
-            raise LadderStateError("multiple open positions reference the same ladder level")
-        seen.add(level_index)
+        seen.add(index)
+        rung = plan.rungs[index]
+        principal = int(position.get("ladder_principal_wei", 0) or 0)
+        if rung.state != "open" or principal != rung.open_principal_wei:
+            raise LadderStateError("position and rung accounting disagree")
+        if rung.position_id is not None and rung.position_id != str(position_id):
+            raise LadderStateError("position id and rung accounting disagree")
+    open_indices = {rung.index for rung in plan.rungs if rung.state == "open"}
+    if open_indices != seen:
+        raise LadderStateError("persisted open rung has no matching position")
 
 
-def reconcile_confirmed_positions(
-    plan: DrawdownLadderPlan,
-    positions: Dict[str, Dict],
-) -> bool:
-    """Recover a crash between position persistence and ladder advancement."""
-    changed = False
-    by_level = {
-        int(position["ladder_level_index"]): position
-        for position in positions.values()
-        if position.get("ladder_id") == plan.id
-        and position.get("ladder_level_index") is not None
-    }
-    while plan.status == "active" and plan.next_level_index in by_level:
-        position = by_level[plan.next_level_index]
-        principal_wei = int(position.get("ladder_principal_wei", 0) or 0)
-        record_fill(plan, plan.next_level_index, principal_wei)
-        changed = True
-    return changed
+def expire_plan(plan: DrawdownLadderPlan) -> None:
+    plan.status = "expired"
+    for rung in plan.rungs:
+        if rung.state in {"ready", "waiting_reset"}:
+            rung.state = "retired"
+    validate_plan(plan)
 
 
 def load_plan(path: str = LADDER_FILE) -> Optional[DrawdownLadderPlan]:
@@ -364,18 +597,24 @@ def save_plan(plan: DrawdownLadderPlan, path: str = LADDER_FILE) -> None:
 def status_payload(plan: Optional[DrawdownLadderPlan]) -> Optional[dict]:
     if plan is None:
         return None
-    next_price = plan.next_level_price
     return {
         "id": plan.id,
         "status": plan.status,
         "spacing": plan.spacing,
         "reference_price": plan.reference_price,
         "terminal_drawdown_percent": plan.terminal_drawdown_percent,
-        "levels_total": len(plan.level_prices),
-        "levels_filled": plan.next_level_index,
-        "next_level_price": next_price,
-        "budget_eth": plan.budget_wei / 10**18,
-        "spent_eth": plan.spent_wei / 10**18,
-        "reserved_eth": max(0, plan.budget_wei - plan.spent_wei) / 10**18,
+        "levels_total": plan.max_levels,
+        "levels_funded": plan.funded_count,
+        "levels_open": sum(r.state == "open" for r in plan.rungs),
+        "levels_ready": sum(r.state == "ready" for r in plan.rungs),
+        "completed_cycles": sum(r.exit_count for r in plan.rungs),
+        "next_level_price": plan.next_level_price,
+        "allocated_budget_eth": plan.allocated_wei / 10**18,
+        "deployed_eth": plan.deployed_wei / 10**18,
+        "reserved_eth": plan.reserved_wei / 10**18,
+        "average_position_eth": (
+            plan.allocated_wei / plan.funded_count / 10**18 if plan.funded_count else 0
+        ),
+        "realized_profit_eth": sum(r.realized_profit_wei for r in plan.rungs) / 10**18,
         "expires_at": plan.expires_at,
     }

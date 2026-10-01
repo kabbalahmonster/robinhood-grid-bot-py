@@ -3113,12 +3113,15 @@ class GridBot:
         )
 
     def _prepare_gridless_ladder(self, price, positions, spendable_balance_wei, now=None):
-        """Load, recover, expire, re-arm, or create the persisted entry ladder."""
+        """Load, recover, resize, and recycle the adaptive entry ladder."""
         from drawdown_ladder import (
+            advance_rearms,
             LadderStateError,
             build_plan,
+            expire_plan,
             load_plan,
             reconcile_confirmed_positions,
+            refresh_plan_funding,
             save_plan,
             validate_context,
         )
@@ -3136,54 +3139,47 @@ class GridBot:
                 return None
             save_plan(plan)
             logger.info(
-                "Armed %s drawdown ladder %s: reference=%.10f, levels=%d, "
-                "budget=%.8f %s, terminal=-%.2f%%",
+                "Armed adaptive %s drawdown ladder %s: reference=%.10f, "
+                "funded=%d/%d, allocated=%.8f %s, terminal=-%.2f%%",
                 plan.spacing, plan.id, plan.reference_price,
-                len(plan.level_prices), plan.budget_wei / 10**18,
+                plan.funded_count, plan.max_levels, plan.allocated_wei / 10**18,
                 self.trade_token_name, plan.terminal_drawdown_percent,
             )
             return plan
 
-        validate_context(plan, positions, self.config)
         if reconcile_confirmed_positions(plan, positions):
             save_plan(plan)
             logger.warning(
-                "Recovered ladder %s progress from confirmed position provenance (%d/%d)",
-                plan.id, plan.next_level_index, len(plan.level_prices),
+                "Recovered ladder %s rung state from confirmed position provenance",
+                plan.id,
             )
+        validate_context(plan, positions, self.config)
 
-        if plan.status == "active" and now >= plan.expires_at:
-            plan.status = "expired"
+        if (plan.status == "active" and plan.expires_at is not None
+                and now >= plan.expires_at):
+            expire_plan(plan)
             save_plan(plan)
             logger.warning(
-                "Drawdown ladder %s expired after %d/%d fills; remaining entries disabled",
-                plan.id, plan.next_level_index, len(plan.level_prices),
+                "Adaptive drawdown ladder %s expired; unfilled and recycled entries disabled",
+                plan.id,
             )
+            return plan
 
-        cooldown_elapsed = (
-            plan.last_exit_at is not None
-            and now - plan.last_exit_at
-            >= self.config.gridless_ladder_rearm_cooldown_seconds
+        changed = advance_rearms(
+            plan, price, self.config.gridless_ladder_rearm_cooldown_seconds, now
         )
-        should_rearm = (
-            plan.status == "closed"
-            and not positions
-            and self.config.gridless_ladder_rearm_policy == "after_exit"
-            and cooldown_elapsed
-        )
-        if should_rearm:
-            replacement = build_plan(price, spendable_balance_wei, self.config, now)
-            if replacement is None:
-                return plan
-            save_plan(replacement)
+        funded_before = plan.funded_count
+        allocated_before = plan.allocated_wei
+        if refresh_plan_funding(plan, spendable_balance_wei, self.config, now):
+            changed = True
             logger.info(
-                "Re-armed drawdown ladder %s after completed exit cycle: "
-                "reference=%.10f, levels=%d, budget=%.8f %s",
-                replacement.id, replacement.reference_price,
-                len(replacement.level_prices), replacement.budget_wei / 10**18,
+                "Adaptive ladder %s grew: funded %d→%d/%d, allocated %.8f→%.8f %s",
+                plan.id, funded_before, plan.funded_count, plan.max_levels,
+                allocated_before / 10**18, plan.allocated_wei / 10**18,
                 self.trade_token_name,
             )
-            return replacement
+        if changed:
+            save_plan(plan)
         return plan
 
     def _gridless_ladder_status(self, positions=None):
@@ -3203,7 +3199,7 @@ class GridBot:
         return status_payload(plan)
 
     def _ladder_execution_price_allowed(self, quote, buy_amount_wei, ladder_context):
-        """Revalidate the final executable output against the frozen ladder rung."""
+        """Revalidate final executable output against the stable ladder rung."""
         if ladder_context is None:
             return True
         quoted_output = int(getattr(quote, "buy_amount", 0) or 0)
@@ -3934,7 +3930,7 @@ class GridBot:
         
         ladder_context = None
         if ladder_mode:
-            from drawdown_ladder import level_is_crossed
+            from drawdown_ladder import eligible_level
 
             spendable_balance_wei = int(
                 Decimal(str(trade_balance)) * Decimal(10**18)
@@ -3961,19 +3957,19 @@ class GridBot:
             if plan.status != "active":
                 logger.debug("Gridless: ladder %s is %s", plan.id, plan.status)
                 return
-            if not level_is_crossed(plan, price):
+            level_index = eligible_level(plan, price)
+            if level_index is None:
                 logger.debug(
-                    "Gridless: ladder waiting at %.10f; current %.10f",
+                    "Gridless: adaptive ladder has no crossed ready rung; next=%s current=%.10f",
                     plan.next_level_price, price,
                 )
                 return
-            level_index = plan.next_level_index
             buy_amount_wei = plan.amount_for_level(level_index)
             if buy_amount_wei > spendable_balance_wei:
                 logger.warning(
                     "Gridless ladder level %d/%d deferred: needs %.8f %s, "
                     "only %.8f remains spendable",
-                    level_index + 1, len(plan.level_prices),
+                    level_index + 1, plan.max_levels,
                     buy_amount_wei / 10**18, self.trade_token_name,
                     spendable_balance_wei / 10**18,
                 )
@@ -3987,14 +3983,14 @@ class GridBot:
                 return
             buy_amount_eth = buy_amount_wei / 10**18
             reason = (
-                f"Drawdown ladder {plan.spacing} level "
-                f"{level_index + 1}/{len(plan.level_prices)} at "
-                f"{plan.level_prices[level_index]:.10f}"
+                f"Adaptive drawdown ladder {plan.spacing} rung "
+                f"{level_index + 1}/{plan.max_levels} at "
+                f"{plan.rungs[level_index].price:.10f}"
             )
             ladder_context = {
                 "ladder_id": plan.id,
                 "level_index": level_index,
-                "trigger_price": plan.level_prices[level_index],
+                "trigger_price": plan.rungs[level_index].price,
                 "reference_price": plan.reference_price,
                 "principal_wei": buy_amount_wei,
             }
@@ -4008,9 +4004,9 @@ class GridBot:
         logger.info(f"🎯 Gridless buy triggered: {reason}")
         if ladder_mode:
             logger.info(
-                "   Amount: %.8f %s (frozen ladder budget; %d levels remain)",
+                "   Amount: %.8f %s (adaptive rung; %d/%d funded)",
                 buy_amount_eth, self.trade_token_name,
-                len(plan.level_prices) - plan.next_level_index,
+                plan.funded_count, plan.max_levels,
             )
         else:
             logger.info(f"   Amount: {buy_amount_eth:.6f} {self.trade_token_name} ({trade_balance:.6f} × {tradeable_pct*100:.0f}% / {available_slots} slots)")
@@ -4066,8 +4062,11 @@ class GridBot:
             expected_context = (
                 active_ladder.id == ladder_context.get("ladder_id")
                 and active_ladder.status == "active"
-                and active_ladder.next_level_index == ladder_context.get("level_index")
-                and active_ladder.amount_for_level(active_ladder.next_level_index)
+                and 0 <= int(ladder_context.get("level_index", -1))
+                < active_ladder.max_levels
+                and active_ladder.rungs[int(ladder_context["level_index"])].state
+                == "ready"
+                and active_ladder.amount_for_level(int(ladder_context["level_index"]))
                 == int(ladder_context.get("principal_wei", 0))
             )
             if not expected_context:
@@ -4344,6 +4343,7 @@ class GridBot:
                         active_ladder,
                         ladder_context["level_index"],
                         ladder_context["principal_wei"],
+                        position_id=pos_id,
                     )
                     save_plan(active_ladder)
                 except Exception as exc:
@@ -4603,7 +4603,7 @@ class GridBot:
     @_with_tournament_terminal("sell")
     def _execute_sell_gridless(self, pos_id, pos, price, pre_fetched_quote=None):
         """Execute a gridless sell order."""
-        from gridless import remove_position, calculate_pnl, load_positions
+        from gridless import remove_position, calculate_pnl
         
         balance = pos.get('balance', 0)
         # Support both cost_wei (new) and cost (legacy nano-ETH)
@@ -5118,7 +5118,16 @@ class GridBot:
                         raise RuntimeError(
                             "sold position does not match persisted drawdown ladder"
                         )
-                    mark_exit(plan, cycle_closed=not load_positions())
+                    level_index = int(pos.get("ladder_level_index", -1))
+                    mark_exit(
+                        plan,
+                        level_index,
+                        position_id=pos_id,
+                        realized_profit_wei=profit_wei,
+                        recycle=(
+                            self.config.gridless_ladder_rearm_policy == "after_exit"
+                        ),
+                    )
                     save_plan(plan)
                 except Exception as exc:
                     logger.critical(
@@ -6503,13 +6512,14 @@ class GridBot:
                     from gridless import load_positions, get_capacity_warning
                     gpos = load_positions()
                     if self._drawdown_ladder_enabled():
-                        from drawdown_ladder import level_is_crossed, load_plan
+                        from drawdown_ladder import eligible_level, load_plan
 
                         ladder_plan = load_plan()
                         if ladder_plan is not None:
                             ladder_status = self._gridless_ladder_status(gpos)
+                            crossed_index = eligible_level(ladder_plan, price)
                             if (len(gpos) >= self.config.max_active_positions
-                                    and level_is_crossed(ladder_plan, price)):
+                                    and crossed_index is not None):
                                 capacity_warning = {
                                     "code": "ladder_buy_blocked_at_capacity",
                                     "message": (
@@ -6518,9 +6528,9 @@ class GridBot:
                                     ),
                                     "filled_positions": len(gpos),
                                     "max_positions": self.config.max_active_positions,
-                                    "ladder_level": ladder_plan.next_level_index + 1,
-                                    "ladder_levels": len(ladder_plan.level_prices),
-                                    "trigger_price": ladder_plan.next_level_price,
+                                    "ladder_level": crossed_index + 1,
+                                    "ladder_levels": ladder_plan.max_levels,
+                                    "trigger_price": ladder_plan.rungs[crossed_index].price,
                                 }
                         elif gpos:
                             raise RuntimeError(

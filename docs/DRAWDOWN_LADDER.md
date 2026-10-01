@@ -1,20 +1,17 @@
-# Drawdown Ladder Allocation
+# Adaptive Drawdown Allocation
 
-The drawdown ladder is an opt-in entry allocator for gridless mode. It freezes
-a bounded principal budget when armed and distributes that budget across price
-levels down to a configured terminal drawdown. Its purpose is to preserve buy
-capacity through continued downside instead of spending the available balance
-near one P&L threshold.
+The drawdown allocator is an opt-in gridless entry engine. It maintains a
+stable field of reusable percentage-drawdown triggers below one reference
+price. Capital can enter at any time: the engine first adds trigger density,
+then raises rung size after maximum coverage is funded. A confirmed sell frees
+its rung to trade again after price resets above that trigger.
 
-It is an allocation mechanism, not an asset-selection or risk-management
-thesis. Existing sell thresholds, stop loss, moonbag handling, profit banking,
-route selection, gas caps, slippage, transfer-tax handling, receipt
-reconciliation, and circuit-breaker behavior remain authoritative.
+It changes entry allocation only. Existing independent-position profit
+thresholds, stop loss, moonbag handling, profit banking, gas reserves, route
+selection, slippage, transfer-tax handling, receipt reconciliation, and circuit
+breakers remain authoritative.
 
-## Enabling it
-
-The legacy threshold allocator remains the default. A conservative paper or
-isolated-wallet profile is:
+## Suggested isolated-wallet profile
 
 ```dotenv
 USE_GRIDLESS=true
@@ -22,180 +19,180 @@ GRIDLESS_ALLOCATION_MODE=drawdown_ladder
 MAX_ACTIVE_POSITIONS=50
 TRADEABLE_BALANCE_PERCENT=50
 GRIDLESS_MIN_POSITION_ETH=0.001
-GRIDLESS_LADDER_TERMINAL_DRAWDOWN_PERCENT=90
+GRIDLESS_LADDER_TERMINAL_DRAWDOWN_PERCENT=95
 GRIDLESS_LADDER_SPACING=log
 GRIDLESS_LADDER_MAX_BUDGET_ETH=0
-GRIDLESS_LADDER_EXPIRY_SECONDS=2592000
+GRIDLESS_LADDER_EXPIRY_SECONDS=0
 GRIDLESS_LADDER_REARM_POLICY=after_exit
-GRIDLESS_LADDER_REARM_COOLDOWN_SECONDS=3600
+GRIDLESS_LADDER_REARM_COOLDOWN_SECONDS=0
 GRIDLESS_LADDER_INCLUDE_REFERENCE_ENTRY=false
 ```
 
-Do not switch an existing threshold ledger into ladder mode. The ladder refuses
-to adopt open positions that lack ladder provenance. Start with an empty
-`data/gridless_positions.json`, or close/migrate the positions deliberately.
-Likewise, threshold mode refuses to trade while a persisted ladder file exists.
-The position ledger and ladder state must be archived or restored as a pair.
+The mode requires a fresh compatible v2 ladder state. It refuses to adopt
+positions without matching ladder provenance and refuses the old v1 one-shot
+state. Archive `data/gridless_ladder.json` together with
+`data/gridless_positions.json` before migration; never delete only one side of
+an active strategy.
 
-## Budget and position count
+## Stable trigger geometry
 
-At arm time, the bot reads the spendable trading balance. In native-ETH mode,
-the existing `ETH_GAS_RESERVE` is removed first. The frozen principal is:
+At creation, the allocator freezes a reference `R` and precomputes the maximum
+number of triggers allowed by `MAX_ACTIVE_POSITIONS`. Let terminal drawdown `D`
+be a fraction, maximum rung count `M`, and one-based rung index `i`.
 
-```text
-uncapped_budget = spendable_balance × TRADEABLE_BALANCE_PERCENT / 100
-budget = min(uncapped_budget, GRIDLESS_LADDER_MAX_BUDGET_ETH)
-```
-
-The second line applies only when the maximum budget is greater than zero.
-Position count is:
+Linear:
 
 ```text
-N = min(MAX_ACTIVE_POSITIONS, floor(budget / GRIDLESS_MIN_POSITION_ETH))
+price[i] = R × (1 - D × i/M)
 ```
 
-If `N` is zero, no ladder is armed. The budget is divided evenly across the
-`N` levels; indivisible wei remainder is assigned to the deepest level. The
-budget, count, reference, and levels are frozen. Later wallet deposits,
-withdrawals, sales, or price changes do not resize or move an active ladder.
-
-Example: 0.100 ETH spendable, 50% tradeable, 0.001 ETH minimum, and 50 maximum
-positions creates 50 entries of 0.001 ETH across a 0.050 ETH frozen budget.
-
-The reserve is logical rather than an on-chain escrow. If another process or
-manual transaction spends the wallet balance, a crossed rung remains pending
-until its exact principal is affordable again; the bot does not shrink it.
-
-## Reference and level geometry
-
-The reference is the observed token price when the ladder first arms. Let:
-
-- `R` be reference price;
-- `D` be terminal drawdown as a fraction, such as `0.90`;
-- `N` be level count;
-- `i` be a one-based level index.
-
-With reference entry disabled (the default), linear spacing is:
+Logarithmic:
 
 ```text
-price[i] = R × (1 - D × i/N)
+price[i] = R × (1 - D)^(i/M)
 ```
 
-This spends capital steadily in absolute drawdown space. With 50 levels ending
-at -90%, the levels are 1.8 percentage points apart.
+With a $100 reference and a 95% terminal drawdown, the deepest trigger is $5.
+Linear spreads triggers evenly in absolute drawdown. Logarithmic spacing keeps
+more triggers for deep declines.
 
-Log spacing is:
+Unfunded triggers already exist in the persisted geometry. Funding activates
+them without moving any existing price. Initial funded rungs are distributed
+evenly across the complete range and always include the terminal floor. Later
+funding splits uncovered intervals to make coverage progressively denser.
+
+## Dynamic capital accounting
+
+The engine derives controlled principal from free spendable settlement asset
+plus principal currently deployed in open ladder positions:
 
 ```text
-price[i] = R × (1 - D)^(i/N)
+strategy_capital = spendable_balance + deployed_rung_principal
+target_allocation = strategy_capital × TRADEABLE_BALANCE_PERCENT / 100
 ```
 
-This makes adjacent price ratios equal. It deploys less capital during shallow
-drawdowns and reserves more entries for deep declines. Both modes use the same
-budget, count, and final price.
+`GRIDLESS_LADDER_MAX_BUDGET_ETH`, when greater than zero, caps the target.
+Including deployed principal prevents a buy from making the strategy appear
+poorer. Counting only planned principal—not mark-to-market token value—prevents
+price volatility from moving triggers or resizing the plan.
 
-When `GRIDLESS_LADDER_INCLUDE_REFERENCE_ENTRY=true` and more than one position
-exists, level zero is the reference and the last level remains the terminal
-price. A one-position ladder always targets the terminal price; otherwise it
-would not stretch capital downward at all.
+Returned principal is already assigned to its rung and is not mistaken for new
+capital. A wallet deposit or realized net profit increases strategy capital;
+gas and realized losses reduce it. The allocator never shrinks existing target
+sizes automatically. If actual liquid is below the logical ready-rung reserve,
+buys simply defer until funded again.
 
-## Polling and execution behavior
+### Growth order
 
-This bot executes swaps; it does not place resting exchange limit orders. Each
-poll compares the observed price with the next unfilled level. If crossed, at
-most one rung is attempted per cycle. Existing buy cooldowns continue to apply,
-so a gap through multiple levels cannot burst-submit many transactions.
+1. Create each newly affordable rung at `GRIDLESS_MIN_POSITION_ETH`.
+2. Continue densifying until `MAX_ACTIVE_POSITIONS` rungs are funded.
+3. Once maximum coverage exists, distribute additional allocation evenly over
+   every rung target.
+4. An already-open position is never topped up or mutated. Its larger target
+   applies on its next buy cycle after it sells.
 
-The rung advances only after all of the following succeed:
+Example: five open 0.001 ETH rungs plus a new 0.010 ETH deposit represent 0.015
+ETH of strategy capital at 100% tradeable. With a maximum of at least 15, the
+engine funds ten additional 0.001 ETH rungs. If the maximum were five instead,
+the same capital would raise all five future rung targets to 0.003 ETH.
 
-1. An exact-input route is quoted and remains within the configured buy
-   execution recovery margin.
-2. Existing route, slippage, tax, allowance, gas-cap, and gas-reserve checks
-   pass.
-3. The transaction confirms and the token balance increase is measured.
-4. The position is atomically persisted with ladder ID, level index, and exact
-   planned principal.
-5. Ladder progress is atomically checkpointed.
+## Reusable rung lifecycle
 
-A failed quote, rejected route, unaffordable rung, failed transaction, or
-unreconciled receipt does not consume a level. Route price improvement is
-allowed. A route whose effective execution price has recovered too far above
-the crossed rung is rejected according to `GRIDLESS_BUY_EXECUTION_MARGIN`.
+Each trigger has independent persistent state:
 
-## Lifecycle
+```text
+inactive -> ready -> open -> waiting_reset -> ready -> ...
+                                  |
+                                  +-> retired
+```
 
-The persisted states are:
+- `inactive`: stable trigger exists but has no assigned minimum principal.
+- `ready`: funded and eligible when observed price is at or below its trigger.
+- `open`: exactly one confirmed position owns the rung.
+- `waiting_reset`: its position sold; the cooldown must elapse and price must
+  first be observed above the trigger before another downward crossing can buy.
+- `retired`: expiry, cancellation, or `GRIDLESS_LADDER_REARM_POLICY=never`
+  disables further buys.
 
-- `active`: one or more levels can still fill;
-- `terminal`: every planned level filled; averaging down stops;
-- `expired`: the lifetime elapsed; remaining levels are disabled.
-- `closed`: every currently held ladder position exited; unfilled levels from
-  that completed trade cycle are retired.
+The above-trigger reset prevents an immediate rebuy after a stop loss executed
+below the rung. With `after_exit`, normal profitable sells naturally occur
+above their buy trigger, so the rung becomes ready on a subsequent poll and
+waits for price to return downward.
 
-Exits do not rewind or recycle levels. Each confirmed sell records the latest
-exit time. When the final open position exits, the cycle becomes `closed` so a
-fall during the cooldown cannot refill an old rung. With `after_exit`, a new
-ladder can arm only after every ladder position has exited and the re-arm
-cooldown has elapsed. A terminal or expired plan becomes `closed` only when its
-final held position has a confirmed exit. An expired ladder that never filled
-cannot silently re-anchor to a lower market because it has no confirmed exit.
-With `never`, replacement is always an operator decision.
+Selling the last open position does not close or re-anchor the field. With the
+default zero expiry it remains active indefinitely. Re-anchoring is an explicit
+operator migration, not a side effect of an empty position ledger.
 
-## Persistence and crash recovery
+## Buy execution
 
-Plans live at `data/gridless_ladder.json`. Position provenance lives in
-`data/gridless_positions.json`. Both use atomic replacement writes.
+Every poll reconciles state, observes liquid, activates or grows affordable
+rungs, advances eligible resets, and selects the highest crossed ready rung.
+At most one buy is attempted per poll, and the normal buy cooldown still
+applies. A large gap therefore cannot burst-submit every crossed trigger.
 
-There is an unavoidable cross-file boundary after a confirmed buy: the
-position ledger is written before ladder progress. If the process stops in that
-window, restart validation recognizes the uniquely proven next-level position
-and advances the ladder once. Duplicate levels, foreign ladder IDs, missing
-principal, unsupported state versions, chain/token mismatch, oversized plans,
-or malformed accounting fail closed.
+A rung becomes `open` only after:
 
-If the buy confirms but its position cannot be reconciled, the existing
-unresolved-settlement safety mechanism halts trading. If the position is saved
-but ladder checkpointing fails, trading halts and restart recovery uses the
-position provenance. The system never intentionally advances a rung on an
-unconfirmed buy.
+1. its exact-input route passes provider, tax, slippage, gas-cap, and reserve
+   checks;
+2. the final route remains within `GRIDLESS_BUY_EXECUTION_MARGIN` of the rung;
+3. the transaction confirms and actual token receipt is measured;
+4. the position is atomically persisted with ladder ID, rung index, and exact
+   principal;
+5. the rung checkpoint is atomically persisted.
+
+Failed, rejected, unaffordable, or unreconciled buys do not consume a rung.
+
+## Independent exits and compounding
+
+Every open rung remains an ordinary gridless position. The configured
+`GRIDLESS_SELL_THRESHOLD` wakes its independent percentage-P&L sell check. The
+executable route must still preserve `MIN_PROFIT_PERCENT` after projected gas.
+A profitable rung can sell while other rungs remain underwater.
+
+Confirmed proceeds return to the wallet. Original principal supports the same
+rung's next cycle; realized profit increases free strategy capital and will
+eventually add coverage or increase all rung targets. This is bounded adaptive
+compounding, not immediate reinvestment into the just-sold position.
+
+## Persistence and fail-closed recovery
+
+`data/gridless_ladder.json` stores v2 geometry, funding targets, per-rung state,
+position linkage, fill/exit counts, timestamps, and realized rung profit.
+`data/gridless_positions.json` stores the exact open positions.
+
+If a confirmed buy position is written before its rung checkpoint, restart can
+recover the unique matching ready rung from provenance. Duplicate rung owners,
+foreign ladder IDs, missing open positions, principal mismatches, malformed
+state, unsupported versions, chain/token changes, or a changed hard maximum
+fail closed. An ambiguous confirmed sell boundary also remains a safety halt;
+the bot never invents a completed exit from an empty ledger.
 
 ## Dashboard telemetry
 
-Status payloads add:
+The status payload includes:
 
-- `entry_allocation_mode`: `threshold` or `drawdown_ladder`;
-- `drawdown_ladder.id` and `status`;
-- spacing, reference, terminal drawdown, total/filled levels;
-- next level price;
-- frozen budget, spent principal, logical remaining reserve, and expiry.
+- reference, spacing, terminal drawdown, status, and optional expiry;
+- maximum, funded, ready, and open rung counts;
+- next highest ready trigger;
+- allocated, deployed, and logically reserved principal;
+- average target position size;
+- completed buy/sell cycles and recorded realized rung profit.
 
-Open-position P&L remains visible for exit decisions. In ladder mode, legacy
-buy-threshold P&L is not advertised as entry-trigger authority.
+## Safety notes
 
-## Operational safeguards
-
-- Keep `GRIDLESS_LADDER_MAX_BUDGET_ETH` or
-  `TRADEABLE_BALANCE_PERCENT` conservative during evaluation.
-- `MAX_ACTIVE_POSITIONS` is both a risk cap and a ladder-density cap.
-- The gas reserve is never included in the native-ETH snapshot.
+- Use a dedicated wallet or a conservative `TRADEABLE_BALANCE_PERCENT`; wallet
+  deposits are intentionally interpreted as capital available to the strategy.
+- `MAX_ACTIVE_POSITIONS` caps both maximum trigger density and simultaneous
+  ladder positions.
+- `GRIDLESS_LADDER_MAX_BUDGET_ETH` is the hard strategy-principal cap.
+- Native gas reserve is removed before adaptive capital accounting.
 - No leverage or borrowing is introduced.
-- No buy happens below the configured minimum principal.
-- No buy occurs after terminal or expiry.
-- Configuration and persisted-state mismatches stop entry rather than guessing.
-- Use separate wallets/state directories for simultaneous comparison runs.
-- Back up both ladder and position files before changing allocation mode.
+- A manual withdrawal can make logically reserved rungs temporarily
+  unaffordable; it cannot cause the bot to resize a buy downward.
+- Geometry and open positions never move when funding changes.
+- Evaluate gas as a percentage of `GRIDLESS_MIN_POSITION_ETH`; microscopic
+  cycles can be mathematically profitable and economically stupid.
 
-## Suggested evaluation
-
-Run linear and log profiles against identical signal histories and compare:
-
-- capital deployed at -10%, -30%, -50%, -70%, and -90%;
-- weighted cost basis and rebound required to break even;
-- gas as a percentage of each micro-position;
-- unfilled capital at recovery;
-- maximum drawdown and time to exit;
-- failure behavior during gaps, provider outages, and restarts.
-
-Do not judge the strategy only on survivors. Include assets that never recover,
-lose liquidity, or become unsellable. A beautifully spaced descent into zero is
-still a descent into zero, darling.
+Paper-test linear and log profiles against identical histories, including
+deposits, repeated oscillations, stop losses, provider failures, gaps, restart
+boundaries, assets that never recover, and a fully funded 95% descent.

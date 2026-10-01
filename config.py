@@ -456,8 +456,8 @@ class BotConfig:
         if (not math.isfinite(self.gridless_ladder_max_budget_eth)
                 or self.gridless_ladder_max_budget_eth < 0):
             raise ValueError("GRIDLESS_LADDER_MAX_BUDGET_ETH must be non-negative and finite")
-        if self.gridless_ladder_expiry_seconds <= 0:
-            raise ValueError("GRIDLESS_LADDER_EXPIRY_SECONDS must be positive")
+        if self.gridless_ladder_expiry_seconds < 0:
+            raise ValueError("GRIDLESS_LADDER_EXPIRY_SECONDS must be non-negative")
         if self.gridless_ladder_rearm_policy not in {"never", "after_exit"}:
             raise ValueError("GRIDLESS_LADDER_REARM_POLICY must be never or after_exit")
         if self.gridless_ladder_rearm_cooldown_seconds < 0:
@@ -647,7 +647,7 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
         ).strip().lower(),
         gridless_min_position_eth=float(os.getenv("GRIDLESS_MIN_POSITION_ETH", "0.001")),
         gridless_ladder_terminal_drawdown_percent=float(os.getenv(
-            "GRIDLESS_LADDER_TERMINAL_DRAWDOWN_PERCENT", "90"
+            "GRIDLESS_LADDER_TERMINAL_DRAWDOWN_PERCENT", "95"
         )),
         gridless_ladder_spacing=os.getenv(
             "GRIDLESS_LADDER_SPACING", "linear"
@@ -656,13 +656,13 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
             "GRIDLESS_LADDER_MAX_BUDGET_ETH", "0"
         )),
         gridless_ladder_expiry_seconds=int(os.getenv(
-            "GRIDLESS_LADDER_EXPIRY_SECONDS", "2592000"
+            "GRIDLESS_LADDER_EXPIRY_SECONDS", "0"
         )),
         gridless_ladder_rearm_policy=os.getenv(
             "GRIDLESS_LADDER_REARM_POLICY", "after_exit"
         ).strip().lower(),
         gridless_ladder_rearm_cooldown_seconds=int(os.getenv(
-            "GRIDLESS_LADDER_REARM_COOLDOWN_SECONDS", "3600"
+            "GRIDLESS_LADDER_REARM_COOLDOWN_SECONDS", "0"
         )),
         gridless_ladder_include_reference_entry=_bool_env(
             "GRIDLESS_LADDER_INCLUDE_REFERENCE_ENTRY", False
