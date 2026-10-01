@@ -3146,10 +3146,12 @@ class GridBot:
         """Load, recover, resize, and recycle the adaptive entry ladder."""
         from drawdown_ladder import (
             advance_rearms,
+            adopt_legacy_positions,
             LadderStateError,
             build_plan,
             expire_plan,
             load_plan,
+            reconcile_adoption_provenance,
             reconcile_confirmed_positions,
             refresh_plan_funding,
             save_plan,
@@ -3160,10 +3162,30 @@ class GridBot:
         plan = load_plan()
         if plan is None:
             if positions:
-                raise LadderStateError(
-                    "drawdown-ladder mode cannot adopt open positions without "
-                    "persisted ladder provenance; use a fresh bot state or close them first"
+                from gridless import save_positions
+
+                plan, adopted_positions = adopt_legacy_positions(
+                    positions,
+                    spendable_balance_wei,
+                    self.config,
+                    current_price=price,
+                    now=now,
                 )
+                # Ladder-first is intentional: restart can prove and finish the
+                # position-provenance half if the second atomic rename fails.
+                save_plan(plan)
+                save_positions(adopted_positions)
+                positions.clear()
+                positions.update(adopted_positions)
+                logger.warning(
+                    "Adopted %d legacy gridless positions into adaptive %s "
+                    "drawdown ladder %s: reference=%.10f, funded=%d/%d, "
+                    "terminal=-%.2f%%",
+                    len(positions), plan.spacing, plan.id, plan.reference_price,
+                    plan.funded_count, plan.max_levels,
+                    plan.terminal_drawdown_percent,
+                )
+                return plan
             plan = build_plan(price, spendable_balance_wei, self.config, now)
             if plan is None:
                 return None
@@ -3177,6 +3199,14 @@ class GridBot:
             )
             return plan
 
+        if reconcile_adoption_provenance(plan, positions):
+            from gridless import save_positions
+
+            save_positions(positions)
+            logger.warning(
+                "Completed interrupted legacy-position adoption for ladder %s",
+                plan.id,
+            )
         if reconcile_confirmed_positions(plan, positions):
             save_plan(plan)
             logger.warning(
@@ -3200,7 +3230,13 @@ class GridBot:
         )
         funded_before = plan.funded_count
         allocated_before = plan.allocated_wei
-        if refresh_plan_funding(plan, spendable_balance_wei, self.config, now):
+        if refresh_plan_funding(
+            plan,
+            spendable_balance_wei,
+            self.config,
+            now,
+            current_price=price,
+        ):
             changed = True
             logger.info(
                 "Adaptive ladder %s grew: funded %d→%d/%d, allocated %.8f→%.8f %s",

@@ -28,11 +28,49 @@ GRIDLESS_LADDER_REARM_COOLDOWN_SECONDS=0
 GRIDLESS_LADDER_INCLUDE_REFERENCE_ENTRY=false
 ```
 
-The mode requires a fresh compatible v2 ladder state. It refuses to adopt
-positions without matching ladder provenance and refuses the old v1 one-shot
-state. Archive `data/gridless_ladder.json` together with
-`data/gridless_positions.json` before migration; never delete only one side of
-an active strategy.
+The mode can start fresh or adopt ordinary open gridless positions. On the
+first drawdown-mode poll, if positions exist but no ladder exists, it maps those
+positions into a new compatible v2 plan and adds exact rung provenance. It
+still refuses old v1 one-shot state, partial/foreign ladder provenance,
+malformed positions, or more open positions than `MAX_ACTIVE_POSITIONS`.
+Archive `data/gridless_ladder.json` together with
+`data/gridless_positions.json` before any manual migration; never delete only
+one side of an active strategy.
+
+## Adopting an existing gridless bot
+
+An existing threshold-mode bot may be stopped, switched to
+`GRIDLESS_ALLOCATION_MODE=drawdown_ladder`, funded, validated, and restarted
+without selling its positions first. Adoption is deterministic:
+
+1. Every position's exact entry price is derived from persisted cost and token
+   balance. No market-value estimate is used.
+2. The highest entry price—the position currently most underwater at a common
+   market price—becomes the stable ladder reference.
+3. The configured linear or logarithmic geometry is generated from that
+   reference through the terminal drawdown. At 95%, the floor is 5% of the
+   highest historical entry price.
+4. Existing entries are assigned, in price order, to the nearest distinct
+   ideal rungs. Their cost basis, token balance, position ID, and independent
+   sell behavior do not change.
+5. Existing deployed principal plus newly spendable liquid determines how many
+   additional minimum-sized rungs can be funded.
+6. New funding prioritizes empty triggers below the current market so migration
+   cannot burst-buy missed historical levels. Funded levels above the market
+   remain dormant until price is observed above them and crosses downward.
+
+For example, if five legacy entries are presently 70% through 50% underwater,
+the 70%-underwater entry has the highest entry price and becomes the reference.
+Those five positions occupy the nearest unique points in the configured map.
+If deposited liquid funds ten more minimum positions, ten missing triggers are
+added with priority below today's price, extending and densifying coverage
+toward the 95% floor. A bot with no free liquid can still be adopted; later
+deposits grow the same frozen map.
+
+Adoption checkpoints the ladder first and position provenance second. If the
+process stops between those atomic writes, restart completes the provenance
+write only when position ID and exact principal still match. Any mismatch fails
+closed. This recovery path does not infer buys or sells.
 
 ## Stable trigger geometry
 
@@ -57,9 +95,11 @@ Linear spreads triggers evenly in absolute drawdown. Logarithmic spacing keeps
 more triggers for deep declines.
 
 Unfunded triggers already exist in the persisted geometry. Funding activates
-them without moving any existing price. Initial funded rungs are distributed
-evenly across the complete range and always include the terminal floor. Later
-funding splits uncovered intervals to make coverage progressively denser.
+them without moving any existing price. A fresh plan's initial funded rungs are
+distributed evenly across the complete range and always include the terminal
+floor. An adopted plan treats legacy entries as existing anchors and gives new
+capital priority to missing levels below the current market. Later funding
+splits uncovered intervals to make coverage progressively denser.
 
 ## Dynamic capital accounting
 
@@ -157,7 +197,8 @@ compounding, not immediate reinvestment into the just-sold position.
 ## Persistence and fail-closed recovery
 
 `data/gridless_ladder.json` stores v2 geometry, funding targets, per-rung state,
-position linkage, fill/exit counts, timestamps, and realized rung profit.
+position linkage, adoption provenance, fill/exit counts, timestamps, and
+realized rung profit.
 `data/gridless_positions.json` stores the exact open positions.
 
 If a confirmed buy position is written before its rung checkpoint, restart can
@@ -172,7 +213,7 @@ the bot never invents a completed exit from an empty ledger.
 The status payload includes:
 
 - reference, spacing, terminal drawdown, status, and optional expiry;
-- maximum, funded, ready, and open rung counts;
+- maximum, funded, ready, open, and legacy-adopted rung counts;
 - next highest ready trigger;
 - allocated, deployed, and logically reserved principal;
 - average target position size;

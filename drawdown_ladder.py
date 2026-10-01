@@ -41,6 +41,7 @@ class DrawdownRung:
     realized_profit_wei: int = 0
     last_buy_at: Optional[float] = None
     last_sell_at: Optional[float] = None
+    adopted_legacy_position: bool = False
 
     @classmethod
     def from_dict(cls, value: dict) -> "DrawdownRung":
@@ -68,6 +69,9 @@ class DrawdownRung:
                     float(value["last_sell_at"])
                     if value.get("last_sell_at") is not None
                     else None
+                ),
+                adopted_legacy_position=bool(
+                    value.get("adopted_legacy_position", False)
                 ),
             )
         except (KeyError, TypeError, ValueError) as exc:
@@ -235,10 +239,18 @@ def _initial_indices(
     )
 
 
-def _next_density_index(plan: DrawdownLadderPlan) -> Optional[int]:
+def _next_density_index(
+    plan: DrawdownLadderPlan, current_price: Optional[float] = None
+) -> Optional[int]:
     inactive = [r.index for r in plan.rungs if r.state == "inactive"]
     if not inactive:
         return None
+    if current_price is not None and math.isfinite(current_price):
+        future = [
+            index for index in inactive if plan.rungs[index].price < current_price
+        ]
+        if future:
+            inactive = future
     funded = [r.index for r in plan.rungs if r.principal_wei > 0]
     anchors = [-1, *funded]
     # Split the largest uncovered interval in normalized ladder-index space.
@@ -246,6 +258,204 @@ def _next_density_index(plan: DrawdownLadderPlan) -> Optional[int]:
         inactive,
         key=lambda index: (min(abs(index - anchor) for anchor in anchors), -index),
     )
+
+
+def _position_cost_wei(position: Dict[str, Any]) -> int:
+    cost = int(position.get("cost_wei", 0) or 0)
+    if cost <= 0:
+        cost = int(position.get("cost", 0) or 0) * 10**9
+    return cost
+
+
+def _legacy_position_price(position: Dict[str, Any], token_decimals: int) -> float:
+    cost = _position_cost_wei(position)
+    balance = int(position.get("balance", 0) or 0)
+    if cost <= 0 or balance <= 0:
+        raise LadderStateError("legacy position has invalid cost or token balance")
+    price = (cost / 10**18) / (balance / (10**token_decimals))
+    if not math.isfinite(price) or price <= 0:
+        raise LadderStateError("legacy position has an invalid entry price")
+    return price
+
+
+def _map_prices_to_levels(
+    entry_prices: list[float], level_prices: list[float], spacing: str
+) -> list[int]:
+    """Return the minimum-distance monotonic one-to-one rung assignment."""
+    count = len(entry_prices)
+    level_count = len(level_prices)
+    if count > level_count:
+        raise LadderStateError("open positions exceed maximum drawdown ladder levels")
+    if not count:
+        return []
+
+    def coordinate(value: float) -> float:
+        return math.log(value) if spacing == "log" else value / entry_prices[0]
+
+    position_coordinates = [coordinate(value) for value in entry_prices]
+    level_coordinates = [coordinate(value) for value in level_prices]
+    infinity = float("inf")
+    costs = [[infinity] * level_count for _ in range(count)]
+    previous = [[-1] * level_count for _ in range(count)]
+    for level in range(level_count - count + 1):
+        costs[0][level] = (position_coordinates[0] - level_coordinates[level]) ** 2
+    for position in range(1, count):
+        best_cost = infinity
+        best_level = -1
+        last_level = level_count - (count - position)
+        for level in range(position, last_level + 1):
+            candidate = costs[position - 1][level - 1]
+            if candidate < best_cost:
+                best_cost = candidate
+                best_level = level - 1
+            costs[position][level] = (
+                best_cost
+                + (position_coordinates[position] - level_coordinates[level]) ** 2
+            )
+            previous[position][level] = best_level
+
+    level = min(range(count - 1, level_count), key=lambda i: costs[-1][i])
+    result = [level]
+    for position in range(count - 1, 0, -1):
+        level = previous[position][level]
+        result.append(level)
+    return list(reversed(result))
+
+
+def adopt_legacy_positions(
+    positions: Dict[str, Dict],
+    spendable_balance_wei: int,
+    config: Any,
+    current_price: Optional[float] = None,
+    now: Optional[float] = None,
+) -> tuple[DrawdownLadderPlan, Dict[str, Dict]]:
+    """Create a ladder around existing gridless positions and add provenance.
+
+    The highest historical entry price is the stable reference. Existing entries
+    are assigned to the nearest distinct ideal rungs without changing their cost
+    basis or token balances. Remaining capital then funds uncovered rungs.
+    """
+    if not positions:
+        raise LadderStateError("legacy adoption requires at least one open position")
+    if len(positions) > int(config.max_active_positions):
+        raise LadderStateError(
+            "open positions exceed MAX_ACTIVE_POSITIONS; increase the cap before adoption"
+        )
+    token_decimals = int(getattr(config, "token_decimals", 18))
+    if not 0 <= token_decimals <= 255:
+        raise LadderStateError("TOKEN_DECIMALS is invalid for legacy adoption")
+
+    entries = []
+    for position_id, position in positions.items():
+        provenance = (
+            position.get("ladder_id"),
+            position.get("ladder_level_index"),
+            position.get("ladder_principal_wei"),
+        )
+        if any(value is not None for value in provenance):
+            raise LadderStateError(
+                "cannot adopt positions carrying existing or partial ladder provenance"
+            )
+        entries.append(
+            (
+                str(position_id),
+                position,
+                _legacy_position_price(position, token_decimals),
+                _position_cost_wei(position),
+            )
+        )
+    entries.sort(key=lambda item: (-item[2], item[0]))
+    reference_price = entries[0][2]
+    created_at = time.time() if now is None else now
+    expiry_seconds = int(config.gridless_ladder_expiry_seconds)
+    maximum = int(config.max_active_positions)
+    minimum = _eth_to_wei(config.gridless_min_position_eth)
+    prices = generate_levels(
+        reference_price,
+        maximum,
+        config.gridless_ladder_terminal_drawdown_percent,
+        config.gridless_ladder_spacing,
+        config.gridless_ladder_include_reference_entry,
+    )
+    assignments = _map_prices_to_levels(
+        [entry[2] for entry in entries], prices, config.gridless_ladder_spacing
+    )
+    plan = DrawdownLadderPlan(
+        id=uuid4().hex[:12],
+        chain_id=int(config.chain_id),
+        token_address=str(config.token_address).lower(),
+        reference_price=reference_price,
+        terminal_drawdown_percent=config.gridless_ladder_terminal_drawdown_percent,
+        spacing=config.gridless_ladder_spacing,
+        created_at=created_at,
+        expires_at=created_at + expiry_seconds if expiry_seconds > 0 else None,
+        minimum_position_wei=minimum,
+        max_levels=maximum,
+        include_reference_entry=config.gridless_ladder_include_reference_entry,
+        rungs=[
+            DrawdownRung(index=index, price=price) for index, price in enumerate(prices)
+        ],
+        last_funding_at=created_at,
+    )
+    adopted = {str(key): dict(value) for key, value in positions.items()}
+    for (position_id, _position, _price, cost), index in zip(entries, assignments):
+        rung = plan.rungs[index]
+        rung.principal_wei = max(minimum, cost)
+        rung.state = "open"
+        rung.position_id = position_id
+        rung.open_principal_wei = cost
+        rung.fill_count = 1
+        rung.last_buy_at = created_at
+        rung.adopted_legacy_position = True
+        adopted[position_id].update(
+            {
+                "ladder_id": plan.id,
+                "ladder_level_index": index,
+                "ladder_principal_wei": cost,
+            }
+        )
+    refresh_plan_funding(
+        plan,
+        spendable_balance_wei,
+        config,
+        created_at,
+        current_price=current_price,
+    )
+    validate_plan(plan)
+    return plan, adopted
+
+
+def reconcile_adoption_provenance(
+    plan: DrawdownLadderPlan, positions: Dict[str, Dict]
+) -> bool:
+    """Finish the recoverable ladder-first half of a legacy adoption commit."""
+    changed = False
+    for rung in plan.rungs:
+        if not rung.adopted_legacy_position or rung.state != "open":
+            continue
+        position_id = str(rung.position_id)
+        position = positions.get(position_id)
+        if position is None:
+            raise LadderStateError("adopted ladder rung has no matching open position")
+        provenance = (
+            position.get("ladder_id"),
+            position.get("ladder_level_index"),
+            position.get("ladder_principal_wei"),
+        )
+        if all(value is None for value in provenance):
+            if _position_cost_wei(position) != rung.open_principal_wei:
+                raise LadderStateError("adopted position cost changed during migration")
+            position.update(
+                {
+                    "ladder_id": plan.id,
+                    "ladder_level_index": rung.index,
+                    "ladder_principal_wei": rung.open_principal_wei,
+                }
+            )
+            changed = True
+        elif any(value is None for value in provenance):
+            raise LadderStateError("adopted position has partial ladder provenance")
+    return changed
 
 
 def build_plan(
@@ -308,6 +518,7 @@ def refresh_plan_funding(
     spendable_balance_wei: int,
     config: Any,
     now: Optional[float] = None,
+    current_price: Optional[float] = None,
 ) -> bool:
     """Add stable coverage first, then water-fill rung targets at maximum density."""
     if plan.status != "active":
@@ -318,12 +529,18 @@ def refresh_plan_funding(
     while (
         plan.funded_count < plan.max_levels and available >= plan.minimum_position_wei
     ):
-        index = _next_density_index(plan)
+        index = _next_density_index(plan, current_price)
         if index is None:
             break
         rung = plan.rungs[index]
         rung.principal_wei = plan.minimum_position_wei
-        rung.state = "ready"
+        rung.state = (
+            "waiting_reset"
+            if current_price is not None and current_price <= rung.price
+            else "ready"
+        )
+        if rung.state == "waiting_reset":
+            rung.last_sell_at = time.time() if now is None else now
         available -= plan.minimum_position_wei
         changed = True
     if plan.funded_count == plan.max_levels and available > 0:
@@ -606,6 +823,7 @@ def status_payload(plan: Optional[DrawdownLadderPlan]) -> Optional[dict]:
         "levels_total": plan.max_levels,
         "levels_funded": plan.funded_count,
         "levels_open": sum(r.state == "open" for r in plan.rungs),
+        "levels_adopted": sum(r.adopted_legacy_position for r in plan.rungs),
         "levels_ready": sum(r.state == "ready" for r in plan.rungs),
         "completed_cycles": sum(r.exit_count for r in plan.rungs),
         "next_level_price": plan.next_level_price,

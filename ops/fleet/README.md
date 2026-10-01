@@ -174,6 +174,20 @@ sudo apt install tmux git python3 python3-venv
 
 ## Gridless strategy coverage modeling
 
+### Adopting an existing bot into drawdown allocation
+
+Drawdown mode can adopt valid open threshold-mode gridless positions when the
+bot has no persisted ladder yet. Stop only the canary bot, back up its paired
+`data/gridless_positions.json` and `data/gridless_ladder.json` state if present,
+preview the variables, apply them, validate configuration, and start only that
+bot. The highest legacy entry becomes the reference; existing cost bases stay
+unchanged; newly available liquid prioritizes unfilled triggers below market.
+
+Do not remove only one file from an existing ladder. Old one-shot ladder state,
+partial or foreign provenance, invalid positions, and position counts above
+`MAX_ACTIVE_POSITIONS` fail closed. See `docs/DRAWDOWN_LADDER.md` for the exact
+mapping and interrupted-write recovery contract.
+
 `strategy-model` is a read-only planning tool for comparing
 `GRIDLESS_BUY_THRESHOLD`, `GRIDLESS_SELL_THRESHOLD`,
 `MIN_PROFIT_PERCENT`, and position capacity. It produces three adjacent files:

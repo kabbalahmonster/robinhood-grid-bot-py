@@ -10,12 +10,14 @@ from unittest.mock import MagicMock, patch
 from drawdown_ladder import (
     LadderStateError,
     advance_rearms,
+    adopt_legacy_positions,
     build_plan,
     eligible_level,
     generate_levels,
     load_plan,
     mark_exit,
     reconcile_confirmed_positions,
+    reconcile_adoption_provenance,
     record_fill,
     refresh_plan_funding,
     save_plan,
@@ -72,6 +74,77 @@ class DrawdownLadderGeometryTests(unittest.TestCase):
 
 
 class AdaptiveLadderStateTests(unittest.TestCase):
+    def test_adopts_legacy_positions_and_funds_missing_coverage(self):
+        config = ladder_config(max_active_positions=10, token_decimals=18)
+        positions = {
+            "0": {"cost_wei": int(0.001 * WEI), "balance": int(0.01 * WEI)},
+            "1": {"cost_wei": int(0.001 * WEI), "balance": int(0.02 * WEI)},
+        }
+        plan, adopted = adopt_legacy_positions(
+            positions, int(0.003 * WEI), config, current_price=0.04, now=100
+        )
+        self.assertAlmostEqual(plan.reference_price, 0.1)
+        self.assertEqual(plan.funded_count, 5)
+        self.assertEqual(sum(r.state == "open" for r in plan.rungs), 2)
+        self.assertAlmostEqual(plan.rungs[-1].price, 0.005)
+        self.assertEqual(len({p["ladder_level_index"] for p in adopted.values()}), 2)
+        validate_context(plan, adopted, config)
+
+    def test_adoption_maps_entries_monotonically_to_distinct_log_rungs(self):
+        config = ladder_config(
+            max_active_positions=50, token_decimals=18, gridless_ladder_spacing="log"
+        )
+        current = 0.03
+        positions = {}
+        for index, loss in enumerate((70, 65, 60, 55, 50)):
+            entry = current / (1 - loss / 100)
+            balance = int((0.001 / entry) * WEI)
+            positions[str(index)] = {
+                "cost_wei": int(0.001 * WEI),
+                "balance": balance,
+            }
+        plan, adopted = adopt_legacy_positions(
+            positions, int(0.010 * WEI), config, current_price=current, now=100
+        )
+        indices = [
+            adopted[position_id]["ladder_level_index"]
+            for position_id in sorted(adopted, key=int)
+        ]
+        self.assertEqual(indices, sorted(indices))
+        self.assertEqual(len(set(indices)), 5)
+        self.assertEqual(plan.funded_count, 15)
+        self.assertAlmostEqual(plan.rungs[-1].price, plan.reference_price * 0.05)
+        newly_ready = [
+            rung
+            for rung in plan.rungs
+            if rung.state == "ready" and not rung.adopted_legacy_position
+        ]
+        self.assertTrue(newly_ready)
+        self.assertTrue(all(rung.price < current for rung in newly_ready))
+        validate_context(plan, adopted, config)
+
+    def test_interrupted_adoption_recovers_only_exact_position(self):
+        config = ladder_config(max_active_positions=5, token_decimals=18)
+        positions = {"0": {"cost_wei": int(0.001 * WEI), "balance": int(0.01 * WEI)}}
+        plan, adopted = adopt_legacy_positions(
+            positions, 0, config, current_price=0.05, now=100
+        )
+        self.assertTrue(reconcile_adoption_provenance(plan, positions))
+        self.assertEqual(positions, adopted)
+        validate_context(plan, positions, config)
+
+    def test_adoption_rejects_existing_or_partial_provenance(self):
+        config = ladder_config(max_active_positions=5, token_decimals=18)
+        position = {
+            "0": {
+                "cost_wei": int(0.001 * WEI),
+                "balance": int(0.01 * WEI),
+                "ladder_id": "foreign",
+            }
+        }
+        with self.assertRaises(LadderStateError):
+            adopt_legacy_positions(position, 0, config, current_price=0.05, now=100)
+
     def test_initial_capital_funds_minimum_sized_even_coverage(self):
         plan = build_plan(
             1.0,
@@ -158,6 +231,23 @@ class AdaptiveLadderStateTests(unittest.TestCase):
         self.assertFalse(advance_rearms(plan, plan.rungs[0].price * 0.5, 0, now=130))
         self.assertIsNone(eligible_level(plan, plan.rungs[0].price * 0.5))
 
+    def test_historical_rung_funded_below_market_rearms_after_cooldown(self):
+        config = ladder_config(max_active_positions=2)
+        plan = build_plan(1.0, int(0.001 * WEI), config, now=100)
+        self.assertTrue(
+            refresh_plan_funding(
+                plan,
+                int(0.002 * WEI),
+                config,
+                now=200,
+                current_price=0.01,
+            )
+        )
+        dormant = next(rung for rung in plan.rungs if rung.state == "waiting_reset")
+        self.assertFalse(advance_rearms(plan, dormant.price * 1.01, 60, now=250))
+        self.assertTrue(advance_rearms(plan, dormant.price * 1.01, 60, now=260))
+        self.assertEqual(dormant.state, "ready")
+
     def test_reconcile_buy_checkpoint_crash(self):
         plan = build_plan(
             1.0, int(0.001 * WEI), ladder_config(max_active_positions=1), now=100
@@ -231,11 +321,16 @@ class AdaptiveLadderBotTests(unittest.TestCase):
         self.assertEqual(same.id, plan.id)
         self.assertEqual(same.status, "active")
 
-    def test_open_positions_without_plan_are_rejected(self):
-        with self.assertRaises(LadderStateError):
-            self.bot._prepare_gridless_ladder(
-                1.0, {"0": {"balance": 1}}, int(0.01 * WEI), now=100
-            )
+    def test_open_positions_without_plan_are_adopted(self):
+        self.bot.config.token_decimals = 18
+        positions = {"0": {"cost_wei": int(0.001 * WEI), "balance": int(0.01 * WEI)}}
+        plan = self.bot._prepare_gridless_ladder(
+            0.05, positions, int(0.01 * WEI), now=100
+        )
+        self.assertAlmostEqual(plan.reference_price, 0.1)
+        self.assertEqual(plan.funded_count, 11)
+        self.assertEqual(positions["0"]["ladder_id"], plan.id)
+        validate_context(plan, positions, self.bot.config)
 
     def test_execution_price_guard_blocks_recovered_route(self):
         context = {"trigger_price": 0.5, "reference_price": 1.0}

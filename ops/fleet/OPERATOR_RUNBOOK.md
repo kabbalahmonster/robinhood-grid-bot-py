@@ -229,6 +229,21 @@ To canary LI.FI, set `LI_FI_API_KEY` and use
 `ROUTE_TOURNAMENT_SETTLEMENTS=native` and `ROUTE_TOURNAMENT_MODE=shadow`.
 `lofi` is accepted as an input alias, though documentation uses `lifi`.
 
+## Existing-gridless drawdown canary
+
+An existing gridless bot no longer needs to liquidate before its first
+drawdown-ladder run. Stop the selected bot and back up its paired position and
+ladder files before changing configuration. Preview and apply the drawdown
+variables with `update-variable`, run `grid_bot.py --check-config` inside that
+checkout, then start only the canary and inspect its first status/log cycle.
+
+The adoption log must report the legacy position count, frozen reference,
+funded/max rungs, and terminal drawdown. Confirm dashboard
+`levels_adopted` equals the prior open-position count and that the next ready
+trigger is below the current market. A provenance mismatch or unsupported old
+ladder is a safety stop; restore the paired backup or perform an explicit
+migration rather than deleting one state file.
+
 ## Position-balance reconciliation
 
 Set `AUTO_RECONCILE_UNRESOLVED_BROADCAST=true` in a bot's `.env` to let its
