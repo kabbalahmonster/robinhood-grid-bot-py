@@ -155,6 +155,20 @@ def render_asset(asset, default_symbol):
     return f"{asset['symbol']}={decimal_text(asset['balance'])}"
 
 
+def render_progress(probe):
+    """Render one compact line after a bot's live RPC probe completes."""
+    bot = build_report([probe])["bots"][0]
+    line = (
+        f"{bot['status'].upper()} | ETH={decimal_text(bot['eth']['balance'])} | "
+        f"{render_asset(bot['usdg'], 'USDG')} | "
+        f"{render_asset(bot['managed_token'], 'managed')}"
+    )
+    if bot["errors"]:
+        error = bot["errors"][0]
+        line += f" | {error['name']}: {error['detail']}"
+    return line
+
+
 def render_human(report):
     lines = [
         f"Fleet balance report: {report['status'].upper()}",
@@ -188,7 +202,9 @@ def render_human(report):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--json", action="store_true")
+    output = parser.add_mutually_exclusive_group()
+    output.add_argument("--json", action="store_true")
+    output.add_argument("--progress", action="store_true")
     parser.add_argument("reports", nargs="+")
     args = parser.parse_args()
     probes = []
@@ -198,6 +214,12 @@ def main():
         except (OSError, json.JSONDecodeError) as exc:
             print(f"Could not read probe report {path}: {exc}", file=sys.stderr)
             return 2
+    if args.progress:
+        if len(probes) != 1:
+            print("--progress requires exactly one probe report", file=sys.stderr)
+            return 2
+        print(render_progress(probes[0]))
+        return 0
     report = build_report(probes)
     if args.json:
         print(json.dumps(report, separators=(",", ":")))

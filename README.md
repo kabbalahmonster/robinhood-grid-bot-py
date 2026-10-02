@@ -492,7 +492,9 @@ For a read-only funding snapshot, `balance-report` queries every configured
 wallet and prints ETH, USDG, and configured managed-token balances per bot,
 then totals them by chain and token contract. Use `balance-report --json` for
 raw wei/token units suitable for exact automation; `--only` and `--exclude`
-use the normal fleet selectors. The command never signs or broadcasts.
+use the normal fleet selectors. Live per-bot scan progress appears immediately
+on stderr, followed by the complete report on stdout. The command never signs
+or broadcasts.
 
 Rebuild procedure:
 

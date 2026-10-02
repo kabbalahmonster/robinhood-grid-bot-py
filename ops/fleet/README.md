@@ -1022,7 +1022,11 @@ different networks are never combined. Managed-token totals are likewise
 separate per contract. JSON retains raw wei/token units for exact downstream
 accounting. The command is read-only, never loads a treasury signer, and
 continues to print partial results when one bot's RPC or configuration probe
-fails; its exit status is nonzero in that case.
+fails; its exit status is nonzero in that case. While scanning, it immediately
+prints the current bot number/name, then that bot's ETH, USDG, managed-token
+balances, status, and elapsed time. Progress goes to stderr while the complete
+human or JSON report goes to stdout, so `--json > fleet-balances.json` remains
+machine-safe instead of appearing to hang during slow RPC calls.
 
 ## Reconciling fleet transaction history
 

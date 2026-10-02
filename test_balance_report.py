@@ -69,6 +69,16 @@ class TestBalanceReport(unittest.TestCase):
         self.assertEqual(report["bots"][0]["managed_token"]["address"], shared["address"])
         self.assertEqual(report["bots"][0]["usdg"]["address"], shared["address"])
 
+    def test_progress_line_shows_balances_and_first_failure(self):
+        item = probe("broken", 2 * 10**15, 1_500_000, 2_500_000_000_000_000_000,
+                     status="fail")
+        item["checks"] = [
+            {"name": "contract_WETH", "status": "fail", "detail": "RPC timeout"}
+        ]
+        line = balance_report.render_progress(item)
+        self.assertIn("FAIL | ETH=0.002 | USDG=1.5 | TOK=2.5", line)
+        self.assertIn("contract_WETH: RPC timeout", line)
+
     def test_json_cli_returns_failure_but_keeps_partial_report(self):
         good = probe("good", 10**18, 1_000_000, 10**18)
         bad = {

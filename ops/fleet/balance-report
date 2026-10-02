@@ -10,6 +10,8 @@ usage() { cat <<'EOF'
 Usage: balance-report [--json] [--only NAMES] [--exclude NAMES] [--config PATH]
 Read ETH, USDG, and configured managed-token balances for the fleet and print
 per-bot balances plus chain/asset-aware fleet totals. Never signs or broadcasts.
+Live per-bot progress is written to stderr; the complete report is written to
+stdout, so --json remains safe to redirect to a file.
 EOF
 }
 
@@ -40,10 +42,17 @@ trap 'rm -rf -- "$report_dir"' EXIT
 reports=()
 failures=0
 index=0
+total=${#FLEET_BOT_DIRS[@]}
+printf '\nScanning %d bot wallet(s) with read-only RPC calls. Slow endpoints may take a moment.\n\n' \
+  "$total" >&2
 for bot_dir in "${FLEET_BOT_DIRS[@]}"; do
   python_bin="$(fleet_python_for "$bot_dir")"
   name="$(fleet_bot_name "$bot_dir")"
   report="$report_dir/$index.json"
+  current=$((index + 1))
+  started=$SECONDS
+  printf '[%d/%d] %s — checking ETH, USDG, and managed token... ' \
+    "$current" "$total" "$name" >&2
   if ! (cd "$bot_dir" && "$python_bin" "$SCRIPT_DIR/probe-bot.py" \
       --mode inventory --name "$name" --json > "$report"); then
     failures=$((failures + 1))
@@ -52,12 +61,20 @@ for bot_dir in "${FLEET_BOT_DIRS[@]}"; do
     printf '{"name":"%s","status":"fail","checks":[{"name":"probe","status":"fail","detail":"probe produced no report"}]}' \
       "$name" > "$report"
   fi
+  progress="$(python3 "$SCRIPT_DIR/balance-report.py" --progress "$report" 2>/dev/null \
+    || printf 'FAIL | could not render probe result')"
+  printf '%s (%ss)\n' "$progress" "$((SECONDS - started))" >&2
   reports+=("$report")
   index=$((index + 1))
 done
 
 args=()
 ((json == 0)) || args+=(--json)
+if ((json)); then
+  printf '\nAll wallet probes finished. Writing complete JSON report...\n\n' >&2
+else
+  printf '\nAll wallet probes finished. Full fleet balance report follows.\n\n' >&2
+fi
 render_status=0
 python3 "$SCRIPT_DIR/balance-report.py" "${args[@]}" "${reports[@]}" || render_status=$?
 ((failures == 0 && render_status == 0))

@@ -67,11 +67,16 @@ class TestBalanceReportCommand(unittest.TestCase):
         self.assertIn("USDG USDG=3", human.stdout)
         self.assertIn("managed TOK=5", human.stdout)
         self.assertNotIn("never-print-this", human.stdout + human.stderr)
+        self.assertIn("Scanning 2 bot wallet(s)", human.stderr)
+        self.assertIn("[1/2] ALPHA — checking ETH, USDG, and managed token... WARN |", human.stderr)
+        self.assertIn("[2/2] BETA — checking ETH, USDG, and managed token... WARN |", human.stderr)
+        self.assertIn("Full fleet balance report follows.", human.stderr)
 
         self.assertEqual(selected.returncode, 0, selected.stderr)
         payload = json.loads(selected.stdout)
         self.assertEqual([bot["name"] for bot in payload["bots"]], ["ALPHA"])
         self.assertEqual(payload["totals"]["native_eth"][0]["balance"], "0.002")
+        self.assertIn("Writing complete JSON report", selected.stderr)
 
 
 if __name__ == "__main__":
