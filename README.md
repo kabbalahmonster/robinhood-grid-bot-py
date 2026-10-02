@@ -181,16 +181,17 @@ python grid_bot.py
 | `USE_GRIDLESS` | No | true | Enable gridless trading mode |
 | `GRIDLESS_BUY_THRESHOLD` | No | -10.0 | Buy when top position P&L ≤ this % |
 | `GRIDLESS_SELL_THRESHOLD` | No | 5.0 | Sell when position P&L ≥ this % |
-| `GRIDLESS_LEADING_EDGE` | No | true | Buy into strength (single position climbing) |
+| `GRIDLESS_LEADING_EDGE` | No | true | Buy into strength at 50% of the sell trigger; legacy threshold mode limits this to one position, while Survivor advances from each highest purchase point |
 | `GRIDLESS_STOPLOSS_ENABLED` | No | false | Enable stoploss in gridless mode |
 | `GRIDLESS_STOPLOSS_THRESHOLD` | No | -25.0 | Stoploss trigger % |
 | `GRIDLESS_BUY_COOLDOWN_SECONDS` | No | 0 | Cooldown between gridless buys (0 disables cooldown) |
 | `GRIDLESS_BUY_EXECUTION_MARGIN` | No | 50 | Execution margin % - blocks buy if quote P&L recovered past threshold + (abs(threshold) * margin%) (e.g., -10% trigger + 50% = block above -5%) |
-| `GRIDLESS_ALLOCATION_MODE` | No | threshold | `threshold` preserves legacy entries; `drawdown_ladder` uses a frozen reference; `survivor` adds upward re-anchoring and one leading-edge position |
+| `GRIDLESS_ALLOCATION_MODE` | No | threshold | `threshold` preserves legacy entries; `drawdown_ladder` uses a frozen reference; `survivor` permits off-ladder leading buys and re-anchors only after a confirmed higher fill |
 | `GRIDLESS_MIN_POSITION_ETH` | No | 0.001 | Initial principal per funded rung; capital adds coverage to the maximum before increasing rung size |
 | `GRIDLESS_LADDER_TERMINAL_DRAWDOWN_PERCENT` | No | 95 | Deepest trigger below the stable reference price; must be greater than 0 and less than 100 |
 | `GRIDLESS_LADDER_SPACING` | No | linear | `linear` for equal drawdown intervals or `log` for equal price ratios |
-| `GRIDLESS_SURVIVOR_REANCHOR_PERCENT` | No | 0.25 | In `survivor`, percentage rise above the reference required to move the ladder upward and arm a leading-edge entry; 0 follows every strict new high |
+| `SURVIVOR_RAPID_POLL_SECONDS` | No | 1 | Temporary main-loop interval after a confirmed Survivor sell |
+| `SURVIVOR_RAPID_POLL_WINDOW_SECONDS` | No | 30 | Duration of sell-side rapid polling after each confirmed Survivor sell; 0 disables it |
 | `GRIDLESS_LADDER_MAX_BUDGET_ETH` | No | 0 | Optional hard cap on total assigned rung principal; 0 disables the extra cap |
 | `GRIDLESS_LADDER_EXPIRY_SECONDS` | No | 0 | Stop new rung fills after this many seconds; 0 keeps the adaptive field active indefinitely |
 | `GRIDLESS_LADDER_REARM_POLICY` | No | after_exit | `after_exit` recycles each sold rung; `never` retires a rung after its first completed trade |
@@ -713,7 +714,7 @@ MAX_ACTIVE_POSITIONS=6           # Max positions to hold
 Buys are triggered when:
 1. **No positions exist** - Initial buy to start
 2. **Top position P&L ≤ buy_threshold** - Buy the dip
-3. **Leading edge** (optional) - Buy into strength when single position climbing
+3. **Leading edge** (optional) - Legacy threshold mode buys into strength with one position; Survivor repeats from the current highest purchase point and ratchets its ladder only after each higher fill confirms
 
 Buy amount: `available_WETH / available_slots`
 
@@ -1170,7 +1171,7 @@ DASHBOARD_GROUP=Robinhood Farm
 
 Restart the bot after changing `.env`. Reporting runs in a daemon thread with a bounded queue and a five-second HTTP timeout, so dashboard downtime does not block trading. Successful requests are logged only at `DEBUG`; failures remain warnings.
 
-Each status payload includes schema version, chain/token/public-wallet metadata, ETH, USDG, and trading-token balances, positions, AVG P&L, session and persistent realized profit, buy/sell counts, capacity, optional transient `buy_attempt` and `sell_attempt` state, and up to 50 trades. `strategy_mode` explicitly reports `grid`, `gridless_threshold`, or `drawdown_ladder`; drawdown bots also report `strategy_spacing` as `linear` or `log` and the bounded ladder summary. These are display-only values derived from the existing configuration—there is no additional environment switch, and omitting them preserves legacy trading behavior. Taxed-token bots additionally report the effective fee and tolerance through `taxed_token`, `token_transfer_fee_percent`, and `swap_slippage_percent`. `token_tax_detection_source` distinguishes `manual`, `auto-detected`, and `none`; `token_tax_detection_observations` reports the bounded supporting observation count. It also includes `treasury_sent_usdg`: the all-time total of successful USDG sweep receipts in `data/treasury_transfers.json`. Dry runs, refused commands, failed broadcasts, and sweeps of other ERC-20s are excluded. Sell checks run before the status report so a blocked attempt is visible in the same round rather than one report late. Buy checks run afterward, so a gas-blocked buy is carried into the following report and cleared immediately before the next buy check. The USDG balance is a read-only ERC-20 call made once per cycle when `USDG_ADDRESS` is configured; a failed read is omitted and never interrupts trading. Only the public wallet address is sent—never the private key.
+Each status payload includes schema version, chain/token/public-wallet metadata, ETH, USDG, and trading-token balances, positions, AVG P&L, session and persistent realized profit, buy/sell counts, capacity, optional transient `buy_attempt` and `sell_attempt` state, and up to 50 trades. `strategy_mode` explicitly reports `grid`, `gridless_threshold`, `drawdown_ladder`, or `survivor`; ladder bots also report `strategy_spacing` as `linear` or `log` and the bounded ladder summary. These are display-only values derived from the existing configuration—there is no additional environment switch, and omitting them preserves legacy trading behavior. Taxed-token bots additionally report the effective fee and tolerance through `taxed_token`, `token_transfer_fee_percent`, and `swap_slippage_percent`. `token_tax_detection_source` distinguishes `manual`, `auto-detected`, and `none`; `token_tax_detection_observations` reports the bounded supporting observation count. It also includes `treasury_sent_usdg`: the all-time total of successful USDG sweep receipts in `data/treasury_transfers.json`. Dry runs, refused commands, failed broadcasts, and sweeps of other ERC-20s are excluded. Sell checks run before the status report so a blocked attempt is visible in the same round rather than one report late. Buy checks run afterward, so a gas-blocked buy is carried into the following report and cleared immediately before the next buy check. The USDG balance is a read-only ERC-20 call made once per cycle when `USDG_ADDRESS` is configured; a failed read is omitted and never interrupts trading. Only the public wallet address is sent—never the private key.
 
 Experimental builds also include a versioned `sigil` descriptor created once per process incarnation. One of exactly 23 curated positive, present-tense intentions in `sigil_intentions.json` is selected from cryptographic startup entropy, reduced to unique consonants, and bound with the bot ID and incarnation nonce into a SHA-256 visual seed. Only `{version, method, key, seed}` is reported; the readable intention and nonce are discarded. The dashboard can therefore render the symbol deterministically without an image service, while every restart produces a new working. A missing or malformed grimoire falls back to one built-in intention because dashboard ornamentation must never prevent trading from starting.
 

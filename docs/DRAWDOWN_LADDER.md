@@ -12,11 +12,14 @@ selection, slippage, transfer-tax handling, receipt reconciliation, and circuit
 breakers remain authoritative.
 
 `GRIDLESS_ALLOCATION_MODE=drawdown_ladder` retains the original frozen
-reference. `GRIDLESS_ALLOCATION_MODE=survivor` is the dynamic variant: after a
-configured new-high advance it moves the complete trigger geometry upward and
-arms one leading-edge entry. Open positions keep their cost basis, identity,
-principal, and sell rules; their rung becomes the future reusable trigger at
-the repositioned level.
+reference. `GRIDLESS_ALLOCATION_MODE=survivor` is the dynamic variant. The
+highest open purchase point triggers an off-ladder leading buy when its P&L
+reaches 50% of the configured sell trigger. Market price alone never moves the
+ladder. Only a successfully confirmed leading fill above the prior reference
+ratchets the complete trigger geometry upward to that measured economic entry
+price. Open positions keep their cost basis, identity, principal, and sell
+rules; their rung becomes the future reusable trigger at the repositioned
+level.
 
 ## Suggested isolated-wallet profile
 
@@ -28,7 +31,9 @@ TRADEABLE_BALANCE_PERCENT=50
 GRIDLESS_MIN_POSITION_ETH=0.001
 GRIDLESS_LADDER_TERMINAL_DRAWDOWN_PERCENT=95
 GRIDLESS_LADDER_SPACING=log
-GRIDLESS_SURVIVOR_REANCHOR_PERCENT=0.25
+GRIDLESS_LEADING_EDGE=true
+SURVIVOR_RAPID_POLL_SECONDS=1
+SURVIVOR_RAPID_POLL_WINDOW_SECONDS=30
 GRIDLESS_LADDER_MAX_BUDGET_ETH=0
 GRIDLESS_LADDER_EXPIRY_SECONDS=0
 GRIDLESS_LADDER_REARM_POLICY=after_exit
@@ -37,9 +42,11 @@ GRIDLESS_LADDER_INCLUDE_REFERENCE_ENTRY=false
 ```
 
 Use `GRIDLESS_ALLOCATION_MODE=survivor` for dynamic behavior and keep
-`GRIDLESS_LEADING_EDGE=true`. The leading entry counts inside
-`MAX_ACTIVE_POSITIONS`, uses one already funded rung, and exits through the
-same profit, stop-loss, gas, quote, and receipt safeguards as every position.
+`GRIDLESS_LEADING_EDGE=true`. Each leading entry counts inside
+`MAX_ACTIVE_POSITIONS`, borrows one funded rung as its accounting slot even
+though its entry is off the ladder, and exits through the same profit,
+stop-loss, gas, quote, and receipt safeguards as every position. A failed,
+rejected, or unreconciled buy cannot move the reference.
 
 The mode can start fresh or adopt ordinary open gridless positions. On the
 first ladder-mode poll, if positions exist but no ladder exists, it maps those
@@ -175,15 +182,20 @@ above their buy trigger, so the rung becomes ready on a subsequent poll and
 waits for price to return downward.
 
 Selling the last open position does not close or re-anchor the field. With the
-default zero expiry it remains active indefinitely. Re-anchoring is an explicit
-operator migration, not a side effect of an empty position ledger.
+default zero expiry it remains active indefinitely. Frozen drawdown mode can be
+re-anchored only by an explicit migration; Survivor can ratchet upward only
+from a confirmed higher leading-edge purchase point.
 
 ## Buy execution
 
 Every poll reconciles state, observes liquid, activates or grows affordable
 rungs, advances eligible resets, and selects the highest crossed ready rung.
-At most one buy is attempted per poll, and the normal buy cooldown still
-applies. A large gap therefore cannot burst-submit every crossed trigger.
+In Survivor, the current highest purchase point is also checked against 50% of
+the configured sell trigger. If crossed, the next buy uses a funded ready rung
+for principal accounting but executes at the live leading edge; confirmation
+then moves the geometry to the measured new purchase point. Multiple leading
+positions may accumulate while capacity remains. At most one buy is attempted
+per poll, and the normal buy cooldown still applies.
 
 A rung becomes `open` only after:
 
@@ -209,12 +221,21 @@ rung's next cycle; realized profit increases free strategy capital and will
 eventually add coverage or increase all rung targets. This is bounded adaptive
 compounding, not immediate reinvestment into the just-sold position.
 
+After a confirmed Survivor sell, the main loop and sell-side P&L observation
+temporarily accelerate to `SURVIVOR_RAPID_POLL_SECONDS` for
+`SURVIVOR_RAPID_POLL_WINDOW_SECONDS`. Each confirmation extends the window.
+This still executes at most one independently validated sell per cycle; it does
+not batch transactions or bypass route, gas, profit, receipt, or unresolved-
+broadcast safeguards. Set the window to `0` to disable acceleration.
+
 ## Persistence and fail-closed recovery
 
-`data/gridless_ladder.json` stores v2 geometry, funding targets, per-rung state,
-position linkage, adoption provenance, fill/exit counts, timestamps, and
-realized rung profit.
-`data/gridless_positions.json` stores the exact open positions.
+`data/gridless_ladder.json` stores versioned geometry, funding targets,
+per-rung state and entry kind, position linkage, adoption provenance,
+fill/exit counts, timestamps, and realized rung profit.
+`data/gridless_positions.json` stores the exact open positions. Survivor
+leading entries also persist their measured fill price so restart can finish a
+confirmed position-first re-anchor without consulting the live market.
 
 If a confirmed buy position is written before its rung checkpoint, restart can
 recover the unique matching ready rung from provenance. Duplicate rung owners,

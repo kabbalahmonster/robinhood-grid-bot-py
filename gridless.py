@@ -81,6 +81,53 @@ def get_top_position(positions: Dict[str, Dict], token_decimals: int = 18) -> Op
     return (top_id, top_pos) if top_id else None
 
 
+def get_highest_position(positions: Dict[str, Dict], token_decimals: int = 18) -> Optional[Tuple[str, Dict]]:
+    """Get the highest valid purchase point for leading-edge continuation."""
+    highest_id, highest_pos, highest_price = None, None, 0.0
+    for pos_id, pos in positions.items():
+        buy_price = get_buy_price(pos, token_decimals)
+        if buy_price > highest_price:
+            highest_price, highest_id, highest_pos = buy_price, pos_id, pos
+    return (highest_id, highest_pos) if highest_id is not None else None
+
+
+def survivor_leading_edge_trigger(positions: Dict[str, Dict], current_price: float,
+                                  config: Any,
+                                  position_pnls: Optional[Dict[str, Dict[str, float]]] = None):
+    """Return a trigger only when the highest purchase point clears half-sell P&L."""
+    if not getattr(config, "gridless_leading_edge", False):
+        return False, "Leading edge disabled", None
+    if not positions:
+        return False, "No purchase point exists yet", None
+    if len(positions) >= int(getattr(config, "max_active_positions", 10)):
+        return False, "Max positions reached", None
+    highest = get_highest_position(
+        positions, _configured_token_decimals(config)
+    )
+    if highest is None:
+        return False, "No valid purchase point exists", None
+    position_id, position = highest
+    observed = (position_pnls or {}).get(str(position_id), {})
+    candidates = trigger_pnl_candidates(observed, "buy")
+    if not candidates:
+        if (position_pnls is not None
+                and getattr(config, "bidirectional_pnl_enabled", False)):
+            return False, "No fresh leading-edge P&L observation", position_id
+        candidates = [("legacy", calculate_pnl(
+            position, current_price, _configured_token_decimals(config)
+        ))]
+    source, pnl = max(candidates, key=lambda item: item[1])
+    trigger = get_sell_trigger_percent(config) * 0.5
+    crossed = pnl > trigger or math.isclose(
+        pnl, trigger, rel_tol=1e-12, abs_tol=1e-9
+    )
+    reason = (
+        f"Highest purchase point {source} P&L {pnl:.2f}% "
+        f"{'>' if crossed else '<'}= 50% of sell ({trigger}%)"
+    )
+    return crossed, reason, position_id
+
+
 def get_sell_trigger_percent(config: Any) -> float:
     """Return the configured net P&L threshold that wakes a normal sell."""
     if getattr(config, 'pnl_trigger_by_min_profit', False) is True:
@@ -129,15 +176,25 @@ def trigger_focus_candidates(positions: Dict[str, Dict], config: Any,
     allocation_mode = str(getattr(
         config, 'gridless_allocation_mode', 'threshold'
     )).lower()
-    if (allocation_mode not in {'drawdown_ladder', 'survivor'}
+    if (allocation_mode != 'drawdown_ladder'
             and positions and len(positions) < max_active):
-        top = get_top_position(positions, token_decimals)
+        top = (
+            get_highest_position(positions, token_decimals)
+            if allocation_mode == 'survivor'
+            else get_top_position(positions, token_decimals)
+        )
         if top is not None:
             observed = (position_pnls or {}).get(str(top[0]), {})
             for source, pnl in trigger_pnl_candidates(observed, "buy"):
-                distances = [max(0.0, pnl - buy_threshold)]
-                triggered = pnl <= buy_threshold
-                if leading_edge and len(positions) == 1:
+                if allocation_mode == 'survivor':
+                    leading_threshold = sell_threshold * 0.5
+                    distances = [max(0.0, leading_threshold - pnl)]
+                    triggered = leading_edge and pnl >= leading_threshold
+                else:
+                    distances = [max(0.0, pnl - buy_threshold)]
+                    triggered = pnl <= buy_threshold
+                if (allocation_mode != 'survivor'
+                        and leading_edge and len(positions) == 1):
                     leading_threshold = sell_threshold * 0.5
                     distances.append(max(0.0, leading_threshold - pnl))
                     triggered = triggered or pnl >= leading_threshold
@@ -359,6 +416,10 @@ def load_positions() -> Dict[str, Dict[str, int]]:
                     )
                 if v.get('ladder_entry_kind') in {'ladder', 'leading_edge'}:
                     positions[k]['ladder_entry_kind'] = v['ladder_entry_kind']
+                if float(v.get('ladder_fill_price', 0) or 0) > 0:
+                    positions[k]['ladder_fill_price'] = float(
+                        v['ladder_fill_price']
+                    )
         return positions
     except (json.JSONDecodeError, IOError):
         return {}
@@ -377,7 +438,8 @@ def add_position(cost_wei: int, balance: int,
                  ladder_id: Optional[str] = None,
                  ladder_level_index: Optional[int] = None,
                  ladder_principal_wei: Optional[int] = None,
-                 ladder_entry_kind: Optional[str] = None) -> str:
+                 ladder_entry_kind: Optional[str] = None,
+                 ladder_fill_price: Optional[float] = None) -> str:
     """Add new position with lowest available ID (fills gaps).
     
     Args:
@@ -407,6 +469,10 @@ def add_position(cost_wei: int, balance: int,
                 else 'ladder'
             ),
         })
+        if ladder_entry_kind == 'leading_edge':
+            if ladder_fill_price is None or float(ladder_fill_price) <= 0:
+                raise ValueError("leading-edge provenance requires fill price")
+            position['ladder_fill_price'] = float(ladder_fill_price)
     positions[str(next_id)] = position
     save_positions(positions)
     return str(next_id)

@@ -43,6 +43,7 @@ class DrawdownRung:
     last_buy_at: Optional[float] = None
     last_sell_at: Optional[float] = None
     adopted_legacy_position: bool = False
+    open_entry_kind: Optional[str] = None
 
     @classmethod
     def from_dict(cls, value: dict) -> "DrawdownRung":
@@ -74,6 +75,11 @@ class DrawdownRung:
                 adopted_legacy_position=bool(
                     value.get("adopted_legacy_position", False)
                 ),
+                open_entry_kind=(
+                    str(value["open_entry_kind"])
+                    if value.get("open_entry_kind") is not None
+                    else ("ladder" if value.get("state") == "open" else None)
+                ),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise LadderStateError(f"invalid ladder rung: {exc}") from exc
@@ -100,8 +106,6 @@ class DrawdownLadderPlan:
     mode: str = "drawdown_ladder"
     reanchor_count: int = 0
     last_reanchor_at: Optional[float] = None
-    leading_edge_pending: bool = False
-    leading_edge_level_index: Optional[int] = None
     version: int = LADDER_VERSION
 
     @property
@@ -180,11 +184,6 @@ class DrawdownLadderPlan:
                 last_reanchor_at=(
                     float(value["last_reanchor_at"])
                     if value.get("last_reanchor_at") is not None else None
-                ),
-                leading_edge_pending=bool(value.get("leading_edge_pending", False)),
-                leading_edge_level_index=(
-                    int(value["leading_edge_level_index"])
-                    if value.get("leading_edge_level_index") is not None else None
                 ),
                 version=version,
             )
@@ -426,6 +425,7 @@ def adopt_legacy_positions(
         rung.fill_count = 1
         rung.last_buy_at = created_at
         rung.adopted_legacy_position = True
+        rung.open_entry_kind = "ladder"
         adopted[position_id].update(
             {
                 "ladder_id": plan.id,
@@ -614,33 +614,30 @@ def eligible_level(plan: DrawdownLadderPlan, current_price: float) -> Optional[i
 
 def reanchor_survivor(
     plan: DrawdownLadderPlan,
-    current_price: float,
-    config: Any,
+    confirmed_buy_price: float,
     now: Optional[float] = None,
 ) -> bool:
-    """Move survivor geometry upward after a configured new-high advance."""
+    """Move survivor geometry only after a higher leading-edge fill confirms."""
     if plan.mode != "survivor" or plan.status != "active":
         return False
-    if not math.isfinite(current_price) or current_price <= 0:
+    if not math.isfinite(confirmed_buy_price) or confirmed_buy_price <= 0:
         return False
-    threshold = float(getattr(config, "gridless_survivor_reanchor_percent", 0.25))
-    trigger = plan.reference_price * (1 + threshold / 100)
-    if current_price < trigger or math.isclose(current_price, plan.reference_price):
+    if confirmed_buy_price <= plan.reference_price or math.isclose(
+        confirmed_buy_price, plan.reference_price
+    ):
         return False
     prices = generate_levels(
-        current_price,
+        confirmed_buy_price,
         plan.max_levels,
         plan.terminal_drawdown_percent,
         plan.spacing,
         plan.include_reference_entry,
     )
-    plan.reference_price = current_price
+    plan.reference_price = confirmed_buy_price
     for rung, price in zip(plan.rungs, prices):
         rung.price = price
     plan.reanchor_count += 1
     plan.last_reanchor_at = time.time() if now is None else now
-    if plan.leading_edge_level_index is None:
-        plan.leading_edge_pending = True
     validate_plan(plan)
     return True
 
@@ -669,11 +666,10 @@ def record_fill(
     rung.open_principal_wei = int(principal_wei)
     rung.fill_count += 1
     rung.last_buy_at = time.time() if filled_at is None else filled_at
+    rung.open_entry_kind = entry_kind
     if entry_kind == "leading_edge":
-        if plan.mode != "survivor" or plan.leading_edge_level_index is not None:
-            raise LadderStateError("survivor leading-edge ownership is invalid")
-        plan.leading_edge_level_index = level_index
-        plan.leading_edge_pending = False
+        if plan.mode != "survivor":
+            raise LadderStateError("leading-edge entries require survivor mode")
     validate_plan(plan)
 
 
@@ -693,11 +689,10 @@ def mark_exit(
     rung.state = "waiting_reset" if recycle and plan.status == "active" else "retired"
     rung.position_id = None
     rung.open_principal_wei = 0
+    rung.open_entry_kind = None
     rung.exit_count += 1
     rung.realized_profit_wei += int(realized_profit_wei)
     rung.last_sell_at = time.time() if exited_at is None else exited_at
-    if plan.leading_edge_level_index == level_index:
-        plan.leading_edge_level_index = None
     validate_plan(plan)
 
 
@@ -726,6 +721,13 @@ def reconcile_confirmed_positions(
                 position_id,
                 entry_kind=position.get("ladder_entry_kind", "ladder"),
             )
+            if position.get("ladder_entry_kind") == "leading_edge":
+                fill_price = float(position.get("ladder_fill_price", 0) or 0)
+                if fill_price <= 0:
+                    raise LadderStateError(
+                        "recovered leading-edge position is missing fill price"
+                    )
+                reanchor_survivor(plan, fill_price)
             changed = True
     return changed
 
@@ -741,14 +743,6 @@ def validate_plan(plan: DrawdownLadderPlan) -> None:
         raise LadderStateError("version 3 ladder must use survivor behavior")
     if plan.reanchor_count < 0:
         raise LadderStateError("ladder reanchor count cannot be negative")
-    if (plan.leading_edge_level_index is not None
-            and not 0 <= plan.leading_edge_level_index < plan.max_levels):
-        raise LadderStateError("leading-edge level is invalid")
-    if (plan.leading_edge_level_index is not None
-            and plan.rungs[plan.leading_edge_level_index].state != "open"):
-        raise LadderStateError("leading-edge level is not open")
-    if plan.leading_edge_pending and plan.leading_edge_level_index is not None:
-        raise LadderStateError("leading-edge entry cannot be pending and open")
     if not plan.id or plan.chain_id <= 0 or not plan.token_address:
         raise LadderStateError("ladder identity is incomplete")
     if not math.isfinite(plan.reference_price) or plan.reference_price <= 0:
@@ -793,7 +787,12 @@ def validate_plan(plan: DrawdownLadderPlan) -> None:
                 or rung.open_principal_wei > rung.principal_wei
             ):
                 raise LadderStateError("open rung principal is invalid")
-        elif rung.open_principal_wei or rung.position_id is not None:
+            if rung.open_entry_kind not in {"ladder", "leading_edge"}:
+                raise LadderStateError("open rung entry kind is invalid")
+            if rung.open_entry_kind == "leading_edge" and plan.mode != "survivor":
+                raise LadderStateError("leading-edge rung requires survivor mode")
+        elif (rung.open_principal_wei or rung.position_id is not None
+              or rung.open_entry_kind is not None):
             raise LadderStateError("non-open rung cannot retain an open position")
         if rung.exit_count > rung.fill_count:
             raise LadderStateError("rung exits exceed fills")
@@ -857,8 +856,8 @@ def validate_context(
         entry_kind = position.get("ladder_entry_kind", "ladder")
         if entry_kind not in {"ladder", "leading_edge"}:
             raise LadderStateError("position ladder entry kind is invalid")
-        if (entry_kind == "leading_edge") != (plan.leading_edge_level_index == index):
-            raise LadderStateError("position and leading-edge ownership disagree")
+        if entry_kind != rung.open_entry_kind:
+            raise LadderStateError("position and rung entry kind disagree")
     open_indices = {rung.index for rung in plan.rungs if rung.state == "open"}
     if open_indices != seen:
         raise LadderStateError("persisted open rung has no matching position")
@@ -933,6 +932,13 @@ def status_payload(plan: Optional[DrawdownLadderPlan]) -> Optional[dict]:
         "expires_at": plan.expires_at,
         "reanchor_count": plan.reanchor_count,
         "last_reanchor_at": plan.last_reanchor_at,
-        "leading_edge_pending": plan.leading_edge_pending,
-        "leading_edge_open": plan.leading_edge_level_index is not None,
+        "leading_edge_pending": False,
+        "leading_edge_open": any(
+            r.state == "open" and r.open_entry_kind == "leading_edge"
+            for r in plan.rungs
+        ),
+        "leading_edge_open_count": sum(
+            r.state == "open" and r.open_entry_kind == "leading_edge"
+            for r in plan.rungs
+        ),
     }

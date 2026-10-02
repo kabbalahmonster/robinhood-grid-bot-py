@@ -6,6 +6,48 @@ from grid_bot import GridBot, _dashboard_strategy_mode
 
 
 class GridBotInitialStateTests(unittest.TestCase):
+    def test_survivor_rapid_poll_window_shortens_main_loop_delay(self):
+        bot = GridBot.__new__(GridBot)
+        bot.config = SimpleNamespace(
+            poll_interval_seconds=6,
+            survivor_rapid_poll_seconds=1,
+        )
+        bot._survivor_rapid_poll_until = 100.0
+        self.assertEqual(bot._next_main_loop_delay(now=99.0), 1)
+        self.assertEqual(bot._next_main_loop_delay(now=100.0), 6)
+
+    def test_survivor_rapid_window_forces_fresh_sell_side_observation(self):
+        bot = GridBot.__new__(GridBot)
+        bot._survivor_rapid_poll_until = 100.0
+        bot._pnl_poll_sequence = MagicMock(return_value=["buy", "sell"])
+        self.assertEqual(
+            bot._select_pnl_poll_side({"0": {}}, now=99.0),
+            ("sell", "post_sell_rapid"),
+        )
+
+    @patch("grid_bot.time.monotonic", return_value=50.0)
+    def test_confirmed_survivor_sell_arms_rapid_poll_window(self, _monotonic):
+        bot = GridBot.__new__(GridBot)
+        bot.config = SimpleNamespace(
+            gridless_allocation_mode="survivor",
+            poll_interval_seconds=6,
+            survivor_rapid_poll_seconds=1,
+            survivor_rapid_poll_window_seconds=30,
+        )
+        bot._survivor_rapid_poll_until = 0.0
+        bot._arm_survivor_rapid_polling()
+        self.assertEqual(bot._survivor_rapid_poll_until, 80.0)
+
+    def test_legacy_mode_does_not_arm_survivor_rapid_polling(self):
+        bot = GridBot.__new__(GridBot)
+        bot.config = SimpleNamespace(
+            gridless_allocation_mode="threshold",
+            survivor_rapid_poll_window_seconds=30,
+        )
+        bot._survivor_rapid_poll_until = 0.0
+        bot._arm_survivor_rapid_polling()
+        self.assertEqual(bot._survivor_rapid_poll_until, 0.0)
+
     def test_dashboard_strategy_mode_is_explicit_and_legacy_safe(self):
         self.assertEqual(
             _dashboard_strategy_mode(SimpleNamespace(use_gridless=False)), "grid"

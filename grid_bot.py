@@ -831,6 +831,7 @@ class GridBot:
         self._pnl_near_focus_side = None
         self._pnl_near_focus_poll_due = True
         self._last_pnl_focus_status = None
+        self._survivor_rapid_poll_until = 0.0
         self.profit_tracker = ProfitTracker()
         self.dashboard_trades_file = "data/dashboard_trades.json"
         self.dashboard_trades = self._load_dashboard_trades()
@@ -3166,7 +3167,6 @@ class GridBot:
             reconcile_adoption_provenance,
             reconcile_confirmed_positions,
             refresh_plan_funding,
-            reanchor_survivor,
             save_plan,
             validate_context,
         )
@@ -3238,10 +3238,9 @@ class GridBot:
             )
             return plan
 
-        changed = reanchor_survivor(plan, price, self.config, now)
         changed = advance_rearms(
             plan, price, self.config.gridless_ladder_rearm_cooldown_seconds, now
-        ) or changed
+        )
         funded_before = plan.funded_count
         allocated_before = plan.allocated_wei
         if refresh_plan_funding(
@@ -3600,6 +3599,9 @@ class GridBot:
         eligible = self._pnl_poll_sequence(positions)
         if not eligible:
             return None, "unavailable"
+        if ("sell" in eligible
+                and now < getattr(self, "_survivor_rapid_poll_until", 0.0)):
+            return "sell", "post_sell_rapid"
         latches = getattr(
             self, "_pnl_trigger_latches", {"buy": None, "sell": None}
         )
@@ -3742,6 +3744,38 @@ class GridBot:
             direction, reason, source,
         )
         self._log_pnl_focus_transition()
+
+    def _arm_survivor_rapid_polling(self):
+        """Temporarily favor fast sell-side cycles after a confirmed Survivor exit."""
+        if str(getattr(
+            self.config, "gridless_allocation_mode", "threshold"
+        )).lower() != "survivor":
+            return
+        window = int(getattr(
+            self.config, "survivor_rapid_poll_window_seconds", 30
+        ))
+        if window <= 0:
+            return
+        self._survivor_rapid_poll_until = time.monotonic() + window
+        logger.info(
+            "Survivor rapid sell polling armed for %ds at %ds intervals",
+            window,
+            min(
+                int(getattr(self.config, "poll_interval_seconds", 6)),
+                int(getattr(self.config, "survivor_rapid_poll_seconds", 1)),
+            ),
+        )
+
+    def _next_main_loop_delay(self, now=None):
+        """Return the normal or post-sell Survivor polling delay."""
+        normal = int(getattr(self.config, "poll_interval_seconds", 30))
+        now = time.monotonic() if now is None else float(now)
+        if now < getattr(self, "_survivor_rapid_poll_until", 0.0):
+            return min(
+                normal,
+                int(getattr(self.config, "survivor_rapid_poll_seconds", 1)),
+            )
+        return normal
 
     def _refresh_bidirectional_pnl(self, positions, trade_balance_eth, now=None):
         """Refresh one side per cycle, adapting cadence near active triggers."""
@@ -4011,6 +4045,7 @@ class GridBot:
         ladder_context = None
         if ladder_mode:
             from drawdown_ladder import eligible_level
+            from gridless import survivor_leading_edge_trigger
 
             spendable_balance_wei = int(
                 Decimal(str(trade_balance)) * Decimal(10**18)
@@ -4039,13 +4074,14 @@ class GridBot:
                 return
             level_index = eligible_level(plan, price)
             entry_kind = "ladder"
-            if (
-                getattr(plan, "mode", "drawdown_ladder") == "survivor"
-                and plan.leading_edge_pending
-                and plan.leading_edge_level_index is None
-                and getattr(self.config, "gridless_leading_edge", True)
-                and price >= plan.reference_price
-            ):
+            leading_reason = None
+            if getattr(plan, "mode", "drawdown_ladder") == "survivor":
+                leading, leading_reason, _ = survivor_leading_edge_trigger(
+                    gridless_positions, price, self.config, position_pnls
+                )
+            else:
+                leading = False
+            if leading:
                 ready = [r.index for r in plan.rungs if r.state == "ready"]
                 if ready:
                     level_index = min(ready)
@@ -4075,15 +4111,18 @@ class GridBot:
                 return
             buy_amount_eth = buy_amount_wei / 10**18
             reason = (
-                ("Survivor leading edge" if entry_kind == "leading_edge" else
+                ((f"Survivor leading edge: {leading_reason}" if entry_kind == "leading_edge" else
                  f"Adaptive drawdown ladder {plan.spacing} rung") + " "
                 f"{level_index + 1}/{plan.max_levels} at "
-                f"{plan.rungs[level_index].price:.10f}"
+                f"{price if entry_kind == 'leading_edge' else plan.rungs[level_index].price:.10f}")
             )
             ladder_context = {
                 "ladder_id": plan.id,
                 "level_index": level_index,
-                "trigger_price": plan.rungs[level_index].price,
+                "trigger_price": (
+                    price if entry_kind == "leading_edge"
+                    else plan.rungs[level_index].price
+                ),
                 "reference_price": plan.reference_price,
                 "principal_wei": buy_amount_wei,
                 "entry_kind": entry_kind,
@@ -4167,8 +4206,6 @@ class GridBot:
                 expected_context = (
                     expected_context
                     and active_ladder.mode == "survivor"
-                    and active_ladder.leading_edge_pending
-                    and active_ladder.leading_edge_level_index is None
                 )
             if not expected_context:
                 logger.critical(
@@ -4349,10 +4386,12 @@ class GridBot:
         if not self._quote_matches_exact_input(quote, buy_amount_wei):
             logger.error("Buy aborted: executable quote input/output amounts are not exact")
             return
-        if not self._ladder_execution_price_allowed(
-            quote, buy_amount_wei, ladder_context
-        ):
-            return
+        if (ladder_context is None
+                or ladder_context.get("entry_kind") != "leading_edge"):
+            if not self._ladder_execution_price_allowed(
+                quote, buy_amount_wei, ladder_context
+            ):
+                return
 
         # Execute swap with configurable gas multipliers
         # Use API's gas price estimate if available (more accurate than network average)
@@ -4429,6 +4468,9 @@ class GridBot:
             )
             logger.debug(f"Quote buy_amount: {quote.buy_amount}, sell_amount: {quote.sell_amount}")
             
+            tokens = tokens_received / self.token_unit
+            economic_cost_eth = cost_wei / 10**18
+            buy_price = economic_cost_eth / tokens if tokens > 0 else 0
             add_kwargs = {}
             if ladder_context is not None:
                 add_kwargs = {
@@ -4437,9 +4479,11 @@ class GridBot:
                     "ladder_principal_wei": ladder_context["principal_wei"],
                     "ladder_entry_kind": ladder_context.get("entry_kind", "ladder"),
                 }
+                if ladder_context.get("entry_kind") == "leading_edge":
+                    add_kwargs["ladder_fill_price"] = buy_price
             pos_id = add_position(cost_wei, tokens_received, **add_kwargs)
             if ladder_context is not None:
-                from drawdown_ladder import record_fill, save_plan
+                from drawdown_ladder import record_fill, reanchor_survivor, save_plan
 
                 try:
                     record_fill(
@@ -4449,6 +4493,15 @@ class GridBot:
                         position_id=pos_id,
                         entry_kind=ladder_context.get("entry_kind", "ladder"),
                     )
+                    if ladder_context.get("entry_kind") == "leading_edge":
+                        moved = reanchor_survivor(active_ladder, buy_price)
+                        if not moved:
+                            logger.warning(
+                                "Confirmed leading-edge fill %.10f did not exceed "
+                                "Survivor reference %.10f; position retained and "
+                                "ladder geometry left unchanged",
+                                buy_price, active_ladder.reference_price,
+                            )
                     save_plan(active_ladder)
                 except Exception as exc:
                     logger.critical(
@@ -4462,9 +4515,6 @@ class GridBot:
             if weth_fallback:
                 self._clear_settlement_guard()
             
-            tokens = tokens_received / self.token_unit
-            economic_cost_eth = cost_wei / 10**18
-            buy_price = economic_cost_eth / tokens if tokens > 0 else 0
             self.session_buys += 1
             self.last_buy_time = time.time()  # Update cooldown timer
             self._record_dashboard_trade(
@@ -5268,7 +5318,8 @@ class GridBot:
                 bank_amount = actual_profit * bank_pct / 100
                 logger.info(f"🏦 Banking {bank_pct}% of profit = {bank_amount:.6f} {self.trade_token_name} → USDG")
                 self.bank_profit(bank_amount, profit_budget_eth=actual_profit)
-            
+
+            self._arm_survivor_rapid_polling()
             logger.info(f"   Tx: {result.tx_hash}")
         else:
             self._mark_tournament_transaction_failure("sell", result)
@@ -6826,7 +6877,7 @@ class GridBot:
                     self._attempt_auto_reconcile_unresolved_broadcast()
                 if not getattr(self, "_safety_halted", False):
                     self.run_cycle()
-                time.sleep(poll_interval)
+                time.sleep(self._next_main_loop_delay())
             except KeyboardInterrupt:
                 logger.info("Stopping bot...")
                 self.running = False

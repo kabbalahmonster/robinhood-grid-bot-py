@@ -128,6 +128,8 @@ class BotConfig:
     
     # Bot Behavior
     poll_interval_seconds: int
+    survivor_rapid_poll_seconds: int
+    survivor_rapid_poll_window_seconds: int
     startup_jitter_seconds: float
     performance_telemetry_every_cycles: int
     anti_mev_jitter: bool
@@ -162,7 +164,6 @@ class BotConfig:
     gridless_stoploss_enabled: bool  # Enable stoploss sells
     gridless_leading_edge: bool  # Enable leading edge buys (buy into strength)
     gridless_allocation_mode: str  # threshold, drawdown_ladder, or survivor
-    gridless_survivor_reanchor_percent: float
     gridless_min_position_eth: float
     gridless_ladder_terminal_drawdown_percent: float
     gridless_ladder_spacing: str
@@ -407,6 +408,12 @@ class BotConfig:
         
         if self.poll_interval_seconds < 1:
             raise ValueError("POLL_INTERVAL_SECONDS must be at least 1 second")
+        if self.survivor_rapid_poll_seconds < 1:
+            raise ValueError("SURVIVOR_RAPID_POLL_SECONDS must be at least 1")
+        if self.survivor_rapid_poll_window_seconds < 0:
+            raise ValueError(
+                "SURVIVOR_RAPID_POLL_WINDOW_SECONDS must be non-negative"
+            )
         if self.startup_jitter_seconds < 0:
             raise ValueError("STARTUP_JITTER_SECONDS must be non-negative")
         if self.performance_telemetry_every_cycles < 1:
@@ -444,11 +451,6 @@ class BotConfig:
             raise ValueError(
                 "TRADEABLE_BALANCE_PERCENT must be greater than 0 and at most 100 "
                 "in drawdown-ladder mode"
-            )
-        if (not math.isfinite(self.gridless_survivor_reanchor_percent)
-                or not 0 <= self.gridless_survivor_reanchor_percent <= 100):
-            raise ValueError(
-                "GRIDLESS_SURVIVOR_REANCHOR_PERCENT must be between 0 and 100"
             )
         if not math.isfinite(self.gridless_min_position_eth) or self.gridless_min_position_eth <= 0:
             raise ValueError("GRIDLESS_MIN_POSITION_ETH must be positive and finite")
@@ -577,6 +579,12 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
         
         # Bot Behavior
         poll_interval_seconds=int(os.getenv("POLL_INTERVAL_SECONDS", "6")),
+        survivor_rapid_poll_seconds=int(os.getenv(
+            "SURVIVOR_RAPID_POLL_SECONDS", "1"
+        )),
+        survivor_rapid_poll_window_seconds=int(os.getenv(
+            "SURVIVOR_RAPID_POLL_WINDOW_SECONDS", "30"
+        )),
         startup_jitter_seconds=float(os.getenv("STARTUP_JITTER_SECONDS", "20")),
         performance_telemetry_every_cycles=int(os.getenv(
             "PERFORMANCE_TELEMETRY_EVERY_CYCLES", "10"
@@ -651,9 +659,6 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
         gridless_allocation_mode=os.getenv(
             "GRIDLESS_ALLOCATION_MODE", "threshold"
         ).strip().lower(),
-        gridless_survivor_reanchor_percent=float(os.getenv(
-            "GRIDLESS_SURVIVOR_REANCHOR_PERCENT", "0.25"
-        )),
         gridless_min_position_eth=float(os.getenv("GRIDLESS_MIN_POSITION_ETH", "0.001")),
         gridless_ladder_terminal_drawdown_percent=float(os.getenv(
             "GRIDLESS_LADDER_TERMINAL_DRAWDOWN_PERCENT", "95"
