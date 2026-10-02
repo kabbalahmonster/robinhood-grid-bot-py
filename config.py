@@ -161,7 +161,8 @@ class BotConfig:
     gridless_stoploss_threshold: float  # P&L % for stoploss (default: -25.0)
     gridless_stoploss_enabled: bool  # Enable stoploss sells
     gridless_leading_edge: bool  # Enable leading edge buys (buy into strength)
-    gridless_allocation_mode: str  # threshold or drawdown_ladder
+    gridless_allocation_mode: str  # threshold, drawdown_ladder, or survivor
+    gridless_survivor_reanchor_percent: float
     gridless_min_position_eth: float
     gridless_ladder_terminal_drawdown_percent: float
     gridless_ladder_spacing: str
@@ -431,18 +432,23 @@ class BotConfig:
 
         if not 0 <= self.gridless_buy_execution_margin <= 100:
             raise ValueError("GRIDLESS_BUY_EXECUTION_MARGIN must be between 0 and 100")
-        if self.gridless_allocation_mode not in {"threshold", "drawdown_ladder"}:
+        if self.gridless_allocation_mode not in {"threshold", "drawdown_ladder", "survivor"}:
             raise ValueError(
-                "GRIDLESS_ALLOCATION_MODE must be threshold or drawdown_ladder"
+                "GRIDLESS_ALLOCATION_MODE must be threshold, drawdown_ladder, or survivor"
             )
-        if self.gridless_allocation_mode == "drawdown_ladder" and not self.use_gridless:
-            raise ValueError("GRIDLESS_ALLOCATION_MODE=drawdown_ladder requires USE_GRIDLESS=true")
-        if (self.gridless_allocation_mode == "drawdown_ladder"
+        if self.gridless_allocation_mode in {"drawdown_ladder", "survivor"} and not self.use_gridless:
+            raise ValueError("ladder allocation modes require USE_GRIDLESS=true")
+        if (self.gridless_allocation_mode in {"drawdown_ladder", "survivor"}
                 and (not math.isfinite(self.tradeable_balance_percent)
                      or not 0 < self.tradeable_balance_percent <= 100)):
             raise ValueError(
                 "TRADEABLE_BALANCE_PERCENT must be greater than 0 and at most 100 "
                 "in drawdown-ladder mode"
+            )
+        if (not math.isfinite(self.gridless_survivor_reanchor_percent)
+                or not 0 <= self.gridless_survivor_reanchor_percent <= 100):
+            raise ValueError(
+                "GRIDLESS_SURVIVOR_REANCHOR_PERCENT must be between 0 and 100"
             )
         if not math.isfinite(self.gridless_min_position_eth) or self.gridless_min_position_eth <= 0:
             raise ValueError("GRIDLESS_MIN_POSITION_ETH must be positive and finite")
@@ -645,6 +651,9 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
         gridless_allocation_mode=os.getenv(
             "GRIDLESS_ALLOCATION_MODE", "threshold"
         ).strip().lower(),
+        gridless_survivor_reanchor_percent=float(os.getenv(
+            "GRIDLESS_SURVIVOR_REANCHOR_PERCENT", "0.25"
+        )),
         gridless_min_position_eth=float(os.getenv("GRIDLESS_MIN_POSITION_ETH", "0.001")),
         gridless_ladder_terminal_drawdown_percent=float(os.getenv(
             "GRIDLESS_LADDER_TERMINAL_DRAWDOWN_PERCENT", "95"

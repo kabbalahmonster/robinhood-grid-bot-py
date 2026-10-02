@@ -21,6 +21,13 @@ class GridBotInitialStateTests(unittest.TestCase):
             )),
             "drawdown_ladder",
         )
+        self.assertEqual(
+            _dashboard_strategy_mode(SimpleNamespace(
+                use_gridless=True,
+                gridless_allocation_mode="survivor",
+            )),
+            "survivor",
+        )
 
     @patch("grid_bot.create_reporter_from_config", return_value=None)
     @patch("grid_bot.create_swap_provider")

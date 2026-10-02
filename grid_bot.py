@@ -36,7 +36,9 @@ def _dashboard_strategy_mode(config):
     allocation_mode = str(
         getattr(config, "gridless_allocation_mode", "threshold")
     ).lower()
-    if allocation_mode == "drawdown_ladder":
+    if allocation_mode in {"drawdown_ladder", "survivor"}:
+        if allocation_mode == "survivor":
+            return "survivor"
         return "drawdown_ladder"
     return "gridless_threshold"
 
@@ -3148,11 +3150,9 @@ class GridBot:
         return max(0, self.config.max_active_positions - len(positions))
 
     def _drawdown_ladder_enabled(self):
-        return (
-            str(getattr(
-                self.config, "gridless_allocation_mode", "threshold"
-            )).lower() == "drawdown_ladder"
-        )
+        return str(getattr(
+            self.config, "gridless_allocation_mode", "threshold"
+        )).lower() in {"drawdown_ladder", "survivor"}
 
     def _prepare_gridless_ladder(self, price, positions, spendable_balance_wei, now=None):
         """Load, recover, resize, and recycle the adaptive entry ladder."""
@@ -3166,6 +3166,7 @@ class GridBot:
             reconcile_adoption_provenance,
             reconcile_confirmed_positions,
             refresh_plan_funding,
+            reanchor_survivor,
             save_plan,
             validate_context,
         )
@@ -3237,9 +3238,10 @@ class GridBot:
             )
             return plan
 
+        changed = reanchor_survivor(plan, price, self.config, now)
         changed = advance_rearms(
             plan, price, self.config.gridless_ladder_rearm_cooldown_seconds, now
-        )
+        ) or changed
         funded_before = plan.funded_count
         allocated_before = plan.allocated_wei
         if refresh_plan_funding(
@@ -4036,6 +4038,18 @@ class GridBot:
                 logger.debug("Gridless: ladder %s is %s", plan.id, plan.status)
                 return
             level_index = eligible_level(plan, price)
+            entry_kind = "ladder"
+            if (
+                getattr(plan, "mode", "drawdown_ladder") == "survivor"
+                and plan.leading_edge_pending
+                and plan.leading_edge_level_index is None
+                and getattr(self.config, "gridless_leading_edge", True)
+                and price >= plan.reference_price
+            ):
+                ready = [r.index for r in plan.rungs if r.state == "ready"]
+                if ready:
+                    level_index = min(ready)
+                    entry_kind = "leading_edge"
             if level_index is None:
                 logger.debug(
                     "Gridless: adaptive ladder has no crossed ready rung; next=%s current=%.10f",
@@ -4061,7 +4075,8 @@ class GridBot:
                 return
             buy_amount_eth = buy_amount_wei / 10**18
             reason = (
-                f"Adaptive drawdown ladder {plan.spacing} rung "
+                ("Survivor leading edge" if entry_kind == "leading_edge" else
+                 f"Adaptive drawdown ladder {plan.spacing} rung") + " "
                 f"{level_index + 1}/{plan.max_levels} at "
                 f"{plan.rungs[level_index].price:.10f}"
             )
@@ -4071,6 +4086,7 @@ class GridBot:
                 "trigger_price": plan.rungs[level_index].price,
                 "reference_price": plan.reference_price,
                 "principal_wei": buy_amount_wei,
+                "entry_kind": entry_kind,
             }
         else:
             tradeable_pct = getattr(
@@ -4147,6 +4163,13 @@ class GridBot:
                 and active_ladder.amount_for_level(int(ladder_context["level_index"]))
                 == int(ladder_context.get("principal_wei", 0))
             )
+            if ladder_context.get("entry_kind") == "leading_edge":
+                expected_context = (
+                    expected_context
+                    and active_ladder.mode == "survivor"
+                    and active_ladder.leading_edge_pending
+                    and active_ladder.leading_edge_level_index is None
+                )
             if not expected_context:
                 logger.critical(
                     "Buy aborted: drawdown ladder changed after trigger evaluation"
@@ -4158,7 +4181,8 @@ class GridBot:
         # Skip for leading edge buys (buying into strength with single position)
         execution_margin_pct = getattr(self.config, 'gridless_buy_execution_margin', 50.0)  # Default 50%
         
-        if ladder_context is not None:
+        if (ladder_context is not None
+                and ladder_context.get("entry_kind") != "leading_edge"):
             if not self._ladder_execution_price_allowed(
                 quote, buy_amount_wei, ladder_context
             ):
@@ -4411,6 +4435,7 @@ class GridBot:
                     "ladder_id": ladder_context["ladder_id"],
                     "ladder_level_index": ladder_context["level_index"],
                     "ladder_principal_wei": ladder_context["principal_wei"],
+                    "ladder_entry_kind": ladder_context.get("entry_kind", "ladder"),
                 }
             pos_id = add_position(cost_wei, tokens_received, **add_kwargs)
             if ladder_context is not None:
@@ -4422,6 +4447,7 @@ class GridBot:
                         ladder_context["level_index"],
                         ladder_context["principal_wei"],
                         position_id=pos_id,
+                        entry_kind=ladder_context.get("entry_kind", "ladder"),
                     )
                     save_plan(active_ladder)
                 except Exception as exc:

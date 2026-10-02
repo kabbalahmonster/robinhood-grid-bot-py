@@ -129,7 +129,7 @@ def trigger_focus_candidates(positions: Dict[str, Dict], config: Any,
     allocation_mode = str(getattr(
         config, 'gridless_allocation_mode', 'threshold'
     )).lower()
-    if (allocation_mode != 'drawdown_ladder'
+    if (allocation_mode not in {'drawdown_ladder', 'survivor'}
             and positions and len(positions) < max_active):
         top = get_top_position(positions, token_decimals)
         if top is not None:
@@ -357,6 +357,8 @@ def load_positions() -> Dict[str, Dict[str, int]]:
                     positions[k]['ladder_principal_wei'] = int(
                         v['ladder_principal_wei']
                     )
+                if v.get('ladder_entry_kind') in {'ladder', 'leading_edge'}:
+                    positions[k]['ladder_entry_kind'] = v['ladder_entry_kind']
         return positions
     except (json.JSONDecodeError, IOError):
         return {}
@@ -374,7 +376,8 @@ def save_positions(positions: Dict[str, Dict[str, int]]) -> None:
 def add_position(cost_wei: int, balance: int,
                  ladder_id: Optional[str] = None,
                  ladder_level_index: Optional[int] = None,
-                 ladder_principal_wei: Optional[int] = None) -> str:
+                 ladder_principal_wei: Optional[int] = None,
+                 ladder_entry_kind: Optional[str] = None) -> str:
     """Add new position with lowest available ID (fills gaps).
     
     Args:
@@ -399,6 +402,10 @@ def add_position(cost_wei: int, balance: int,
             'ladder_id': str(ladder_id),
             'ladder_level_index': int(ladder_level_index),
             'ladder_principal_wei': int(ladder_principal_wei),
+            'ladder_entry_kind': (
+                ladder_entry_kind if ladder_entry_kind in {'ladder', 'leading_edge'}
+                else 'ladder'
+            ),
         })
     positions[str(next_id)] = position
     save_positions(positions)

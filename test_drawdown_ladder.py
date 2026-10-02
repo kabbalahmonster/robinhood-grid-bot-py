@@ -18,6 +18,7 @@ from drawdown_ladder import (
     mark_exit,
     reconcile_confirmed_positions,
     reconcile_adoption_provenance,
+    reanchor_survivor,
     record_fill,
     refresh_plan_funding,
     save_plan,
@@ -46,6 +47,8 @@ def ladder_config(**overrides):
         "gridless_ladder_rearm_policy": "after_exit",
         "gridless_ladder_rearm_cooldown_seconds": 0,
         "gridless_allocation_mode": "drawdown_ladder",
+        "gridless_survivor_reanchor_percent": 0.25,
+        "gridless_leading_edge": True,
         "gridless_buy_execution_margin": 50.0,
     }
     values.update(overrides)
@@ -74,6 +77,82 @@ class DrawdownLadderGeometryTests(unittest.TestCase):
 
 
 class AdaptiveLadderStateTests(unittest.TestCase):
+    def test_survivor_reanchors_upward_and_preserves_open_position(self):
+        config = ladder_config(
+            gridless_allocation_mode="survivor",
+            max_active_positions=5,
+        )
+        plan = build_plan(1.0, int(0.005 * WEI), config, now=100)
+        self.assertEqual(plan.version, 3)
+        self.assertEqual(plan.mode, "survivor")
+        principal = plan.amount_for_level(0)
+        record_fill(plan, 0, principal, "7", filled_at=101)
+        old_prices = plan.level_prices
+
+        self.assertTrue(reanchor_survivor(plan, 1.01, config, now=102))
+
+        self.assertEqual(plan.reference_price, 1.01)
+        self.assertEqual(plan.reanchor_count, 1)
+        self.assertTrue(all(new > old for new, old in zip(plan.level_prices, old_prices)))
+        self.assertEqual(plan.rungs[0].state, "open")
+        self.assertEqual(plan.rungs[0].position_id, "7")
+        self.assertTrue(plan.leading_edge_pending)
+
+    def test_survivor_reanchor_threshold_prevents_noise_and_downward_moves(self):
+        config = ladder_config(
+            gridless_allocation_mode="survivor",
+            gridless_survivor_reanchor_percent=1,
+        )
+        plan = build_plan(1.0, int(0.005 * WEI), config, now=100)
+        self.assertFalse(reanchor_survivor(plan, 1.009, config, now=101))
+        self.assertFalse(reanchor_survivor(plan, 0.5, config, now=102))
+        self.assertEqual(plan.reference_price, 1.0)
+
+    def test_survivor_allows_only_one_leading_edge_owner(self):
+        config = ladder_config(gridless_allocation_mode="survivor")
+        plan = build_plan(1.0, int(0.005 * WEI), config, now=100)
+        self.assertTrue(reanchor_survivor(plan, 1.01, config, now=101))
+        level = min(funded_indices(plan))
+        principal = plan.amount_for_level(level)
+        record_fill(
+            plan, level, principal, "1", filled_at=102, entry_kind="leading_edge"
+        )
+        self.assertEqual(plan.leading_edge_level_index, level)
+        self.assertFalse(plan.leading_edge_pending)
+        mark_exit(plan, level, "1", exited_at=103)
+        self.assertIsNone(plan.leading_edge_level_index)
+
+    def test_survivor_restart_recovers_confirmed_leading_edge(self):
+        config = ladder_config(gridless_allocation_mode="survivor")
+        plan = build_plan(1.0, int(0.005 * WEI), config, now=100)
+        reanchor_survivor(plan, 1.01, config, now=101)
+        level = min(funded_indices(plan))
+        position = {
+            "0": {
+                "ladder_id": plan.id,
+                "ladder_level_index": level,
+                "ladder_principal_wei": plan.amount_for_level(level),
+                "ladder_entry_kind": "leading_edge",
+            }
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "ladder.json")
+            save_plan(plan, path)
+            recovered = load_plan(path)
+        self.assertTrue(reconcile_confirmed_positions(recovered, position))
+        self.assertEqual(recovered.leading_edge_level_index, level)
+        self.assertFalse(recovered.leading_edge_pending)
+        validate_context(recovered, position, config)
+
+    def test_static_v2_plan_cannot_be_reinterpreted_as_survivor(self):
+        plan = build_plan(1.0, int(0.005 * WEI), ladder_config(), now=100)
+        with self.assertRaisesRegex(LadderStateError, "does not match"):
+            validate_context(
+                plan,
+                {},
+                ladder_config(gridless_allocation_mode="survivor"),
+            )
+
     def test_adopts_legacy_positions_and_funds_missing_coverage(self):
         config = ladder_config(max_active_positions=10, token_decimals=18)
         positions = {
@@ -358,6 +437,28 @@ class AdaptiveLadderBotTests(unittest.TestCase):
         self.bot._execute_buy_gridless.assert_called_once()
         call = self.bot._execute_buy_gridless.call_args
         self.assertEqual(call.kwargs["ladder_context"]["level_index"], first_index)
+
+    def test_survivor_new_high_attempts_leading_edge_from_funded_rung(self):
+        self.bot.config = ladder_config(
+            gridless_allocation_mode="survivor",
+            max_active_positions=5,
+        )
+        self.bot.config.use_eth_trading = True
+        self.bot.config.eth_gas_reserve = 0.001
+        self.bot.config.weth_address = "0x0000000000000000000000000000000000000002"
+        self.bot.wallet = MagicMock()
+        self.bot.wallet.get_eth_balance.return_value = 0.006
+        self.bot._taxed_token_active = MagicMock(return_value=False)
+        self.bot.last_taxed_token_failure_time = 0
+        self.bot.last_buy_time = 0
+        self.bot.gridless_buy_cooldown = 0
+        self.bot._execute_buy_gridless = MagicMock()
+        self.bot._funding_warning = None
+        with patch("gridless.load_positions", return_value={}):
+            self.bot._check_buys_gridless(1.0)
+            self.bot._check_buys_gridless(1.01)
+        call = self.bot._execute_buy_gridless.call_args
+        self.assertEqual(call.kwargs["ladder_context"]["entry_kind"], "leading_edge")
 
 
 class DrawdownLadderPositionIntegrationTests(unittest.TestCase):

@@ -186,10 +186,11 @@ python grid_bot.py
 | `GRIDLESS_STOPLOSS_THRESHOLD` | No | -25.0 | Stoploss trigger % |
 | `GRIDLESS_BUY_COOLDOWN_SECONDS` | No | 0 | Cooldown between gridless buys (0 disables cooldown) |
 | `GRIDLESS_BUY_EXECUTION_MARGIN` | No | 50 | Execution margin % - blocks buy if quote P&L recovered past threshold + (abs(threshold) * margin%) (e.g., -10% trigger + 50% = block above -5%) |
-| `GRIDLESS_ALLOCATION_MODE` | No | threshold | `threshold` preserves legacy P&L-triggered entries; `drawdown_ladder` adopts valid existing gridless positions when needed, then dynamically funds reusable drawdown triggers |
+| `GRIDLESS_ALLOCATION_MODE` | No | threshold | `threshold` preserves legacy entries; `drawdown_ladder` uses a frozen reference; `survivor` adds upward re-anchoring and one leading-edge position |
 | `GRIDLESS_MIN_POSITION_ETH` | No | 0.001 | Initial principal per funded rung; capital adds coverage to the maximum before increasing rung size |
 | `GRIDLESS_LADDER_TERMINAL_DRAWDOWN_PERCENT` | No | 95 | Deepest trigger below the stable reference price; must be greater than 0 and less than 100 |
 | `GRIDLESS_LADDER_SPACING` | No | linear | `linear` for equal drawdown intervals or `log` for equal price ratios |
+| `GRIDLESS_SURVIVOR_REANCHOR_PERCENT` | No | 0.25 | In `survivor`, percentage rise above the reference required to move the ladder upward and arm a leading-edge entry; 0 follows every strict new high |
 | `GRIDLESS_LADDER_MAX_BUDGET_ETH` | No | 0 | Optional hard cap on total assigned rung principal; 0 disables the extra cap |
 | `GRIDLESS_LADDER_EXPIRY_SECONDS` | No | 0 | Stop new rung fills after this many seconds; 0 keeps the adaptive field active indefinitely |
 | `GRIDLESS_LADDER_REARM_POLICY` | No | after_exit | `after_exit` recycles each sold rung; `never` retires a rung after its first completed trade |

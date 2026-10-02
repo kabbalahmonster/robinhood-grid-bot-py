@@ -11,16 +11,24 @@ thresholds, stop loss, moonbag handling, profit banking, gas reserves, route
 selection, slippage, transfer-tax handling, receipt reconciliation, and circuit
 breakers remain authoritative.
 
+`GRIDLESS_ALLOCATION_MODE=drawdown_ladder` retains the original frozen
+reference. `GRIDLESS_ALLOCATION_MODE=survivor` is the dynamic variant: after a
+configured new-high advance it moves the complete trigger geometry upward and
+arms one leading-edge entry. Open positions keep their cost basis, identity,
+principal, and sell rules; their rung becomes the future reusable trigger at
+the repositioned level.
+
 ## Suggested isolated-wallet profile
 
 ```dotenv
 USE_GRIDLESS=true
-GRIDLESS_ALLOCATION_MODE=drawdown_ladder
+GRIDLESS_ALLOCATION_MODE=survivor
 MAX_ACTIVE_POSITIONS=50
 TRADEABLE_BALANCE_PERCENT=50
 GRIDLESS_MIN_POSITION_ETH=0.001
 GRIDLESS_LADDER_TERMINAL_DRAWDOWN_PERCENT=95
 GRIDLESS_LADDER_SPACING=log
+GRIDLESS_SURVIVOR_REANCHOR_PERCENT=0.25
 GRIDLESS_LADDER_MAX_BUDGET_ETH=0
 GRIDLESS_LADDER_EXPIRY_SECONDS=0
 GRIDLESS_LADDER_REARM_POLICY=after_exit
@@ -28,10 +36,17 @@ GRIDLESS_LADDER_REARM_COOLDOWN_SECONDS=0
 GRIDLESS_LADDER_INCLUDE_REFERENCE_ENTRY=false
 ```
 
+Use `GRIDLESS_ALLOCATION_MODE=survivor` for dynamic behavior and keep
+`GRIDLESS_LEADING_EDGE=true`. The leading entry counts inside
+`MAX_ACTIVE_POSITIONS`, uses one already funded rung, and exits through the
+same profit, stop-loss, gas, quote, and receipt safeguards as every position.
+
 The mode can start fresh or adopt ordinary open gridless positions. On the
-first drawdown-mode poll, if positions exist but no ladder exists, it maps those
-positions into a new compatible v2 plan and adds exact rung provenance. It
-still refuses old v1 one-shot state, partial/foreign ladder provenance,
+first ladder-mode poll, if positions exist but no ladder exists, it maps those
+positions into a compatible versioned plan and adds exact rung provenance.
+Frozen-reference plans remain v2; survivor plans use v3 and cannot be silently
+reinterpreted between modes. It still refuses old v1 one-shot state,
+partial/foreign ladder provenance,
 malformed positions, or more open positions than `MAX_ACTIVE_POSITIONS`.
 Archive `data/gridless_ladder.json` together with
 `data/gridless_positions.json` before any manual migration; never delete only
@@ -210,7 +225,8 @@ the bot never invents a completed exit from an empty ledger.
 
 ## Dashboard telemetry
 
-The status payload identifies the active strategy as `drawdown_ladder` and
+The status payload identifies the active strategy as `drawdown_ladder` or
+`survivor` and
 reports `strategy_spacing` as `linear` or `log`. DoomDash uses those values for
 its compact mode badge. Both values are derived from the existing environment
 configuration; no dashboard-only variable or trading behavior change is
