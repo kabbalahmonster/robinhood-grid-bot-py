@@ -135,6 +135,36 @@ def get_sell_trigger_percent(config: Any) -> float:
     return float(getattr(config, 'gridless_sell_threshold', 5.0))
 
 
+def survivor_next_leading_edge_price(
+        positions: Dict[str, Dict], config: Any) -> Optional[float]:
+    """Return the indicative raw-price target for the next Survivor lead buy.
+
+    Execution remains governed by a fresh authorized buy-side P&L observation;
+    this value is public dashboard telemetry, not an alternate trigger path.
+    """
+    allocation_mode = str(
+        getattr(config, 'gridless_allocation_mode', 'threshold')
+    ).lower()
+    if allocation_mode != 'survivor':
+        return None
+    if not getattr(config, 'gridless_leading_edge', False):
+        return None
+    if not positions or len(positions) >= int(
+            getattr(config, 'max_active_positions', 10)):
+        return None
+    highest = get_highest_position(
+        positions, _configured_token_decimals(config)
+    )
+    if highest is None:
+        return None
+    purchase_price = get_buy_price(
+        highest[1], _configured_token_decimals(config)
+    )
+    if not math.isfinite(purchase_price) or purchase_price <= 0:
+        return None
+    return purchase_price * (1 + get_sell_trigger_percent(config) * 0.5 / 100)
+
+
 def trigger_pnl_candidates(observed: Dict[str, Any], direction: str):
     """Return named, finite P&L marks authorized for one strategy direction."""
     configured = observed.get(f"{direction}_trigger_pnls")

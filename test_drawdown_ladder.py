@@ -63,6 +63,39 @@ def funded_indices(plan):
 
 
 class DrawdownLadderGeometryTests(unittest.TestCase):
+    def test_survivor_reports_indicative_next_leading_edge_price(self):
+        positions = {
+            "low": {"cost_wei": WEI, "balance": 2 * WEI},
+            "high": {"cost_wei": WEI, "balance": WEI},
+        }
+        config = ladder_config(
+            gridless_allocation_mode="survivor",
+            max_active_positions=5,
+            token_decimals=18,
+            gridless_sell_threshold=5,
+        )
+
+        self.assertAlmostEqual(
+            gridless.survivor_next_leading_edge_price(positions, config),
+            1.025,
+        )
+
+    def test_next_leading_edge_price_is_absent_for_legacy_or_full_bot(self):
+        positions = {"0": {"cost_wei": WEI, "balance": WEI}}
+        threshold = ladder_config(
+            gridless_allocation_mode="threshold", max_active_positions=5
+        )
+        full = ladder_config(
+            gridless_allocation_mode="survivor", max_active_positions=1
+        )
+
+        self.assertIsNone(
+            gridless.survivor_next_leading_edge_price(positions, threshold)
+        )
+        self.assertIsNone(
+            gridless.survivor_next_leading_edge_price(positions, full)
+        )
+
     def test_survivor_leading_edge_uses_highest_purchase_point_at_half_sell(self):
         positions = {
             "low": {"cost_wei": WEI, "balance": 2 * WEI},

@@ -3275,7 +3275,20 @@ class GridBot:
                 raise RuntimeError("open gridless positions have no drawdown ladder state")
             return None
         validate_context(plan, positions, self.config)
-        return status_payload(plan)
+        payload = status_payload(plan)
+        if plan.mode == "survivor":
+            from gridless import (
+                get_sell_trigger_percent,
+                survivor_next_leading_edge_price,
+            )
+
+            payload["next_leading_edge_price"] = (
+                survivor_next_leading_edge_price(positions, self.config)
+            )
+            payload["leading_edge_trigger_percent"] = (
+                get_sell_trigger_percent(self.config) * 0.5
+            )
+        return payload
 
     def _ladder_execution_price_allowed(self, quote, buy_amount_wei, ladder_context):
         """Revalidate final executable output against the stable ladder rung."""
