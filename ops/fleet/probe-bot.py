@@ -105,18 +105,28 @@ def main():
                   f"configured={config.chain_id} actual={actual_chain}")
 
         assets = []
-        seen = set()
-        for label, address in ((config.token_symbol, config.token_address), ("USDG", config.usdg_address), ("WETH", config.weth_address)):
-            if not address or address.lower() in seen:
+        seen = {}
+        for role, label, address in (
+            ("managed", config.token_symbol, config.token_address),
+            ("usdg", "USDG", config.usdg_address),
+            ("weth", "WETH", config.weth_address),
+        ):
+            if not address:
                 continue
-            seen.add(address.lower())
+            normalized_address = address.lower()
+            if normalized_address in seen:
+                seen[normalized_address]["roles"].append(role)
+                continue
             try:
                 code = wallet.w3.eth.get_code(address)
                 add_check(result, f"contract_{label}", "pass" if code else "fail", address)
                 info = wallet.get_token_info(address)
                 balance, raw = wallet.get_token_balance(address)
-                assets.append({"label": label, "symbol": info.symbol, "address": address, "decimals": info.decimals,
-                               "balance": str(balance), "balance_raw": str(raw)})
+                asset = {"role": role, "roles": [role], "label": label,
+                         "symbol": info.symbol, "address": address, "decimals": info.decimals,
+                         "balance": str(balance), "balance_raw": str(raw)}
+                assets.append(asset)
+                seen[normalized_address] = asset
             except Exception as exc:
                 add_check(result, f"contract_{label}", "fail", exc)
         result["assets"] = assets

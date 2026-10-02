@@ -117,7 +117,8 @@ sudo apt install tmux git python3 python3-venv
      ops/fleet/position-capacity.py \
      ops/fleet/backup-private-keys ops/fleet/fleet-discover \
      ops/fleet/liquidate-assets ops/fleet/sell-moonbags ops/fleet/fleet-doctor \
-     ops/fleet/fleet-inventory ops/fleet/fleet-audit \
+     ops/fleet/fleet-inventory ops/fleet/balance-report ops/fleet/balance-report.py \
+     ops/fleet/fleet-audit \
      ops/fleet/dashboard-remove ops/fleet/initialize-bots \
      ops/fleet/reconcile-position-balances ops/fleet/reconcile-position-balances.py \
      ops/fleet/initialize-bot-env.py ops/fleet/fleet-watch \
@@ -162,6 +163,7 @@ sudo apt install tmux git python3 python3-venv
    ln -sf "$PWD/ops/fleet/sell-moonbags" "$HOME/bin/sell-moonbags"
    ln -sf "$PWD/ops/fleet/fleet-doctor" "$HOME/bin/fleet-doctor"
    ln -sf "$PWD/ops/fleet/fleet-inventory" "$HOME/bin/fleet-inventory"
+   ln -sf "$PWD/ops/fleet/balance-report" "$HOME/bin/balance-report"
    ln -sf "$PWD/ops/fleet/fleet-audit" "$HOME/bin/fleet-audit"
    ln -sf "$PWD/ops/fleet/dashboard-remove" "$HOME/bin/dashboard-remove"
    ln -sf "$PWD/ops/fleet/initialize-bots" "$HOME/bin/initialize-bots"
@@ -503,6 +505,7 @@ unless their section explicitly says otherwise.
 | `fleet-discover` | Generate a guarded fleet config from checkout discovery | Prints only |
 | `fleet-doctor` | Validate Git, config, RPC, contracts, providers, and dashboard | No |
 | `fleet-inventory` | Read balances, positions, reserves, Git, and audit timestamps | No |
+| `balance-report` | Read ETH, USDG, and managed-token balances with per-bot and fleet totals | No |
 | `fleet-watch` | Phone-friendly live view from local status snapshots | No |
 | `strategy-model` | Compare gridless trigger geometry and generate HTML/CSV/JSON reports | Writes report files only |
 | `fleet-audit` | Reconcile local treasury/liquidation audit records | No |
@@ -914,6 +917,7 @@ directory containing `robinhood-grid-bot-py`:
 ```bash
 ops/fleet/fleet-doctor --only seedcoin,tendies
 ops/fleet/fleet-inventory --exclude ai,closed
+ops/fleet/balance-report --only seedcoin,tendies
 ops/fleet/treasury-transfer --only seedcoin --asset ETH --amount 0.0005
 ```
 
@@ -923,6 +927,7 @@ names, empty list items, and a selection containing no bots are errors. Every
 command prints the final names before doing work. Selectors are supported by
 `start-fleet`, `update-fleet`, `update-variable`, both treasury tools,
 `liquidate-assets`, `fleet-doctor`, `fleet-inventory`, and `fleet-audit`.
+`balance-report` supports the same selectors.
 
 `stop-fleet` and `restart-fleet` remain whole-session operations because tmux
 owns one fleet session. `update-fleet --restart` and
@@ -1001,6 +1006,23 @@ classic/gridless position counts, Git identity, and latest local treasury and
 liquidation timestamps. JSON retains raw integer balances for automation;
 human output is deliberately shorter. Inventory is read-only, but it does make
 RPC calls and therefore may fail on an unavailable or misconfigured endpoint.
+
+For a balance-focused fleet report with totals, use:
+
+```bash
+balance-report
+balance-report --json > fleet-balances.json
+balance-report --only robinvault,earn
+```
+
+The human report prints every selected bot's public wallet, native ETH, USDG,
+and configured managed-token balance, followed by fleet totals. Totals are
+kept separate by chain and token contract, so identically named assets on
+different networks are never combined. Managed-token totals are likewise
+separate per contract. JSON retains raw wei/token units for exact downstream
+accounting. The command is read-only, never loads a treasury signer, and
+continues to print partial results when one bot's RPC or configuration probe
+fails; its exit status is nonzero in that case.
 
 ## Reconciling fleet transaction history
 

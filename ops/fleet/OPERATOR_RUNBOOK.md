@@ -278,6 +278,7 @@ restart:
 stop-bot BOTNAME
 reconcile-position-balances --only BOTNAME --apply --confirm-bot-stopped
 fleet-inventory --only BOTNAME
+balance-report --only BOTNAME
 restart-bot BOTNAME
 ```
 

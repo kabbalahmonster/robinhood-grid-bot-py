@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+SCRIPT_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)"
+# shellcheck source=fleet-common.sh
+source "$SCRIPT_DIR/fleet-common.sh"
+
+usage() { cat <<'EOF'
+Usage: balance-report [--json] [--only NAMES] [--exclude NAMES] [--config PATH]
+Read ETH, USDG, and configured managed-token balances for the fleet and print
+per-bot balances plus chain/asset-aware fleet totals. Never signs or broadcasts.
+EOF
+}
+
+config_path=""; only=""; exclude=""; json=0
+while (($#)); do
+  case "$1" in
+    --config|--only|--exclude)
+      (($# >= 2)) || fleet_die "$1 requires a value"
+      case "$1" in
+        --config) config_path="$2" ;;
+        --only) only="$2" ;;
+        --exclude) exclude="$2" ;;
+      esac
+      shift 2
+      ;;
+    --json) json=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) fleet_die "Unknown option: $1" ;;
+  esac
+done
+
+fleet_load_config "$config_path"
+fleet_apply_selection "$only" "$exclude"
+fleet_validate_bots >&2
+
+report_dir="$(mktemp -d)" || fleet_die "Could not create balance report workspace"
+trap 'rm -rf -- "$report_dir"' EXIT
+reports=()
+failures=0
+index=0
+for bot_dir in "${FLEET_BOT_DIRS[@]}"; do
+  python_bin="$(fleet_python_for "$bot_dir")"
+  name="$(fleet_bot_name "$bot_dir")"
+  report="$report_dir/$index.json"
+  if ! (cd "$bot_dir" && "$python_bin" "$SCRIPT_DIR/probe-bot.py" \
+      --mode inventory --name "$name" --json > "$report"); then
+    failures=$((failures + 1))
+  fi
+  if [[ ! -s "$report" ]]; then
+    printf '{"name":"%s","status":"fail","checks":[{"name":"probe","status":"fail","detail":"probe produced no report"}]}' \
+      "$name" > "$report"
+  fi
+  reports+=("$report")
+  index=$((index + 1))
+done
+
+args=()
+((json == 0)) || args+=(--json)
+render_status=0
+python3 "$SCRIPT_DIR/balance-report.py" "${args[@]}" "${reports[@]}" || render_status=$?
+((failures == 0 && render_status == 0))

@@ -416,6 +416,7 @@ option and safety invariant.
 | `fleet-discover` | Print deterministic membership for review | No |
 | `fleet-doctor` | Check config, Git, RPC, contracts, provider route, and dashboard | No |
 | `fleet-inventory` | Read addresses, reserves, managed balances, positions, and audit ages | No |
+| `balance-report` | Read ETH, USDG, and managed-token balances with per-bot and fleet totals | No |
 | `fleet-watch` | Phone-friendly live view using local bot status snapshots | No |
 | `strategy-model` | Generate comparative gridless buy/sell coverage charts, CSV, and JSON | Report files only |
 | `reconcile-position-balances` | Preview/apply an audited proportional haircut when tracked tokens exceed wallet reality | Yes |
@@ -486,6 +487,12 @@ shared strategy values such as `MAX_POSITIONS=6` and
 `POLL_INTERVAL_SECONDS=12` across the entire new batch.
 See the [fleet guide](ops/fleet/README.md#initialize-new-bot-checkouts) for the
 full setup, dependency, validation, backup, and registration workflow.
+
+For a read-only funding snapshot, `balance-report` queries every configured
+wallet and prints ETH, USDG, and configured managed-token balances per bot,
+then totals them by chain and token contract. Use `balance-report --json` for
+raw wei/token units suitable for exact automation; `--only` and `--exclude`
+use the normal fleet selectors. The command never signs or broadcasts.
 
 Rebuild procedure:
 
