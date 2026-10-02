@@ -575,6 +575,7 @@ class AdaptiveLadderBotTests(unittest.TestCase):
         with patch("gridless.load_positions", return_value={}):
             self.bot._check_buys_gridless(0.0000002751)
         self.bot._execute_buy_gridless.assert_called_once()
+        self.assertTrue(self.bot._execute_buy_gridless.call_args.args[3])
         context = self.bot._execute_buy_gridless.call_args.kwargs["ladder_context"]
         self.assertEqual(context["entry_kind"], "leading_edge")
         self.assertTrue(context["bootstrap_reference"])
@@ -613,6 +614,7 @@ class AdaptiveLadderBotTests(unittest.TestCase):
                 1.025, {"0": {"buy_trigger_pnls": {"buy": 2.5}}}
             )
         call = self.bot._execute_buy_gridless.call_args
+        self.assertTrue(call.args[3])
         self.assertEqual(call.kwargs["ladder_context"]["entry_kind"], "leading_edge")
         self.assertAlmostEqual(call.kwargs["ladder_context"]["trigger_price"], 1.025)
         self.assertEqual(load_plan().reference_price, 1.0)

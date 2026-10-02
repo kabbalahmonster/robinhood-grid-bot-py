@@ -25,6 +25,32 @@ class GridBotInitialStateTests(unittest.TestCase):
             ("sell", "post_sell_rapid"),
         )
 
+    def test_crossed_sell_lane_outranks_simultaneous_buy_lane(self):
+        bot = GridBot.__new__(GridBot)
+        bot._survivor_rapid_poll_until = 0.0
+        bot._pnl_poll_sequence = MagicMock(
+            return_value=["buy", "sell", "legacy"]
+        )
+        bot._pnl_trigger_latches = {"buy": "buy", "sell": "sell"}
+
+        self.assertEqual(
+            bot._select_pnl_poll_side({"0": {}}, now=99.0),
+            ("sell", "triggered_sell_priority"),
+        )
+
+    def test_sell_attempt_or_latch_suppresses_buy_for_cycle(self):
+        bot = GridBot.__new__(GridBot)
+        bot._sell_priority_this_cycle = False
+        bot._pnl_trigger_latches = {"buy": "buy", "sell": None}
+        self.assertFalse(bot._sell_has_cycle_priority())
+
+        bot._sell_priority_this_cycle = True
+        self.assertTrue(bot._sell_has_cycle_priority())
+
+        bot._sell_priority_this_cycle = False
+        bot._pnl_trigger_latches["sell"] = "legacy"
+        self.assertTrue(bot._sell_has_cycle_priority())
+
     @patch("grid_bot.time.monotonic", return_value=50.0)
     def test_confirmed_survivor_sell_arms_rapid_poll_window(self, _monotonic):
         bot = GridBot.__new__(GridBot)

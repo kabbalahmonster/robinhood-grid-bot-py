@@ -242,6 +242,13 @@ This still executes at most one independently validated sell per cycle; it does
 not batch transactions or bypass route, gas, profit, receipt, or unresolved-
 broadcast safeguards. Set the window to `0` to disable acceleration.
 
+Sell triggers have strict execution priority over buys. While an authorized
+sell trigger is latched, its observation lane is refreshed ahead of any
+simultaneous buy lane. If the exit route times out, is rejected, or otherwise
+cannot execute, that cycle does not fall through to a buy tournament. A
+successful sell also consumes the cycle so the next rapid poll can attempt the
+next profitable position before Survivor commits capital to a new entry.
+
 ## Persistence and fail-closed recovery
 
 `data/gridless_ladder.json` stores versioned geometry, funding targets,

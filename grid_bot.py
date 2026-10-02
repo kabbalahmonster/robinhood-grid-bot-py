@@ -3131,6 +3131,7 @@ class GridBot:
                 
                 # FAST PROFIT MODE: Sell if profit exceeds minimum, regardless of sellMin
                 if fast_profit and current_profit >= effective_min_profit:
+                    self._sell_priority_this_cycle = True
                     logger.info(f"🚀 Fast profit trigger: Position {pos_id} at {price:.10f} (profit: {current_profit:.2f}%, sellMin: {sell_min:.10f})")
                     self.execute_sell(pos_id, price)
                     return  # One sell per cycle
@@ -3139,6 +3140,7 @@ class GridBot:
                 required_price = max(sell_min, buy_price * (1 + effective_min_profit / 100))
                 
                 if price >= required_price:
+                    self._sell_priority_this_cycle = True
                     logger.info(f"Sell trigger: Position {pos_id} at price {price:.10f} (required: {required_price:.10f}, profit: {current_profit:.2f}%)")
                     self.execute_sell(pos_id, price)
                     return  # One sell per cycle
@@ -3618,6 +3620,12 @@ class GridBot:
         latches = getattr(
             self, "_pnl_trigger_latches", {"buy": None, "sell": None}
         )
+        # Exits outrank entries. Once an authorized sell lane crosses its
+        # trigger, keep refreshing that lane instead of alternating with a
+        # simultaneous buy trigger.
+        sell_source = latches.get("sell")
+        if sell_source in eligible:
+            return sell_source, "triggered_sell_priority"
         latched_sides = []
         for side in eligible:
             if side in latches.values() and side not in latched_sides:
@@ -3757,6 +3765,14 @@ class GridBot:
             direction, reason, source,
         )
         self._log_pnl_focus_transition()
+
+    def _sell_has_cycle_priority(self):
+        """Return true while an actionable exit must suppress new entries."""
+        latches = getattr(self, "_pnl_trigger_latches", {})
+        return bool(
+            getattr(self, "_sell_priority_this_cycle", False)
+            or (isinstance(latches, dict) and latches.get("sell"))
+        )
 
     def _arm_survivor_rapid_polling(self):
         """Temporarily favor fast sell-side cycles after a confirmed Survivor exit."""
@@ -4165,7 +4181,11 @@ class GridBot:
             logger.info(f"   Amount: {buy_amount_eth:.6f} {self.trade_token_name} ({trade_balance:.6f} × {tradeable_pct*100:.0f}% / {available_slots} slots)")
         
         # Execute the buy via execute_buy_gridless
-        is_leading_edge_buy = not ladder_mode and "Leading edge" in reason
+        is_leading_edge_buy = bool(
+            (ladder_context is not None
+             and ladder_context.get("entry_kind") == "leading_edge")
+            or (not ladder_mode and "Leading edge" in reason)
+        )
         self._execute_buy_gridless(
             buy_amount_eth,
             buy_amount_wei,
@@ -4634,6 +4654,9 @@ class GridBot:
             return
         
         pos_id, pos, reason = best_candidate
+        # Reserve this cycle for the exit before route preparation. Quote or
+        # tournament failures must not fall through into a simultaneous buy.
+        self._sell_priority_this_cycle = True
         
         # Verify with individual position quote before executing
         balance = pos.get('balance', 0)
@@ -6396,6 +6419,7 @@ class GridBot:
             self._safety_halted = True
             return
         self.round_count += 1
+        self._sell_priority_this_cycle = False
         # Ephemeral by design: a sell attempt must be re-established by this
         # round's quote check or it disappears from the next dashboard report.
         self._sell_attempt = None
@@ -6879,10 +6903,16 @@ class GridBot:
         # buy check below will replace it only if another tournament actually
         # occurs. Leaving gate comparisons here made completed buy cards repeat
         # forever.
-        # Then check buys
+        # Then check buys, unless an actionable sell claimed the cycle. A sell
+        # remains authoritative after route failure/timeout and after success;
+        # the next rapid Survivor poll gets first chance to sell another
+        # position before any new capital is committed.
         phase_started = time.perf_counter()
         buys_before_check = self.session_buys
-        self.check_buys(price, position_pnls)
+        if self._sell_has_cycle_priority():
+            logger.info("Buy deferred: active sell trigger has execution priority")
+        else:
+            self.check_buys(price, position_pnls)
         if self.session_buys > buys_before_check:
             self._clear_pnl_trigger_latch("buy", "successful execution")
         self._cycle_phase_ms["buys"] = (time.perf_counter() - phase_started) * 1000
