@@ -210,7 +210,11 @@ the bot never invents a completed exit from an empty ledger.
 
 ## Dashboard telemetry
 
-The status payload includes:
+The status payload identifies the active strategy as `drawdown_ladder` and
+reports `strategy_spacing` as `linear` or `log`. DoomDash uses those values for
+its compact mode badge. Both values are derived from the existing environment
+configuration; no dashboard-only variable or trading behavior change is
+introduced. The bounded ladder summary also includes:
 
 - reference, spacing, terminal drawdown, status, and optional expiry;
 - maximum, funded, ready, open, and legacy-adopted rung counts;

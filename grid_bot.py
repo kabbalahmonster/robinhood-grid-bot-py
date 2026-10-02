@@ -29,6 +29,18 @@ from token_tax_detector import TokenTaxDetector
 MIN_BUY_OBSERVATION_PRINCIPAL_WEI = 10**15  # 0.001 ETH/WETH
 
 
+def _dashboard_strategy_mode(config):
+    """Return a stable public strategy label without changing strategy behavior."""
+    if not getattr(config, "use_gridless", True):
+        return "grid"
+    allocation_mode = str(
+        getattr(config, "gridless_allocation_mode", "threshold")
+    ).lower()
+    if allocation_mode == "drawdown_ladder":
+        return "drawdown_ladder"
+    return "gridless_threshold"
+
+
 def _runtime_build_provenance(environ=None, runner=subprocess.run):
     """Resolve a public build identity once without making startup depend on Git."""
     environ = os.environ if environ is None else environ
@@ -6682,6 +6694,12 @@ class GridBot:
                     sells=self.session_sells,
                     filled_positions=active,
                     max_positions=self.config.max_active_positions,
+                    strategy_mode=_dashboard_strategy_mode(self.config),
+                    strategy_spacing=(
+                        getattr(self.config, "gridless_ladder_spacing", None)
+                        if self._drawdown_ladder_enabled()
+                        else None
+                    ),
                     entry_allocation_mode=getattr(
                         self.config, "gridless_allocation_mode", "threshold"
                     ),

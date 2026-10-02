@@ -2,10 +2,26 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from grid_bot import GridBot
+from grid_bot import GridBot, _dashboard_strategy_mode
 
 
 class GridBotInitialStateTests(unittest.TestCase):
+    def test_dashboard_strategy_mode_is_explicit_and_legacy_safe(self):
+        self.assertEqual(
+            _dashboard_strategy_mode(SimpleNamespace(use_gridless=False)), "grid"
+        )
+        self.assertEqual(
+            _dashboard_strategy_mode(SimpleNamespace(use_gridless=True)),
+            "gridless_threshold",
+        )
+        self.assertEqual(
+            _dashboard_strategy_mode(SimpleNamespace(
+                use_gridless=True,
+                gridless_allocation_mode="drawdown_ladder",
+            )),
+            "drawdown_ladder",
+        )
+
     @patch("grid_bot.create_reporter_from_config", return_value=None)
     @patch("grid_bot.create_swap_provider")
     @patch("grid_bot.Wallet")

@@ -82,11 +82,15 @@ class TestDashboardReporter(unittest.TestCase):
         }
 
         reporter.report(
+            strategy_mode="drawdown_ladder",
+            strategy_spacing="log",
             entry_allocation_mode="drawdown_ladder",
             drawdown_ladder=ladder,
         )
 
         payload = reporter._queue[0]
+        self.assertEqual(payload["strategy_mode"], "drawdown_ladder")
+        self.assertEqual(payload["strategy_spacing"], "log")
         self.assertEqual(payload["entry_allocation_mode"], "drawdown_ladder")
         self.assertEqual(payload["drawdown_ladder"], ladder)
 
