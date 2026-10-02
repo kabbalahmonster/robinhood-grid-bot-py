@@ -4075,10 +4075,16 @@ class GridBot:
             level_index = eligible_level(plan, price)
             entry_kind = "ladder"
             leading_reason = None
+            bootstrap_reference = False
             if getattr(plan, "mode", "drawdown_ladder") == "survivor":
-                leading, leading_reason, _ = survivor_leading_edge_trigger(
-                    gridless_positions, price, self.config, position_pnls
-                )
+                if not gridless_positions:
+                    leading = True
+                    bootstrap_reference = True
+                    leading_reason = "initial confirmed purchase point"
+                else:
+                    leading, leading_reason, _ = survivor_leading_edge_trigger(
+                        gridless_positions, price, self.config, position_pnls
+                    )
             else:
                 leading = False
             if leading:
@@ -4126,6 +4132,7 @@ class GridBot:
                 "reference_price": plan.reference_price,
                 "principal_wei": buy_amount_wei,
                 "entry_kind": entry_kind,
+                "bootstrap_reference": bootstrap_reference,
             }
         else:
             tradeable_pct = getattr(
@@ -4207,6 +4214,13 @@ class GridBot:
                     expected_context
                     and active_ladder.mode == "survivor"
                 )
+                if ladder_context.get("bootstrap_reference", False):
+                    expected_context = (
+                        expected_context
+                        and not gridless_positions
+                        and active_ladder.deployed_wei == 0
+                        and active_ladder.reanchor_count == 0
+                    )
             if not expected_context:
                 logger.critical(
                     "Buy aborted: drawdown ladder changed after trigger evaluation"
@@ -4481,9 +4495,17 @@ class GridBot:
                 }
                 if ladder_context.get("entry_kind") == "leading_edge":
                     add_kwargs["ladder_fill_price"] = buy_price
+                    add_kwargs["ladder_bootstrap_reference"] = bool(
+                        ladder_context.get("bootstrap_reference", False)
+                    )
             pos_id = add_position(cost_wei, tokens_received, **add_kwargs)
             if ladder_context is not None:
-                from drawdown_ladder import record_fill, reanchor_survivor, save_plan
+                from drawdown_ladder import (
+                    anchor_survivor_bootstrap,
+                    record_fill,
+                    reanchor_survivor,
+                    save_plan,
+                )
 
                 try:
                     record_fill(
@@ -4494,7 +4516,12 @@ class GridBot:
                         entry_kind=ladder_context.get("entry_kind", "ladder"),
                     )
                     if ladder_context.get("entry_kind") == "leading_edge":
-                        moved = reanchor_survivor(active_ladder, buy_price)
+                        if ladder_context.get("bootstrap_reference", False):
+                            moved = anchor_survivor_bootstrap(
+                                active_ladder, buy_price
+                            )
+                        else:
+                            moved = reanchor_survivor(active_ladder, buy_price)
                         if not moved:
                             logger.warning(
                                 "Confirmed leading-edge fill %.10f did not exceed "

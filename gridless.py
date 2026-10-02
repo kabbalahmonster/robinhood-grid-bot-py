@@ -420,6 +420,8 @@ def load_positions() -> Dict[str, Dict[str, int]]:
                     positions[k]['ladder_fill_price'] = float(
                         v['ladder_fill_price']
                     )
+                if v.get('ladder_bootstrap_reference') is True:
+                    positions[k]['ladder_bootstrap_reference'] = True
         return positions
     except (json.JSONDecodeError, IOError):
         return {}
@@ -439,7 +441,8 @@ def add_position(cost_wei: int, balance: int,
                  ladder_level_index: Optional[int] = None,
                  ladder_principal_wei: Optional[int] = None,
                  ladder_entry_kind: Optional[str] = None,
-                 ladder_fill_price: Optional[float] = None) -> str:
+                 ladder_fill_price: Optional[float] = None,
+                 ladder_bootstrap_reference: bool = False) -> str:
     """Add new position with lowest available ID (fills gaps).
     
     Args:
@@ -473,6 +476,12 @@ def add_position(cost_wei: int, balance: int,
             if ladder_fill_price is None or float(ladder_fill_price) <= 0:
                 raise ValueError("leading-edge provenance requires fill price")
             position['ladder_fill_price'] = float(ladder_fill_price)
+            if ladder_bootstrap_reference:
+                position['ladder_bootstrap_reference'] = True
+        elif ladder_bootstrap_reference:
+            raise ValueError(
+                "bootstrap-reference provenance requires a leading-edge entry"
+            )
     positions[str(next_id)] = position
     save_positions(positions)
     return str(next_id)

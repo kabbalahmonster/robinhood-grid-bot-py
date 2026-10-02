@@ -716,6 +716,11 @@ Buys are triggered when:
 2. **Top position P&L ≤ buy_threshold** - Buy the dip
 3. **Leading edge** (optional) - Legacy threshold mode buys into strength with one position; Survivor repeats from the current highest purchase point and ratchets its ladder only after each higher fill confirms
 
+In Survivor, the fresh initial buy executes at the live market and its confirmed
+measured purchase point forms the ladder. Downward ladder rungs are threshold
+crossings, not exact-price orders: price at or below a funded ready rung is
+eligible. A gap through multiple rungs is worked one guarded buy per poll.
+
 Buy amount: `available_WETH / available_slots`
 
 ### Gridless Sell Logic

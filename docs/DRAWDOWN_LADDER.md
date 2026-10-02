@@ -49,7 +49,13 @@ stop-loss, gas, quote, and receipt safeguards as every position. A failed,
 rejected, or unreconciled buy cannot move the reference.
 
 The mode can start fresh or adopt ordinary open gridless positions. On the
-first ladder-mode poll, if positions exist but no ladder exists, it maps those
+first fresh Survivor poll, it immediately attempts one ordinary guarded buy at
+the live market. The confirmed measured economic entry—not the earlier market
+observation—becomes the reference from which its ladder is formed. If that buy
+fails or remains unresolved, the provisional geometry does not become an open
+position and no confirmed purchase anchor is invented.
+
+If positions exist but no ladder exists, the first ladder-mode poll maps those
 positions into a compatible versioned plan and adds exact rung provenance.
 Frozen-reference plans remain v2; survivor plans use v3 and cannot be silently
 reinterpreted between modes. It still refuses old v1 one-shot state,
@@ -190,6 +196,12 @@ from a confirmed higher leading-edge purchase point.
 
 Every poll reconciles state, observes liquid, activates or grows affordable
 rungs, advances eligible resets, and selects the highest crossed ready rung.
+Rungs are thresholds, not limit orders: a ready rung is eligible whenever the
+observed price is equal to or below its trigger. A gap through several rungs
+buys the highest missed funded rung first, then can buy the next crossed rung
+on later polls, subject to capacity, cooldown, liquid, and every execution
+guard. It does not wait for an exact-price match.
+
 In Survivor, the current highest purchase point is also checked against 50% of
 the configured sell trigger. If crossed, the next buy uses a funded ready rung
 for principal accounting but executes at the live leading edge; confirmation
@@ -201,7 +213,9 @@ A rung becomes `open` only after:
 
 1. its exact-input route passes provider, tax, slippage, gas-cap, and reserve
    checks;
-2. the final route remains within `GRIDLESS_BUY_EXECUTION_MARGIN` of the rung;
+2. for a downward rung entry, the final route has not recovered too far above
+   the crossed trigger under `GRIDLESS_BUY_EXECUTION_MARGIN`; execution below
+   the trigger remains valid;
 3. the transaction confirms and actual token receipt is measured;
 4. the position is atomically persisted with ladder ID, rung index, and exact
    principal;

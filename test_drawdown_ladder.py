@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 from drawdown_ladder import (
     LadderStateError,
     advance_rearms,
+    anchor_survivor_bootstrap,
     adopt_legacy_positions,
     build_plan,
     eligible_level,
@@ -119,6 +120,20 @@ class DrawdownLadderGeometryTests(unittest.TestCase):
 
 
 class AdaptiveLadderStateTests(unittest.TestCase):
+    def test_survivor_bootstrap_forms_geometry_from_confirmed_fill_even_if_lower(self):
+        config = ladder_config(
+            gridless_allocation_mode="survivor", max_active_positions=5,
+        )
+        plan = build_plan(1.0, int(0.005 * WEI), config, now=100)
+        level = min(funded_indices(plan))
+        record_fill(
+            plan, level, plan.amount_for_level(level), "0",
+            filled_at=101, entry_kind="leading_edge",
+        )
+        self.assertTrue(anchor_survivor_bootstrap(plan, 0.99))
+        self.assertEqual(plan.reference_price, 0.99)
+        self.assertEqual(plan.reanchor_count, 0)
+
     def test_survivor_reanchors_upward_and_preserves_open_position(self):
         config = ladder_config(
             gridless_allocation_mode="survivor",
@@ -186,6 +201,24 @@ class AdaptiveLadderStateTests(unittest.TestCase):
         self.assertEqual(recovered.rungs[level].open_entry_kind, "leading_edge")
         self.assertEqual(recovered.reference_price, 1.01)
         validate_context(recovered, position, config)
+
+    def test_survivor_restart_recovers_confirmed_bootstrap_reference(self):
+        config = ladder_config(gridless_allocation_mode="survivor")
+        plan = build_plan(1.0, int(0.005 * WEI), config, now=100)
+        level = min(funded_indices(plan))
+        position = {
+            "0": {
+                "ladder_id": plan.id,
+                "ladder_level_index": level,
+                "ladder_principal_wei": plan.amount_for_level(level),
+                "ladder_entry_kind": "leading_edge",
+                "ladder_fill_price": 0.99,
+                "ladder_bootstrap_reference": True,
+            }
+        }
+        self.assertTrue(reconcile_confirmed_positions(plan, position))
+        self.assertEqual(plan.reference_price, 0.99)
+        validate_context(plan, position, config)
 
     def test_static_v2_plan_cannot_be_reinterpreted_as_survivor(self):
         plan = build_plan(1.0, int(0.005 * WEI), ladder_config(), now=100)
@@ -344,6 +377,16 @@ class AdaptiveLadderStateTests(unittest.TestCase):
         self.assertEqual(plan.rungs[0].fill_count, 2)
         self.assertEqual(plan.rungs[0].exit_count, 1)
 
+    def test_ready_rung_triggers_anywhere_at_or_below_its_price(self):
+        plan = build_plan(
+            1.0, int(0.003 * WEI), ladder_config(max_active_positions=3), now=100
+        )
+        first_ready = min(funded_indices(plan))
+        self.assertEqual(
+            eligible_level(plan, plan.rungs[first_ready].price * 0.80),
+            first_ready,
+        )
+
     def test_stoploss_below_rung_cannot_immediately_rebuy(self):
         plan = build_plan(
             1.0, int(0.001 * WEI), ladder_config(max_active_positions=1), now=100
@@ -481,6 +524,29 @@ class AdaptiveLadderBotTests(unittest.TestCase):
         call = self.bot._execute_buy_gridless.call_args
         self.assertEqual(call.kwargs["ladder_context"]["level_index"], first_index)
 
+    def test_fresh_survivor_immediately_attempts_off_ladder_bootstrap_buy(self):
+        self.bot.config = ladder_config(
+            gridless_allocation_mode="survivor", max_active_positions=50,
+        )
+        self.bot.config.use_eth_trading = True
+        self.bot.config.eth_gas_reserve = 0.001
+        self.bot.config.weth_address = "0x0000000000000000000000000000000000000002"
+        self.bot.wallet = MagicMock()
+        self.bot.wallet.get_eth_balance.return_value = 0.018
+        self.bot._taxed_token_active = MagicMock(return_value=False)
+        self.bot.last_taxed_token_failure_time = 0
+        self.bot.last_buy_time = 0
+        self.bot.gridless_buy_cooldown = 0
+        self.bot._execute_buy_gridless = MagicMock()
+        self.bot._funding_warning = None
+        with patch("gridless.load_positions", return_value={}):
+            self.bot._check_buys_gridless(0.0000002751)
+        self.bot._execute_buy_gridless.assert_called_once()
+        context = self.bot._execute_buy_gridless.call_args.kwargs["ladder_context"]
+        self.assertEqual(context["entry_kind"], "leading_edge")
+        self.assertTrue(context["bootstrap_reference"])
+        self.assertEqual(load_plan().reference_price, 0.0000002751)
+
     def test_survivor_half_sell_trigger_attempts_off_ladder_leading_edge(self):
         self.bot.config = ladder_config(
             gridless_allocation_mode="survivor",
@@ -576,11 +642,12 @@ class DrawdownLadderPositionIntegrationTests(unittest.TestCase):
         position_id = gridless.add_position(
             123, 456, ladder_id="ladder-1", ladder_level_index=7,
             ladder_principal_wei=100, ladder_entry_kind="leading_edge",
-            ladder_fill_price=1.234,
+            ladder_fill_price=1.234, ladder_bootstrap_reference=True,
         )
         position = gridless.load_positions()[position_id]
         self.assertEqual(position["ladder_entry_kind"], "leading_edge")
         self.assertAlmostEqual(position["ladder_fill_price"], 1.234)
+        self.assertTrue(position["ladder_bootstrap_reference"])
 
     def test_partial_provenance_is_rejected(self):
         with self.assertRaises(ValueError):

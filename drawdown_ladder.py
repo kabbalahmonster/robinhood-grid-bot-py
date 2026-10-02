@@ -642,6 +642,35 @@ def reanchor_survivor(
     return True
 
 
+def anchor_survivor_bootstrap(
+    plan: DrawdownLadderPlan,
+    confirmed_buy_price: float,
+) -> bool:
+    """Form fresh Survivor geometry from its first confirmed purchase point."""
+    if plan.mode != "survivor" or plan.status != "active":
+        return False
+    if not math.isfinite(confirmed_buy_price) or confirmed_buy_price <= 0:
+        return False
+    open_rungs = [rung for rung in plan.rungs if rung.state == "open"]
+    if (plan.reanchor_count != 0 or len(open_rungs) != 1
+            or open_rungs[0].open_entry_kind != "leading_edge"):
+        raise LadderStateError(
+            "Survivor bootstrap anchor requires exactly one first leading fill"
+        )
+    prices = generate_levels(
+        confirmed_buy_price,
+        plan.max_levels,
+        plan.terminal_drawdown_percent,
+        plan.spacing,
+        plan.include_reference_entry,
+    )
+    plan.reference_price = confirmed_buy_price
+    for rung, price in zip(plan.rungs, prices):
+        rung.price = price
+    validate_plan(plan)
+    return True
+
+
 def level_is_crossed(plan: DrawdownLadderPlan, current_price: float) -> bool:
     return eligible_level(plan, current_price) is not None
 
@@ -727,7 +756,10 @@ def reconcile_confirmed_positions(
                     raise LadderStateError(
                         "recovered leading-edge position is missing fill price"
                     )
-                reanchor_survivor(plan, fill_price)
+                if position.get("ladder_bootstrap_reference") is True:
+                    anchor_survivor_bootstrap(plan, fill_price)
+                else:
+                    reanchor_survivor(plan, fill_price)
             changed = True
     return changed
 
@@ -858,6 +890,11 @@ def validate_context(
             raise LadderStateError("position ladder entry kind is invalid")
         if entry_kind != rung.open_entry_kind:
             raise LadderStateError("position and rung entry kind disagree")
+        if (position.get("ladder_bootstrap_reference") is True
+                and entry_kind != "leading_edge"):
+            raise LadderStateError(
+                "Survivor bootstrap provenance requires a leading-edge entry"
+            )
     open_indices = {rung.index for rung in plan.rungs if rung.state == "open"}
     if open_indices != seen:
         raise LadderStateError("persisted open rung has no matching position")
