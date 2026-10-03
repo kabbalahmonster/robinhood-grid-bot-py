@@ -20,8 +20,8 @@ from uuid import uuid4
 
 
 LADDER_FILE = "data/gridless_ladder.json"
-LADDER_VERSION = 4
-SUPPORTED_LADDER_VERSIONS = {2, 3, 4}
+LADDER_VERSION = 5
+SUPPORTED_LADDER_VERSIONS = {2, 3, 4, 5}
 RUNG_STATES = {"inactive", "ready", "open", "waiting_reset", "retired"}
 
 
@@ -136,6 +136,12 @@ class DrawdownLadderPlan:
         return max(0, self.allocated_wei - self.deployed_wei)
 
     @property
+    def reserved_count(self) -> int:
+        return sum(
+            rung.state in {"ready", "waiting_reset"} for rung in self.rungs
+        )
+
+    @property
     def next_level_price(self) -> Optional[float]:
         ready = [rung.price for rung in self.rungs if rung.state == "ready"]
         return max(ready) if self.status == "active" and ready else None
@@ -157,7 +163,7 @@ class DrawdownLadderPlan:
         version = int(value.get("version", 0))
         if version not in SUPPORTED_LADDER_VERSIONS:
             raise LadderStateError(
-                f"unsupported ladder version {version}; expected 2, 3, or 4; "
+                f"unsupported ladder version {version}; expected 2, 3, 4, or 5; "
                 "archive the v1 one-shot plan before enabling adaptive mode"
             )
         try:
@@ -239,9 +245,10 @@ def _eth_to_wei(value: Any) -> int:
 
 
 def _target_budget_wei(
-    plan: Optional[DrawdownLadderPlan], spendable_balance_wei: int, config: Any
+    plan: Optional[DrawdownLadderPlan], spendable_balance_wei: int, config: Any,
+    *, include_deployed: bool = True,
 ) -> int:
-    deployed = plan.deployed_wei if plan is not None else 0
+    deployed = plan.deployed_wei if plan is not None and include_deployed else 0
     capital = max(0, int(spendable_balance_wei)) + deployed
     fraction = Decimal(str(config.tradeable_balance_percent)) / Decimal(100)
     target = int(Decimal(capital) * fraction)
@@ -281,6 +288,33 @@ def _next_density_index(
         inactive,
         key=lambda index: (min(abs(index - anchor) for anchor in anchors), -index),
     )
+
+
+def _survivor_reservation_indices(
+    plan: DrawdownLadderPlan,
+    count: int,
+    upper_bound_price: Optional[float],
+) -> list[int]:
+    """Spread the live future grid from the lowest open entry to the floor."""
+    candidates = [
+        rung.index
+        for rung in plan.rungs
+        if rung.state not in {"open", "retired"}
+        and (
+            upper_bound_price is None
+            or not math.isfinite(upper_bound_price)
+            or rung.price < upper_bound_price
+        )
+    ]
+    count = min(max(0, int(count)), len(candidates))
+    if count == 0:
+        return []
+    if count == 1:
+        # With only one affordable buy, favor the nearest protection instead
+        # of marooning all liquid at the terminal floor.
+        return [candidates[0]]
+    offsets = _initial_indices(len(candidates), count, include_reference_entry=True)
+    return [candidates[offset] for offset in offsets]
 
 
 def _position_cost_wei(position: Dict[str, Any]) -> int:
@@ -420,7 +454,7 @@ def adopt_legacy_positions(
         ],
         last_funding_at=created_at,
         mode=str(getattr(config, "gridless_allocation_mode", "drawdown_ladder")),
-        version=(4 if getattr(config, "gridless_allocation_mode", "") == "survivor" else 2),
+        version=(5 if getattr(config, "gridless_allocation_mode", "") == "survivor" else 2),
     )
     adopted = {str(key): dict(value) for key, value in positions.items()}
     for (position_id, _position, _price, cost), index in zip(entries, assignments):
@@ -446,6 +480,7 @@ def adopt_legacy_positions(
         config,
         created_at,
         current_price=current_price,
+        upper_bound_price=min(entry[2] for entry in entries),
     )
     validate_plan(plan)
     return plan, adopted
@@ -534,7 +569,7 @@ def build_plan(
         ],
         last_funding_at=created_at,
         mode=str(getattr(config, "gridless_allocation_mode", "drawdown_ladder")),
-        version=(4 if getattr(config, "gridless_allocation_mode", "") == "survivor" else 2),
+        version=(5 if getattr(config, "gridless_allocation_mode", "") == "survivor" else 2),
     )
     refresh_plan_funding(plan, spendable_balance_wei, config, created_at)
     validate_plan(plan)
@@ -547,13 +582,19 @@ def refresh_plan_funding(
     config: Any,
     now: Optional[float] = None,
     current_price: Optional[float] = None,
+    upper_bound_price: Optional[float] = None,
 ) -> bool:
     """Add stable coverage first, then water-fill rung targets at maximum density."""
     if plan.status != "active":
         return False
     if plan.mode == "survivor" and plan.version >= 4:
         return rebalance_survivor_funding(
-            plan, spendable_balance_wei, config, now, current_price
+            plan,
+            spendable_balance_wei,
+            config,
+            now,
+            current_price,
+            upper_bound_price,
         )
     target = _target_budget_wei(plan, spendable_balance_wei, config)
     available = target - plan.allocated_wei
@@ -594,6 +635,7 @@ def rebalance_survivor_funding(
     config: Any,
     now: Optional[float] = None,
     current_price: Optional[float] = None,
+    upper_bound_price: Optional[float] = None,
 ) -> bool:
     """Derive every unfilled Survivor reservation from live wallet capital.
 
@@ -607,8 +649,15 @@ def rebalance_survivor_funding(
         (rung.principal_wei, rung.state, rung.last_sell_at, rung.rearm_required)
         for rung in plan.rungs
     ]
-    target = _target_budget_wei(plan, spendable_balance_wei, config)
-    reserve = max(0, target - plan.deployed_wei)
+    # Survivor's future grid is a view of liquid alone. Open positions are
+    # immutable accounting facts, but their deployed principal does not buy
+    # extra future reservations or dilute their size.
+    reserve = _target_budget_wei(
+        plan,
+        spendable_balance_wei,
+        config,
+        include_deployed=False,
+    )
 
     for rung in plan.rungs:
         if rung.state == "open":
@@ -625,33 +674,27 @@ def rebalance_survivor_funding(
         rung.state not in {"open", "retired"} for rung in plan.rungs
     )
     funded_slots = min(available_slots, reserve // plan.minimum_position_wei)
-    selected = []
-    for _ in range(int(funded_slots)):
-        index = _next_density_index(plan, current_price)
-        if index is None:
-            break
-        rung = plan.rungs[index]
-        rung.principal_wei = plan.minimum_position_wei
-        selected.append(rung)
+    selected = [
+        plan.rungs[index]
+        for index in _survivor_reservation_indices(
+            plan, int(funded_slots), upper_bound_price
+        )
+    ]
 
-    selected_total = len(selected) * plan.minimum_position_wei
-    if selected and len(selected) == available_slots and reserve > selected_total:
-        quotient, remainder = divmod(reserve - selected_total, len(selected))
+    # Every usable wei of Survivor liquid belongs to the future grid. More
+    # liquid first increases rung count/density, then increases every future
+    # buy equally once the available geometry is saturated.
+    if selected:
+        quotient, remainder = divmod(reserve, len(selected))
         for offset, rung in enumerate(selected):
-            rung.principal_wei += quotient + (1 if offset < remainder else 0)
+            rung.principal_wei = quotient + (1 if offset < remainder else 0)
 
     timestamp = time.time() if now is None else now
     for rung in selected:
-        crossed = (
-            current_price is not None
-            and math.isfinite(current_price)
-            and current_price <= rung.price
-        )
-        if crossed:
-            rung.rearm_required = True
+        # A newly rendered Survivor trigger is live immediately, even when the
+        # market is already below it. Execution remains one guarded buy per
+        # poll. Only a real prior exit can impose the persistent reset guard.
         rung.state = "waiting_reset" if rung.rearm_required else "ready"
-        if crossed and rung.last_sell_at is None:
-            rung.last_sell_at = timestamp
 
     after = [
         (rung.principal_wei, rung.state, rung.last_sell_at, rung.rearm_required)
@@ -676,10 +719,10 @@ def sync_survivor_state(
     if plan.mode != "survivor" or plan.status != "active":
         return False
     changed = False
-    if plan.version == 3:
-        plan.version = 4
+    if plan.version in {3, 4}:
+        plan.version = 5
         changed = True
-    if plan.version != 4:
+    if plan.version != 5:
         raise LadderStateError("unsupported Survivor state version")
 
     configured_spacing = str(config.gridless_ladder_spacing)
@@ -696,12 +739,15 @@ def sync_survivor_state(
         or plan.include_reference_entry != configured_reference_entry
     )
     reference = plan.reference_price
+    lowest_open_price = None
     if positions:
         token_decimals = int(getattr(config, "token_decimals", 18))
-        reference = max(
+        entry_prices = [
             _legacy_position_price(position, token_decimals)
             for position in positions.values()
-        )
+        ]
+        reference = max(entry_prices)
+        lowest_open_price = min(entry_prices)
     reference_changed = not math.isclose(
         reference, plan.reference_price, rel_tol=0, abs_tol=1e-18
     )
@@ -725,7 +771,12 @@ def sync_survivor_state(
         changed = True
 
     if rebalance_survivor_funding(
-        plan, spendable_balance_wei, config, now, current_price
+        plan,
+        spendable_balance_wei,
+        config,
+        now,
+        current_price,
+        upper_bound_price=lowest_open_price,
     ):
         changed = True
     if changed:
@@ -784,7 +835,7 @@ def reanchor_survivor(
         return False
     if plan.version == 3 and confirmed_buy_price < plan.reference_price:
         # Version 3 was an upward-only ratchet. It is explicitly migrated by
-        # sync_survivor_state before version 4 may move either direction.
+        # sync_survivor_state before version 4+ may move either direction.
         return False
     prices = generate_levels(
         confirmed_buy_price,
@@ -933,8 +984,8 @@ def validate_plan(plan: DrawdownLadderPlan) -> None:
         raise LadderStateError("ladder mode is invalid")
     if plan.version == 2 and plan.mode != "drawdown_ladder":
         raise LadderStateError("version 2 ladder cannot use survivor behavior")
-    if plan.version in {3, 4} and plan.mode != "survivor":
-        raise LadderStateError("version 3/4 ladder must use survivor behavior")
+    if plan.version in {3, 4, 5} and plan.mode != "survivor":
+        raise LadderStateError("version 3/4/5 ladder must use survivor behavior")
     if plan.reanchor_count < 0:
         raise LadderStateError("ladder reanchor count cannot be negative")
     if not plan.id or plan.chain_id <= 0 or not plan.token_address:
@@ -1131,13 +1182,13 @@ def status_payload(plan: Optional[DrawdownLadderPlan]) -> Optional[dict]:
         "reference_price": plan.reference_price,
         "terminal_drawdown_percent": plan.terminal_drawdown_percent,
         "levels_total": plan.max_levels,
-        "levels_funded": plan.funded_count,
+        "levels_funded": (
+            plan.reserved_count if plan.mode == "survivor" else plan.funded_count
+        ),
         "levels_open": sum(r.state == "open" for r in plan.rungs),
         "levels_adopted": sum(r.adopted_legacy_position for r in plan.rungs),
         "levels_ready": sum(r.state == "ready" for r in plan.rungs),
-        "levels_reserved": sum(
-            r.state in {"ready", "waiting_reset"} for r in plan.rungs
-        ),
+        "levels_reserved": plan.reserved_count,
         "completed_cycles": sum(r.exit_count for r in plan.rungs),
         "next_level_price": plan.next_level_price,
         "next_level_amount_eth": (
@@ -1147,7 +1198,11 @@ def status_payload(plan: Optional[DrawdownLadderPlan]) -> Optional[dict]:
         "deployed_eth": plan.deployed_wei / 10**18,
         "reserved_eth": plan.reserved_wei / 10**18,
         "average_position_eth": (
-            plan.allocated_wei / plan.funded_count / 10**18 if plan.funded_count else 0
+            plan.reserved_wei / plan.reserved_count / 10**18
+            if plan.mode == "survivor" and plan.reserved_count
+            else plan.allocated_wei / plan.funded_count / 10**18
+            if plan.funded_count
+            else 0
         ),
         "realized_profit_eth": sum(r.realized_profit_wei for r in plan.rungs) / 10**18,
         "expires_at": plan.expires_at,

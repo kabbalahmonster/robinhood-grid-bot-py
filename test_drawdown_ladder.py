@@ -174,7 +174,7 @@ class AdaptiveLadderStateTests(unittest.TestCase):
             max_active_positions=5,
         )
         plan = build_plan(1.0, int(0.005 * WEI), config, now=100)
-        self.assertEqual(plan.version, 4)
+        self.assertEqual(plan.version, 5)
         self.assertEqual(plan.mode, "survivor")
         principal = plan.amount_for_level(0)
         record_fill(plan, 0, principal, "7", filled_at=101)
@@ -275,6 +275,77 @@ class AdaptiveLadderStateTests(unittest.TestCase):
         self.assertEqual(plan.rungs[index].principal_wei, 0)
         self.assertEqual(plan.funded_count, 2)
 
+    def test_survivor_liquid_rebuilds_future_density_below_lowest_open_position(self):
+        config = ladder_config(
+            gridless_allocation_mode="survivor",
+            max_active_positions=10,
+            token_decimals=18,
+        )
+        plan = build_plan(1.0, int(0.010 * WEI), config, now=100)
+        for position_id, index in (("high", 0), ("low", 1)):
+            record_fill(
+                plan, index, plan.amount_for_level(index), position_id,
+                filled_at=101,
+            )
+        positions = {
+            "high": {
+                "cost_wei": WEI,
+                "balance": WEI,
+                "ladder_id": plan.id,
+                "ladder_level_index": 0,
+                "ladder_principal_wei": plan.rungs[0].open_principal_wei,
+            },
+            "low": {
+                "cost_wei": int(0.8 * WEI),
+                "balance": WEI,
+                "ladder_id": plan.id,
+                "ladder_level_index": 1,
+                "ladder_principal_wei": plan.rungs[1].open_principal_wei,
+            },
+        }
+
+        self.assertTrue(sync_survivor_state(
+            plan, positions, int(0.004 * WEI), config,
+            current_price=0.70, now=102,
+        ))
+        four = [r.price for r in plan.rungs if r.state == "ready"]
+        self.assertEqual(len(four), 4)
+        self.assertTrue(all(price < 0.8 for price in four))
+        self.assertEqual(plan.rungs[eligible_level(plan, 0.70)].price, max(four))
+        self.assertEqual(plan.reserved_wei, int(0.004 * WEI))
+
+        self.assertTrue(sync_survivor_state(
+            plan, positions, int(0.008 * WEI), config,
+            current_price=0.70, now=103,
+        ))
+        eight = [r.price for r in plan.rungs if r.state == "ready"]
+        self.assertEqual(len(eight), 8)
+        self.assertTrue(set(four).issubset(set(eight)))
+        self.assertEqual(plan.reserved_wei, int(0.008 * WEI))
+
+        self.assertTrue(sync_survivor_state(
+            plan, positions, int(0.002 * WEI), config,
+            current_price=0.70, now=104,
+        ))
+        two = [r.price for r in plan.rungs if r.state == "ready"]
+        self.assertEqual(two, [max(eight), min(eight)])
+        self.assertEqual(plan.reserved_wei, int(0.002 * WEI))
+        payload = status_payload(plan)
+        self.assertEqual(payload["levels_funded"], 2)
+        self.assertEqual(payload["levels_open"], 2)
+        self.assertEqual(payload["levels_reserved"], 2)
+
+    def test_survivor_allocates_all_usable_liquid_across_future_grid(self):
+        config = ladder_config(
+            gridless_allocation_mode="survivor", max_active_positions=5
+        )
+        plan = build_plan(1.0, int(0.013 * WEI), config, now=100)
+
+        self.assertEqual(plan.reserved_wei, int(0.013 * WEI))
+        self.assertEqual(plan.funded_count, 5)
+        principals = [r.principal_wei for r in plan.rungs]
+        self.assertLessEqual(max(principals) - min(principals), 1)
+
     def test_survivor_reference_follows_highest_current_position(self):
         config = ladder_config(
             gridless_allocation_mode="survivor",
@@ -336,7 +407,7 @@ class AdaptiveLadderStateTests(unittest.TestCase):
         self.assertTrue(sync_survivor_state(
             plan, positions, int(0.004 * WEI), config, current_price=0.75, now=101
         ))
-        self.assertEqual(plan.version, 4)
+        self.assertEqual(plan.version, 5)
         self.assertEqual(plan.reference_price, 0.5)
 
     def test_survivor_allows_multiple_leading_edge_positions(self):
@@ -688,7 +759,7 @@ class AdaptiveLadderBotTests(unittest.TestCase):
             0.8, {}, int(0.005 * WEI), now=200
         )
 
-        self.assertEqual(migrated.version, 4)
+        self.assertEqual(migrated.version, 5)
         self.assertEqual(migrated.terminal_drawdown_percent, 95)
         self.assertEqual(migrated.spacing, "linear")
         self.assertFalse(migrated.include_reference_entry)

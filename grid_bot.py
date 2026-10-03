@@ -3168,7 +3168,6 @@ class GridBot:
             load_plan,
             reconcile_adoption_provenance,
             reconcile_confirmed_positions,
-            rebalance_survivor_funding,
             refresh_plan_funding,
             save_plan,
             sync_survivor_state,
@@ -3199,7 +3198,8 @@ class GridBot:
                     "drawdown ladder %s: reference=%.10f, funded=%d/%d, "
                     "terminal=-%.2f%%",
                     len(positions), plan.spacing, plan.id, plan.reference_price,
-                    plan.funded_count, plan.max_levels,
+                    (plan.reserved_count if plan.mode == "survivor"
+                     else plan.funded_count), plan.max_levels,
                     plan.terminal_drawdown_percent,
                 )
                 return plan
@@ -3243,8 +3243,12 @@ class GridBot:
             return plan
 
         changed = False
-        funded_before = plan.funded_count
-        allocated_before = plan.allocated_wei
+        funded_before = (
+            plan.reserved_count if plan.mode == "survivor" else plan.funded_count
+        )
+        allocated_before = (
+            plan.reserved_wei if plan.mode == "survivor" else plan.allocated_wei
+        )
         if plan.mode == "survivor":
             resized = sync_survivor_state(
                 plan,
@@ -3261,14 +3265,6 @@ class GridBot:
                 now,
             ):
                 changed = True
-            if rebalance_survivor_funding(
-                plan,
-                spendable_balance_wei,
-                self.config,
-                now,
-                current_price=price,
-            ):
-                resized = True
         else:
             changed = advance_rearms(
                 plan,
@@ -3288,8 +3284,12 @@ class GridBot:
             logger.info(
                 "Adaptive ladder %s resized: funded %d→%d/%d, "
                 "allocated %.8f→%.8f %s",
-                plan.id, funded_before, plan.funded_count, plan.max_levels,
-                allocated_before / 10**18, plan.allocated_wei / 10**18,
+                plan.id, funded_before,
+                (plan.reserved_count if plan.mode == "survivor"
+                 else plan.funded_count),
+                plan.max_levels, allocated_before / 10**18,
+                (plan.reserved_wei if plan.mode == "survivor"
+                 else plan.allocated_wei) / 10**18,
                 self.trade_token_name,
             )
         if changed:
@@ -4231,7 +4231,8 @@ class GridBot:
             logger.info(
                 "   Amount: %.8f %s (adaptive rung; %d/%d funded)",
                 buy_amount_eth, self.trade_token_name,
-                plan.funded_count, plan.max_levels,
+                (plan.reserved_count if plan.mode == "survivor"
+                 else plan.funded_count), plan.max_levels,
             )
         else:
             logger.info(f"   Amount: {buy_amount_eth:.6f} {self.trade_token_name} ({trade_balance:.6f} × {tradeable_pct*100:.0f}% / {available_slots} slots)")

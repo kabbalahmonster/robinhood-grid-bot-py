@@ -186,8 +186,8 @@ python grid_bot.py
 | `GRIDLESS_STOPLOSS_THRESHOLD` | No | -25.0 | Stoploss trigger % |
 | `GRIDLESS_BUY_COOLDOWN_SECONDS` | No | 0 | Cooldown between gridless buys (0 disables cooldown) |
 | `GRIDLESS_BUY_EXECUTION_MARGIN` | No | 50 | Ladder execution-recovery % across the gap from the crossed target rung toward the nearest occupied rung above it. For example, a -60% target with the next open rung at -50% and margin 50 blocks above -55%. With no occupied rung above, the ladder reference is the fallback boundary. `0` permits no recovery; `100` permits recovery to the boundary. |
-| `GRIDLESS_ALLOCATION_MODE` | No | threshold | `threshold` preserves legacy entries; `drawdown_ladder` uses a frozen reference; `survivor` derives geometry from the highest current open purchase and resizes unfilled allocation from live wallet capital every poll |
-| `GRIDLESS_MIN_POSITION_ETH` | No | 0.001 | Initial principal per funded rung; capital adds coverage to the maximum before increasing rung size |
+| `GRIDLESS_ALLOCATION_MODE` | No | threshold | `threshold` preserves legacy entries; `drawdown_ladder` uses a frozen reference; `survivor` rebuilds a liquid-only future grid every poll below the lowest open purchase, referenced to the highest open purchase |
+| `GRIDLESS_MIN_POSITION_ETH` | No | 0.001 | Minimum future buy principal; Survivor uses liquid to add/remove evenly spread future rungs, then divides all usable liquid across them |
 | `GRIDLESS_LADDER_TERMINAL_DRAWDOWN_PERCENT` | No | 95 | Deepest trigger below the stable reference price; must be greater than 0 and less than 100 |
 | `GRIDLESS_LADDER_SPACING` | No | linear | `linear` for equal drawdown intervals or `log` for equal price ratios |
 | `SURVIVOR_RAPID_POLL_SECONDS` | No | 1 | Temporary main-loop interval after a confirmed Survivor sell |
@@ -722,9 +722,11 @@ crossings, not exact-price orders: price at or below a funded ready rung is
 eligible. A gap through multiple rungs is worked one guarded buy per poll.
 
 Legacy threshold buy amount: `available_WETH / available_slots`. Survivor
-derives the next amount from current spendable settlement balance, deployed
-principal, minimum position size, hard budget cap, and remaining position
-slots on every poll.
+derives the complete future grid from current spendable settlement balance,
+minimum position size, hard budget cap, and remaining position slots on every
+poll. Open principal does not enter that future allocation: the highest open
+entry supplies the reference and the lowest open entry bounds the first future
+trigger, while deposits and withdrawals expand or contract grid density.
 
 ### Gridless Sell Logic
 

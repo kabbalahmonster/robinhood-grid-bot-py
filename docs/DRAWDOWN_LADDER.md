@@ -57,7 +57,7 @@ position and no confirmed purchase anchor is invented.
 
 If positions exist but no ladder exists, the first ladder-mode poll maps those
 positions into a compatible versioned plan and adds exact rung provenance.
-Frozen-reference plans remain v2; live survivor plans use v4. Existing v3
+Frozen-reference plans remain v2; live survivor plans use v5. Existing v3/v4
 Survivor state is explicitly migrated from its matching persisted open
 positions on the first poll; no market estimate is used. Plans cannot be
 silently reinterpreted between modes. The loader still refuses old v1 one-shot state,
@@ -90,19 +90,20 @@ without selling its positions first. Adoption is deterministic:
 4. Existing entries are assigned, in price order, to the nearest distinct
    ideal rungs. Their cost basis, token balance, position ID, and independent
    sell behavior do not change.
-5. Existing deployed principal plus newly spendable liquid determines how many
-   additional minimum-sized rungs can be funded.
-6. New funding prioritizes empty triggers below the current market so migration
-   cannot burst-buy missed historical levels. Funded levels above the market
-   remain dormant until price is observed above them and crosses downward.
+5. Frozen mode combines deployed principal and spendable liquid. Survivor uses
+   spendable liquid alone to size its future reservations.
+6. Survivor spreads new reservations below the lowest adopted entry through
+   the terminal floor. A crossed reservation is immediately eligible, but the
+   normal one-buy-per-poll, cooldown, route, reserve, and execution guards
+   remain authoritative.
 
 For example, if five legacy entries are presently 70% through 50% underwater,
 the 70%-underwater entry has the highest entry price and becomes the reference.
 Those five positions occupy the nearest unique points in the configured map.
-If deposited liquid funds ten more minimum positions, ten missing triggers are
-added with priority below today's price, extending and densifying coverage
-toward the 95% floor. A bot with no free liquid can still be adopted; later
-deposits grow the same frozen map.
+If deposited liquid funds ten more minimum positions, Survivor spreads ten
+future triggers below the lowest adopted entry toward the 95% floor. A bot
+with no free liquid can still be adopted; later deposits render its future
+grid without rewriting the adopted positions.
 
 Adoption checkpoints the ladder first and position provenance second. If the
 process stops between those atomic writes, restart completes the provenance
@@ -134,16 +135,18 @@ Linear spreads triggers evenly in absolute drawdown. Logarithmic spacing keeps
 more triggers for deep declines.
 
 Unfunded triggers already exist in the plan geometry. Funding activates them.
-A fresh plan's initial funded rungs are
-distributed evenly across the complete range and always include the terminal
-floor. An adopted plan treats legacy entries as existing anchors and gives new
-capital priority to missing levels below the current market. Later funding
-splits uncovered intervals to make coverage progressively denser.
+Frozen drawdown mode retains the original incremental coverage rules. Survivor
+rebuilds its funded future grid every poll: it starts below the lowest current
+open entry, spreads the affordable reservations through the terminal floor,
+and uses more liquid to increase density. Removing liquid reduces the number
+of funded future triggers and spreads the remaining reservations more widely.
+With only one affordable reservation, Survivor puts it at the nearest trigger
+below the lowest entry instead of marooning all liquid at the floor.
 
 ## Dynamic capital accounting
 
-The engine derives controlled principal from free spendable settlement asset
-plus principal currently deployed in open ladder positions:
+Frozen drawdown mode derives controlled principal from free spendable
+settlement asset plus principal currently deployed in open ladder positions:
 
 ```text
 strategy_capital = spendable_balance + deployed_rung_principal
@@ -155,27 +158,35 @@ Including deployed principal prevents a buy from making the strategy appear
 poorer. Counting only planned principal—not mark-to-market token value—prevents
 price volatility from moving triggers or resizing the plan.
 
-Returned principal is already represented once and is not mistaken for new
-capital. In Survivor, a wallet deposit or realized net profit adds reserved
-rungs or increases the next-buy amount on the next poll. A withdrawal, gas, or
-realized loss removes or shrinks unfilled reservations on the next poll. Open
-position principal is immutable: if deployed principal alone exceeds the new
-target, every unfilled rung is defunded and no buy is available until liquid
-capital returns. Frozen drawdown mode retains its historical add-only targets.
+Survivor deliberately uses liquid alone for its future grid:
+
+```text
+future_grid_capital = spendable_balance × TRADEABLE_BALANCE_PERCENT / 100
+```
+
+Filled positions neither add to nor dilute that future allocation. Their exact
+cost basis remains immutable; only the highest open entry sets the reference
+and the lowest open entry sets the top boundary of the downward future grid.
+A wallet deposit or realized net profit increases density or rung size on the
+next poll. A withdrawal, gas expense, or realized loss contracts density and
+redistributes the remaining liquid on the next poll. The optional ladder budget
+caps this liquid future allocation in Survivor.
 
 ### Growth order
 
-1. Create each newly affordable rung at `GRIDLESS_MIN_POSITION_ETH`.
-2. Continue densifying until `MAX_ACTIVE_POSITIONS` rungs are funded.
-3. Once every currently empty slot has coverage, distribute additional liquid
-   evenly across those next-buy reservations.
-4. An already-open position is never topped up or mutated. After it sells, its
-   future reservation is derived from then-current wallet capital.
+1. Count how many minimum-sized future buys current liquid can support.
+2. Spread that many reservations evenly from below the lowest open entry to the
+   configured terminal floor.
+3. Divide all usable liquid evenly across those reservations; any indivisible
+   wei remainder is distributed deterministically.
+4. Repeat from scratch after every liquid or open-position change. An already
+   open position is never topped up or mutated.
 
-Example: five open 0.001 ETH rungs plus a new 0.010 ETH deposit represent 0.015
-ETH of strategy capital at 100% tradeable. With a maximum of at least 15, the
-engine funds ten additional 0.001 ETH rungs. If the maximum were five instead,
-the same capital would raise all five future rung targets to 0.003 ETH.
+Example: five open positions plus 0.010 ETH liquid at 100% tradeable create ten
+future 0.001 ETH reservations. Adding 0.005 ETH creates fifteen denser future
+reservations; withdrawing back to 0.004 ETH contracts the grid to four wider
+reservations. The five filled positions do not consume or inflate that liquid
+allocation, though `MAX_ACTIVE_POSITIONS` still limits simultaneous execution.
 
 ## Reusable rung lifecycle
 
@@ -247,10 +258,10 @@ Every open rung remains an ordinary gridless position. The configured
 executable route must still preserve `MIN_PROFIT_PERCENT` after projected gas.
 A profitable rung can sell while other rungs remain underwater.
 
-Confirmed proceeds return to the wallet. Original principal supports the same
-rung's next cycle; realized profit increases free strategy capital and will
-eventually add coverage or increase all rung targets. This is bounded adaptive
-compounding, not immediate reinvestment into the just-sold position.
+Confirmed proceeds return to the wallet. In Survivor they become liquid input
+to the next full future-grid render, potentially increasing density or every
+reservation's size. This is bounded adaptive compounding, not immediate
+reinvestment into the just-sold position.
 
 After a confirmed Survivor sell, the main loop and sell-side P&L observation
 temporarily accelerate to `SURVIVOR_RAPID_POLL_SECONDS` for
@@ -302,6 +313,10 @@ introduced. The bounded ladder summary also includes:
 - average target position size;
 - completed buy/sell cycles and recorded realized rung profit.
 
+For Survivor, `funded` and average target size describe only the rendered
+future reservations; `open` is reported separately. This prevents filled
+positions from being presented as part of the liquid downward grid.
+
 ## Treasury sweeps and future buys
 
 Native `treasury-transfer --amount available` intentionally sends every liquid
@@ -337,8 +352,9 @@ recipient, fee, and execution guards.
 - No leverage or borrowing is introduced.
 - In Survivor, a manual withdrawal immediately defunds or shrinks unfilled
   reservations; it never rewrites an open position or bypasses minimum size.
-- Funding changes do not move Survivor geometry; confirmed changes to the
-  highest currently open purchase point do.
+- Funding changes expand or contract Survivor's funded future density.
+  Confirmed position changes also update its highest reference and lowest
+  downward-grid boundary.
 - Evaluate gas as a percentage of `GRIDLESS_MIN_POSITION_ETH`; microscopic
   cycles can be mathematically profitable and economically stupid.
 
