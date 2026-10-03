@@ -376,6 +376,30 @@ class AdaptiveLadderStateTests(unittest.TestCase):
         self.assertLess(next_price, entries[-1] * 0.98)
         self.assertIsNone(eligible_level(plan, 0.0000002314))
 
+        # Once price actually reaches that rung and it fills, the next render
+        # must advance a complete interval below the new lowest fill instead
+        # of making another same-price rung immediately eligible.
+        level = eligible_level(plan, next_price)
+        self.assertIsNotNone(level)
+        principal = plan.amount_for_level(level)
+        record_fill(plan, level, principal, "5", filled_at=103)
+        fill_price = next_price * 1.001
+        positions["5"] = {
+            "cost_wei": int(fill_price * WEI),
+            "balance": WEI,
+            "ladder_id": plan.id,
+            "ladder_level_index": level,
+            "ladder_principal_wei": principal,
+        }
+        self.assertTrue(sync_survivor_state(
+            plan, positions, int(0.011 * WEI), config,
+            current_price=fill_price, now=104,
+        ))
+        following_price = plan.next_level_price
+        self.assertIsNotNone(following_price)
+        self.assertLess(following_price, fill_price * 0.98)
+        self.assertIsNone(eligible_level(plan, fill_price))
+
     def test_survivor_allocates_all_usable_liquid_across_future_grid(self):
         config = ladder_config(
             gridless_allocation_mode="survivor", max_active_positions=5
