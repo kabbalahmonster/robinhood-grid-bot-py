@@ -12,14 +12,14 @@ selection, slippage, transfer-tax handling, receipt reconciliation, and circuit
 breakers remain authoritative.
 
 `GRIDLESS_ALLOCATION_MODE=drawdown_ladder` retains the original frozen
-reference. `GRIDLESS_ALLOCATION_MODE=survivor` is the dynamic variant. The
-highest open purchase point triggers an off-ladder leading buy when its P&L
-reaches 50% of the configured sell trigger. Market price alone never moves the
-ladder. Only a successfully confirmed leading fill above the prior reference
-ratchets the complete trigger geometry upward to that measured economic entry
-price. Open positions keep their cost basis, identity, principal, and sell
-rules; their rung becomes the future reusable trigger at the repositioned
-level.
+reference. `GRIDLESS_ALLOCATION_MODE=survivor` is the live variant. Its
+reference is always the highest currently open measured purchase point, so a
+confirmed higher buy moves the complete field upward and selling that leader
+moves it down to the next-highest open position. With no open position, the
+last confirmed reference remains until the next confirmed leading fill; market
+price alone never invents an accounting anchor. Open positions keep their cost
+basis, identity, principal, and sell rules while the rendered trigger geometry
+is derived again each poll.
 
 ## Suggested isolated-wallet profile
 
@@ -57,8 +57,10 @@ position and no confirmed purchase anchor is invented.
 
 If positions exist but no ladder exists, the first ladder-mode poll maps those
 positions into a compatible versioned plan and adds exact rung provenance.
-Frozen-reference plans remain v2; survivor plans use v3 and cannot be silently
-reinterpreted between modes. It still refuses old v1 one-shot state,
+Frozen-reference plans remain v2; live survivor plans use v4. Existing v3
+Survivor state is explicitly migrated from its matching persisted open
+positions on the first poll; no market estimate is used. Plans cannot be
+silently reinterpreted between modes. The loader still refuses old v1 one-shot state,
 partial/foreign ladder provenance,
 malformed positions, or more open positions than `MAX_ACTIVE_POSITIONS`.
 Archive `data/gridless_ladder.json` together with
@@ -100,11 +102,13 @@ process stops between those atomic writes, restart completes the provenance
 write only when position ID and exact principal still match. Any mismatch fails
 closed. This recovery path does not infer buys or sells.
 
-## Stable trigger geometry
+## Trigger geometry
 
-At creation, the allocator freezes a reference `R` and precomputes the maximum
-number of triggers allowed by `MAX_ACTIVE_POSITIONS`. Let terminal drawdown `D`
-be a fraction, maximum rung count `M`, and one-based rung index `i`.
+The allocator computes the maximum number of triggers allowed by
+`MAX_ACTIVE_POSITIONS` from reference `R`. Frozen drawdown mode retains its
+creation reference. Survivor derives `R` every poll from the highest open
+measured purchase point. Let terminal drawdown `D` be a fraction, maximum rung
+count `M`, and one-based rung index `i`.
 
 Linear:
 
@@ -122,8 +126,8 @@ With a $100 reference and a 95% terminal drawdown, the deepest trigger is $5.
 Linear spreads triggers evenly in absolute drawdown. Logarithmic spacing keeps
 more triggers for deep declines.
 
-Unfunded triggers already exist in the persisted geometry. Funding activates
-them without moving any existing price. A fresh plan's initial funded rungs are
+Unfunded triggers already exist in the plan geometry. Funding activates them.
+A fresh plan's initial funded rungs are
 distributed evenly across the complete range and always include the terminal
 floor. An adopted plan treats legacy entries as existing anchors and gives new
 capital priority to missing levels below the current market. Later funding
@@ -144,20 +148,22 @@ Including deployed principal prevents a buy from making the strategy appear
 poorer. Counting only planned principal—not mark-to-market token value—prevents
 price volatility from moving triggers or resizing the plan.
 
-Returned principal is already assigned to its rung and is not mistaken for new
-capital. A wallet deposit or realized net profit increases strategy capital;
-gas and realized losses reduce it. The allocator never shrinks existing target
-sizes automatically. If actual liquid is below the logical ready-rung reserve,
-buys simply defer until funded again.
+Returned principal is already represented once and is not mistaken for new
+capital. In Survivor, a wallet deposit or realized net profit adds reserved
+rungs or increases the next-buy amount on the next poll. A withdrawal, gas, or
+realized loss removes or shrinks unfilled reservations on the next poll. Open
+position principal is immutable: if deployed principal alone exceeds the new
+target, every unfilled rung is defunded and no buy is available until liquid
+capital returns. Frozen drawdown mode retains its historical add-only targets.
 
 ### Growth order
 
 1. Create each newly affordable rung at `GRIDLESS_MIN_POSITION_ETH`.
 2. Continue densifying until `MAX_ACTIVE_POSITIONS` rungs are funded.
-3. Once maximum coverage exists, distribute additional allocation evenly over
-   every rung target.
-4. An already-open position is never topped up or mutated. Its larger target
-   applies on its next buy cycle after it sells.
+3. Once every currently empty slot has coverage, distribute additional liquid
+   evenly across those next-buy reservations.
+4. An already-open position is never topped up or mutated. After it sells, its
+   future reservation is derived from then-current wallet capital.
 
 Example: five open 0.001 ETH rungs plus a new 0.010 ETH deposit represent 0.015
 ETH of strategy capital at 100% tradeable. With a maximum of at least 15, the
@@ -187,10 +193,11 @@ below the rung. With `after_exit`, normal profitable sells naturally occur
 above their buy trigger, so the rung becomes ready on a subsequent poll and
 waits for price to return downward.
 
-Selling the last open position does not close or re-anchor the field. With the
-default zero expiry it remains active indefinitely. Frozen drawdown mode can be
-re-anchored only by an explicit migration; Survivor can ratchet upward only
-from a confirmed higher leading-edge purchase point.
+Selling the last open position does not close the field. With the default zero
+expiry it remains active indefinitely and retains the last confirmed reference
+until another guarded leading buy confirms. Frozen drawdown mode can be
+re-anchored only by an explicit migration; Survivor follows its current open
+leader in either direction.
 
 ## Buy execution
 
@@ -254,9 +261,11 @@ next profitable position before Survivor commits capital to a new entry.
 
 ## Persistence and fail-closed recovery
 
-`data/gridless_ladder.json` stores versioned geometry, funding targets,
-per-rung state and entry kind, position linkage, adoption provenance,
-fill/exit counts, timestamps, and realized rung profit.
+`data/gridless_ladder.json` stores versioned identity and recovery facts:
+current derived geometry/allocation, per-rung lifecycle and reset guards,
+position linkage, adoption provenance, fill/exit counts, timestamps, and
+realized rung profit. Survivor rewrites the derived geometry and unfilled
+reservations atomically whenever live position or wallet state changes.
 `data/gridless_positions.json` stores the exact open positions. Survivor
 leading entries also persist their measured fill price so restart can finish a
 confirmed position-first re-anchor without consulting the live market.
@@ -278,7 +287,9 @@ configuration; no dashboard-only variable or trading behavior change is
 introduced. The bounded ladder summary also includes:
 
 - reference, spacing, terminal drawdown, status, and optional expiry;
-- maximum, funded, ready, open, and legacy-adopted rung counts;
+- state version; maximum, funded, reserved, ready, open, and legacy-adopted
+  rung counts;
+- the live amount assigned to the next ladder buy;
 - next highest ready trigger;
 - allocated, deployed, and logically reserved principal;
 - average target position size;
@@ -317,9 +328,10 @@ recipient, fee, and execution guards.
 - `GRIDLESS_LADDER_MAX_BUDGET_ETH` is the hard strategy-principal cap.
 - Native gas reserve is removed before adaptive capital accounting.
 - No leverage or borrowing is introduced.
-- A manual withdrawal can make logically reserved rungs temporarily
-  unaffordable; it cannot cause the bot to resize a buy downward.
-- Geometry and open positions never move when funding changes.
+- In Survivor, a manual withdrawal immediately defunds or shrinks unfilled
+  reservations; it never rewrites an open position or bypasses minimum size.
+- Funding changes do not move Survivor geometry; confirmed changes to the
+  highest currently open purchase point do.
 - Evaluate gas as a percentage of `GRIDLESS_MIN_POSITION_ETH`; microscopic
   cycles can be mathematically profitable and economically stupid.
 

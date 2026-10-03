@@ -24,6 +24,7 @@ from drawdown_ladder import (
     refresh_plan_funding,
     save_plan,
     status_payload,
+    sync_survivor_state,
     validate_context,
 )
 from grid_bot import GridBot
@@ -173,7 +174,7 @@ class AdaptiveLadderStateTests(unittest.TestCase):
             max_active_positions=5,
         )
         plan = build_plan(1.0, int(0.005 * WEI), config, now=100)
-        self.assertEqual(plan.version, 3)
+        self.assertEqual(plan.version, 4)
         self.assertEqual(plan.mode, "survivor")
         principal = plan.amount_for_level(0)
         record_fill(plan, 0, principal, "7", filled_at=101)
@@ -188,12 +189,155 @@ class AdaptiveLadderStateTests(unittest.TestCase):
         self.assertEqual(plan.rungs[0].position_id, "7")
         self.assertEqual(plan.rungs[0].open_entry_kind, "ladder")
 
-    def test_survivor_reanchor_requires_a_higher_confirmed_purchase_point(self):
+    def test_survivor_reanchor_follows_a_lower_confirmed_leading_purchase(self):
         config = ladder_config(gridless_allocation_mode="survivor")
         plan = build_plan(1.0, int(0.005 * WEI), config, now=100)
         self.assertFalse(reanchor_survivor(plan, 1.0, now=101))
-        self.assertFalse(reanchor_survivor(plan, 0.5, now=102))
+        self.assertTrue(reanchor_survivor(plan, 0.5, now=102))
+        self.assertEqual(plan.reference_price, 0.5)
+
+    def test_survivor_live_funding_expands_and_shrinks_with_wallet(self):
+        config = ladder_config(
+            gridless_allocation_mode="survivor", max_active_positions=10
+        )
+        plan = build_plan(1.0, int(0.005 * WEI), config, now=100)
+        self.assertEqual(plan.funded_count, 5)
+
+        self.assertTrue(sync_survivor_state(
+            plan, {}, int(0.008 * WEI), config, current_price=1.0, now=101
+        ))
+        self.assertEqual(plan.funded_count, 8)
+        self.assertEqual(plan.reserved_wei, int(0.008 * WEI))
+
+        self.assertTrue(sync_survivor_state(
+            plan, {}, int(0.002 * WEI), config, current_price=1.0, now=102
+        ))
+        self.assertEqual(plan.funded_count, 2)
+        self.assertEqual(plan.reserved_wei, int(0.002 * WEI))
+
+    def test_survivor_live_funding_preserves_open_principal_and_resizes_next_buy(self):
+        config = ladder_config(
+            gridless_allocation_mode="survivor", max_active_positions=5
+        )
+        plan = build_plan(1.0, int(0.005 * WEI), config, now=100)
+        open_indices = funded_indices(plan)[:2]
+        for sequence, index in enumerate(open_indices):
+            record_fill(
+                plan,
+                index,
+                plan.amount_for_level(index),
+                str(sequence),
+                filled_at=101,
+            )
+        positions = {
+            str(sequence): {
+                "cost_wei": plan.rungs[index].open_principal_wei,
+                "balance": WEI,
+                "ladder_id": plan.id,
+                "ladder_level_index": index,
+                "ladder_principal_wei": plan.rungs[index].open_principal_wei,
+            }
+            for sequence, index in enumerate(open_indices)
+        }
+        deployed = plan.deployed_wei
+
+        self.assertTrue(sync_survivor_state(
+            plan, positions, 0, config, current_price=1.0, now=102
+        ))
+        self.assertEqual(plan.funded_count, 2)
+        self.assertEqual(plan.deployed_wei, deployed)
+        self.assertEqual(plan.reserved_wei, 0)
+
+        self.assertTrue(sync_survivor_state(
+            plan, positions, int(0.006 * WEI), config, current_price=1.0, now=103
+        ))
+        self.assertEqual(plan.funded_count, 5)
+        self.assertEqual(plan.deployed_wei, deployed)
+        self.assertEqual(plan.reserved_wei, int(0.006 * WEI))
+        self.assertEqual(
+            {r.principal_wei for r in plan.rungs if r.state != "open"},
+            {int(0.002 * WEI)},
+        )
+
+    def test_survivor_live_funding_never_resurrects_retired_rung(self):
+        config = ladder_config(
+            gridless_allocation_mode="survivor", max_active_positions=3
+        )
+        plan = build_plan(1.0, int(0.003 * WEI), config, now=100)
+        index = funded_indices(plan)[0]
+        record_fill(plan, index, plan.amount_for_level(index), "0", filled_at=101)
+        mark_exit(plan, index, "0", exited_at=102, recycle=False)
+
+        self.assertTrue(sync_survivor_state(
+            plan, {}, int(0.010 * WEI), config, current_price=1.0, now=103
+        ))
+        self.assertEqual(plan.rungs[index].state, "retired")
+        self.assertEqual(plan.rungs[index].principal_wei, 0)
+        self.assertEqual(plan.funded_count, 2)
+
+    def test_survivor_reference_follows_highest_current_position(self):
+        config = ladder_config(
+            gridless_allocation_mode="survivor",
+            max_active_positions=5,
+            token_decimals=18,
+        )
+        plan = build_plan(1.2, int(0.005 * WEI), config, now=100)
+        indices = funded_indices(plan)[:2]
+        record_fill(plan, indices[0], plan.amount_for_level(indices[0]), "high")
+        record_fill(plan, indices[1], plan.amount_for_level(indices[1]), "low")
+        positions = {
+            "high": {
+                "cost_wei": WEI,
+                "balance": WEI,
+                "ladder_id": plan.id,
+                "ladder_level_index": indices[0],
+                "ladder_principal_wei": plan.rungs[indices[0]].open_principal_wei,
+            },
+            "low": {
+                "cost_wei": WEI,
+                "balance": 2 * WEI,
+                "ladder_id": plan.id,
+                "ladder_level_index": indices[1],
+                "ladder_principal_wei": plan.rungs[indices[1]].open_principal_wei,
+            },
+        }
+        self.assertTrue(sync_survivor_state(
+            plan, positions, int(0.003 * WEI), config, current_price=0.75, now=101
+        ))
         self.assertEqual(plan.reference_price, 1.0)
+
+        mark_exit(plan, indices[0], "high", exited_at=102)
+        positions.pop("high")
+        self.assertTrue(sync_survivor_state(
+            plan, positions, int(0.004 * WEI), config, current_price=0.75, now=103
+        ))
+        self.assertEqual(plan.reference_price, 0.5)
+
+    def test_survivor_v3_migrates_from_current_position_evidence(self):
+        config = ladder_config(
+            gridless_allocation_mode="survivor",
+            max_active_positions=5,
+            token_decimals=18,
+        )
+        plan = build_plan(1.0, int(0.005 * WEI), config, now=100)
+        index = funded_indices(plan)[0]
+        record_fill(plan, index, plan.amount_for_level(index), "0")
+        plan.version = 3
+        positions = {
+            "0": {
+                "cost_wei": WEI,
+                "balance": 2 * WEI,
+                "ladder_id": plan.id,
+                "ladder_level_index": index,
+                "ladder_principal_wei": plan.rungs[index].open_principal_wei,
+            }
+        }
+
+        self.assertTrue(sync_survivor_state(
+            plan, positions, int(0.004 * WEI), config, current_price=0.75, now=101
+        ))
+        self.assertEqual(plan.version, 4)
+        self.assertEqual(plan.reference_price, 0.5)
 
     def test_survivor_allows_multiple_leading_edge_positions(self):
         config = ladder_config(gridless_allocation_mode="survivor")
@@ -487,7 +631,10 @@ class AdaptiveLadderStateTests(unittest.TestCase):
         record_fill(plan, 0, plan.amount_for_level(0), "0")
         mark_exit(plan, 0, "0", exited_at=120, realized_profit_wei=100)
         payload = status_payload(plan)
+        self.assertEqual(payload["state_version"], plan.version)
         self.assertEqual(payload["levels_funded"], 2)
+        self.assertEqual(payload["levels_reserved"], 2)
+        self.assertEqual(payload["next_level_amount_eth"], 0.001)
         self.assertEqual(payload["completed_cycles"], 1)
         self.assertEqual(payload["realized_profit_eth"], 100 / WEI)
 
@@ -681,6 +828,34 @@ class AdaptiveLadderBotTests(unittest.TestCase):
         self.assertEqual(call.kwargs["ladder_context"]["entry_kind"], "leading_edge")
         self.assertAlmostEqual(call.kwargs["ladder_context"]["trigger_price"], 1.025)
         self.assertEqual(load_plan().reference_price, 1.0)
+
+    def test_empty_mature_survivor_uses_reanchor_not_bootstrap(self):
+        self.bot.config = ladder_config(
+            gridless_allocation_mode="survivor", max_active_positions=5,
+        )
+        self.bot.config.use_eth_trading = True
+        self.bot.config.eth_gas_reserve = 0.001
+        self.bot.config.weth_address = "0x0000000000000000000000000000000000000002"
+        self.bot.wallet = MagicMock()
+        self.bot.wallet.get_eth_balance.return_value = 0.006
+        self.bot._taxed_token_active = MagicMock(return_value=False)
+        self.bot.last_taxed_token_failure_time = 0
+        self.bot.last_buy_time = 0
+        self.bot.gridless_buy_cooldown = 0
+        self.bot._execute_buy_gridless = MagicMock()
+        self.bot._funding_warning = None
+        plan = build_plan(1.0, int(0.005 * WEI), self.bot.config, now=100)
+        index = funded_indices(plan)[0]
+        record_fill(plan, index, plan.amount_for_level(index), "0", filled_at=101)
+        mark_exit(plan, index, "0", exited_at=102)
+        save_plan(plan)
+
+        with patch("gridless.load_positions", return_value={}):
+            self.bot._check_buys_gridless(0.5)
+
+        context = self.bot._execute_buy_gridless.call_args.kwargs["ladder_context"]
+        self.assertEqual(context["entry_kind"], "leading_edge")
+        self.assertFalse(context["bootstrap_reference"])
 
     def test_survivor_market_high_without_half_sell_trigger_does_not_buy_or_reanchor(self):
         self.bot.config = ladder_config(

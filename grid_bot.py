@@ -3168,8 +3168,10 @@ class GridBot:
             load_plan,
             reconcile_adoption_provenance,
             reconcile_confirmed_positions,
+            rebalance_survivor_funding,
             refresh_plan_funding,
             save_plan,
+            sync_survivor_state,
             validate_context,
         )
 
@@ -3240,21 +3242,52 @@ class GridBot:
             )
             return plan
 
-        changed = advance_rearms(
-            plan, price, self.config.gridless_ladder_rearm_cooldown_seconds, now
-        )
+        changed = False
         funded_before = plan.funded_count
         allocated_before = plan.allocated_wei
-        if refresh_plan_funding(
-            plan,
-            spendable_balance_wei,
-            self.config,
-            now,
-            current_price=price,
-        ):
+        if plan.mode == "survivor":
+            resized = sync_survivor_state(
+                plan,
+                positions,
+                spendable_balance_wei,
+                self.config,
+                current_price=price,
+                now=now,
+            )
+            if advance_rearms(
+                plan,
+                price,
+                self.config.gridless_ladder_rearm_cooldown_seconds,
+                now,
+            ):
+                changed = True
+            if rebalance_survivor_funding(
+                plan,
+                spendable_balance_wei,
+                self.config,
+                now,
+                current_price=price,
+            ):
+                resized = True
+        else:
+            changed = advance_rearms(
+                plan,
+                price,
+                self.config.gridless_ladder_rearm_cooldown_seconds,
+                now,
+            )
+            resized = refresh_plan_funding(
+                plan,
+                spendable_balance_wei,
+                self.config,
+                now,
+                current_price=price,
+            )
+        if resized:
             changed = True
             logger.info(
-                "Adaptive ladder %s grew: funded %d→%d/%d, allocated %.8f→%.8f %s",
+                "Adaptive ladder %s resized: funded %d→%d/%d, "
+                "allocated %.8f→%.8f %s",
                 plan.id, funded_before, plan.funded_count, plan.max_levels,
                 allocated_before / 10**18, plan.allocated_wei / 10**18,
                 self.trade_token_name,
@@ -4116,8 +4149,14 @@ class GridBot:
             if getattr(plan, "mode", "drawdown_ladder") == "survivor":
                 if not gridless_positions:
                     leading = True
-                    bootstrap_reference = True
-                    leading_reason = "initial confirmed purchase point"
+                    bootstrap_reference = not any(
+                        rung.fill_count for rung in plan.rungs
+                    )
+                    leading_reason = (
+                        "initial confirmed purchase point"
+                        if bootstrap_reference
+                        else "new purchase point after all positions exited"
+                    )
                 else:
                     leading, leading_reason, _ = survivor_leading_edge_trigger(
                         gridless_positions, price, self.config, position_pnls
@@ -6748,9 +6787,34 @@ class GridBot:
                     from gridless import load_positions, get_capacity_warning
                     gpos = load_positions()
                     if self._drawdown_ladder_enabled():
-                        from drawdown_ladder import eligible_level, load_plan
+                        from drawdown_ladder import eligible_level
 
-                        ladder_plan = load_plan()
+                        live_trade_balance = (
+                            eth_bal if getattr(self.config, "use_eth_trading", False)
+                            else weth_bal
+                        )
+                        if self.session_sells > sells_before_check:
+                            if getattr(self.config, "use_eth_trading", False):
+                                live_trade_balance = self.wallet.get_eth_balance()
+                                eth_bal = live_trade_balance
+                                weth_bal = live_trade_balance
+                            else:
+                                live_trade_balance, _ = self.wallet.get_token_balance(
+                                    self.config.weth_address
+                                )
+                                weth_bal = live_trade_balance
+                        spendable_balance = live_trade_balance
+                        if getattr(self.config, "use_eth_trading", False):
+                            spendable_balance = max(
+                                0,
+                                live_trade_balance
+                                - getattr(self.config, "eth_gas_reserve", 0.001),
+                            )
+                        ladder_plan = self._prepare_gridless_ladder(
+                            price,
+                            gpos,
+                            int(Decimal(str(spendable_balance)) * Decimal(10**18)),
+                        )
                         if ladder_plan is not None:
                             ladder_status = self._gridless_ladder_status(gpos)
                             crossed_index = eligible_level(ladder_plan, price)

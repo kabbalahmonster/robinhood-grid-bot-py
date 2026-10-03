@@ -20,8 +20,8 @@ from uuid import uuid4
 
 
 LADDER_FILE = "data/gridless_ladder.json"
-LADDER_VERSION = 3
-SUPPORTED_LADDER_VERSIONS = {2, 3}
+LADDER_VERSION = 4
+SUPPORTED_LADDER_VERSIONS = {2, 3, 4}
 RUNG_STATES = {"inactive", "ready", "open", "waiting_reset", "retired"}
 
 
@@ -44,6 +44,7 @@ class DrawdownRung:
     last_sell_at: Optional[float] = None
     adopted_legacy_position: bool = False
     open_entry_kind: Optional[str] = None
+    rearm_required: bool = False
 
     @classmethod
     def from_dict(cls, value: dict) -> "DrawdownRung":
@@ -79,6 +80,12 @@ class DrawdownRung:
                     str(value["open_entry_kind"])
                     if value.get("open_entry_kind") is not None
                     else ("ladder" if value.get("state") == "open" else None)
+                ),
+                rearm_required=bool(
+                    value.get(
+                        "rearm_required",
+                        value.get("state") == "waiting_reset",
+                    )
                 ),
             )
         except (KeyError, TypeError, ValueError) as exc:
@@ -150,7 +157,7 @@ class DrawdownLadderPlan:
         version = int(value.get("version", 0))
         if version not in SUPPORTED_LADDER_VERSIONS:
             raise LadderStateError(
-                f"unsupported ladder version {version}; expected 2 or 3; "
+                f"unsupported ladder version {version}; expected 2, 3, or 4; "
                 "archive the v1 one-shot plan before enabling adaptive mode"
             )
         try:
@@ -413,7 +420,7 @@ def adopt_legacy_positions(
         ],
         last_funding_at=created_at,
         mode=str(getattr(config, "gridless_allocation_mode", "drawdown_ladder")),
-        version=(3 if getattr(config, "gridless_allocation_mode", "") == "survivor" else 2),
+        version=(4 if getattr(config, "gridless_allocation_mode", "") == "survivor" else 2),
     )
     adopted = {str(key): dict(value) for key, value in positions.items()}
     for (position_id, _position, _price, cost), index in zip(entries, assignments):
@@ -527,7 +534,7 @@ def build_plan(
         ],
         last_funding_at=created_at,
         mode=str(getattr(config, "gridless_allocation_mode", "drawdown_ladder")),
-        version=(3 if getattr(config, "gridless_allocation_mode", "") == "survivor" else 2),
+        version=(4 if getattr(config, "gridless_allocation_mode", "") == "survivor" else 2),
     )
     refresh_plan_funding(plan, spendable_balance_wei, config, created_at)
     validate_plan(plan)
@@ -544,6 +551,10 @@ def refresh_plan_funding(
     """Add stable coverage first, then water-fill rung targets at maximum density."""
     if plan.status != "active":
         return False
+    if plan.mode == "survivor" and plan.version >= 4:
+        return rebalance_survivor_funding(
+            plan, spendable_balance_wei, config, now, current_price
+        )
     target = _target_budget_wei(plan, spendable_balance_wei, config)
     available = target - plan.allocated_wei
     changed = False
@@ -561,6 +572,7 @@ def refresh_plan_funding(
             else "ready"
         )
         if rung.state == "waiting_reset":
+            rung.rearm_required = True
             rung.last_sell_at = time.time() if now is None else now
         available -= plan.minimum_position_wei
         changed = True
@@ -572,6 +584,130 @@ def refresh_plan_funding(
             changed = True
     if changed:
         plan.last_funding_at = time.time() if now is None else now
+        validate_plan(plan)
+    return changed
+
+
+def rebalance_survivor_funding(
+    plan: DrawdownLadderPlan,
+    spendable_balance_wei: int,
+    config: Any,
+    now: Optional[float] = None,
+    current_price: Optional[float] = None,
+) -> bool:
+    """Derive every unfilled Survivor reservation from live wallet capital.
+
+    Confirmed positions remain immutable accounting facts. Ready and reset
+    rungs are a live allocation view: deposits may add coverage or enlarge
+    future entries, while withdrawals defund or shrink them immediately.
+    """
+    if plan.mode != "survivor" or plan.version < 4 or plan.status != "active":
+        return False
+    before = [
+        (rung.principal_wei, rung.state, rung.last_sell_at, rung.rearm_required)
+        for rung in plan.rungs
+    ]
+    target = _target_budget_wei(plan, spendable_balance_wei, config)
+    reserve = max(0, target - plan.deployed_wei)
+
+    for rung in plan.rungs:
+        if rung.state == "open":
+            # An open position's measured principal cannot be resized by a
+            # wallet balance change. Its next-cycle target is derived after exit.
+            rung.principal_wei = rung.open_principal_wei
+        elif rung.state == "retired":
+            rung.principal_wei = 0
+        else:
+            rung.principal_wei = 0
+            rung.state = "inactive"
+
+    available_slots = sum(
+        rung.state not in {"open", "retired"} for rung in plan.rungs
+    )
+    funded_slots = min(available_slots, reserve // plan.minimum_position_wei)
+    selected = []
+    for _ in range(int(funded_slots)):
+        index = _next_density_index(plan, current_price)
+        if index is None:
+            break
+        rung = plan.rungs[index]
+        rung.principal_wei = plan.minimum_position_wei
+        selected.append(rung)
+
+    selected_total = len(selected) * plan.minimum_position_wei
+    if selected and len(selected) == available_slots and reserve > selected_total:
+        quotient, remainder = divmod(reserve - selected_total, len(selected))
+        for offset, rung in enumerate(selected):
+            rung.principal_wei += quotient + (1 if offset < remainder else 0)
+
+    timestamp = time.time() if now is None else now
+    for rung in selected:
+        crossed = (
+            current_price is not None
+            and math.isfinite(current_price)
+            and current_price <= rung.price
+        )
+        if crossed:
+            rung.rearm_required = True
+        rung.state = "waiting_reset" if rung.rearm_required else "ready"
+        if crossed and rung.last_sell_at is None:
+            rung.last_sell_at = timestamp
+
+    after = [
+        (rung.principal_wei, rung.state, rung.last_sell_at, rung.rearm_required)
+        for rung in plan.rungs
+    ]
+    changed = before != after
+    if changed:
+        plan.last_funding_at = timestamp
+        validate_plan(plan)
+    return changed
+
+
+def sync_survivor_state(
+    plan: DrawdownLadderPlan,
+    positions: Dict[str, Dict],
+    spendable_balance_wei: int,
+    config: Any,
+    current_price: Optional[float] = None,
+    now: Optional[float] = None,
+) -> bool:
+    """Migrate and derive Survivor geometry/allocation from live durable facts."""
+    if plan.mode != "survivor" or plan.status != "active":
+        return False
+    changed = False
+    if plan.version == 3:
+        plan.version = 4
+        changed = True
+    if plan.version != 4:
+        raise LadderStateError("unsupported Survivor state version")
+
+    if positions:
+        token_decimals = int(getattr(config, "token_decimals", 18))
+        reference = max(
+            _legacy_position_price(position, token_decimals)
+            for position in positions.values()
+        )
+        if not math.isclose(reference, plan.reference_price, rel_tol=0, abs_tol=1e-18):
+            prices = generate_levels(
+                reference,
+                plan.max_levels,
+                plan.terminal_drawdown_percent,
+                plan.spacing,
+                plan.include_reference_entry,
+            )
+            plan.reference_price = reference
+            for rung, price in zip(plan.rungs, prices):
+                rung.price = price
+            plan.reanchor_count += 1
+            plan.last_reanchor_at = time.time() if now is None else now
+            changed = True
+
+    if rebalance_survivor_funding(
+        plan, spendable_balance_wei, config, now, current_price
+    ):
+        changed = True
+    if changed:
         validate_plan(plan)
     return changed
 
@@ -595,6 +731,7 @@ def advance_rearms(
             and current_price > rung.price
         ):
             rung.state = "ready"
+            rung.rearm_required = False
             changed = True
     if changed:
         validate_plan(plan)
@@ -617,14 +754,16 @@ def reanchor_survivor(
     confirmed_buy_price: float,
     now: Optional[float] = None,
 ) -> bool:
-    """Move survivor geometry only after a higher leading-edge fill confirms."""
+    """Move Survivor geometry after a confirmed leading-edge fill."""
     if plan.mode != "survivor" or plan.status != "active":
         return False
     if not math.isfinite(confirmed_buy_price) or confirmed_buy_price <= 0:
         return False
-    if confirmed_buy_price <= plan.reference_price or math.isclose(
-        confirmed_buy_price, plan.reference_price
-    ):
+    if math.isclose(confirmed_buy_price, plan.reference_price, rel_tol=0, abs_tol=1e-18):
+        return False
+    if plan.version == 3 and confirmed_buy_price < plan.reference_price:
+        # Version 3 was an upward-only ratchet. It is explicitly migrated by
+        # sync_survivor_state before version 4 may move either direction.
         return False
     prices = generate_levels(
         confirmed_buy_price,
@@ -696,6 +835,7 @@ def record_fill(
     rung.fill_count += 1
     rung.last_buy_at = time.time() if filled_at is None else filled_at
     rung.open_entry_kind = entry_kind
+    rung.rearm_required = False
     if entry_kind == "leading_edge":
         if plan.mode != "survivor":
             raise LadderStateError("leading-edge entries require survivor mode")
@@ -719,6 +859,7 @@ def mark_exit(
     rung.position_id = None
     rung.open_principal_wei = 0
     rung.open_entry_kind = None
+    rung.rearm_required = bool(recycle and plan.status == "active")
     rung.exit_count += 1
     rung.realized_profit_wei += int(realized_profit_wei)
     rung.last_sell_at = time.time() if exited_at is None else exited_at
@@ -771,8 +912,8 @@ def validate_plan(plan: DrawdownLadderPlan) -> None:
         raise LadderStateError("ladder mode is invalid")
     if plan.version == 2 and plan.mode != "drawdown_ladder":
         raise LadderStateError("version 2 ladder cannot use survivor behavior")
-    if plan.version == 3 and plan.mode != "survivor":
-        raise LadderStateError("version 3 ladder must use survivor behavior")
+    if plan.version in {3, 4} and plan.mode != "survivor":
+        raise LadderStateError("version 3/4 ladder must use survivor behavior")
     if plan.reanchor_count < 0:
         raise LadderStateError("ladder reanchor count cannot be negative")
     if not plan.id or plan.chain_id <= 0 or not plan.token_address:
@@ -811,7 +952,8 @@ def validate_plan(plan: DrawdownLadderPlan) -> None:
             raise LadderStateError("ladder rung accounting cannot be negative")
         if rung.state == "inactive" and rung.principal_wei != 0:
             raise LadderStateError("inactive rung cannot reserve principal")
-        if rung.state != "inactive" and rung.principal_wei < plan.minimum_position_wei:
+        if (rung.state in {"ready", "open", "waiting_reset"}
+                and rung.principal_wei < plan.minimum_position_wei):
             raise LadderStateError("funded rung is below the minimum principal")
         if rung.state == "open":
             if (
@@ -826,6 +968,10 @@ def validate_plan(plan: DrawdownLadderPlan) -> None:
         elif (rung.open_principal_wei or rung.position_id is not None
               or rung.open_entry_kind is not None):
             raise LadderStateError("non-open rung cannot retain an open position")
+        if rung.state == "waiting_reset" and not rung.rearm_required:
+            raise LadderStateError("waiting reset rung is missing its reset guard")
+        if rung.state in {"ready", "open"} and rung.rearm_required:
+            raise LadderStateError("tradable rung cannot retain a reset guard")
         if rung.exit_count > rung.fill_count:
             raise LadderStateError("rung exits exceed fills")
 
@@ -945,8 +1091,14 @@ def save_plan(plan: DrawdownLadderPlan, path: str = LADDER_FILE) -> None:
 def status_payload(plan: Optional[DrawdownLadderPlan]) -> Optional[dict]:
     if plan is None:
         return None
+    next_ready = max(
+        (rung for rung in plan.rungs if rung.state == "ready"),
+        key=lambda rung: rung.price,
+        default=None,
+    )
     return {
         "id": plan.id,
+        "state_version": plan.version,
         "status": plan.status,
         "mode": plan.mode,
         "spacing": plan.spacing,
@@ -957,8 +1109,14 @@ def status_payload(plan: Optional[DrawdownLadderPlan]) -> Optional[dict]:
         "levels_open": sum(r.state == "open" for r in plan.rungs),
         "levels_adopted": sum(r.adopted_legacy_position for r in plan.rungs),
         "levels_ready": sum(r.state == "ready" for r in plan.rungs),
+        "levels_reserved": sum(
+            r.state in {"ready", "waiting_reset"} for r in plan.rungs
+        ),
         "completed_cycles": sum(r.exit_count for r in plan.rungs),
         "next_level_price": plan.next_level_price,
+        "next_level_amount_eth": (
+            next_ready.principal_wei / 10**18 if next_ready is not None else None
+        ),
         "allocated_budget_eth": plan.allocated_wei / 10**18,
         "deployed_eth": plan.deployed_wei / 10**18,
         "reserved_eth": plan.reserved_wei / 10**18,
