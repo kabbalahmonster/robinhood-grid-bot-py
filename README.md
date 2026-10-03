@@ -185,7 +185,7 @@ python grid_bot.py
 | `GRIDLESS_STOPLOSS_ENABLED` | No | false | Enable stoploss in gridless mode |
 | `GRIDLESS_STOPLOSS_THRESHOLD` | No | -25.0 | Stoploss trigger % |
 | `GRIDLESS_BUY_COOLDOWN_SECONDS` | No | 0 | Cooldown between gridless buys (0 disables cooldown) |
-| `GRIDLESS_BUY_EXECUTION_MARGIN` | No | 50 | Execution margin % - blocks buy if quote P&L recovered past threshold + (abs(threshold) * margin%) (e.g., -10% trigger + 50% = block above -5%) |
+| `GRIDLESS_BUY_EXECUTION_MARGIN` | No | 50 | Ladder execution-recovery % across the gap from the crossed target rung toward the nearest occupied rung above it. For example, a -60% target with the next open rung at -50% and margin 50 blocks above -55%. With no occupied rung above, the ladder reference is the fallback boundary. `0` permits no recovery; `100` permits recovery to the boundary. |
 | `GRIDLESS_ALLOCATION_MODE` | No | threshold | `threshold` preserves legacy entries; `drawdown_ladder` uses a frozen reference; `survivor` permits off-ladder leading buys and re-anchors only after a confirmed higher fill |
 | `GRIDLESS_MIN_POSITION_ETH` | No | 0.001 | Initial principal per funded rung; capital adds coverage to the maximum before increasing rung size |
 | `GRIDLESS_LADDER_TERMINAL_DRAWDOWN_PERCENT` | No | 95 | Deepest trigger below the stable reference price; must be greater than 0 and less than 100 |

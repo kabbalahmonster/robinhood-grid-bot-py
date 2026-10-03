@@ -3304,11 +3304,18 @@ class GridBot:
         execution_price = (int(buy_amount_wei) / 10**18) / token_output
         trigger_price = float(ladder_context["trigger_price"])
         reference_price = float(ladder_context["reference_price"])
+        recovery_boundary_price = float(
+            ladder_context.get("recovery_boundary_price", reference_price)
+        )
+        if (not math.isfinite(recovery_boundary_price)
+                or recovery_boundary_price <= trigger_price):
+            recovery_boundary_price = reference_price
         execution_margin_pct = float(getattr(
             self.config, "gridless_buy_execution_margin", 50.0
         ))
         allowed_recovery = trigger_price + (
-            (reference_price - trigger_price) * execution_margin_pct / 100
+            (recovery_boundary_price - trigger_price)
+            * execution_margin_pct / 100
         )
         if math.isfinite(execution_price) and execution_price <= allowed_recovery:
             return True
@@ -3333,8 +3340,9 @@ class GridBot:
         )
         logger.info(
             "Buy aborted: executable ladder price %.10f exceeds allowed %.10f "
-            "for trigger %.10f",
+            "for trigger %.10f toward recovery boundary %.10f",
             execution_price, allowed_recovery, trigger_price,
+            recovery_boundary_price,
         )
         return False
 
@@ -4151,14 +4159,23 @@ class GridBot:
                 f"{level_index + 1}/{plan.max_levels} at "
                 f"{price if entry_kind == 'leading_edge' else plan.rungs[level_index].price:.10f}")
             )
+            trigger_price = (
+                price if entry_kind == "leading_edge"
+                else plan.rungs[level_index].price
+            )
+            occupied_above = [
+                rung.price for rung in plan.rungs
+                if rung.state == "open" and rung.price > trigger_price
+            ]
             ladder_context = {
                 "ladder_id": plan.id,
                 "level_index": level_index,
-                "trigger_price": (
-                    price if entry_kind == "leading_edge"
-                    else plan.rungs[level_index].price
-                ),
+                "trigger_price": trigger_price,
                 "reference_price": plan.reference_price,
+                "recovery_boundary_price": (
+                    min(occupied_above) if occupied_above
+                    else plan.reference_price
+                ),
                 "principal_wei": buy_amount_wei,
                 "entry_kind": entry_kind,
                 "bootstrap_reference": bootstrap_reference,

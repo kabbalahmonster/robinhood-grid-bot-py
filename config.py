@@ -189,7 +189,7 @@ class BotConfig:
     
     # Gridless Cooldown
     gridless_buy_cooldown_seconds: int  # Seconds between gridless buys (default: 300)
-    gridless_buy_execution_margin: float  # Allowed recovery toward buy threshold before execution
+    gridless_buy_execution_margin: float  # Allowed recovery toward next occupied rung before execution
     
     # RPC Rotation (optional, defaults to None = single RPC_URL mode)
     rpc_urls: Optional[list] = None  # List of RPC URLs for rotation/failover

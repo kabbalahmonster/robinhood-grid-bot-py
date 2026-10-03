@@ -530,11 +530,36 @@ class AdaptiveLadderBotTests(unittest.TestCase):
         self.assertEqual(positions["0"]["ladder_id"], plan.id)
         validate_context(plan, positions, self.bot.config)
 
-    def test_execution_price_guard_blocks_recovered_route(self):
+    def test_execution_price_guard_uses_gap_to_next_occupied_rung(self):
+        context = {
+            "trigger_price": 0.4,
+            "reference_price": 1.0,
+            "recovery_boundary_price": 0.5,
+        }
+        self.bot.token_unit = WEI
+        allowed_quote = SimpleNamespace(buy_amount=int(WEI / 0.4499))
+        blocked_quote = SimpleNamespace(buy_amount=int(WEI / 0.4501))
+
+        self.assertTrue(
+            self.bot._ladder_execution_price_allowed(allowed_quote, WEI, context)
+        )
+        self.assertFalse(
+            self.bot._ladder_execution_price_allowed(blocked_quote, WEI, context)
+        )
+        self.bot._mark_buy_tournament_aborted.assert_called_once()
+        abort = self.bot._mark_buy_tournament_aborted.call_args.kwargs
+        self.assertEqual(abort["reason"], "ladder_trigger_recovered")
+        self.assertAlmostEqual(abort["block_threshold_percent"], -55.0)
+        self.assertAlmostEqual(abort["trigger_threshold_percent"], -60.0)
+
+    def test_execution_price_guard_falls_back_to_reference_without_open_rung(self):
         context = {"trigger_price": 0.5, "reference_price": 1.0}
         quote = SimpleNamespace(buy_amount=WEI)
         self.bot.token_unit = WEI
-        self.assertFalse(self.bot._ladder_execution_price_allowed(quote, WEI, context))
+
+        self.assertFalse(
+            self.bot._ladder_execution_price_allowed(quote, WEI, context)
+        )
 
     def test_polling_attempts_highest_crossed_ready_rung(self):
         self.bot.config.use_eth_trading = True
@@ -556,6 +581,44 @@ class AdaptiveLadderBotTests(unittest.TestCase):
         self.bot._execute_buy_gridless.assert_called_once()
         call = self.bot._execute_buy_gridless.call_args
         self.assertEqual(call.kwargs["ladder_context"]["level_index"], first_index)
+
+    def test_ladder_context_uses_nearest_open_rung_as_recovery_boundary(self):
+        self.bot.config.use_eth_trading = True
+        self.bot.config.eth_gas_reserve = 0.001
+        self.bot.config.weth_address = "0x0000000000000000000000000000000000000002"
+        self.bot.wallet = MagicMock()
+        self.bot.wallet.get_eth_balance.return_value = 0.006
+        self.bot._taxed_token_active = MagicMock(return_value=False)
+        self.bot.last_taxed_token_failure_time = 0
+        self.bot.last_buy_time = 0
+        self.bot.gridless_buy_cooldown = 0
+        self.bot._execute_buy_gridless = MagicMock()
+        self.bot._funding_warning = None
+        plan = self.bot._prepare_gridless_ladder(
+            1.0, {}, int(0.005 * WEI), now=100
+        )
+        funded = funded_indices(plan)
+        upper_index, target_index = funded[0], funded[1]
+        record_fill(
+            plan, upper_index, plan.amount_for_level(upper_index), "0", filled_at=101
+        )
+        save_plan(plan)
+        positions = {
+            "0": {
+                "ladder_id": plan.id,
+                "ladder_level_index": upper_index,
+                "ladder_principal_wei": plan.amount_for_level(upper_index),
+            }
+        }
+
+        with patch("gridless.load_positions", return_value=positions):
+            self.bot._check_buys_gridless(plan.rungs[target_index].price)
+
+        context = self.bot._execute_buy_gridless.call_args.kwargs["ladder_context"]
+        self.assertEqual(context["level_index"], target_index)
+        self.assertEqual(
+            context["recovery_boundary_price"], plan.rungs[upper_index].price
+        )
 
     def test_fresh_survivor_immediately_attempts_off_ladder_bootstrap_buy(self):
         self.bot.config = ladder_config(

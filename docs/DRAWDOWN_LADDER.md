@@ -214,8 +214,11 @@ A rung becomes `open` only after:
 1. its exact-input route passes provider, tax, slippage, gas-cap, and reserve
    checks;
 2. for a downward rung entry, the final route has not recovered too far above
-   the crossed trigger under `GRIDLESS_BUY_EXECUTION_MARGIN`; execution below
-   the trigger remains valid;
+   the crossed trigger under `GRIDLESS_BUY_EXECUTION_MARGIN`. The percentage
+   is applied across the price gap from the target rung toward the nearest
+   occupied rung above it; when none exists, the ladder reference is the
+   fallback boundary. Thus a -60% target, -50% occupied rung, and margin 50
+   allow execution through -55%. Execution below the trigger remains valid;
 3. the transaction confirms and actual token receipt is measured;
 4. the position is atomically persisted with ladder ID, rung index, and exact
    principal;
