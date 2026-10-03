@@ -140,8 +140,10 @@ rebuilds its funded future grid every poll: it starts below the lowest current
 open entry, spreads the affordable reservations through the terminal floor,
 and uses more liquid to increase density. Removing liquid reduces the number
 of funded future triggers and spreads the remaining reservations more widely.
-With only one affordable reservation, Survivor puts it at the nearest trigger
-below the lowest entry instead of marooning all liquid at the floor.
+The lowest open entry is the upper boundary, not another funded endpoint: the
+first future trigger is one complete density interval below it. This prevents
+a successful fill from immediately generating another buy at effectively the
+same price.
 
 ## Dynamic capital accounting
 

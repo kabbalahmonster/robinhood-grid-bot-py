@@ -309,11 +309,12 @@ def _survivor_reservation_indices(
     count = min(max(0, int(count)), len(candidates))
     if count == 0:
         return []
-    if count == 1:
-        # With only one affordable buy, favor the nearest protection instead
-        # of marooning all liquid at the terminal floor.
-        return [candidates[0]]
-    offsets = _initial_indices(len(candidates), count, include_reference_entry=True)
+    # The lowest open entry is the *upper boundary*, not itself a funded
+    # endpoint. Put the first future buy one complete density interval below
+    # it, and always retain terminal coverage. Including offset zero here can
+    # create another immediately crossed rung at effectively the same fill
+    # price after every buy, causing clustered catch-up purchases.
+    offsets = _initial_indices(len(candidates), count, include_reference_entry=False)
     return [candidates[offset] for offset in offsets]
 
 

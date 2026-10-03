@@ -311,7 +311,8 @@ class AdaptiveLadderStateTests(unittest.TestCase):
         four = [r.price for r in plan.rungs if r.state == "ready"]
         self.assertEqual(len(four), 4)
         self.assertTrue(all(price < 0.8 for price in four))
-        self.assertEqual(plan.rungs[eligible_level(plan, 0.70)].price, max(four))
+        self.assertIsNone(eligible_level(plan, 0.70))
+        self.assertEqual(plan.rungs[eligible_level(plan, 0.60)].price, max(four))
         self.assertEqual(plan.reserved_wei, int(0.004 * WEI))
 
         self.assertTrue(sync_survivor_state(
@@ -320,7 +321,7 @@ class AdaptiveLadderStateTests(unittest.TestCase):
         ))
         eight = [r.price for r in plan.rungs if r.state == "ready"]
         self.assertEqual(len(eight), 8)
-        self.assertTrue(set(four).issubset(set(eight)))
+        self.assertGreater(max(eight), max(four))
         self.assertEqual(plan.reserved_wei, int(0.008 * WEI))
 
         self.assertTrue(sync_survivor_state(
@@ -328,12 +329,52 @@ class AdaptiveLadderStateTests(unittest.TestCase):
             current_price=0.70, now=104,
         ))
         two = [r.price for r in plan.rungs if r.state == "ready"]
-        self.assertEqual(two, [max(eight), min(eight)])
+        self.assertLess(max(two), max(four))
+        self.assertEqual(min(two), min(eight))
         self.assertEqual(plan.reserved_wei, int(0.002 * WEI))
         payload = status_payload(plan)
         self.assertEqual(payload["levels_funded"], 2)
         self.assertEqual(payload["levels_open"], 2)
         self.assertEqual(payload["levels_reserved"], 2)
+
+    def test_survivor_next_grid_does_not_cluster_at_latest_low_fill(self):
+        config = ladder_config(
+            gridless_allocation_mode="survivor",
+            max_active_positions=50,
+            token_decimals=18,
+            gridless_ladder_terminal_drawdown_percent=99,
+        )
+        plan = build_plan(0.0000003400, int(0.050 * WEI), config, now=100)
+        entries = [
+            0.0000003400,
+            0.0000003200,
+            0.0000002900,
+            0.0000002600,
+            0.0000002320,
+        ]
+        positions = {}
+        for index, entry in enumerate(entries):
+            position_id = str(index)
+            record_fill(
+                plan, index, plan.amount_for_level(index), position_id,
+                filled_at=101,
+            )
+            positions[position_id] = {
+                "cost_wei": int(entry * WEI),
+                "balance": WEI,
+                "ladder_id": plan.id,
+                "ladder_level_index": index,
+                "ladder_principal_wei": plan.rungs[index].open_principal_wei,
+            }
+
+        self.assertTrue(sync_survivor_state(
+            plan, positions, int(0.012 * WEI), config,
+            current_price=0.0000002314, now=102,
+        ))
+        next_price = plan.next_level_price
+        self.assertIsNotNone(next_price)
+        self.assertLess(next_price, entries[-1] * 0.98)
+        self.assertIsNone(eligible_level(plan, 0.0000002314))
 
     def test_survivor_allocates_all_usable_liquid_across_future_grid(self):
         config = ladder_config(
