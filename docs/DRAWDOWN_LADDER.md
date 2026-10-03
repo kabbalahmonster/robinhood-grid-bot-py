@@ -67,6 +67,13 @@ Archive `data/gridless_ladder.json` together with
 `data/gridless_positions.json` before any manual migration; never delete only
 one side of an active strategy.
 
+Because Survivor geometry is derived state, changes to terminal drawdown,
+linear/log spacing, or reference-entry inclusion are also regenerated and
+atomically checkpointed on the next poll. Frozen v2 plans continue to reject
+those configuration mismatches. Chain, token, mode, maximum-rung count,
+minimum principal, and position ownership remain accounting/identity
+invariants and still fail closed when they drift.
+
 ## Adopting an existing gridless bot
 
 An existing threshold-mode bot may be stopped, switched to

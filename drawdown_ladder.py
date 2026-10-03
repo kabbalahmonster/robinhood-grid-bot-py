@@ -682,26 +682,47 @@ def sync_survivor_state(
     if plan.version != 4:
         raise LadderStateError("unsupported Survivor state version")
 
+    configured_spacing = str(config.gridless_ladder_spacing)
+    configured_terminal = float(config.gridless_ladder_terminal_drawdown_percent)
+    configured_reference_entry = bool(config.gridless_ladder_include_reference_entry)
+    geometry_changed = (
+        plan.spacing != configured_spacing
+        or not math.isclose(
+            plan.terminal_drawdown_percent,
+            configured_terminal,
+            rel_tol=0,
+            abs_tol=1e-12,
+        )
+        or plan.include_reference_entry != configured_reference_entry
+    )
+    reference = plan.reference_price
     if positions:
         token_decimals = int(getattr(config, "token_decimals", 18))
         reference = max(
             _legacy_position_price(position, token_decimals)
             for position in positions.values()
         )
-        if not math.isclose(reference, plan.reference_price, rel_tol=0, abs_tol=1e-18):
-            prices = generate_levels(
-                reference,
-                plan.max_levels,
-                plan.terminal_drawdown_percent,
-                plan.spacing,
-                plan.include_reference_entry,
-            )
-            plan.reference_price = reference
-            for rung, price in zip(plan.rungs, prices):
-                rung.price = price
+    reference_changed = not math.isclose(
+        reference, plan.reference_price, rel_tol=0, abs_tol=1e-18
+    )
+    if geometry_changed or reference_changed:
+        plan.spacing = configured_spacing
+        plan.terminal_drawdown_percent = configured_terminal
+        plan.include_reference_entry = configured_reference_entry
+        prices = generate_levels(
+            reference,
+            plan.max_levels,
+            plan.terminal_drawdown_percent,
+            plan.spacing,
+            plan.include_reference_entry,
+        )
+        plan.reference_price = reference
+        for rung, price in zip(plan.rungs, prices):
+            rung.price = price
+        if reference_changed:
             plan.reanchor_count += 1
             plan.last_reanchor_at = time.time() if now is None else now
-            changed = True
+        changed = True
 
     if rebalance_survivor_funding(
         plan, spendable_balance_wei, config, now, current_price
@@ -992,9 +1013,12 @@ def validate_context(
         raise LadderStateError(
             "persisted ladder minimum does not match GRIDLESS_MIN_POSITION_ETH"
         )
-    if plan.spacing != str(config.gridless_ladder_spacing):
+    if (
+        plan.mode != "survivor"
+        and plan.spacing != str(config.gridless_ladder_spacing)
+    ):
         raise LadderStateError("persisted ladder spacing does not match configuration")
-    if not math.isclose(
+    if plan.mode != "survivor" and not math.isclose(
         plan.terminal_drawdown_percent,
         float(config.gridless_ladder_terminal_drawdown_percent),
         rel_tol=0,
@@ -1003,8 +1027,10 @@ def validate_context(
         raise LadderStateError(
             "persisted ladder terminal drawdown does not match configuration"
         )
-    if plan.include_reference_entry != bool(
-        config.gridless_ladder_include_reference_entry
+    if (
+        plan.mode != "survivor"
+        and plan.include_reference_entry
+        != bool(config.gridless_ladder_include_reference_entry)
     ):
         raise LadderStateError(
             "persisted reference-entry mode does not match configuration"

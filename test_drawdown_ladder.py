@@ -666,6 +666,45 @@ class AdaptiveLadderBotTests(unittest.TestCase):
         self.assertEqual(same.id, plan.id)
         self.assertEqual(same.status, "active")
 
+    def test_survivor_migrates_persisted_geometry_config_drift(self):
+        self.bot.config = ladder_config(
+            gridless_allocation_mode="survivor",
+            max_active_positions=5,
+            gridless_ladder_terminal_drawdown_percent=95,
+            gridless_ladder_spacing="linear",
+            gridless_ladder_include_reference_entry=False,
+        )
+        plan = build_plan(1.0, int(0.005 * WEI), self.bot.config, now=100)
+        plan.version = 3
+        plan.terminal_drawdown_percent = 99
+        plan.spacing = "log"
+        plan.include_reference_entry = True
+        old_prices = generate_levels(1.0, 5, 99, "log", True)
+        for rung, price in zip(plan.rungs, old_prices):
+            rung.price = price
+        save_plan(plan)
+
+        migrated = self.bot._prepare_gridless_ladder(
+            0.8, {}, int(0.005 * WEI), now=200
+        )
+
+        self.assertEqual(migrated.version, 4)
+        self.assertEqual(migrated.terminal_drawdown_percent, 95)
+        self.assertEqual(migrated.spacing, "linear")
+        self.assertFalse(migrated.include_reference_entry)
+        self.assertEqual(migrated.level_prices, generate_levels(1.0, 5, 95, "linear"))
+
+    def test_frozen_ladder_still_rejects_geometry_config_drift(self):
+        plan = build_plan(1.0, int(0.005 * WEI), self.bot.config, now=100)
+        plan.terminal_drawdown_percent = 99
+        plan.rungs[-1].price = 0.01
+        save_plan(plan)
+
+        with self.assertRaisesRegex(LadderStateError, "terminal drawdown"):
+            self.bot._prepare_gridless_ladder(
+                0.8, {}, int(0.005 * WEI), now=200
+            )
+
     def test_open_positions_without_plan_are_adopted(self):
         self.bot.config.token_decimals = 18
         positions = {"0": {"cost_wei": int(0.001 * WEI), "balance": int(0.01 * WEI)}}
