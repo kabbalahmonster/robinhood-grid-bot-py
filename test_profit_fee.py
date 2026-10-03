@@ -1,5 +1,6 @@
 import unittest
 from unittest.mock import Mock, patch
+import inspect
 import os
 from types import SimpleNamespace
 
@@ -82,6 +83,22 @@ class ProfitFeeTests(unittest.TestCase):
         bot.config.profit_fee_percent = 0
         self.assertIsNone(bot._charge_profit_fee(10**18, "0xdisabled"))
         bot.wallet.transfer_erc20.assert_not_called()
+
+    def test_gridless_fee_accrues_before_survivor_ladder_checkpoint(self):
+        source = inspect.getsource(GridBot._execute_sell_gridless)
+
+        self.assertEqual(
+            source.count("self._charge_profit_fee(profit_wei, result.tx_hash)"),
+            1,
+        )
+        self.assertLess(
+            source.index("self._charge_profit_fee(profit_wei, result.tx_hash)"),
+            source.index("remove_position(pos_id)"),
+        )
+        self.assertLess(
+            source.index("self._charge_profit_fee(profit_wei, result.tx_hash)"),
+            source.index("mark_exit("),
+        )
 
     def test_native_fee_preserves_gas_reserve(self):
         bot = self.make_bot(native=True, percent=10)

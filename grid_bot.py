@@ -5380,6 +5380,26 @@ class GridBot:
                 self.profit_tracker.record_sale(profit_wei, result.tx_hash)
             except (OSError, ValueError) as exc:
                 logger.error(f"Could not persist realized profit: {exc}")
+
+            # A confirmed profitable sale owes its configured fee regardless
+            # of later position/ladder checkpoint health. Accrue it before
+            # Survivor bookkeeping so a fail-closed ladder error cannot bypass
+            # the fee obligation.
+            fee_checkpoint_error = None
+            try:
+                self._charge_profit_fee(profit_wei, result.tx_hash)
+            except Exception as exc:
+                # Normal transfer failures are handled and durably accrued by
+                # _charge_profit_fee itself. Reaching this branch means even
+                # the fee obligation could not be checkpointed. Finish sale
+                # reconciliation, then halt instead of silently trading on.
+                fee_checkpoint_error = exc
+                logger.critical(
+                    "Confirmed sell profit-fee obligation could not be "
+                    "checkpointed; sale reconciliation will finish before "
+                    "trading halts: %s",
+                    exc,
+                )
             
             # Remove position
             remove_position(pos_id)
@@ -5426,8 +5446,10 @@ class GridBot:
             )
             logger.info(f"✅ Gridless sell successful! Profit: {actual_profit:.6f} {self.trade_token_name} ({profit_pct:+.2f}%)")
 
-            self._charge_profit_fee(profit_wei, result.tx_hash)
-            
+            if fee_checkpoint_error is not None:
+                self._safety_halted = True
+                return
+
             # Reset buy cooldown so we can buy again immediately after selling
             self.last_buy_time = 0
             logger.debug(f"🔄 Buy cooldown reset after sell")
