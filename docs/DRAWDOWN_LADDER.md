@@ -268,7 +268,7 @@ reinvestment into the just-sold position.
 After a confirmed Survivor sell, the main loop and sell-side P&L observation
 temporarily accelerate to `SURVIVOR_RAPID_POLL_SECONDS` for
 `SURVIVOR_RAPID_POLL_WINDOW_SECONDS`. Each confirmation extends the window.
-This still executes at most one independently validated sell per cycle; it does
+By default this still executes at most one independently validated sell per cycle; it does
 not batch transactions or bypass route, gas, profit, receipt, or unresolved-
 broadcast safeguards. Set the window to `0` to disable acceleration.
 
@@ -278,6 +278,24 @@ simultaneous buy lane. If the exit route times out, is rejected, or otherwise
 cannot execute, that cycle does not fall through to a buy tournament. A
 successful sell also consumes the cycle so the next rapid poll can attempt the
 next profitable position before Survivor commits capital to a new entry.
+
+`SURVIVOR_BATCH_SELL_ENABLED=true` enables an experimental Survivor-only exit
+path. When at least two positions have fresh authoritative polling P&L marks at
+or above the configured sell threshold, their post-moonbag amounts are combined
+into one exact-input swap. Stale, below-threshold, and stop-loss candidates are
+never included. Measured proceeds and confirmed transaction/setup gas are split
+between lots by sold-token weight with exact integer remainder conservation;
+each lot then retains its own cost basis, realized result, profit fee, banking,
+and ladder exit. The receipt, dashboard trade, and session sell count remain one
+transaction. With fewer than two eligible lots, or outside Survivor, the normal
+single-position path is unchanged.
+
+The confirmed batch is journaled before position or ladder state changes, so a
+restart completes a partial checkpoint without submitting another swap or
+double-counting telemetry. Optional banking remains a post-settlement,
+best-effort transaction and is deliberately not replayed from this journal: a
+process crash after the sale is fully checkpointed can skip that banking pass,
+which avoids risking a duplicate external banking swap.
 
 ## Persistence and fail-closed recovery
 

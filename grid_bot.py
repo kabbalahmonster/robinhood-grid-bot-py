@@ -29,6 +29,24 @@ from token_tax_detector import TokenTaxDetector
 MIN_BUY_OBSERVATION_PRINCIPAL_WEI = 10**15  # 0.001 ETH/WETH
 
 
+def _allocate_integer_pro_rata(total, weighted_ids):
+    """Split an integer exactly by positive weights using largest remainders."""
+    total = int(total)
+    items = [(str(key), int(weight)) for key, weight in weighted_ids]
+    if total < 0 or not items or any(weight <= 0 for _, weight in items):
+        raise ValueError("pro-rata allocation requires a non-negative total and positive weights")
+    denominator = sum(weight for _, weight in items)
+    allocated = {key: total * weight // denominator for key, weight in items}
+    remainder = total - sum(allocated.values())
+    order = sorted(
+        items,
+        key=lambda item: (-(total * item[1] % denominator), item[0]),
+    )
+    for key, _ in order[:remainder]:
+        allocated[key] += 1
+    return allocated
+
+
 def _dashboard_strategy_mode(config):
     """Return a stable public strategy label without changing strategy behavior."""
     if not getattr(config, "use_gridless", True):
@@ -2585,13 +2603,20 @@ class GridBot:
             os.fsync(handle.fileno())
         os.replace(temp_path, path)
 
-    def _charge_profit_fee(self, profit_wei, sale_tx_hash):
+    def _charge_profit_fee(self, profit_wei, sale_tx_hash, *, per_lot_profits=None):
         """Send the configured share of positive realized profit."""
         fee_percent = getattr(self.config, "profit_fee_percent", 0)
         if fee_percent <= 0 or profit_wei <= 0:
             return None
 
-        sale_fee_wei = int(Decimal(int(profit_wei)) * Decimal(str(fee_percent)) / Decimal(100))
+        if per_lot_profits is None:
+            fee_bases = [int(profit_wei)]
+        else:
+            fee_bases = [max(0, int(value)) for value in per_lot_profits]
+        sale_fee_wei = sum(
+            int(Decimal(value) * Decimal(str(fee_percent)) / Decimal(100))
+            for value in fee_bases if value > 0
+        )
         if sale_fee_wei <= 0:
             return None
 
@@ -4040,6 +4065,163 @@ class GridBot:
         )
         self.save_positions()
 
+    def _defer_batch_sell_gas_cost(self, lots, gas_wei):
+        """Persist confirmed batch setup gas across all still-open lots."""
+        import gridless
+        gas_wei = int(gas_wei)
+        if gas_wei <= 0:
+            return
+        weights = [(lot["position_id"], lot["sell_amount"]) for lot in lots]
+        allocations = _allocate_integer_pro_rata(gas_wei, weights)
+        positions = gridless.load_positions()
+        if any(str(lot["position_id"]) not in positions for lot in lots):
+            raise RuntimeError("cannot preserve batch sell setup gas: position missing")
+        for lot in lots:
+            position_id = str(lot["position_id"])
+            positions[position_id]["deferred_sell_gas_wei"] = (
+                int(positions[position_id].get("deferred_sell_gas_wei", 0) or 0)
+                + allocations[position_id]
+            )
+        gridless.save_positions(positions)
+
+    @staticmethod
+    def _batch_settlement_journal_path():
+        return "data/survivor_batch_settlement.json"
+
+    def _save_batch_settlement_journal(self, journal):
+        path = self._batch_settlement_journal_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        temp_path = path + ".tmp"
+        with open(temp_path, "w") as handle:
+            json.dump(journal, handle, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+
+    def _load_batch_settlement_journal(self):
+        path = self._batch_settlement_journal_path()
+        try:
+            with open(path, "r") as handle:
+                journal = json.load(handle)
+            if journal.get("schema_version") != 1 or not journal.get("tx_hash"):
+                raise ValueError("invalid Survivor batch settlement journal")
+            return journal
+        except FileNotFoundError:
+            return None
+
+    def _clear_batch_settlement_journal(self):
+        try:
+            os.remove(self._batch_settlement_journal_path())
+        except FileNotFoundError:
+            pass
+
+    @staticmethod
+    def _fee_audit_contains_sale(sale_tx_hash):
+        try:
+            with open("data/profit_fees.json", "r") as handle:
+                entries = json.load(handle)
+            return any(
+                isinstance(entry, dict)
+                and entry.get("sale_tx_hash") == sale_tx_hash
+                for entry in entries
+            )
+        except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError):
+            return False
+
+    def _recover_survivor_batch_settlement(self):
+        """Finish an interrupted confirmed batch without another swap."""
+        import gridless
+        from drawdown_ladder import load_plan, mark_exit, save_plan
+
+        try:
+            journal = self._load_batch_settlement_journal()
+            if journal is None:
+                return True
+            tx_hash = str(journal["tx_hash"])
+            lots = list(journal["lots"])
+            lot_profits = [int(lot["profit_wei"]) for lot in lots]
+            aggregate_profit = sum(lot_profits)
+            self.profit_tracker.record_sale(aggregate_profit, tx_hash)
+
+            if (not journal.get("fee_checkpointed")
+                    and not self._fee_audit_contains_sale(tx_hash)):
+                self._charge_profit_fee(
+                    sum(max(0, value) for value in lot_profits), tx_hash,
+                    per_lot_profits=lot_profits,
+                )
+            journal["fee_checkpointed"] = True
+            self._save_batch_settlement_journal(journal)
+
+            positions = gridless.load_positions()
+            changed = False
+            for lot in lots:
+                changed = positions.pop(str(lot["position_id"]), None) is not None or changed
+            if changed:
+                gridless.save_positions(positions)
+            journal["positions_checkpointed"] = True
+            self._save_batch_settlement_journal(journal)
+
+            plan = load_plan()
+            if plan is None:
+                raise RuntimeError("persisted Survivor ladder is missing")
+            plan_changed = False
+            for lot in lots:
+                if lot.get("ladder_id") != plan.id:
+                    raise RuntimeError("batch journal does not match Survivor ladder")
+                level_index = int(lot["ladder_level_index"])
+                rung = plan.rungs[level_index]
+                position_id = str(lot["position_id"])
+                if rung.state == "open":
+                    mark_exit(
+                        plan, level_index, position_id=position_id,
+                        realized_profit_wei=int(lot["profit_wei"]),
+                        recycle=(
+                            self.config.gridless_ladder_rearm_policy == "after_exit"
+                        ),
+                    )
+                    plan_changed = True
+                elif rung.position_id is not None:
+                    raise RuntimeError("batch journal rung is not safely reconciled")
+            if plan_changed:
+                save_plan(plan)
+            journal["ladder_checkpointed"] = True
+            self._save_batch_settlement_journal(journal)
+            self._clear_exact_approval_guard()
+
+            if not any(
+                    trade.get("side") == "sell"
+                    and trade.get("tx_hash") == tx_hash
+                    for trade in getattr(self, "dashboard_trades", [])):
+                process_id = str(getattr(
+                    self, "process_started_utc", "current-process"
+                ))
+                if journal.get("telemetry_process") != process_id:
+                    # Persist the same-process idempotency marker immediately
+                    # before the non-throwing in-memory counter updates.
+                    journal["telemetry_process"] = process_id
+                    self._save_batch_settlement_journal(journal)
+                    self.session_sells += 1
+                    self.session_profit_weth += aggregate_profit / 10**18
+                self._record_dashboard_trade(
+                    "sell", int(journal["received_wei"]) / 10**18,
+                    int(journal["sell_amount"]) / self.token_unit,
+                    float(journal["price"]), tx_hash,
+                    aggregate_profit / 10**18,
+                    gas_fee_eth=int(journal["gas_wei"]) / 10**18,
+                    measured_amount_raw=int(journal["received_wei"]),
+                    realized_profit_wei=aggregate_profit,
+                )
+            self._clear_batch_settlement_journal()
+            logger.warning("Recovered confirmed Survivor batch settlement %s", tx_hash)
+            return True
+        except Exception as exc:
+            self._safety_halted = True
+            logger.critical(
+                "Confirmed Survivor batch settlement recovery failed; trading halted: %s",
+                exc,
+            )
+            return False
+
     def _check_buys_gridless(self, price, position_pnls=None):
         """Evaluate threshold or persisted drawdown-ladder gridless entries."""
         from gridless import should_buy, load_positions
@@ -4660,6 +4842,11 @@ class GridBot:
                               remove_position, get_buy_price,
                               trigger_pnl_candidates)
         
+        # A confirmed aggregate swap is never broadcast again. Finish any
+        # interrupted positions/ladder checkpoint before considering new work.
+        if not self._recover_survivor_batch_settlement():
+            return
+
         # Load gridless positions
         gridless_positions = load_positions()
         if not gridless_positions:
@@ -4675,10 +4862,12 @@ class GridBot:
         best_candidate = None
         best_priority = 999
         best_pnl = float('-inf')
+        batch_candidates = []
         
         for pos_id, pos in gridless_positions.items():
             observed = (position_pnls or {}).get(str(pos_id), {})
             candidates = trigger_pnl_candidates(observed, "sell")
+            fresh_candidates = list(candidates)
             if not candidates:
                 # Net-P&L polling fails closed when its authoritative trigger
                 # quote is missing or stale. Legacy mode retains the old mark.
@@ -4688,6 +4877,20 @@ class GridBot:
                 candidates = [("legacy", calculate_pnl(
                     pos, price, self.token_decimals
                 ))]
+
+            # Batch eligibility is deliberately narrower than ordinary sell
+            # eligibility: only fresh polling marks may authorize inclusion,
+            # and a stop-loss mark keeps the lot on the existing independent
+            # stop-loss path.
+            if (fresh_candidates
+                    and not (stoploss_enabled and any(
+                        pnl <= stoploss_threshold for _, pnl in fresh_candidates
+                    ))
+                    and any(pnl >= sell_threshold for _, pnl in fresh_candidates)):
+                batch_candidates.append((
+                    str(pos_id), pos,
+                    max(pnl for _, pnl in fresh_candidates),
+                ))
 
             for source, pnl in candidates:
                 # Check stoploss first (highest priority)
@@ -4707,6 +4910,61 @@ class GridBot:
                         best_priority = 1
                         best_pnl = pnl
         
+        batch_enabled = (
+            bool(getattr(self.config, "survivor_batch_sell_enabled", False))
+            and str(getattr(
+                self.config, "gridless_allocation_mode", "threshold"
+            )).lower() == "survivor"
+        )
+        if batch_enabled and len(batch_candidates) >= 2:
+            lots = []
+            for candidate_id, candidate_pos, candidate_pnl in sorted(
+                    batch_candidates, key=lambda item: item[0]):
+                sell_amount, sold_cost_wei = self._gridless_sell_terms(candidate_pos)
+                if sell_amount <= 0 or sold_cost_wei <= 0:
+                    continue
+                lots.append({
+                    "position_id": candidate_id,
+                    "position": candidate_pos,
+                    "sell_amount": int(sell_amount),
+                    "sold_cost_wei": int(sold_cost_wei),
+                    "pnl": float(candidate_pnl),
+                    "moonbag_tokens": int(candidate_pos.get("balance", 0)) - int(sell_amount),
+                })
+            if len(lots) >= 2:
+                self._sell_priority_this_cycle = True
+                aggregate_amount = sum(lot["sell_amount"] for lot in lots)
+                if not self._wallet_can_cover_sell(aggregate_amount, "survivor-batch"):
+                    return
+                aggregate = {
+                    "balance": aggregate_amount,
+                    "cost_wei": sum(lot["sold_cost_wei"] for lot in lots),
+                }
+                logger.info(
+                    "Survivor batch sell trigger: %d positions, %s raw tokens",
+                    len(lots), aggregate_amount,
+                )
+                quote, _ = self._actionable_quote_with_weth_fallback(
+                    sell_token=self.config.token_address,
+                    buy_token=self.trade_token_address,
+                    sell_amount=aggregate_amount,
+                    direction="sell",
+                    sold_cost_wei=aggregate["cost_wei"],
+                )
+                if not quote.success:
+                    logger.warning(
+                        "Survivor batch candidate quote failed: %s", quote.error
+                    )
+                    self._observe_token_tax_failure(
+                        quote, direction="sell", position_id="survivor-batch"
+                    )
+                    return
+                self._execute_sell_gridless(
+                    "survivor-batch", aggregate, price,
+                    pre_fetched_quote=quote, batch_lots=lots,
+                )
+                return
+
         if best_candidate is None:
             return
         
@@ -4875,7 +5133,8 @@ class GridBot:
         self._execute_sell_gridless(pos_id, pos, price, quote)
     
     @_with_tournament_terminal("sell")
-    def _execute_sell_gridless(self, pos_id, pos, price, pre_fetched_quote=None):
+    def _execute_sell_gridless(
+            self, pos_id, pos, price, pre_fetched_quote=None, batch_lots=None):
         """Execute a gridless sell order."""
         from gridless import remove_position, calculate_pnl
         
@@ -4898,7 +5157,11 @@ class GridBot:
         
         # Moonbag logic
         moonbag_pct = getattr(self.config, 'moonbag_percentage', 0)
-        if moonbag_pct > 0:
+        if batch_lots:
+            sell_amount = sum(int(lot["sell_amount"]) for lot in batch_lots)
+            sell_tokens = sell_amount / self.token_unit
+            moonbag_tokens = sum(int(lot["moonbag_tokens"]) for lot in batch_lots)
+        elif moonbag_pct > 0:
             moonbag_tokens = int(balance * moonbag_pct / 100)
             sell_amount = balance - moonbag_tokens
             sell_tokens = sell_amount / self.token_unit
@@ -4908,7 +5171,10 @@ class GridBot:
             sell_tokens = tokens
             moonbag_tokens = 0
         
-        _, sold_cost_wei = self._gridless_sell_terms(pos)
+        sold_cost_wei = (
+            sum(int(lot["sold_cost_wei"]) for lot in batch_lots)
+            if batch_lots else self._gridless_sell_terms(pos)[1]
+        )
         sold_cost_eth = sold_cost_wei / 10**18
         self._queue_route_shadow("sell", sell_amount, sold_cost_wei)
         expected_eth = sell_tokens * price
@@ -5030,7 +5296,12 @@ class GridBot:
                 return
         
         # Reserve projected unwrap gas in every later profit-floor calculation.
-        # Replace it with the confirmed fee after settlement.
+        # Replace it with the confirmed fee after settlement. Approval gas
+        # confirmed in this attempt is persisted for crash/retry recovery, but
+        # sold_cost_wei was snapshotted before that persistence and this local
+        # setup total charges it exactly once. On a later attempt the persisted
+        # amount is already in sold_cost_wei and only newly confirmed setup gas
+        # is added here.
         sell_setup_gas_wei = unwrap_projected_wei
         # Providers with API-managed approvals return the required approval txs.
         if self.provider.capabilities.api_managed_approval:
@@ -5100,10 +5371,15 @@ class GridBot:
                         logger.error(f"Cancel transaction failed: {result.error}")
                         return
                     sell_setup_gas_wei += self._receipt_gas_cost_wei(result)
-                    self._defer_sell_gas_cost(
-                        pos_id, self._receipt_gas_cost_wei(result),
-                        gridless_position=True,
-                    )
+                    if batch_lots:
+                        self._defer_batch_sell_gas_cost(
+                            batch_lots, self._receipt_gas_cost_wei(result)
+                        )
+                    else:
+                        self._defer_sell_gas_cost(
+                            pos_id, self._receipt_gas_cost_wei(result),
+                            gridless_position=True,
+                        )
                     self._seal_provider_fallback()
                     logger.info(f"Cancel transaction confirmed: {result.tx_hash}")
                     # Wait for confirmation
@@ -5119,10 +5395,15 @@ class GridBot:
                         logger.error(f"Approval transaction failed: {result.error}")
                         return
                     sell_setup_gas_wei += self._receipt_gas_cost_wei(result)
-                    self._defer_sell_gas_cost(
-                        pos_id, self._receipt_gas_cost_wei(result),
-                        gridless_position=True,
-                    )
+                    if batch_lots:
+                        self._defer_batch_sell_gas_cost(
+                            batch_lots, self._receipt_gas_cost_wei(result)
+                        )
+                    else:
+                        self._defer_sell_gas_cost(
+                            pos_id, self._receipt_gas_cost_wei(result),
+                            gridless_position=True,
+                        )
                     self._seal_provider_fallback()
                     logger.info(f"Approval transaction confirmed: {result.tx_hash}")
                     # Wait for confirmation
@@ -5211,10 +5492,15 @@ class GridBot:
                     logger.error(f"Approval failed: {result.error}")
                     return
                 sell_setup_gas_wei += self._receipt_gas_cost_wei(result)
-                self._defer_sell_gas_cost(
-                    pos_id, self._receipt_gas_cost_wei(result),
-                    gridless_position=True,
-                )
+                if batch_lots:
+                    self._defer_batch_sell_gas_cost(
+                        batch_lots, self._receipt_gas_cost_wei(result)
+                    )
+                else:
+                    self._defer_sell_gas_cost(
+                        pos_id, self._receipt_gas_cost_wei(result),
+                        gridless_position=True,
+                    )
                 self._seal_provider_fallback()
                 self._record_exact_approval_guard(
                     result, operation="sell", spender=spender, amount=sell_amount,
@@ -5368,6 +5654,31 @@ class GridBot:
                     )
                     return
             logger.info("Measured trade-token receipt: %s wei", received_wei)
+            if batch_lots:
+                try:
+                    self._settle_confirmed_survivor_batch(
+                        batch_lots, price, result, received_wei,
+                        sell_setup_gas_wei=sell_setup_gas_wei,
+                    )
+                except Exception as exc:
+                    # A confirmed receipt can never flow back into provider
+                    # fallback. If even the durable journal cannot be written,
+                    # retain an unresolved-broadcast guard and halt.
+                    self.wallet._record_unresolved_broadcast(
+                        result.tx_hash or "confirmed-batch-settlement-failed",
+                        sell_tx,
+                        f"confirmed Survivor batch settlement failed: {exc}",
+                    )
+                    self._mark_tournament_settlement_unresolved(
+                        "sell", reason="batch_settlement_checkpoint_failed",
+                        tx_hash=result.tx_hash,
+                    )
+                    self._safety_halted = True
+                    logger.critical(
+                        "Confirmed Survivor batch sell could not be durably "
+                        "checkpointed; trading halted: %s", exc,
+                    )
+                return
             eth_received = received_wei / 10**18
             profit_wei = self._net_sale_profit_wei(
                 received_wei, sold_cost_wei, result, setup_gas_wei=sell_setup_gas_wei
@@ -5473,6 +5784,147 @@ class GridBot:
                 tx=sell_tx,
                 tx_hash=getattr(result, "tx_hash", None),
             )
+
+    def _settle_confirmed_survivor_batch(
+            self, lots, price, result, received_wei, *, sell_setup_gas_wei=0):
+        """Reconcile one confirmed aggregate swap into its Survivor lots."""
+        import gridless
+        from drawdown_ladder import load_plan, mark_exit, save_plan
+
+        weights = [(lot["position_id"], lot["sell_amount"]) for lot in lots]
+        proceeds = _allocate_integer_pro_rata(received_wei, weights)
+        total_gas_wei = int(sell_setup_gas_wei) + self._receipt_gas_cost_wei(result)
+        gas = _allocate_integer_pro_rata(total_gas_wei, weights)
+        lot_profits = {
+            str(lot["position_id"]): (
+                proceeds[str(lot["position_id"])]
+                - int(lot["sold_cost_wei"])
+                - gas[str(lot["position_id"])]
+            )
+            for lot in lots
+        }
+        aggregate_profit_wei = sum(lot_profits.values())
+        positive_profit_wei = sum(max(0, value) for value in lot_profits.values())
+
+        journal = {
+            "schema_version": 1,
+            "tx_hash": str(result.tx_hash),
+            "received_wei": int(received_wei),
+            "gas_wei": int(total_gas_wei),
+            "sell_amount": sum(int(lot["sell_amount"]) for lot in lots),
+            "price": float(price),
+            "fee_checkpointed": False,
+            "positions_checkpointed": False,
+            "ladder_checkpointed": False,
+            "lots": [{
+                "position_id": str(lot["position_id"]),
+                "profit_wei": int(lot_profits[str(lot["position_id"])]),
+                "ladder_id": lot["position"].get("ladder_id"),
+                "ladder_level_index": int(
+                    lot["position"].get("ladder_level_index", -1)
+                ),
+            } for lot in lots],
+        }
+        # This durable intent is written before either state file changes. A
+        # restart completes it without ever re-entering swap execution.
+        self._save_batch_settlement_journal(journal)
+
+        try:
+            self.profit_tracker.record_sale(aggregate_profit_wei, result.tx_hash)
+        except (OSError, ValueError) as exc:
+            logger.error("Could not persist batch realized profit: %s", exc)
+
+        fee_checkpoint_error = None
+        try:
+            self._charge_profit_fee(
+                positive_profit_wei, result.tx_hash,
+                per_lot_profits=lot_profits.values(),
+            )
+        except Exception as exc:
+            fee_checkpoint_error = exc
+            logger.critical(
+                "Confirmed batch sell profit-fee obligation could not be "
+                "checkpointed; reconciliation will finish before trading halts: %s",
+                exc,
+            )
+        if fee_checkpoint_error is None:
+            journal["fee_checkpointed"] = True
+            self._save_batch_settlement_journal(journal)
+
+        # Close all positions in one atomic positions-file replacement.
+        positions = gridless.load_positions()
+        for lot in lots:
+            positions.pop(str(lot["position_id"]), None)
+        gridless.save_positions(positions)
+        journal["positions_checkpointed"] = True
+        self._save_batch_settlement_journal(journal)
+
+        try:
+            plan = load_plan()
+            if plan is None:
+                raise RuntimeError("persisted Survivor ladder is missing")
+            for lot in lots:
+                position_id = str(lot["position_id"])
+                position = lot["position"]
+                if position.get("ladder_id") != plan.id:
+                    raise RuntimeError(
+                        f"sold position {position_id} does not match persisted Survivor ladder"
+                    )
+                mark_exit(
+                    plan, int(position.get("ladder_level_index", -1)),
+                    position_id=position_id,
+                    realized_profit_wei=lot_profits[position_id],
+                    recycle=(
+                        self.config.gridless_ladder_rearm_policy == "after_exit"
+                    ),
+                )
+            save_plan(plan)
+            journal["ladder_checkpointed"] = True
+            self._save_batch_settlement_journal(journal)
+        except Exception as exc:
+            logger.critical(
+                "Batch sell confirmed and positions removed, but Survivor exits "
+                "could not be checkpointed; trading halted: %s", exc,
+            )
+            self._safety_halted = True
+            return
+
+        self._clear_exact_approval_guard()
+        journal["telemetry_process"] = str(getattr(
+            self, "process_started_utc", "current-process"
+        ))
+        self._save_batch_settlement_journal(journal)
+        # Delay in-memory telemetry until both durable strategy stores are
+        # checkpointed. The journal marker prevents same-process recovery from
+        # counting this receipt twice.
+        self.session_sells += 1
+        self.session_profit_weth += aggregate_profit_wei / 10**18
+        self._record_dashboard_trade(
+            "sell", int(received_wei) / 10**18,
+            sum(int(lot["sell_amount"]) for lot in lots) / self.token_unit,
+            price, result.tx_hash, aggregate_profit_wei / 10**18,
+            gas_fee_eth=total_gas_wei / 10**18,
+            receipt_result=result, measured_amount_raw=int(received_wei),
+            realized_profit_wei=aggregate_profit_wei,
+        )
+        logger.info(
+            "✅ Survivor batch sell successful: %d positions, profit %.8f %s, tx %s",
+            len(lots), aggregate_profit_wei / 10**18,
+            self.trade_token_name, result.tx_hash,
+        )
+        if fee_checkpoint_error is not None:
+            self._safety_halted = True
+            return
+        self._clear_batch_settlement_journal()
+        self.last_buy_time = 0
+        bank_pct = float(getattr(self.config, "bank_percentage", 0) or 0)
+        bankable_profit_wei = max(0, aggregate_profit_wei)
+        if bank_pct > 0 and bankable_profit_wei > 0:
+            bank_amount = bankable_profit_wei / 10**18 * bank_pct / 100
+            self.bank_profit(
+                bank_amount, profit_budget_eth=bankable_profit_wei / 10**18
+            )
+        self._arm_survivor_rapid_polling()
     
     @_with_tournament_terminal("buy")
     @_with_swap_provider_fallback

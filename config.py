@@ -162,6 +162,7 @@ class BotConfig:
     gridless_sell_threshold: float  # P&L % to trigger sell (default: 5.0)
     gridless_stoploss_threshold: float  # P&L % for stoploss (default: -25.0)
     gridless_stoploss_enabled: bool  # Enable stoploss sells
+    survivor_batch_sell_enabled: bool  # Combine 2+ fresh profitable Survivor exits
     gridless_leading_edge: bool  # Enable leading edge buys (buy into strength)
     gridless_allocation_mode: str  # threshold, drawdown_ladder, or survivor
     gridless_min_position_eth: float
@@ -655,6 +656,9 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
         gridless_sell_threshold=float(os.getenv("GRIDLESS_SELL_THRESHOLD", "5.0")),
         gridless_stoploss_threshold=float(os.getenv("GRIDLESS_STOPLOSS_THRESHOLD", "-25.0")),
         gridless_stoploss_enabled=os.getenv("GRIDLESS_STOPLOSS_ENABLED", "false").lower() == "true",
+        survivor_batch_sell_enabled=os.getenv(
+            "SURVIVOR_BATCH_SELL_ENABLED", "false"
+        ).lower() == "true",
         gridless_leading_edge=os.getenv("GRIDLESS_LEADING_EDGE", "true").lower() == "true",
         gridless_allocation_mode=os.getenv(
             "GRIDLESS_ALLOCATION_MODE", "threshold"

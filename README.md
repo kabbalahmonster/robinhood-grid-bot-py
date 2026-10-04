@@ -192,6 +192,7 @@ python grid_bot.py
 | `GRIDLESS_LADDER_SPACING` | No | linear | `linear` for equal drawdown intervals or `log` for equal price ratios |
 | `SURVIVOR_RAPID_POLL_SECONDS` | No | 1 | Temporary main-loop interval after a confirmed Survivor sell |
 | `SURVIVOR_RAPID_POLL_WINDOW_SECONDS` | No | 30 | Duration of sell-side rapid polling after each confirmed Survivor sell; 0 disables it |
+| `SURVIVOR_BATCH_SELL_ENABLED` | No | false | Experimental: in Survivor only, combine two or more positions whose fresh authoritative sell P&L marks meet the normal sell threshold into one exact-input swap; stop-loss, stale, and below-threshold positions remain separate/excluded |
 | `GRIDLESS_LADDER_MAX_BUDGET_ETH` | No | 0 | Optional hard cap on total assigned rung principal; 0 disables the extra cap |
 | `GRIDLESS_LADDER_EXPIRY_SECONDS` | No | 0 | Stop new rung fills after this many seconds; 0 keeps the adaptive field active indefinitely |
 | `GRIDLESS_LADDER_REARM_POLICY` | No | after_exit | `after_exit` recycles each sold rung; `never` retires a rung after its first completed trade |

@@ -136,6 +136,12 @@ class DrawdownLadderGeometryTests(unittest.TestCase):
             config = load_config()
         self.assertEqual(config.survivor_rapid_poll_seconds, 2)
         self.assertEqual(config.survivor_rapid_poll_window_seconds, 45)
+        self.assertFalse(config.survivor_batch_sell_enabled)
+
+        env["SURVIVOR_BATCH_SELL_ENABLED"] = "true"
+        with patch.dict(os.environ, env, clear=True):
+            enabled = load_config()
+        self.assertTrue(enabled.survivor_batch_sell_enabled)
 
     def test_linear_levels_reach_terminal_drawdown(self):
         levels = generate_levels(1.0, 5, 95, "linear")
