@@ -1922,6 +1922,12 @@ only after the tournament produces no winner. Failed or more-than-three-second-o
 results are discarded and rebuilt normally. Set the value back to `0` to
 disable the overlap without changing tournament policy.
 
+For multi-action latency canaries, use the staged profile and acceptance gates
+in `docs/LIGHTNING_ROUNDS.md`. In particular, derive shorter gate deadlines from
+a fresh counterfactual bundle rather than timeout counts alone. Same-round route
+reuse is opt-in and reuses only provider/settlement identity; it does not reuse
+quotes, calldata, simulation, approvals, or transaction results.
+
 Use `shadow` with `ROUTE_TOURNAMENT_CANARY=false` for comparison telemetry
 without tournament route authority. Promote beyond one bot only after a
 monitored window confirms acceptable provider quota and execution behavior.

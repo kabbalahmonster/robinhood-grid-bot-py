@@ -16,6 +16,23 @@ class GridBotInitialStateTests(unittest.TestCase):
         self.assertEqual(bot._next_main_loop_delay(now=99.0), 1)
         self.assertEqual(bot._next_main_loop_delay(now=100.0), 6)
 
+    def test_completion_delay_remains_legacy_default(self):
+        bot = GridBot.__new__(GridBot)
+        bot.config = SimpleNamespace(poll_interval_seconds=4)
+        bot._survivor_rapid_poll_until = 0.0
+
+        self.assertEqual(bot._poll_sleep_after_cycle(10.0, now=13.0), 4.0)
+
+    def test_fixed_rate_subtracts_work_and_never_overlaps(self):
+        bot = GridBot.__new__(GridBot)
+        bot.config = SimpleNamespace(
+            poll_interval_seconds=4, poll_cadence_mode="fixed_rate"
+        )
+        bot._survivor_rapid_poll_until = 0.0
+
+        self.assertEqual(bot._poll_sleep_after_cycle(10.0, now=13.0), 1.0)
+        self.assertEqual(bot._poll_sleep_after_cycle(10.0, now=17.0), 0.0)
+
     def test_survivor_rapid_window_forces_fresh_sell_side_observation(self):
         bot = GridBot.__new__(GridBot)
         bot._survivor_rapid_poll_until = 100.0

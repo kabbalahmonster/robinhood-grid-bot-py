@@ -1084,6 +1084,7 @@ def collect_execution_preflight(config, address, context, client_factory=None,
     # absolute-sized budget. A slow Uniswap preparation can therefore never
     # consume Sushi's opportunity to produce an executable candidate.
     started = time.monotonic()
+    deadline = started + max(0.0, float(max_seconds))
     LOG.info(
         "Route tournament start tournament_id=%s direction=%s mode=execution_preflight expected_candidates=%d",
         tournament_id, context.get("direction"), len(identities),
@@ -1127,7 +1128,11 @@ def collect_execution_preflight(config, address, context, client_factory=None,
     pool = ThreadPoolExecutor(max_workers=len(identities), thread_name_prefix="route-preflight")
     futures = {pool.submit(collect_one, identity): identity for identity in identities}
     try:
-        for future in as_completed(futures, timeout=max(0.1, float(max_seconds) + 0.5)):
+        # The configured deadline is the whole gate budget, not the worker
+        # budget plus an undocumented half-second grace period.  Candidate
+        # adapters already receive the same absolute deadline.
+        remaining = max(0.01, deadline - time.monotonic())
+        for future in as_completed(futures, timeout=remaining):
             identity = futures[future]
             try:
                 partial = future.result()

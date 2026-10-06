@@ -128,6 +128,7 @@ class BotConfig:
     
     # Bot Behavior
     poll_interval_seconds: int
+    poll_cadence_mode: str
     survivor_rapid_poll_seconds: int
     survivor_rapid_poll_window_seconds: int
     startup_jitter_seconds: float
@@ -211,6 +212,8 @@ class BotConfig:
     route_tournament_shadow_timeout_seconds: float = 4.0
     route_tournament_gate_timeout_seconds: float = 12.0
     route_tournament_speculative_fallback_seconds: float = 0.0
+    route_tournament_shadow_background: bool = False
+    route_tournament_round_route_reuse: bool = False
     bidirectional_pnl_enabled: bool = True
     pnl_polling_mode: str = "bidirectional"
     pnl_legacy_triggers: Optional[bool] = None
@@ -265,6 +268,12 @@ class BotConfig:
             raise ValueError(
                 "ROUTE_TOURNAMENT_SPECULATIVE_FALLBACK_SECONDS must be 0 (disabled) "
                 "or at least 1 second and below ROUTE_TOURNAMENT_GATE_TIMEOUT_SECONDS"
+            )
+        if getattr(self, "poll_cadence_mode", "completion_delay") not in {
+            "completion_delay", "fixed_rate"
+        }:
+            raise ValueError(
+                "POLL_CADENCE_MODE supports completion_delay or fixed_rate"
             )
         quote_timeout = float(getattr(
             self, "bidirectional_pnl_quote_timeout_seconds", 4
@@ -580,6 +589,9 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
         
         # Bot Behavior
         poll_interval_seconds=int(os.getenv("POLL_INTERVAL_SECONDS", "6")),
+        poll_cadence_mode=os.getenv(
+            "POLL_CADENCE_MODE", "completion_delay"
+        ).strip().lower(),
         survivor_rapid_poll_seconds=int(os.getenv(
             "SURVIVOR_RAPID_POLL_SECONDS", "1"
         )),
@@ -616,6 +628,12 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
         route_tournament_speculative_fallback_seconds=float(
             os.getenv("ROUTE_TOURNAMENT_SPECULATIVE_FALLBACK_SECONDS", "0")
         ),
+        route_tournament_shadow_background=os.getenv(
+            "ROUTE_TOURNAMENT_SHADOW_BACKGROUND", "false"
+        ).lower() == "true",
+        route_tournament_round_route_reuse=os.getenv(
+            "ROUTE_TOURNAMENT_ROUND_ROUTE_REUSE", "false"
+        ).lower() == "true",
         bidirectional_pnl_enabled=os.getenv(
             "BIDIRECTIONAL_PNL_ENABLED", "true"
         ).lower() == "true",

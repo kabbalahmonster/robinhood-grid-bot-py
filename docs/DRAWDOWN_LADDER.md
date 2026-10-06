@@ -288,6 +288,13 @@ halt ends the round immediately. No aggregate swap is created, and route, tax,
 slippage, gas-cap, profit, receipt, reconciliation, and cooldown guards are not
 bypassed.
 
+For a guarded latency canary, `POLL_CADENCE_MODE=fixed_rate` removes the extra
+post-round delay, and `ROUTE_TOURNAMENT_ROUND_ROUTE_REUSE=true` can reuse only
+the first same-direction tournament winner's provider/settlement identity for
+later fills in that round. Every fill still receives a fresh exact-amount quote,
+local simulation, and the full execution/receipt/accounting guard stack. See
+`docs/LIGHTNING_ROUNDS.md`.
+
 With the default `false`, sell triggers retain strict execution priority over
 buys. A selected sell failure or success consumes that cycle, and the next
 rapid poll handles another profitable position before committing new capital.

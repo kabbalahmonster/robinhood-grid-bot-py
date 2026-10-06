@@ -832,6 +832,39 @@ def test_shadow_observation_budget_is_four_seconds():
     assert collection.call_args.kwargs["max_seconds"] == 4
 
 
+def test_background_shadow_returns_without_collecting_on_execution_thread():
+    b = bot("shadow")
+    b.config.route_tournament_shadow_background = True
+    b._cycle_active = True
+    b._route_shadow_pending = {"sell": context("sell")}
+    b._route_shadow_job_lock = threading.Lock()
+    b._route_shadow_deferred = {}
+    b._route_shadow_active = False
+
+    with patch.object(b, "_collect_route_shadow_contexts") as collection:
+        b._finish_route_shadow()
+
+    collection.assert_not_called()
+    assert b._route_shadow_deferred["sell"]["direction"] == "sell"
+
+
+def test_background_shadow_coalesces_latest_direction_snapshot():
+    b = bot("shadow")
+    b.config.route_tournament_shadow_background = True
+    b._cycle_active = True
+    b._route_shadow_job_lock = threading.Lock()
+    old = context("sell")
+    old["amount"] = 1
+    latest = context("sell")
+    latest["amount"] = 2
+    b._route_shadow_deferred = {"sell": old}
+    b._route_shadow_pending = {"sell": latest}
+
+    b._finish_route_shadow()
+
+    assert b._route_shadow_deferred["sell"]["amount"] == 2
+
+
 def test_poll_and_observer_failure_do_not_change_operation():
     b = bot("shadow")
     @_with_swap_provider_fallback
@@ -925,6 +958,22 @@ def test_gate_mode_requires_explicit_canary_flag():
     cfg.route_tournament_mode = "gate"
     cfg.route_tournament_canary = False
     with pytest.raises(ValueError, match="ROUTE_TOURNAMENT_CANARY=true"):
+        cfg.validate()
+
+
+def test_invalid_poll_cadence_fails_closed():
+    cfg = BotConfig.__new__(BotConfig)
+    cfg.route_tournament_mode = "off"
+    cfg.route_tournament_providers = ("sushiswap",)
+    cfg.route_tournament_settlements = ("native",)
+    cfg.route_tournament_shadow_timeout_seconds = 4
+    cfg.route_tournament_gate_timeout_seconds = 12
+    cfg.route_tournament_speculative_fallback_seconds = 0
+    cfg.poll_cadence_mode = "overlap"
+    cfg.chain_id = 4663
+    cfg.li_fi_api_key = ""
+
+    with pytest.raises(ValueError, match="POLL_CADENCE_MODE"):
         cfg.validate()
 
 
@@ -1852,6 +1901,115 @@ def test_stale_speculative_quote_is_rejected_for_normal_refresh():
 
     assert b._consume_speculative_fallback("sell", state) is None
     assert b._route_comparisons["sell"]["speculative_fallback"]["outcome"] == "stale_retry_normal"
+
+
+def test_speculative_fallback_not_ready_does_not_wait_a_second_gate_window():
+    b = bot("gate")
+    b.config.route_tournament_gate_timeout_seconds = 12
+    b._route_comparisons = {"sell": {}}
+    state = {
+        "done": threading.Event(), "lock": threading.Lock(), "result": None,
+        "telemetry": {"status": "started"},
+    }
+
+    started = time.monotonic()
+    assert b._consume_speculative_fallback("sell", state) is None
+
+    assert time.monotonic() - started < 0.05
+    telemetry = b._route_comparisons["sell"]["speculative_fallback"]
+    assert telemetry["status"] == "not_ready_at_gate_deadline"
+    assert telemetry["outcome"] == "not_used"
+
+
+def test_same_round_route_identity_skips_second_tournament_but_revalidates():
+    b = bot("gate")
+    b.config.gridless_multi_action_rounds = True
+    b.config.route_tournament_round_route_reuse = True
+    b.config.route_tournament_speculative_fallback_seconds = 0
+    b.config.use_eth_trading = False
+    b.round_count = 7
+    b._round_route_selections = {
+        "sell": {
+            "round": 7,
+            "selection": {"provider": "sushiswap", "settlement": "weth"},
+            "source_tournament_id": "first-fill",
+        }
+    }
+    selected_provider = SimpleNamespace(name="sushiswap")
+    selected_quote = QuoteResult(
+        success=True, sell_amount=222, buy_amount=333, to="router", data="0x01"
+    )
+    b.provider = SimpleNamespace(active=SimpleNamespace(name="uniswap"))
+    b.api_client = b.provider
+    b._route_comparisons = {}
+    b._collect_route_execution_preflight = Mock()
+    b._revalidate_selected_route = Mock(return_value={
+        "provider": selected_provider, "quote": selected_quote,
+        "weth_fallback": True, "gas_estimate": 123,
+    })
+
+    observed, uses_weth = b._actionable_quote_with_weth_fallback(
+        sell_token="token", buy_token="weth", sell_amount=222,
+        direction="sell", sold_cost_wei=111,
+    )
+
+    assert observed is selected_quote
+    assert uses_weth is True
+    b._collect_route_execution_preflight.assert_not_called()
+    b._revalidate_selected_route.assert_called_once_with(
+        {"provider": "sushiswap", "settlement": "weth"}, "sell", 222
+    )
+    comparison = b._route_comparisons["sell"]
+    assert comparison["route_selection_source"] == "same_round_fresh_revalidation"
+    assert comparison["source_tournament_id"] == "first-fill"
+    assert comparison["status"] == "preflight_candidate_selected"
+
+
+def test_round_route_identity_never_crosses_a_round_boundary():
+    b = bot("gate")
+    b.config.gridless_multi_action_rounds = True
+    b.config.route_tournament_round_route_reuse = True
+    b.round_count = 8
+    b._round_route_selections = {
+        "sell": {
+            "round": 7, "selection": {"provider": "sushiswap"},
+            "source_tournament_id": "old",
+        }
+    }
+
+    assert b._round_route_selection("sell") is None
+
+
+def test_failed_first_revalidation_does_not_seed_round_route_reuse():
+    b = bot("gate")
+    b.config.gridless_multi_action_rounds = True
+    b.config.route_tournament_round_route_reuse = True
+    b.config.route_tournament_speculative_fallback_seconds = 0
+    b.config.use_eth_trading = False
+    b.config.weth_address = "weth"
+    b.round_count = 9
+    b._round_route_selections = {}
+    b._swap_slippage_fraction = Mock(return_value=0.01)
+    classic_quote = QuoteResult(success=True, sell_amount=10, buy_amount=20)
+    primary = SimpleNamespace(name="uniswap")
+    router = SimpleNamespace(
+        primary=primary, active=primary,
+        build_swap_transaction=Mock(return_value=classic_quote),
+    )
+    b.provider = router
+    b.api_client = router
+    b._collect_route_execution_preflight = Mock(return_value={
+        "provider": "sushiswap", "settlement": "native"
+    })
+    b._revalidate_selected_route = Mock(return_value=None)
+
+    observed, _uses_weth = b._actionable_quote_with_weth_fallback(
+        sell_token="token", buy_token="native", sell_amount=10,
+        direction="sell", sold_cost_wei=5,
+    )
+
+    assert observed is classic_quote
+    assert b._round_route_selections == {}
 
 
 def test_speculative_fallback_can_be_cancelled_before_request_start():

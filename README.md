@@ -116,6 +116,8 @@ python grid_bot.py
 | `ROUTE_TOURNAMENT_SHADOW_TIMEOUT_SECONDS` | No | 4 | Absolute shadow round deadline, bounded to 1-15 seconds |
 | `ROUTE_TOURNAMENT_GATE_TIMEOUT_SECONDS` | No | 12 | Absolute execution-preflight deadline, bounded to 1-15 seconds |
 | `ROUTE_TOURNAMENT_SPECULATIVE_FALLBACK_SECONDS` | No | 0 | Opt-in gate canary: start an isolated sell-only baseline quote after this delay while preserving the full tournament deadline; `0` disables |
+| `ROUTE_TOURNAMENT_SHADOW_BACKGROUND` | No | false | Run bounded shadow observation after the trading pass on one daemon worker, coalescing queued work to the latest snapshot per direction so execution never waits for telemetry |
+| `ROUTE_TOURNAMENT_ROUND_ROUTE_REUSE` | No | false | With gate + multi-action rounds, tournament once per direction per round and reuse only its provider/settlement identity; every later fill is freshly quoted, simulated, guarded, broadcast, and reconciled |
 | `USE_LI_FI` | No | false | Use LI.FI instead of 0x for swaps |
 | `USE_UNISWAP_API` | No | true | Legacy Uniswap selection used when `SWAP_PROVIDER` is empty |
 | **Token Configuration** ||||
@@ -154,6 +156,7 @@ python grid_bot.py
 | `GAS_PRICE_MULTIPLIER` | No | 1.05 | Safety multiplier applied to current/quoted gas price; values below 1 are clamped |
 | **Bot Behavior** ||||
 | `POLL_INTERVAL_SECONDS` | No | 6 | Price check interval in seconds |
+| `POLL_CADENCE_MODE` | No | completion_delay | `completion_delay` sleeps the full interval after work; `fixed_rate` subtracts round work and starts immediately after an overrun without overlapping rounds |
 | `BIDIRECTIONAL_PNL_ENABLED` | No | true | Alternate exact buy- and sell-side net P&L observations for gridless triggers and dashboard display |
 | `PNL_POLLING_MODE` | No | bidirectional | P&L observations: `legacy`, `buy`, or `sell` polls only that mark; `bidirectional` alternates buy/sell; `trilateral` rotates buy/sell/legacy while retaining one request per cycle |
 | `PNL_LEGACY_TRIGGERS` | No | mode-dependent | Let the gross legacy mark independently wake both buy and sell tournaments. Defaults to true in `legacy` mode and false in every other mode when blank |
@@ -1160,7 +1163,9 @@ Each process logs `Bot runtime provenance` once with its build SHA, tracked-file
 dirty state, source, and process-start UTC. Every
 `PERFORMANCE_TELEMETRY_EVERY_CYCLES` cycles it also logs `Bot cycle performance`
 with total/balance/price/sell/dashboard/buy timing and sanitized aggregate RPC
-method counts. RPC URLs, arguments, wallet data, payloads, and provider response
+method counts, plus cadence mode and measured start-to-start gap. Same-round
+route reuse lifecycle records include the source tournament ID and the fixed
+`same_round_fresh_revalidation` label. RPC URLs, arguments, wallet data, payloads, and provider response
 bodies are never included. Slow, failed, and safety-halted cycles emit
 immediately. These records are observational and do not cache calls, alter
 deadlines, or change trading decisions.
@@ -1734,7 +1739,10 @@ comparison, rather than collecting another tournament.
 
 The experiment captures the pre-operation balance, gas price and economic
 assumptions, then collects fresh quotes **after the existing execution attempt
-finishes**. It never substitutes a provider, quote, approval, calldata or
+finishes**. With `ROUTE_TOURNAMENT_SHADOW_BACKGROUND=true`, collection is
+dispatched after the complete trading pass to one bounded daemon worker; queued
+work coalesces to the latest snapshot per direction and the trading thread never
+waits for it. It never substitutes a provider, quote, approval, calldata or
 transaction. Consequently this is a subsequent-market observation, not a
 claim that the hypothetical winner was available at the broadcast instant.
 The existing same-provider WETH recovery/replay safeguards remain in place.
@@ -1883,10 +1891,27 @@ isolated provider graph after that delay while the tournament retains its full
 deadline. The overlap result is used only when the tournament has no freshly
 revalidated winner, the quote succeeded, its provider remains in the execution
 registry, and it is no more than three seconds old. Otherwise normal baseline
-quoting runs from scratch. The overlap never approves, signs, broadcasts, or
+quoting runs from scratch. If it is not ready when the gate ends, the normal
+baseline quote starts immediately; the bot never waits through a second
+gate-sized window. The overlap never approves, signs, broadcasts, or
 weakens the later slippage, gas-cap, profit-floor, simulation, receipt, or
 settlement guards. Keep it at `0` fleet-wide until a one-bot canary demonstrates
 lower fallback latency without a material increase in provider throttling.
+
+With `GRIDLESS_MULTI_ACTION_ROUNDS=true`, the additional opt-in
+`ROUTE_TOURNAMENT_ROUND_ROUTE_REUSE=true` runs at most one full tournament per
+direction per polling round. Later fills reuse only that round's winning
+provider/settlement identity and must freshly quote and locally simulate their
+exact amount before passing every ordinary economic, gas, broadcast, receipt,
+balance, and position guard. The hint cannot cross a round or restart, and a
+failed revalidation discards it before the fresh baseline fallback path.
+
+`POLL_CADENCE_MODE=fixed_rate` makes `POLL_INTERVAL_SECONDS` start-to-start by
+subtracting completed round work from the sleep. An overrun starts the next
+round immediately but never overlaps rounds or wallet/nonce activity. The
+default `completion_delay` preserves the prior `round work + interval` cadence.
+See [Lightning managed rounds](docs/LIGHTNING_ROUNDS.md) for activation,
+acceptance, and rollback.
 
 For a ROBINVAULT canary, record the current revision/config and baseline
 actionable request counts, latency, gas and route/fallback logs. Enable only

@@ -832,6 +832,11 @@ class GridBot:
         self._pnl_near_focus_poll_due = True
         self._last_pnl_focus_status = None
         self._survivor_rapid_poll_until = 0.0
+        self._route_shadow_job_lock = threading.Lock()
+        self._route_shadow_deferred = {}
+        self._route_shadow_active = False
+        self._cycle_active = False
+        self._round_route_selections = {}
         self.profit_tracker = ProfitTracker()
         self.dashboard_trades_file = "data/dashboard_trades.json"
         self.dashboard_trades = self._load_dashboard_trades()
@@ -1566,6 +1571,12 @@ class GridBot:
             if previous and previous["amount"] == int(amount):
                 return
             pending[direction] = snapshot(self, direction, amount, sold_cost_wei)
+            sequence = int(getattr(self, "_route_shadow_sequence", 0)) + 1
+            self._route_shadow_sequence = sequence
+            latest = getattr(self, "_route_shadow_latest_sequence", {})
+            latest[direction] = sequence
+            self._route_shadow_latest_sequence = latest
+            pending[direction]["shadow_sequence"] = sequence
             pending[direction]["tournament_id"] = uuid.uuid4().hex
             pending[direction]["started_at"] = datetime.now().astimezone().isoformat()
             self._route_shadow_pending = pending
@@ -1579,6 +1590,25 @@ class GridBot:
     def _finish_route_shadow(self):
         pending = getattr(self, "_route_shadow_pending", {})
         self._route_shadow_pending = {}
+        if (pending and getattr(
+                self.config, "route_tournament_shadow_background", False)):
+            lock = getattr(self, "_route_shadow_job_lock", None)
+            if lock is None:
+                lock = threading.Lock()
+                self._route_shadow_job_lock = lock
+            with lock:
+                # One latest snapshot per direction bounds observer work when
+                # several fills occur in one round.
+                deferred = getattr(self, "_route_shadow_deferred", {})
+                deferred.update(pending)
+                self._route_shadow_deferred = deferred
+            if not getattr(self, "_cycle_active", False):
+                self._dispatch_route_shadow_background()
+            return
+        self._collect_route_shadow_contexts(pending)
+
+    def _collect_route_shadow_contexts(self, pending):
+        """Collect already-snapshotted shadow jobs without execution authority."""
         for direction, context in pending.items():
             try:
                 from route_tournament import collect
@@ -1626,9 +1656,47 @@ class GridBot:
                               "selected_hypothetical_winner": None, "runner_up_delta": None}
                 logger.warning("Route shadow observation failed; execution unchanged")
             comparison["updated_at"] = datetime.now().astimezone().isoformat()
+            sequence = context.get("shadow_sequence")
+            if (sequence is not None and sequence != getattr(
+                    self, "_route_shadow_latest_sequence", {}
+            ).get(direction)):
+                logger.info(
+                    "Discarding stale route shadow result direction=%s", direction
+                )
+                continue
             comparisons = getattr(self, "_route_comparisons", {})
             comparisons[direction] = comparison
             self._route_comparisons = comparisons
+
+    def _dispatch_route_shadow_background(self):
+        """Start at most one daemon observer; execution never waits for it."""
+        if not getattr(
+                self.config, "route_tournament_shadow_background", False):
+            return
+        lock = getattr(self, "_route_shadow_job_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._route_shadow_job_lock = lock
+        with lock:
+            if getattr(self, "_route_shadow_active", False):
+                return
+            if not getattr(self, "_route_shadow_deferred", {}):
+                return
+            self._route_shadow_active = True
+
+        def worker():
+            while True:
+                with lock:
+                    jobs = dict(getattr(self, "_route_shadow_deferred", {}))
+                    self._route_shadow_deferred = {}
+                    if not jobs:
+                        self._route_shadow_active = False
+                        return
+                self._collect_route_shadow_contexts(jobs)
+
+        threading.Thread(
+            target=worker, name="route-shadow-observer", daemon=True,
+        ).start()
 
     def _attempt_with_route_comparison(self, direction):
         attempt = getattr(self, "_" + direction + "_attempt", None)
@@ -1682,6 +1750,12 @@ class GridBot:
         reason = comparison.get("terminal_reason")
         receipt_status = comparison.get("receipt_status")
         lifecycle_suffix = f" tx_hash={tx_hash}" if tx_hash else ""
+        route_source = comparison.get("route_selection_source")
+        if route_source == "same_round_fresh_revalidation":
+            lifecycle_suffix += " route_selection_source=same_round_fresh_revalidation"
+            source_id = str(comparison.get("source_tournament_id") or "")
+            if re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", source_id):
+                lifecycle_suffix += f" source_tournament_id={source_id}"
         lifecycle_suffix += f" reason={reason}" if reason else ""
         lifecycle_suffix += (
             f" receipt_status={receipt_status}"
@@ -1935,12 +2009,13 @@ class GridBot:
     def _consume_speculative_fallback(self, direction, state):
         if not state:
             return None
-        wait_seconds = float(getattr(
-            self.config, "route_tournament_gate_timeout_seconds", 12
-        ))
-        if not state["done"].wait(max(0.1, wait_seconds)):
+        # The fallback had the entire tournament window to finish. Waiting for
+        # another full gate timeout defeats the overlap and can double worst-
+        # case latency. If it is not ready now, immediately obtain the normal
+        # fresh baseline quote below.
+        if not state["done"].is_set():
             with state["lock"]:
-                state["telemetry"]["status"] = "wait_timeout"
+                state["telemetry"]["status"] = "not_ready_at_gate_deadline"
             self._record_speculative_fallback(direction, state, outcome="not_used")
             return None
         with state["lock"]:
@@ -1988,10 +2063,25 @@ class GridBot:
                 sell_token=sell_token, buy_token=buy_token,
                 sell_amount=sell_amount, direction=direction,
             )
-            selection = self._collect_route_execution_preflight(
-                direction, sell_amount, sold_cost_wei,
-            )
+            cached = self._round_route_selection(direction)
+            if cached is None:
+                selection = self._collect_route_execution_preflight(
+                    direction, sell_amount, sold_cost_wei,
+                )
+                if selection is not None:
+                    self._remember_round_route_selection(direction, selection)
+            else:
+                selection = dict(cached["selection"])
+                self._publish_tournament_transition(
+                    direction, "preflight_candidate_selected",
+                    new_tournament=True,
+                    route_selection_source="same_round_fresh_revalidation",
+                    source_tournament_id=cached["source_tournament_id"],
+                    selected_execution_candidate=dict(selection),
+                )
             validated = self._revalidate_selected_route(selection, direction, sell_amount) if selection else None
+            if selection is not None and validated is None:
+                self._round_route_selections.pop(direction, None)
             if validated is not None:
                 if speculative:
                     speculative["cancel"].set()
@@ -2049,6 +2139,38 @@ class GridBot:
             sell_amount=sell_amount, direction=direction,
             recovery_provider=getattr(self, "provider", None),
         )
+
+    def _round_route_reuse_enabled(self):
+        return bool(
+            getattr(self.config, "route_tournament_mode", "off") == "gate"
+            and getattr(self.config, "route_tournament_canary", False)
+            and getattr(self.config, "gridless_multi_action_rounds", False)
+            and getattr(
+                self.config, "route_tournament_round_route_reuse", False
+            )
+        )
+
+    def _round_route_selection(self, direction):
+        if not self._round_route_reuse_enabled():
+            return None
+        cached = getattr(self, "_round_route_selections", {}).get(direction)
+        if not isinstance(cached, dict):
+            return None
+        if cached.get("round") != getattr(self, "round_count", None):
+            return None
+        return cached
+
+    def _remember_round_route_selection(self, direction, selection):
+        if not self._round_route_reuse_enabled():
+            return
+        comparison = getattr(self, "_route_comparisons", {}).get(direction) or {}
+        cached = getattr(self, "_round_route_selections", {})
+        cached[direction] = {
+            "round": getattr(self, "round_count", None),
+            "selection": dict(selection),
+            "source_tournament_id": comparison.get("tournament_id", "unknown"),
+        }
+        self._round_route_selections = cached
 
     def _project_weth_operation_gas(self, direction, amount_wei):
         """Return (transaction, conservative projected gas) for an exact wrap/unwrap."""
@@ -3881,6 +4003,14 @@ class GridBot:
                 int(getattr(self.config, "survivor_rapid_poll_seconds", 1)),
             )
         return normal
+
+    def _poll_sleep_after_cycle(self, cycle_started, now=None):
+        """Return completion-delay legacy cadence or bounded fixed-rate delay."""
+        interval = float(self._next_main_loop_delay(now=now))
+        if getattr(self.config, "poll_cadence_mode", "completion_delay") != "fixed_rate":
+            return interval
+        current = time.monotonic() if now is None else float(now)
+        return max(0.0, interval - max(0.0, current - float(cycle_started)))
 
     def _refresh_bidirectional_pnl(self, positions, trade_balance_eth, now=None):
         """Refresh one side per cycle, adapting cadence near active triggers."""
@@ -6454,14 +6584,20 @@ class GridBot:
             ) or "none"
         logger.info(
             "Bot cycle performance build_sha=%s build_dirty=%s process_started_utc=%s "
-            "cycle=%s outcome=%s total_ms=%.1f balances_ms=%.1f price_ms=%.1f "
+            "cycle=%s outcome=%s cadence_mode=%s start_gap_ms=%s "
+            "total_ms=%.1f balances_ms=%.1f price_ms=%.1f "
             "sells_ms=%.1f dashboard_ms=%.1f buys_ms=%.1f "
             "rpc_logical_calls=%s rpc_attempts=%s rpc_failures=%s rpc_total_ms=%s "
             "rpc_method_stats=%s",
             getattr(self, "build_sha", "unknown"),
             getattr(self, "build_dirty", "unknown"),
             getattr(self, "process_started_utc", "unknown"),
-            getattr(self, "round_count", 0), outcome, total_ms,
+            getattr(self, "round_count", 0), outcome,
+            getattr(self.config, "poll_cadence_mode", "completion_delay"),
+            (f'{self._main_loop_start_gap_ms:.1f}'
+             if getattr(self, "_main_loop_start_gap_ms", None) is not None
+             else "unavailable"),
+            total_ms,
             phases.get("balances", 0.0), phases.get("price", 0.0),
             phases.get("sells", 0.0), phases.get("dashboard", 0.0),
             phases.get("buys", 0.0),
@@ -6478,15 +6614,22 @@ class GridBot:
         self._cycle_phase_ms = {}
         rpc_before = getattr(self.wallet, "rpc_telemetry_snapshot", lambda: None)()
         outcome = "completed"
+        self._cycle_active = True
         try:
             return self._run_cycle_body()
         except Exception:
             outcome = "error"
             raise
         finally:
+            self._cycle_active = False
             if getattr(self, "_safety_halted", False):
                 outcome = "safety_halted"
-            self._log_cycle_performance(started, rpc_before, outcome)
+            try:
+                # Snapshot foreground work before the observer can contribute
+                # concurrent RPC calls to this cycle's telemetry.
+                self._log_cycle_performance(started, rpc_before, outcome)
+            finally:
+                self._dispatch_route_shadow_background()
 
     def _attempt_auto_reconcile_unresolved_broadcast(self):
         """Fail-closed recovery for a receipt-proven sell position deficit."""
@@ -6591,6 +6734,7 @@ class GridBot:
             self._safety_halted = True
             return
         self.round_count += 1
+        self._round_route_selections = {}
         self._sell_priority_this_cycle = False
         self._allow_buy_after_sell_this_cycle = False
         self._sell_round_attempted = 0
@@ -7168,11 +7312,18 @@ class GridBot:
         logger.info(f"Starting main loop (polling every {poll_interval}s)...")
         while self.running:
             try:
+                cycle_started = time.monotonic()
+                previous_start = getattr(self, "_main_loop_last_started", None)
+                self._main_loop_start_gap_ms = (
+                    max(0.0, (cycle_started - previous_start) * 1000)
+                    if previous_start is not None else None
+                )
+                self._main_loop_last_started = cycle_started
                 if getattr(self, "_safety_halted", False):
                     self._attempt_auto_reconcile_unresolved_broadcast()
                 if not getattr(self, "_safety_halted", False):
                     self.run_cycle()
-                time.sleep(self._next_main_loop_delay())
+                time.sleep(self._poll_sleep_after_cycle(cycle_started))
             except KeyboardInterrupt:
                 logger.info("Stopping bot...")
                 self.running = False

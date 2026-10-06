@@ -55,7 +55,11 @@ class MultiActionRoundTests(unittest.TestCase):
             "UNISWAP_API_KEY": "test-key",
         }
         with patch.dict(os.environ, base, clear=True):
-            self.assertFalse(load_config().gridless_multi_action_rounds)
+            config = load_config()
+            self.assertFalse(config.gridless_multi_action_rounds)
+            self.assertEqual(config.poll_cadence_mode, "completion_delay")
+            self.assertFalse(config.route_tournament_shadow_background)
+            self.assertFalse(config.route_tournament_round_route_reuse)
         with patch.dict(
             os.environ,
             {**base, "GRIDLESS_MULTI_ACTION_ROUNDS": "true"},
