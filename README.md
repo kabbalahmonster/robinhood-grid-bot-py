@@ -422,6 +422,7 @@ option and safety invariant.
 | `fleet-discover` | Print deterministic membership for review | No |
 | `fleet-doctor` | Check config, Git, RPC, contracts, provider route, and dashboard | No |
 | `fleet-inventory` | Read addresses, reserves, managed balances, positions, and audit ages | No |
+| `fleet-git-status` | Quickly show deployed branch/commit/upstream/ahead/behind/tracked edits for one, selected, or all bots | No |
 | `balance-report` | Read ETH, USDG, and managed-token balances with per-bot and fleet totals | No |
 | `fleet-watch` | Phone-friendly live view using local bot status snapshots | No |
 | `strategy-model` | Generate comparative gridless buy/sell coverage charts, CSV, and JSON | Report files only |

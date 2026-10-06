@@ -52,6 +52,7 @@ returns.
 cd ~/bot-farm/fleet-command/robinhood-grid-bot-py
 ops/fleet/update-this-checkout
 ops/fleet/update-fleet
+ops/fleet/fleet-git-status
 ops/fleet/fleet-doctor
 ```
 
@@ -59,6 +60,7 @@ For one canary, use the guarded single-bot updater. It conditionally restarts
 only an already-running bot:
 
 ```bash
+fleet-git-status --only ROBINVAULT
 update-bot ROBINVAULT --list-branches
 update-bot ROBINVAULT --branch nullfox/umbra-provider-integration --check
 update-bot ROBINVAULT --branch nullfox/umbra-provider-integration

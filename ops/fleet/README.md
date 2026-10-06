@@ -117,7 +117,8 @@ sudo apt install tmux git python3 python3-venv
      ops/fleet/position-capacity.py \
      ops/fleet/backup-private-keys ops/fleet/fleet-discover \
      ops/fleet/liquidate-assets ops/fleet/sell-moonbags ops/fleet/fleet-doctor \
-     ops/fleet/fleet-inventory ops/fleet/balance-report ops/fleet/balance-report.py \
+     ops/fleet/fleet-inventory ops/fleet/fleet-git-status \
+     ops/fleet/balance-report ops/fleet/balance-report.py \
      ops/fleet/fleet-audit \
      ops/fleet/dashboard-remove ops/fleet/initialize-bots \
      ops/fleet/reconcile-position-balances ops/fleet/reconcile-position-balances.py \
@@ -163,6 +164,7 @@ sudo apt install tmux git python3 python3-venv
    ln -sf "$PWD/ops/fleet/sell-moonbags" "$HOME/bin/sell-moonbags"
    ln -sf "$PWD/ops/fleet/fleet-doctor" "$HOME/bin/fleet-doctor"
    ln -sf "$PWD/ops/fleet/fleet-inventory" "$HOME/bin/fleet-inventory"
+   ln -sf "$PWD/ops/fleet/fleet-git-status" "$HOME/bin/fleet-git-status"
    ln -sf "$PWD/ops/fleet/balance-report" "$HOME/bin/balance-report"
    ln -sf "$PWD/ops/fleet/fleet-audit" "$HOME/bin/fleet-audit"
    ln -sf "$PWD/ops/fleet/dashboard-remove" "$HOME/bin/dashboard-remove"
@@ -505,6 +507,7 @@ unless their section explicitly says otherwise.
 | `fleet-discover` | Generate a guarded fleet config from checkout discovery | Prints only |
 | `fleet-doctor` | Validate Git, config, RPC, contracts, providers, and dashboard | No |
 | `fleet-inventory` | Read balances, positions, reserves, Git, and audit timestamps | No |
+| `fleet-git-status` | Show deployed branch, commit, upstream divergence, and tracked edits for selected/all bots | No |
 | `balance-report` | Read ETH, USDG, and managed-token balances with per-bot and fleet totals | No |
 | `fleet-watch` | Phone-friendly live view from local status snapshots | No |
 | `strategy-model` | Compare gridless trigger geometry and generate HTML/CSV/JSON reports | Writes report files only |
@@ -926,7 +929,8 @@ the fleet first, then `--exclude` removes names. Unknown names, duplicate bot
 names, empty list items, and a selection containing no bots are errors. Every
 command prints the final names before doing work. Selectors are supported by
 `start-fleet`, `update-fleet`, `update-variable`, both treasury tools,
-`liquidate-assets`, `fleet-doctor`, `fleet-inventory`, and `fleet-audit`.
+`liquidate-assets`, `fleet-doctor`, `fleet-inventory`, `fleet-git-status`, and
+`fleet-audit`.
 `balance-report` supports the same selectors.
 
 `stop-fleet` and `restart-fleet` remain whole-session operations because tmux
@@ -937,6 +941,18 @@ This prevents a partial maintenance command from unexpectedly recycling every
 bot.
 
 ## Read-only health checks and inventory
+
+For the fast Git-only view, without RPC, provider, balance, or contract calls:
+
+```bash
+ops/fleet/fleet-git-status --only v4
+ops/fleet/fleet-git-status
+```
+
+It reads local tracking refs and intentionally ignores untracked runtime files
+such as `.env`, logs, and `data/`. `ahead`/`behind` therefore describe the last
+fetch performed in that checkout; use `update-bot NAME --list-branches` when a
+fresh remote fetch is required.
 
 Run the doctor before starting a new fleet or moving funds:
 

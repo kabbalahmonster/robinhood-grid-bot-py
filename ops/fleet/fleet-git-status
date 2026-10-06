@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+SCRIPT_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)"
+source "$SCRIPT_DIR/fleet-common.sh"
+
+usage() { cat <<'EOF'
+Usage: fleet-git-status [--only NAMES] [--exclude NAMES] [--config PATH]
+Show each selected bot checkout's deployed branch, commit, upstream divergence,
+and tracked-file status. Read-only; does not fetch or inspect untracked runtime files.
+EOF
+}
+
+config_path=""; only=""; exclude=""
+while (($#)); do
+  case "$1" in
+    --config|--only|--exclude)
+      (($# >= 2)) || fleet_die "$1 requires a value"
+      case "$1" in
+        --config) config_path="$2" ;;
+        --only) only="$2" ;;
+        --exclude) exclude="$2" ;;
+      esac
+      shift 2
+      ;;
+    -h|--help) usage; exit 0 ;;
+    *) fleet_die "Unknown option: $1" ;;
+  esac
+done
+
+fleet_load_config "$config_path"
+fleet_apply_selection "$only" "$exclude"
+fleet_sort_targets_by_name
+fleet_validate_bots >&2
+
+failures=0
+for bot_dir in "${FLEET_BOT_DIRS[@]}"; do
+  name="$(fleet_bot_name "$bot_dir")"
+  if ! git -C "$bot_dir" rev-parse --git-dir >/dev/null 2>&1; then
+    printf '%s\tbranch=not-a-repository\tcommit=?\tupstream=none\tahead=?\tbehind=?\ttracked=unknown\n' "$name"
+    failures=$((failures + 1))
+    continue
+  fi
+
+  branch="$(git -C "$bot_dir" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+  commit="$(git -C "$bot_dir" rev-parse --short HEAD 2>/dev/null || printf '?')"
+  upstream="$(git -C "$bot_dir" rev-parse --abbrev-ref '@{upstream}' 2>/dev/null || true)"
+  dirty="no"
+  [[ -z "$(git -C "$bot_dir" status --porcelain --untracked-files=no)" ]] || dirty="yes"
+  ahead="?"; behind="?"
+  if [[ -n "$upstream" ]]; then
+    counts="$(git -C "$bot_dir" rev-list --left-right --count "HEAD...$upstream" 2>/dev/null || true)"
+    if [[ "$counts" =~ ^([0-9]+)[[:space:]]+([0-9]+)$ ]]; then
+      ahead="${BASH_REMATCH[1]}"
+      behind="${BASH_REMATCH[2]}"
+    fi
+  fi
+
+  printf '%s\tbranch=%s\tcommit=%s\tupstream=%s\tahead=%s\tbehind=%s\ttracked_dirty=%s\n' \
+    "$name" "${branch:-detached}" "$commit" "${upstream:-none}" \
+    "$ahead" "$behind" "$dirty"
+done
+
+((failures == 0))
