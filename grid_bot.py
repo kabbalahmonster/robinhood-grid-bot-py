@@ -3809,11 +3809,46 @@ class GridBot:
 
     def _sell_has_cycle_priority(self):
         """Return true while an actionable exit must suppress new entries."""
+        if (getattr(getattr(self, "config", None),
+                    "gridless_multi_action_rounds", False)
+                and getattr(self, "_allow_buy_after_sell_this_cycle", False)):
+            return False
         latches = getattr(self, "_pnl_trigger_latches", {})
         return bool(
             getattr(self, "_sell_priority_this_cycle", False)
             or (isinstance(latches, dict) and latches.get("sell"))
         )
+
+    def _check_buys_for_round(self, price, position_pnls=None):
+        """Run one or more guarded buys without repeating market observation."""
+        multi_action = bool(getattr(
+            self.config, "gridless_multi_action_rounds", False
+        )) and bool(getattr(self.config, "use_gridless", False))
+        max_attempts = (
+            max(1, int(self.config.max_active_positions)) if multi_action else 1
+        )
+        completed = 0
+        for _ in range(max_attempts):
+            if (getattr(self, "_safety_halted", False)
+                    or self.wallet.has_unresolved_broadcast() is True):
+                break
+            before_attempt = self.session_buys
+            self.check_buys(price, position_pnls)
+            if self.session_buys == before_attempt:
+                break
+            completed += self.session_buys - before_attempt
+        return completed
+
+    def _run_buy_phase(self, price, position_pnls=None):
+        """Run the round's buy lane after honoring unresolved sell priority."""
+        before = self.session_buys
+        if self._sell_has_cycle_priority():
+            logger.info("Buy deferred: active sell trigger has execution priority")
+        else:
+            self._check_buys_for_round(price, position_pnls)
+        if self.session_buys > before:
+            self._clear_pnl_trigger_latch("buy", "successful execution")
+        return self.session_buys - before
 
     def _arm_survivor_rapid_polling(self):
         """Temporarily favor fast sell-side cycles after a confirmed Survivor exit."""
@@ -4652,13 +4687,9 @@ class GridBot:
             self._mark_tournament_transaction_failure("buy", result)
             logger.error(f"❌ Gridless buy failed: {result.error}")
     
-    @_with_tournament_terminal("sell")
-    @_with_swap_provider_fallback
     def _check_sells_gridless(self, price, position_pnls=None):
-        """Gridless sell logic - sell when P&L >= threshold or stoploss triggered."""
-        from gridless import (load_positions, find_sell_candidate, calculate_pnl,
-                              remove_position, get_buy_price,
-                              trigger_pnl_candidates)
+        """Snapshot eligible exits, then attempt one or every selected position."""
+        from gridless import load_positions, calculate_pnl, trigger_pnl_candidates
         
         # Load gridless positions
         gridless_positions = load_positions()
@@ -4672,9 +4703,7 @@ class GridBot:
         stoploss_enabled = getattr(self.config, 'gridless_stoploss_enabled', False)
         stoploss_threshold = getattr(self.config, 'gridless_stoploss_threshold', -25.0)
         
-        best_candidate = None
-        best_priority = 999
-        best_pnl = float('-inf')
+        sell_candidates = {}
         
         for pos_id, pos in gridless_positions.items():
             observed = (position_pnls or {}).get(str(pos_id), {})
@@ -4692,27 +4721,92 @@ class GridBot:
             for source, pnl in candidates:
                 # Check stoploss first (highest priority)
                 if stoploss_enabled and pnl <= stoploss_threshold:
-                    if best_priority > 0 or pnl > best_pnl:
-                        best_candidate = (
-                            pos_id, pos, f"STOPLOSS ({source}): {pnl:.1f}%"
+                    candidate = sell_candidates.get(str(pos_id))
+                    if candidate is None or candidate[0] > 0 or pnl > candidate[1]:
+                        sell_candidates[str(pos_id)] = (
+                            0, pnl, pos, f"STOPLOSS ({source}): {pnl:.1f}%"
                         )
-                        best_priority = 0
-                        best_pnl = pnl
                 # Check profit target
                 elif pnl >= sell_threshold:
-                    if best_priority > 1 or pnl > best_pnl:
-                        best_candidate = (
-                            pos_id, pos, f"PROFIT ({source}): {pnl:.1f}%"
+                    candidate = sell_candidates.get(str(pos_id))
+                    if candidate is None or (candidate[0] == 1 and pnl > candidate[1]):
+                        sell_candidates[str(pos_id)] = (
+                            1, pnl, pos, f"PROFIT ({source}): {pnl:.1f}%"
                         )
-                        best_priority = 1
-                        best_pnl = pnl
-        
-        if best_candidate is None:
+
+        if not sell_candidates:
             return
-        
-        pos_id, pos, reason = best_candidate
-        # Reserve this cycle for the exit before route preparation. Quote or
-        # tournament failures must not fall through into a simultaneous buy.
+
+        ordered = sorted(
+            (
+                (priority, pnl, pos_id, pos, reason)
+                for pos_id, (priority, pnl, pos, reason)
+                in sell_candidates.items()
+            ),
+            key=lambda item: (item[0], -item[1], item[2]),
+        )
+        multi_action = bool(getattr(
+            self.config, "gridless_multi_action_rounds", False
+        ))
+        selected = ordered if multi_action else ordered[:1]
+        self._sell_priority_this_cycle = True
+        if multi_action and len(selected) > 1:
+            logger.info(
+                "Multi-action sell snapshot: %d independently eligible positions",
+                len(selected),
+            )
+
+        successful = 0
+        attempted = 0
+        for _priority, pnl, pos_id, snapshot, reason in selected:
+            if (getattr(self, "_safety_halted", False)
+                    or self.wallet.has_unresolved_broadcast() is True):
+                break
+            attempted += 1
+            sells_before = int(getattr(self, "session_sells", 0))
+            self._attempt_gridless_sell_candidate(
+                pos_id, snapshot, price, reason, pnl
+            )
+            sells_after = int(getattr(self, "session_sells", 0))
+            if sells_after > sells_before:
+                successful += sells_after - sells_before
+
+        self._sell_round_attempted = attempted
+        self._sell_round_succeeded = successful
+        if multi_action and successful and attempted == len(selected):
+            # All candidates from the authoritative opening snapshot have had
+            # their own guarded attempt. A buy may now use the freshly
+            # persisted position and wallet state in this same outer round.
+            self._allow_buy_after_sell_this_cycle = True
+
+    @_with_tournament_terminal("sell")
+    @_with_swap_provider_fallback
+    def _attempt_gridless_sell_candidate(
+            self, pos_id, snapshot, price, reason, pnl_at_check):
+        """Attempt one snapshotted position with per-transaction retry scope."""
+        from gridless import load_positions, get_buy_price
+
+        live_positions = load_positions()
+        pos = live_positions.get(str(pos_id))
+        if pos is None:
+            logger.info(
+                "Sell candidate #%s skipped: position already closed", pos_id
+            )
+            return
+        identity_fields = (
+            "balance", "cost_wei", "cost",
+            "ladder_id", "ladder_level_index", "ladder_principal_wei",
+        )
+        if any(pos.get(field) != snapshot.get(field) for field in identity_fields):
+            logger.warning(
+                "Sell candidate #%s skipped: durable position changed after round snapshot",
+                pos_id,
+            )
+            return
+
+        # Mark that this round observed an actionable exit. Legacy mode keeps
+        # strict sell priority; multi-action mode releases the buy lane only
+        # after the complete snapshotted sell pass records a confirmation.
         self._sell_priority_this_cycle = True
         
         # Verify with individual position quote before executing
@@ -4853,7 +4947,6 @@ class GridBot:
         
         if projected_net_profit_eth < min_profit_eth:
             buy_price = get_buy_price(pos, self.token_decimals)
-            pnl_at_check = best_pnl
             logger.info(
                 "⏸️  Position #%s at %.1f%% P&L but projected net profit "
                 "(%.6f after %.6f gas) < min (%.6f) - skipping",
@@ -6499,6 +6592,9 @@ class GridBot:
             return
         self.round_count += 1
         self._sell_priority_this_cycle = False
+        self._allow_buy_after_sell_this_cycle = False
+        self._sell_round_attempted = 0
+        self._sell_round_succeeded = 0
         # Ephemeral by design: a sell attempt must be re-established by this
         # round's quote check or it disappears from the next dashboard report.
         self._sell_attempt = None
@@ -6799,6 +6895,21 @@ class GridBot:
             self._safety_halted = True
             return
 
+        multi_action_round = bool(
+            use_gridless
+            and getattr(self.config, "gridless_multi_action_rounds", False)
+        )
+        buys_before_execution = self.session_buys
+        if multi_action_round:
+            # Execution stays contiguous during a volatile move. Dashboard I/O
+            # runs only after the complete sell/buy pass.
+            self._expire_reported_buy_state()
+            phase_started = time.perf_counter()
+            self._run_buy_phase(price, position_pnls)
+            self._cycle_phase_ms["buys"] = (
+                time.perf_counter() - phase_started
+            ) * 1000
+
         # Report to dashboard if configured (runs regardless of compact mode)
         phase_started = time.perf_counter()
         if self._reporter:
@@ -6809,6 +6920,22 @@ class GridBot:
                 if use_gridless:
                     from gridless import load_positions, get_capacity_warning
                     gpos = load_positions()
+                    active = len(gpos)
+                    if (self.session_sells > sells_before_check
+                            or self.session_buys > buys_before_execution):
+                        token_bal, token_raw = self.wallet.get_token_balance(
+                            self.config.token_address
+                        )
+                        position_balance_raw = sum(
+                            int(position.get("balance", 0) or 0)
+                            for position in gpos.values()
+                        )
+                        position_balance_total = (
+                            position_balance_raw / self.token_unit
+                        )
+                        moonbag_balance = (
+                            int(token_raw) - position_balance_raw
+                        ) / self.token_unit
                     if self._drawdown_ladder_enabled():
                         from drawdown_ladder import eligible_level
 
@@ -6816,7 +6943,8 @@ class GridBot:
                             eth_bal if getattr(self.config, "use_eth_trading", False)
                             else weth_bal
                         )
-                        if self.session_sells > sells_before_check:
+                        if (self.session_sells > sells_before_check
+                                or self.session_buys > buys_before_execution):
                             if getattr(self.config, "use_eth_trading", False):
                                 live_trade_balance = self.wallet.get_eth_balance()
                                 eth_bal = live_trade_balance
@@ -7000,26 +7128,19 @@ class GridBot:
         # enough to report it above, then reset it immediately before the next
         # check. Clearing it at cycle start made the warning exist only between
         # reports, so DoomDash could never receive it.
-        self._expire_reported_buy_state()
-        # Buys run after the dashboard report, so their tournament first becomes
-        # visible in the following round's report. Expire it immediately after
-        # that report in both observational and execution-gate modes; a fresh
-        # buy check below will replace it only if another tournament actually
-        # occurs. Leaving gate comparisons here made completed buy cards repeat
-        # forever.
-        # Then check buys, unless an actionable sell claimed the cycle. A sell
-        # remains authoritative after route failure/timeout and after success;
-        # the next rapid Survivor poll gets first chance to sell another
-        # position before any new capital is committed.
-        phase_started = time.perf_counter()
-        buys_before_check = self.session_buys
-        if self._sell_has_cycle_priority():
-            logger.info("Buy deferred: active sell trigger has execution priority")
+        if multi_action_round:
+            # The just-reported snapshot already contains this round's buy
+            # attempt. Start the next round without stale attempt telemetry.
+            self._expire_reported_buy_state()
         else:
-            self.check_buys(price, position_pnls)
-        if self.session_buys > buys_before_check:
-            self._clear_pnl_trigger_latch("buy", "successful execution")
-        self._cycle_phase_ms["buys"] = (time.perf_counter() - phase_started) * 1000
+            self._expire_reported_buy_state()
+            # Legacy ordering and one-action behavior remain unchanged: report
+            # the sell pass first, then evaluate at most one buy.
+            phase_started = time.perf_counter()
+            self._run_buy_phase(price, position_pnls)
+            self._cycle_phase_ms["buys"] = (
+                time.perf_counter() - phase_started
+            ) * 1000
 
     def _round_summary_mode(self):
         """Choose compact, verbose-debug, or quiet per-round console output."""

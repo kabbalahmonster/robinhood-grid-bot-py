@@ -226,15 +226,19 @@ rungs, advances eligible resets, and selects the highest crossed ready rung.
 Rungs are thresholds, not limit orders: a ready rung is eligible whenever the
 observed price is equal to or below its trigger. A gap through several rungs
 buys the highest missed funded rung first, then can buy the next crossed rung
-on later polls, subject to capacity, cooldown, liquid, and every execution
-guard. It does not wait for an exact-price match.
+on later polls by default. With `GRIDLESS_MULTI_ACTION_ROUNDS=true`, the bot
+reconciles the confirmed state after each fill and immediately attempts the
+next still-eligible rung using the same opening market observation. It stops
+at the first non-fill, cooldown, capacity limit, safety halt, or unresolved
+broadcast. It does not wait for an exact-price match.
 
 In Survivor, the current highest purchase point is also checked against 50% of
 the configured sell trigger. If crossed, the next buy uses a funded ready rung
 for principal accounting but executes at the live leading edge; confirmation
 then moves the geometry to the measured new purchase point. Multiple leading
-positions may accumulate while capacity remains. At most one buy is attempted
-per poll, and the normal buy cooldown still applies.
+positions may accumulate while capacity remains. The default attempts at most
+one buy per poll. Multi-action rounds may complete several independently
+guarded buys, while the normal buy cooldown still applies after every fill.
 
 A rung becomes `open` only after:
 
@@ -268,16 +272,25 @@ reinvestment into the just-sold position.
 After a confirmed Survivor sell, the main loop and sell-side P&L observation
 temporarily accelerate to `SURVIVOR_RAPID_POLL_SECONDS` for
 `SURVIVOR_RAPID_POLL_WINDOW_SECONDS`. Each confirmation extends the window.
-This still executes at most one independently validated sell per cycle; it does
-not batch transactions or bypass route, gas, profit, receipt, or unresolved-
-broadcast safeguards. Set the window to `0` to disable acceleration.
+By default this executes at most one independently validated sell per cycle.
+Set the window to `0` to disable acceleration.
 
-Sell triggers have strict execution priority over buys. While an authorized
-sell trigger is latched, its observation lane is refreshed ahead of any
-simultaneous buy lane. If the exit route times out, is rejected, or otherwise
-cannot execute, that cycle does not fall through to a buy tournament. A
-successful sell also consumes the cycle so the next rapid poll can attempt the
-next profitable position before Survivor commits capital to a new entry.
+`GRIDLESS_MULTI_ACTION_ROUNDS=true` changes only round orchestration. The bot
+freezes the opening sell-eligibility snapshot, sorts its candidates
+deterministically, and gives every candidate a separate exact-input quote and
+transaction attempt. Before each attempt it reloads the position and requires
+the snapshotted balance, cost basis, and ladder ownership to still match.
+Provider fallback is scoped to that one transaction, so a later failure cannot
+replay an earlier confirmed sell. After every candidate has been handled, at
+least one confirmed sell permits the buy lane to run in the same round against
+fresh wallet, position, and Survivor state. An unresolved broadcast or safety
+halt ends the round immediately. No aggregate swap is created, and route, tax,
+slippage, gas-cap, profit, receipt, reconciliation, and cooldown guards are not
+bypassed.
+
+With the default `false`, sell triggers retain strict execution priority over
+buys. A selected sell failure or success consumes that cycle, and the next
+rapid poll handles another profitable position before committing new capital.
 
 ## Persistence and fail-closed recovery
 
