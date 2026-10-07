@@ -3015,6 +3015,11 @@ class GridBot:
                     "eth_amount": float(eth_amount),
                     "token_amount": float(token_amount),
                 }
+                provider_name = getattr(getattr(self, "api_client", None), "name", None)
+                if provider_name in {"uniswap", "sushiswap", "umbra", "lifi"}:
+                    # Persist the route that actually broadcast, which may differ
+                    # from the best preflight quote after a revalidation/fallback.
+                    final["provider"] = provider_name
                 if receipt_result is not None:
                     receipt = getattr(receipt_result, "receipt", None) or {}
                     gas_used = (

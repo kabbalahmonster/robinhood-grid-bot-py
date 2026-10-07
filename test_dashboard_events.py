@@ -166,6 +166,7 @@ class TestDashboardEvents(unittest.TestCase):
         self.bot.wallet = type("Wallet", (), {"address": "0xwallet"})()
         self.bot.config.route_tournament_mode = "gate"
         self.bot.config.max_active_positions = 5
+        self.bot.api_client = type("Provider", (), {"name": "uniswap"})()
         self.bot._route_comparisons = {
             "buy": {"mode": "execution_preflight", "direction": "buy",
                     "status": "preflight_candidate_selected"}
@@ -181,6 +182,7 @@ class TestDashboardEvents(unittest.TestCase):
         self.assertEqual(comparison["updated_at"], self.bot.dashboard_trades[-1]["timestamp"])
         self.assertEqual(comparison["final"]["side"], "buy")
         self.assertEqual(comparison["final"]["token_amount"], 12345.0)
+        self.assertEqual(comparison["final"]["provider"], "uniswap")
 
     def test_tournament_submission_is_published_before_confirmation(self):
         updates = []
