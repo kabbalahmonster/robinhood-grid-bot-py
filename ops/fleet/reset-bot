@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+SCRIPT_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)"
+source "$SCRIPT_DIR/fleet-common.sh"
+
+usage() { cat <<'EOF'
+Usage: reset-bot NAME [NAME ...] [--scope all|positions|history|accounting|learning] [--apply --confirm-reset] [--restart] [--config PATH]
+
+Preview (by default) or reset mutable state for selected intentionally-stopped
+bots. Every changed file is copied to data/reset-backups/<UTC timestamp>/ first.
+
+Scopes:
+  all         positions, dashboard histories, realized-profit/fee accounting,
+              and transfer-tax learning (default)
+  positions   configured STATE_FILE plus gridless position state
+  history     dashboard trade and event histories
+  accounting  profit totals and pending profit-fee accrual state
+  learning    transfer-tax detection observations
+
+The command never reads or changes .env, credentials, code, wallet balances,
+treasury transfer records, or liquidation audit records. Position resets can
+leave tokens in the wallet untracked; use only when deliberately starting that
+wallet's strategy state afresh. --restart starts each selected bot only after a
+successful applied reset.
+
+Examples:
+  reset-bot V4
+  stop-bot V4 && reset-bot V4 --apply --confirm-reset --restart
+  reset-bot V4 --scope history --apply --confirm-reset
+EOF
+}
+
+names=(); config_path=""; scope="all"; apply=0; confirm=0; restart=0
+while (($#)); do
+  case "$1" in
+    --config) (($# >= 2)) || fleet_die "--config requires a path"; config_path="$2"; shift 2 ;;
+    --scope) (($# >= 2)) || fleet_die "--scope requires a value"; scope="$2"; shift 2 ;;
+    --apply) apply=1; shift ;;
+    --confirm-reset) confirm=1; shift ;;
+    --restart) restart=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    -*) fleet_die "Unknown option: $1" ;;
+    *) names+=("$1"); shift ;;
+  esac
+done
+
+(( ${#names[@]} > 0 )) || fleet_die "At least one bot name is required"
+[[ "$scope" =~ ^(all|positions|history|accounting|learning)$ ]] || fleet_die "Invalid --scope: $scope"
+(( apply == 0 || confirm == 1 )) || fleet_die "--apply requires --confirm-reset"
+(( restart == 0 || apply == 1 )) || fleet_die "--restart requires --apply"
+
+names_csv="$(IFS=,; printf '%s' "${names[*]}")"
+fleet_load_config "$config_path"
+fleet_apply_selection "$names_csv" ""
+fleet_validate_bots
+
+for bot_dir in "${FLEET_BOT_DIRS[@]}"; do
+  if ((apply)) && fleet_bot_should_run "$bot_dir"; then
+    fleet_die "$(fleet_bot_name "$bot_dir") is not durably stopped; run stop-bot $(fleet_bot_name "$bot_dir") first"
+  fi
+done
+
+stamp="$(date -u +%Y%m%dT%H%M%SZ).$$"
+for bot_dir in "${FLEET_BOT_DIRS[@]}"; do
+  args=(--bot-dir "$bot_dir" --scope "$scope")
+  ((apply == 0)) || args+=(--apply --backup-stamp "$stamp")
+  python3 "$SCRIPT_DIR/reset-bot.py" "${args[@]}"
+done
+
+if ((apply == 0)); then
+  printf '\nPREVIEW ONLY: no bot state changed. Use --apply --confirm-reset after review.\n'
+  exit 0
+fi
+printf '\nReset %d bot(s); .env and external wallet state were preserved.\n' "${#FLEET_BOT_DIRS[@]}"
+if ((restart)); then
+  for bot_dir in "${FLEET_BOT_DIRS[@]}"; do
+    "$SCRIPT_DIR/start-bot" "$(fleet_bot_name "$bot_dir")" --config "$FLEET_CONFIG_PATH"
+  done
+fi

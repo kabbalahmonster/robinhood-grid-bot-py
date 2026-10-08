@@ -144,6 +144,7 @@ sudo apt install tmux git python3 python3-venv
    ln -sf "$PWD/ops/fleet/start-bot" "$HOME/bin/start-bot"
    ln -sf "$PWD/ops/fleet/stop-bot" "$HOME/bin/stop-bot"
    ln -sf "$PWD/ops/fleet/restart-bot" "$HOME/bin/restart-bot"
+   ln -sf "$PWD/ops/fleet/reset-bot" "$HOME/bin/reset-bot"
    ln -sf "$PWD/ops/fleet/restart-stopped" "$HOME/bin/restart-stopped"
    ln -sf "$PWD/ops/fleet/update-bot" "$HOME/bin/update-bot"
    ln -sf "$PWD/ops/fleet/update-fleet" "$HOME/bin/update-fleet"
@@ -516,6 +517,7 @@ unless their section explicitly says otherwise.
 | `bundle-logs` | Merge selected-bot logs (all rotations with `--since`) into one redacted report | Writes one report file |
 | `start-fleet` / `stop-fleet` / `restart-fleet` | Manage the configured tmux fleet | Processes only |
 | `start-bot NAME` / `stop-bot NAMES...` / `restart-bot NAMES...` | Durably start, stop, or cleanly restart selected bots | Processes/state marker |
+| `reset-bot NAMES...` | Preview or reset selected stopped bots' mutable strategy state with backups | `--apply --confirm-reset` only |
 | `restart-stopped` | Start all intentionally stopped bots, optionally narrowed with `--only`/`--exclude` | Processes/state marker |
 | `update-this-checkout` | Fast-forward the dedicated operations clone | Yes, Git |
 | `update-bot NAME` | Inspect, switch, fast-forward, and conditionally restart one bot checkout | Yes, Git/processes |
@@ -577,6 +579,29 @@ Stop one or several bots durably and leave their panes at clean shell prompts:
 ops/fleet/stop-bot hookr
 ops/fleet/stop-bot hookr,EARN,ROBINVAULT
 ```
+
+## Resetting one bot for a fresh strategy run
+
+`reset-bot` is preview-first, requires the selected bot to be stopped through
+`stop-bot`, and backs up every changed file beneath that checkout's
+`data/reset-backups/<UTC timestamp>/`. It never changes `.env`, credentials,
+code, wallet balances, treasury-transfer records, or liquidation audit records.
+
+```bash
+# Inspect the exact V4 reset first.
+ops/fleet/reset-bot V4
+
+# Then stop, reset all mutable strategy state, and restart only V4.
+ops/fleet/stop-bot V4
+ops/fleet/reset-bot V4 --apply --confirm-reset --restart
+```
+
+The default `all` scope clears classic/gridless position state, dashboard
+trades/events, realized-profit and pending profit-fee accounting, and token-tax
+learning. Use `--scope positions`, `history`, `accounting`, or `learning` for a
+narrower reset. Position resets forget cost bases: any managed tokens left in
+the wallet become untracked, so use this only for a deliberate fresh strategy
+start. The generated backup directory is the rollback source.
 
 Do not use `Ctrl+Z` followed by Up-arrow to restart a bot. `Ctrl+Z` suspends
 the Python process instead of terminating it; launching the command again then
