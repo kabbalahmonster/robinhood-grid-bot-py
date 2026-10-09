@@ -43,6 +43,9 @@ class ResetBotTests(unittest.TestCase):
             (data / "dashboard_events.json").write_text('[{"event": 1}]')
             (data / "profit_totals.json").write_text('{"schema_version": 1}')
             (data / "profit_fee_accrual.json").write_text('{"pending_wei": 12}')
+            (data / "treasury_reporting_baseline.json").write_text(
+                '{"schema_version": 1, "reset_at": "2026-01-01T00:00:00+00:00"}'
+            )
             (data / "token_tax_detection.json").write_text('{"seen": true}')
             (data / "treasury_transfers.json").write_text('[{"audit": true}]')
             result = subprocess.run(
@@ -58,12 +61,19 @@ class ResetBotTests(unittest.TestCase):
             self.assertEqual(json.loads((data / "dashboard_events.json").read_text()), [])
             self.assertEqual(json.loads((data / "profit_totals.json").read_text())["realized_sales"], 0)
             self.assertEqual(json.loads((data / "profit_fee_accrual.json").read_text())["pending_wei"], 0)
+            baseline = json.loads((data / "treasury_reporting_baseline.json").read_text())
+            self.assertEqual(baseline["schema_version"], 1)
+            self.assertNotEqual(baseline["reset_at"], "2026-01-01T00:00:00+00:00")
             self.assertEqual(json.loads((data / "token_tax_detection.json").read_text()), {})
             self.assertEqual(json.loads((data / "treasury_transfers.json").read_text()), [{"audit": True}])
             self.assertTrue((data / "reset-backups" / "test-reset" / "data" / "custom_positions.json").exists())
             self.assertEqual(
                 (data / "reset-backups" / "test-reset" / "data" / "gridless_ladder.json").read_text(),
                 '{"max_levels": 10}',
+            )
+            self.assertTrue(
+                (data / "reset-backups" / "test-reset" / "data" /
+                 "treasury_reporting_baseline.json").exists()
             )
 
     def test_fleet_wrapper_requires_explicit_apply_confirmation(self):

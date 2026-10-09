@@ -31,6 +31,7 @@ SCOPES = {
     "accounting": {
         "data/profit_totals.json": None,
         "data/profit_fee_accrual.json": {"pending_wei": 0, "sale_tx_hashes": []},
+        "data/treasury_reporting_baseline.json": None,
     },
     "learning": {
         "data/token_tax_detection.json": {},
@@ -74,6 +75,11 @@ def selected_files(bot_dir: Path, scope: str):
 
 
 def empty_value(relative: str, configured):
+    if relative == "data/treasury_reporting_baseline.json":
+        return {
+            "schema_version": 1,
+            "reset_at": datetime.now(timezone.utc).isoformat(),
+        }
     if relative != "data/profit_totals.json":
         return configured
     now = datetime.now(timezone.utc).isoformat()

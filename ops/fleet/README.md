@@ -594,7 +594,7 @@ ops/fleet/stop-bot hookr,EARN,ROBINVAULT
 `reset-bot` is preview-first, requires the selected bot to be stopped through
 `stop-bot`, and backs up every changed file beneath that checkout's
 `data/reset-backups/<UTC timestamp>/`. It never changes `.env`, credentials,
-code, wallet balances, treasury-transfer records, or liquidation audit records.
+code, wallet balances, treasury-transfer receipts, or liquidation audit records.
 
 ```bash
 # Inspect the exact V4 reset first.
@@ -607,7 +607,8 @@ ops/fleet/reset-bot V4 --apply --confirm-reset --restart
 
 The default `all` scope clears classic/gridless position state (including the
 persisted drawdown ladder), dashboard
-trades/events, realized-profit and pending profit-fee accounting, and token-tax
+trades/events, realized-profit, pending profit-fee accounting, the displayed
+treasury-sent baseline, and token-tax
 learning. Use `--scope positions`, `history`, `accounting`, or `learning` for a
 narrower reset. Position resets forget cost bases: any managed tokens left in
 the wallet become untracked, so use this only for a deliberate fresh strategy

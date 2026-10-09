@@ -16,8 +16,8 @@ import argparse
 import random
 import math
 import subprocess
-from functools import wraps
-from datetime import datetime
+from functools import lru_cache, wraps
+from datetime import datetime, timezone
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -183,8 +183,49 @@ def _append_treasury_receipt(record):
     os.replace(temp_file, path)
 
 
-def _total_successful_treasury_sent_usdg(usdg_address, path="data/treasury_transfers.json"):
-    """Return the all-time USDG amount confirmed by the local sweep audit log.
+@lru_cache(maxsize=8)
+def _treasury_reporting_reset_at(baseline_path):
+    """Load one explicit baseline or infer it from a pre-feature reset."""
+    if not baseline_path:
+        return None
+    reset_at = None
+    try:
+        with open(baseline_path, "r") as handle:
+            baseline = json.load(handle)
+        raw_reset_at = baseline.get("reset_at") if isinstance(baseline, dict) else None
+        if isinstance(raw_reset_at, str):
+            reset_at = datetime.fromisoformat(raw_reset_at.replace("Z", "+00:00"))
+            if reset_at.tzinfo is None:
+                reset_at = reset_at.replace(tzinfo=timezone.utc)
+            reset_at = reset_at.astimezone(timezone.utc)
+    except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError, ValueError):
+        reset_at = None
+    if reset_at is None and baseline_path:
+        backup_root = Path(baseline_path).parent / "reset-backups"
+        for manifest_path in backup_root.glob("*/manifest.json"):
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                if manifest.get("scope") not in {"all", "accounting"}:
+                    continue
+                stamp = str(manifest.get("created_at", ""))
+                match = re.match(r"^(\d{8}T\d{6}Z)", stamp)
+                if not match:
+                    continue
+                candidate = datetime.strptime(
+                    match.group(1), "%Y%m%dT%H%M%SZ"
+                ).replace(tzinfo=timezone.utc)
+                if reset_at is None or candidate > reset_at:
+                    reset_at = candidate
+            except (json.JSONDecodeError, OSError, TypeError, ValueError):
+                continue
+    return reset_at
+
+
+def _treasury_sent_usdg_totals(
+        usdg_address,
+        path="data/treasury_transfers.json",
+        baseline_path="data/treasury_reporting_baseline.json"):
+    """Return since-reset and all-time USDG totals without mutating receipts.
 
     Treasury receipts are the durable source of truth for this display metric:
     dry runs and refused commands never create a receipt, and failed broadcasts
@@ -193,16 +234,19 @@ def _total_successful_treasury_sent_usdg(usdg_address, path="data/treasury_trans
     representation is preserved there.
     """
     if not usdg_address:
-        return 0.0
+        return 0.0, 0.0, None
+    reset_at = _treasury_reporting_reset_at(baseline_path)
+
     try:
         with open(path, "r") as handle:
             history = json.load(handle)
     except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return 0.0
+        history = []
     if not isinstance(history, list):
-        return 0.0
+        history = []
 
-    total = Decimal(0)
+    all_time = Decimal(0)
+    since_reset = Decimal(0)
     for record in history:
         if not isinstance(record, dict) or not record.get("success"):
             continue
@@ -213,8 +257,31 @@ def _total_successful_treasury_sent_usdg(usdg_address, path="data/treasury_trans
         except Exception:
             continue
         if amount.is_finite() and amount > 0:
-            total += amount
-    return float(total)
+            all_time += amount
+            if reset_at is None:
+                since_reset += amount
+                continue
+            try:
+                receipt_at = datetime.fromisoformat(
+                    str(record.get("timestamp", "")).replace("Z", "+00:00")
+                )
+                if receipt_at.tzinfo is None:
+                    receipt_at = receipt_at.replace(tzinfo=timezone.utc)
+                if receipt_at.astimezone(timezone.utc) > reset_at:
+                    since_reset += amount
+            except (TypeError, ValueError):
+                continue
+    return float(since_reset), float(all_time), (
+        reset_at.isoformat() if reset_at is not None else None
+    )
+
+
+def _total_successful_treasury_sent_usdg(
+        usdg_address, path="data/treasury_transfers.json"):
+    """Backward-compatible all-time total used by CLI/tests."""
+    return _treasury_sent_usdg_totals(
+        usdg_address, path=path, baseline_path=""
+    )[1]
 
 
 def _resolve_transfer_token(config, token):
@@ -7209,12 +7276,17 @@ class GridBot:
                     }
 
                 pnl_focus = self._pnl_focus_snapshot()
+                treasury_since_reset, treasury_all_time, treasury_reset_at = (
+                    _treasury_sent_usdg_totals(self.config.usdg_address)
+                )
                 self._reporter.report(
                     price=price,
                     eth_balance=eth_bal,
                     gas_reserve_eth=gas_reserve_eth,
                     usdg_balance=usdg_bal,
-                    treasury_sent_usdg=_total_successful_treasury_sent_usdg(self.config.usdg_address),
+                    treasury_sent_usdg=treasury_since_reset,
+                    treasury_sent_usdg_all_time=treasury_all_time,
+                    treasury_reporting_reset_at=treasury_reset_at,
                     token_balance=token_bal,
                     moonbag_balance=moonbag_balance,
                     estimated_moonbag_value_eth=max(0.0, moonbag_balance) * price,

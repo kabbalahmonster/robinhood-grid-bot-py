@@ -11,6 +11,7 @@ from grid_bot import (
     _dashboard_root_url,
     _reset_json_history,
     _terminal_transaction_link,
+    _treasury_sent_usdg_totals,
     _total_successful_treasury_sent_usdg,
     check_config,
     run_native_treasury_transfer,
@@ -45,6 +46,54 @@ class TestCliCommands(unittest.TestCase):
                     {"success": True, "token_address": usdg, "amount": "not-a-number"},
                 ], handle)
             self.assertEqual(_total_successful_treasury_sent_usdg(usdg, path), 12.5)
+
+    def test_treasury_reporting_baseline_preserves_all_time_audit_total(self):
+        usdg = "0x0000000000000000000000000000000000000003"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            history_path = os.path.join(temp_dir, "treasury_transfers.json")
+            baseline_path = os.path.join(temp_dir, "treasury_reporting_baseline.json")
+            with open(history_path, "w") as handle:
+                json.dump([
+                    {"success": True, "token_address": usdg, "amount": "12.50",
+                     "timestamp": "2026-01-01T00:00:00+00:00"},
+                    {"success": True, "token_address": usdg, "amount": "3.25",
+                     "timestamp": "2026-02-01T00:00:00+00:00"},
+                ], handle)
+            with open(baseline_path, "w") as handle:
+                json.dump({"schema_version": 1,
+                           "reset_at": "2026-01-15T00:00:00+00:00"}, handle)
+
+            self.assertEqual(
+                _treasury_sent_usdg_totals(usdg, history_path, baseline_path),
+                (3.25, 15.75, "2026-01-15T00:00:00+00:00"),
+            )
+
+    def test_treasury_reporting_uses_latest_legacy_reset_backup(self):
+        usdg = "0x0000000000000000000000000000000000000003"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = os.path.join(temp_dir, "data")
+            os.makedirs(os.path.join(
+                data_dir, "reset-backups", "20260115T000000Z.123"
+            ))
+            history_path = os.path.join(data_dir, "treasury_transfers.json")
+            baseline_path = os.path.join(data_dir, "treasury_reporting_baseline.json")
+            with open(history_path, "w") as handle:
+                json.dump([
+                    {"success": True, "token_address": usdg, "amount": "12.50",
+                     "timestamp": "2026-01-01T00:00:00+00:00"},
+                    {"success": True, "token_address": usdg, "amount": "3.25",
+                     "timestamp": "2026-02-01T00:00:00+00:00"},
+                ], handle)
+            manifest_path = os.path.join(
+                data_dir, "reset-backups", "20260115T000000Z.123", "manifest.json"
+            )
+            with open(manifest_path, "w") as handle:
+                json.dump({"scope": "all", "created_at": "20260115T000000Z.123"}, handle)
+
+            self.assertEqual(
+                _treasury_sent_usdg_totals(usdg, history_path, baseline_path),
+                (3.25, 15.75, "2026-01-15T00:00:00+00:00"),
+            )
 
     def test_reset_json_history_is_idempotent(self):
         with tempfile.TemporaryDirectory() as temp_dir:

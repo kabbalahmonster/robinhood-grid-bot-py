@@ -17,10 +17,11 @@ Scopes:
   positions   configured STATE_FILE plus gridless position and ladder state
   history     dashboard trade and event histories
   accounting  profit totals and pending profit-fee accrual state
+              plus the dashboard treasury-reporting baseline
   learning    transfer-tax detection observations
 
 The command never reads or changes .env, credentials, code, wallet balances,
-treasury transfer records, or liquidation audit records. Position resets can
+treasury transfer receipts, or liquidation audit records. Position resets can
 leave tokens in the wallet untracked; use only when deliberately starting that
 wallet's strategy state afresh. --restart starts each selected bot only after a
 successful applied reset.
