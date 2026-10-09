@@ -170,6 +170,7 @@ sudo apt install tmux git python3 python3-venv
    ln -sf "$PWD/ops/fleet/fleet-audit" "$HOME/bin/fleet-audit"
    ln -sf "$PWD/ops/fleet/dashboard-remove" "$HOME/bin/dashboard-remove"
    ln -sf "$PWD/ops/fleet/initialize-bots" "$HOME/bin/initialize-bots"
+   ln -sf "$PWD/ops/fleet/template-from-bot" "$HOME/bin/template-from-bot"
    ln -sf "$PWD/ops/fleet/fleet-watch" "$HOME/bin/fleet-watch"
    ln -sf "$PWD/ops/fleet/strategy-model" "$HOME/bin/strategy-model"
    ln -sf "$PWD/ops/fleet/reconcile-position-balances" "$HOME/bin/reconcile-position-balances"
@@ -523,6 +524,7 @@ unless their section explicitly says otherwise.
 | `update-bot NAME` | Inspect, switch, fast-forward, and conditionally restart one bot checkout | Yes, Git/processes |
 | `update-fleet` / `update-all` | Fast-forward bot clones; full wrapper can restart | Yes, Git/processes |
 | `initialize-bots` | Create bot clones, wallets, configs, and optional membership | `--apply` only |
+| `template-from-bot NAME` | Derive the initialize template from one bot `.env`, with identity fields removed | `--apply --confirm-template-update` only |
 | `fleet-membership` | Add/remove explicit configured bot names | `--apply` only |
 | `update-variable` | Safely update selected bot `.env` values | `--apply` only |
 | `adjust-positions` | Change capacity without rewriting filled positions | `--apply` only |
@@ -837,6 +839,23 @@ For the shortest normal command, set the default once in `fleet.conf`:
 ```bash
 FLEET_ENV_TEMPLATE="$HOME/bot-farm/fleet-command/.env.template"
 ```
+
+To make an existing bot's non-identity settings the new shared template, use
+`template-from-bot`. It reads only that bot's `.env`; preview output shows paths
+and removed variable names, never dotenv values. The source remains unchanged.
+The default destination is `FLEET_ENV_TEMPLATE`, or choose a one-off target
+with `--template PATH`:
+
+```bash
+template-from-bot V4
+template-from-bot V4 --apply --confirm-template-update
+```
+
+It removes `PRIVATE_KEY`, `TOKEN_SYMBOL`, and `TOKEN_ADDRESS` before writing.
+The prior template is copied to `<template>.bak.<UTC timestamp>` and the new
+template is mode `0600`; dashboard/provider keys and strategy settings are
+otherwise retained. `initialize-bots` generates the three removed values per
+new wallet, so no future bot inherits V4's wallet or token identity.
 
 Then omit `--template`:
 
