@@ -642,6 +642,13 @@ def resize_plan_capacity(
     only when every truncated rung is disposable allocation state; durable
     position, cooldown, and historical accounting remains fail-closed.
     """
+    # Capacity migration must never make an already split-brain ladder look
+    # repaired.  In particular, the legacy reset command could empty the
+    # positions file while leaving an ``open`` persisted rung behind.  Check
+    # the paired state before changing geometry so callers cannot log or save
+    # a successful migration over that corruption.
+    validate_position_pairing(plan, positions)
+
     configured = int(config.max_active_positions)
     if configured < 1:
         raise LadderStateError(
@@ -1163,6 +1170,13 @@ def validate_context(
             "persisted ladder mode does not match GRIDLESS_ALLOCATION_MODE; "
             "archive ladder and positions together before changing modes"
         )
+    validate_position_pairing(plan, positions)
+
+
+def validate_position_pairing(
+    plan: DrawdownLadderPlan, positions: Dict[str, Dict]
+) -> None:
+    """Validate the two-file position/rung invariant without config checks."""
     seen = set()
     for position_id, position in positions.items():
         if position.get("ladder_id") != plan.id:
@@ -1190,8 +1204,14 @@ def validate_context(
                 "Survivor bootstrap provenance requires a leading-edge entry"
             )
     open_indices = {rung.index for rung in plan.rungs if rung.state == "open"}
-    if open_indices != seen:
-        raise LadderStateError("persisted open rung has no matching position")
+    missing = sorted(open_indices - seen)
+    if missing:
+        rendered = ", ".join(str(index) for index in missing)
+        raise LadderStateError(
+            "persisted open rung(s) " + rendered
+            + " have no matching position; ladder and positions must be reset "
+              "or restored together"
+        )
 
 
 def expire_plan(plan: DrawdownLadderPlan) -> None:

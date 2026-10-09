@@ -184,6 +184,29 @@ class AdaptiveLadderStateTests(unittest.TestCase):
         self.assertEqual(plan.rungs[4].position_id, "7")
         self.assertEqual(positions["7"]["ladder_level_index"], 4)
 
+    def test_capacity_expansion_rejects_orphan_open_rung_before_mutation(self):
+        original = ladder_config(
+            gridless_allocation_mode="survivor", max_active_positions=5,
+        )
+        plan = build_plan(1.0, int(0.005 * WEI), original, now=100)
+        record_fill(plan, 4, plan.amount_for_level(4), "7", filled_at=101)
+
+        with self.assertRaisesRegex(
+            LadderStateError,
+            r"open rung\(s\) 4 have no matching position.*reset or restored together",
+        ):
+            resize_plan_capacity(
+                plan,
+                {},
+                ladder_config(
+                    gridless_allocation_mode="survivor",
+                    max_active_positions=10,
+                ),
+            )
+
+        self.assertEqual(plan.max_levels, 5)
+        self.assertEqual(len(plan.rungs), 5)
+
     def test_capacity_contraction_drops_only_disposable_tail(self):
         config = ladder_config(max_active_positions=5)
         plan = build_plan(1.0, int(0.005 * WEI), config, now=100)

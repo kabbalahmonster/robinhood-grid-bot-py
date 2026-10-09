@@ -3360,12 +3360,6 @@ class GridBot:
             )
         capacity_before = plan.max_levels
         capacity_resized = resize_plan_capacity(plan, positions, self.config)
-        if capacity_resized:
-            logger.warning(
-                "Migrated adaptive ladder %s capacity %d→%d while preserving "
-                "position provenance",
-                plan.id, capacity_before, plan.max_levels,
-            )
         validate_context(plan, positions, self.config)
 
         if (plan.status == "active" and plan.expires_at is not None
@@ -3430,6 +3424,12 @@ class GridBot:
             )
         if changed:
             save_plan(plan)
+            if capacity_resized:
+                logger.warning(
+                    "Migrated and saved adaptive ladder %s capacity %d→%d "
+                    "while preserving position provenance",
+                    plan.id, capacity_before, plan.max_levels,
+                )
         return plan
 
     def _gridless_ladder_status(self, positions=None):
