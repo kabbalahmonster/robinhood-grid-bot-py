@@ -38,6 +38,7 @@ class ResetBotTests(unittest.TestCase):
             data = bot / "data"
             (data / "custom_positions.json").write_text('{"position": 1}')
             (data / "gridless_positions.json").write_text('{"gridless": 1}')
+            (data / "gridless_ladder.json").write_text('{"max_levels": 10}')
             (data / "dashboard_trades.json").write_text('[{"trade": 1}]')
             (data / "dashboard_events.json").write_text('[{"event": 1}]')
             (data / "profit_totals.json").write_text('{"schema_version": 1}')
@@ -52,6 +53,7 @@ class ResetBotTests(unittest.TestCase):
             self.assertEqual((bot / ".env").read_text(), "PRIVATE_KEY=do-not-touch\nSTATE_FILE=data/custom_positions.json\n")
             self.assertEqual(json.loads((data / "custom_positions.json").read_text()), {})
             self.assertEqual(json.loads((data / "gridless_positions.json").read_text()), {})
+            self.assertFalse((data / "gridless_ladder.json").exists())
             self.assertEqual(json.loads((data / "dashboard_trades.json").read_text()), [])
             self.assertEqual(json.loads((data / "dashboard_events.json").read_text()), [])
             self.assertEqual(json.loads((data / "profit_totals.json").read_text())["realized_sales"], 0)
@@ -59,6 +61,10 @@ class ResetBotTests(unittest.TestCase):
             self.assertEqual(json.loads((data / "token_tax_detection.json").read_text()), {})
             self.assertEqual(json.loads((data / "treasury_transfers.json").read_text()), [{"audit": True}])
             self.assertTrue((data / "reset-backups" / "test-reset" / "data" / "custom_positions.json").exists())
+            self.assertEqual(
+                (data / "reset-backups" / "test-reset" / "data" / "gridless_ladder.json").read_text(),
+                '{"max_levels": 10}',
+            )
 
     def test_fleet_wrapper_requires_explicit_apply_confirmation(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -12,6 +12,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
+REMOVE = object()
+
+
 SCOPES = {
     "history": {
         "data/dashboard_trades.json": [],
@@ -20,6 +23,10 @@ SCOPES = {
     "positions": {
         "data/positions.json": {},
         "data/gridless_positions.json": {},
+        # A ladder is inseparable from its paired gridless position state.  An
+        # empty JSON object is not valid ladder data, so remove it after backup
+        # rather than replacing it with an invalid placeholder.
+        "data/gridless_ladder.json": REMOVE,
     },
     "accounting": {
         "data/profit_totals.json": None,
@@ -117,6 +124,9 @@ def main():
     print(f"Reset scope: {args.scope}")
     for relative, configured_value in files.items():
         target = bot_dir / relative
+        if configured_value is REMOVE:
+            print(f"  {relative}: {'remove' if target.exists() else 'already absent'}")
+            continue
         value = empty_value(relative, configured_value)
         print(f"  {relative}: {'replace' if target.exists() else 'create'} with {type(value).__name__}")
     print("Preserved: .env, wallet balances, source code, treasury transfers, and liquidation audit data.")
@@ -139,7 +149,10 @@ def main():
                 backup.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(target, backup)
             manifest["files"].append({"path": relative, "existed": existed})
-            atomic_json(target, empty_value(relative, configured_value))
+            if configured_value is REMOVE:
+                target.unlink(missing_ok=True)
+            else:
+                atomic_json(target, empty_value(relative, configured_value))
         atomic_json(backup_root / "manifest.json", manifest)
     except BaseException:
         for record in reversed(manifest["files"]):

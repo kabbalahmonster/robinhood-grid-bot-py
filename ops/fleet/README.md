@@ -598,7 +598,8 @@ ops/fleet/stop-bot V4
 ops/fleet/reset-bot V4 --apply --confirm-reset --restart
 ```
 
-The default `all` scope clears classic/gridless position state, dashboard
+The default `all` scope clears classic/gridless position state (including the
+persisted drawdown ladder), dashboard
 trades/events, realized-profit and pending profit-fee accounting, and token-tax
 learning. Use `--scope positions`, `history`, `accounting`, or `learning` for a
 narrower reset. Position resets forget cost bases: any managed tokens left in

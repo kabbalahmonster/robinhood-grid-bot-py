@@ -14,7 +14,7 @@ bots. Every changed file is copied to data/reset-backups/<UTC timestamp>/ first.
 Scopes:
   all         positions, dashboard histories, realized-profit/fee accounting,
               and transfer-tax learning (default)
-  positions   configured STATE_FILE plus gridless position state
+  positions   configured STATE_FILE plus gridless position and ladder state
   history     dashboard trade and event histories
   accounting  profit totals and pending profit-fee accrual state
   learning    transfer-tax detection observations
