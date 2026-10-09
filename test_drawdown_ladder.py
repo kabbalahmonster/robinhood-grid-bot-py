@@ -81,6 +81,27 @@ class DrawdownLadderGeometryTests(unittest.TestCase):
             gridless.survivor_next_leading_edge_price(positions, config),
             1.025,
         )
+        self.assertEqual(
+            gridless.survivor_leading_edge_runway_prices(positions, config),
+            [1.025, 1.025**2, 1.025**3],
+        )
+
+    def test_survivor_leading_edge_runway_respects_remaining_capacity(self):
+        positions = {
+            "low": {"cost_wei": WEI, "balance": 2 * WEI},
+            "high": {"cost_wei": WEI, "balance": WEI},
+        }
+        config = ladder_config(
+            gridless_allocation_mode="survivor",
+            max_active_positions=4,
+            token_decimals=18,
+            gridless_sell_threshold=5,
+        )
+
+        self.assertEqual(
+            gridless.survivor_leading_edge_runway_prices(positions, config),
+            [1.025, 1.025**2],
+        )
 
     def test_next_leading_edge_price_is_absent_for_legacy_or_full_bot(self):
         positions = {"0": {"cost_wei": WEI, "balance": WEI}}

@@ -7,9 +7,10 @@ Sell: pnl >= sell_threshold (check quote) OR stoploss triggered
 import json
 import math
 import os
-from typing import Dict, Optional, Tuple, Any
+from typing import Any, Dict, List, Optional, Tuple
 
 POSITIONS_FILE = "data/gridless_positions.json"
+SURVIVOR_LEADING_EDGE_RUNWAY = 3
 
 
 def _configured_token_decimals(config: Any) -> int:
@@ -142,27 +143,44 @@ def survivor_next_leading_edge_price(
     Execution remains governed by a fresh authorized buy-side P&L observation;
     this value is public dashboard telemetry, not an alternate trigger path.
     """
+    prices = survivor_leading_edge_runway_prices(positions, config)
+    return prices[0] if prices else None
+
+
+def survivor_leading_edge_runway_prices(
+        positions: Dict[str, Dict], config: Any) -> List[float]:
+    """Return the next three sequential Survivor leading-edge targets.
+
+    Only the first price is actionable. Later prices are forward projections
+    that advance from the confirmed fill price after each guarded buy.
+    """
     allocation_mode = str(
         getattr(config, 'gridless_allocation_mode', 'threshold')
     ).lower()
     if allocation_mode != 'survivor':
-        return None
+        return []
     if not getattr(config, 'gridless_leading_edge', False):
-        return None
-    if not positions or len(positions) >= int(
-            getattr(config, 'max_active_positions', 10)):
-        return None
+        return []
+    available_slots = max(
+        0,
+        int(getattr(config, 'max_active_positions', 10)) - len(positions),
+    )
+    if not positions or available_slots == 0:
+        return []
     highest = get_highest_position(
         positions, _configured_token_decimals(config)
     )
     if highest is None:
-        return None
+        return []
     purchase_price = get_buy_price(
         highest[1], _configured_token_decimals(config)
     )
     if not math.isfinite(purchase_price) or purchase_price <= 0:
-        return None
-    return purchase_price * (1 + get_sell_trigger_percent(config) * 0.5 / 100)
+        return []
+    multiplier = 1 + get_sell_trigger_percent(config) * 0.5 / 100
+    runway_length = min(SURVIVOR_LEADING_EDGE_RUNWAY, available_slots)
+    return [purchase_price * multiplier**step
+            for step in range(1, runway_length + 1)]
 
 
 def trigger_pnl_candidates(observed: Dict[str, Any], direction: str):

@@ -244,6 +244,9 @@ then moves the geometry to the measured new purchase point. Multiple leading
 positions may accumulate while capacity remains. The default attempts at most
 one buy per poll. Multi-action rounds may complete several independently
 guarded buys, while the normal buy cooldown still applies after every fill.
+Status telemetry publishes a three-step leading-edge runway, capped by the
+remaining position capacity. Only its first target is actionable; the other
+two are projections and are recalculated from each confirmed measured fill.
 
 A rung becomes `open` only after:
 

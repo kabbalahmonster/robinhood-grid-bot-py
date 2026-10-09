@@ -3450,11 +3450,15 @@ class GridBot:
         if plan.mode == "survivor":
             from gridless import (
                 get_sell_trigger_percent,
-                survivor_next_leading_edge_price,
+                survivor_leading_edge_runway_prices,
             )
 
+            runway_prices = survivor_leading_edge_runway_prices(
+                positions, self.config
+            )
+            payload["leading_edge_runway_prices"] = runway_prices
             payload["next_leading_edge_price"] = (
-                survivor_next_leading_edge_price(positions, self.config)
+                runway_prices[0] if runway_prices else None
             )
             payload["leading_edge_trigger_percent"] = (
                 get_sell_trigger_percent(self.config) * 0.5
