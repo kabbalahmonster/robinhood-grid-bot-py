@@ -8,6 +8,23 @@ from dashboard_reporter import DashboardReporter
 
 class TestDashboardReporter(unittest.TestCase):
     @patch("dashboard_reporter.threading.Thread.start")
+    def test_report_accepts_treasury_reporting_period_fields(self, _start):
+        reporter = DashboardReporter("https://doomdash.ca/api/status")
+
+        reporter.report(
+            treasury_sent_usdg=1.25,
+            treasury_sent_usdg_all_time=9.5,
+            treasury_reporting_reset_at="2026-10-09T19:00:00+00:00",
+        )
+
+        self.assertEqual(reporter._queue[0]["treasury_sent_usdg"], 1.25)
+        self.assertEqual(reporter._queue[0]["treasury_sent_usdg_all_time"], 9.5)
+        self.assertEqual(
+            reporter._queue[0]["treasury_reporting_reset_at"],
+            "2026-10-09T19:00:00+00:00",
+        )
+
+    @patch("dashboard_reporter.threading.Thread.start")
     def test_usdg_balance_is_in_status_payload(self, _start):
         reporter = DashboardReporter("https://doomdash.ca/api/status")
         reporter.report(
