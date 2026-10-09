@@ -194,6 +194,13 @@ partial or foreign provenance, invalid positions, and position counts above
 `MAX_ACTIVE_POSITIONS` fail closed. See `docs/DRAWDOWN_LADDER.md` for the exact
 mapping and interrupted-write recovery contract.
 
+For an existing adaptive ladder, `adjust-positions` is restart-safe: the next
+strategy poll regenerates the persisted geometry for the new
+`MAX_ACTIVE_POSITIONS` while keeping existing rung indexes and position
+provenance. Expansion is automatic. A contraction fails closed if its removed
+tail would discard an open position, a rearm/cooldown guard, or historical rung
+accounting; raise the capacity or reset the paired strategy state deliberately.
+
 `strategy-model` is a read-only planning tool for comparing
 `GRIDLESS_BUY_THRESHOLD`, `GRIDLESS_SELL_THRESHOLD`,
 `MIN_PROFIT_PERCENT`, and position capacity. It produces three adjacent files:

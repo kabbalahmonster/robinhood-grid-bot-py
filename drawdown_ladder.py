@@ -630,6 +630,76 @@ def refresh_plan_funding(
     return changed
 
 
+def resize_plan_capacity(
+    plan: DrawdownLadderPlan,
+    positions: Dict[str, Dict],
+    config: Any,
+) -> bool:
+    """Migrate persisted trigger geometry to ``MAX_ACTIVE_POSITIONS`` safely.
+
+    Existing rung indexes are stable so position provenance never needs a
+    paired-file rewrite. Expansion appends fresh rungs. Contraction is allowed
+    only when every truncated rung is disposable allocation state; durable
+    position, cooldown, and historical accounting remains fail-closed.
+    """
+    configured = int(config.max_active_positions)
+    if configured < 1:
+        raise LadderStateError(
+            "MAX_ACTIVE_POSITIONS must be at least 1 while adaptive ladder "
+            "state exists"
+        )
+    if configured == plan.max_levels:
+        return False
+
+    if configured < plan.max_levels:
+        for position_id, position in positions.items():
+            index = int(position.get("ladder_level_index", -1))
+            if index >= configured:
+                raise LadderStateError(
+                    f"cannot reduce MAX_ACTIVE_POSITIONS to {configured}; "
+                    f"open position {position_id} occupies ladder rung {index}"
+                )
+        for rung in plan.rungs[configured:]:
+            durable = (
+                rung.state in {"open", "waiting_reset", "retired"}
+                or rung.position_id is not None
+                or rung.open_principal_wei > 0
+                or rung.fill_count > 0
+                or rung.exit_count > 0
+                or rung.realized_profit_wei != 0
+                or rung.last_buy_at is not None
+                or rung.last_sell_at is not None
+                or rung.adopted_legacy_position
+                or rung.open_entry_kind is not None
+                or rung.rearm_required
+            )
+            if durable:
+                raise LadderStateError(
+                    f"cannot reduce MAX_ACTIVE_POSITIONS to {configured}; "
+                    f"ladder rung {rung.index} contains durable state"
+                )
+        del plan.rungs[configured:]
+    else:
+        plan.rungs.extend(
+            DrawdownRung(index=index, price=plan.reference_price)
+            for index in range(plan.max_levels, configured)
+        )
+
+    plan.max_levels = configured
+    prices = generate_levels(
+        plan.reference_price,
+        configured,
+        plan.terminal_drawdown_percent,
+        plan.spacing,
+        plan.include_reference_entry,
+    )
+    for index, (rung, price) in enumerate(zip(plan.rungs, prices)):
+        rung.index = index
+        rung.price = price
+    validate_plan(plan)
+    return True
+
+
 def rebalance_survivor_funding(
     plan: DrawdownLadderPlan,
     spendable_balance_wei: int,

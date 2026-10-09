@@ -3296,6 +3296,7 @@ class GridBot:
             reconcile_adoption_provenance,
             reconcile_confirmed_positions,
             refresh_plan_funding,
+            resize_plan_capacity,
             save_plan,
             sync_survivor_state,
             validate_context,
@@ -3357,6 +3358,14 @@ class GridBot:
                 "Recovered ladder %s rung state from confirmed position provenance",
                 plan.id,
             )
+        capacity_before = plan.max_levels
+        capacity_resized = resize_plan_capacity(plan, positions, self.config)
+        if capacity_resized:
+            logger.warning(
+                "Migrated adaptive ladder %s capacity %d→%d while preserving "
+                "position provenance",
+                plan.id, capacity_before, plan.max_levels,
+            )
         validate_context(plan, positions, self.config)
 
         if (plan.status == "active" and plan.expires_at is not None
@@ -3369,7 +3378,7 @@ class GridBot:
             )
             return plan
 
-        changed = False
+        changed = capacity_resized
         funded_before = (
             plan.reserved_count if plan.mode == "survivor" else plan.funded_count
         )

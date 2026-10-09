@@ -22,6 +22,7 @@ from drawdown_ladder import (
     reanchor_survivor,
     record_fill,
     refresh_plan_funding,
+    resize_plan_capacity,
     save_plan,
     status_payload,
     sync_survivor_state,
@@ -154,6 +155,75 @@ class DrawdownLadderGeometryTests(unittest.TestCase):
 
 
 class AdaptiveLadderStateTests(unittest.TestCase):
+    def test_capacity_expansion_preserves_open_provenance_and_history(self):
+        original = ladder_config(
+            gridless_allocation_mode="survivor", max_active_positions=5,
+        )
+        plan = build_plan(1.0, int(0.005 * WEI), original, now=100)
+        record_fill(plan, 4, plan.amount_for_level(4), "7", filled_at=101)
+        positions = {
+            "7": {
+                "ladder_id": plan.id,
+                "ladder_level_index": 4,
+                "ladder_principal_wei": plan.rungs[4].open_principal_wei,
+            }
+        }
+
+        changed = resize_plan_capacity(
+            plan,
+            positions,
+            ladder_config(
+                gridless_allocation_mode="survivor", max_active_positions=10,
+            ),
+        )
+
+        self.assertTrue(changed)
+        self.assertEqual(plan.max_levels, 10)
+        self.assertEqual(len(plan.rungs), 10)
+        self.assertEqual(plan.rungs[4].state, "open")
+        self.assertEqual(plan.rungs[4].position_id, "7")
+        self.assertEqual(positions["7"]["ladder_level_index"], 4)
+
+    def test_capacity_contraction_drops_only_disposable_tail(self):
+        config = ladder_config(max_active_positions=5)
+        plan = build_plan(1.0, int(0.005 * WEI), config, now=100)
+
+        self.assertTrue(resize_plan_capacity(
+            plan, {}, ladder_config(max_active_positions=3)
+        ))
+        self.assertEqual(plan.max_levels, 3)
+        self.assertEqual(len(plan.rungs), 3)
+
+    def test_capacity_contraction_rejects_open_tail_rung(self):
+        config = ladder_config(max_active_positions=5)
+        plan = build_plan(1.0, int(0.005 * WEI), config, now=100)
+        record_fill(plan, 4, plan.amount_for_level(4), "7", filled_at=101)
+        positions = {
+            "7": {
+                "ladder_id": plan.id,
+                "ladder_level_index": 4,
+                "ladder_principal_wei": plan.rungs[4].open_principal_wei,
+            }
+        }
+
+        with self.assertRaisesRegex(
+            LadderStateError, "open position 7 occupies ladder rung 4"
+        ):
+            resize_plan_capacity(
+                plan, positions, ladder_config(max_active_positions=3)
+            )
+
+    def test_capacity_contraction_rejects_tail_history(self):
+        config = ladder_config(max_active_positions=5)
+        plan = build_plan(1.0, int(0.005 * WEI), config, now=100)
+        record_fill(plan, 4, plan.amount_for_level(4), "7", filled_at=101)
+        mark_exit(plan, 4, "7", exited_at=102, realized_profit_wei=123)
+
+        with self.assertRaisesRegex(LadderStateError, "durable state"):
+            resize_plan_capacity(
+                plan, {}, ladder_config(max_active_positions=3)
+            )
+
     def test_survivor_bootstrap_forms_geometry_from_confirmed_fill_even_if_lower(self):
         config = ladder_config(
             gridless_allocation_mode="survivor", max_active_positions=5,
@@ -795,6 +865,24 @@ class AdaptiveLadderBotTests(unittest.TestCase):
         self.assertEqual(first.id, second.id)
         self.assertEqual(second.reference_price, 1.0)
         self.assertEqual(second.funded_count, 15)
+
+    def test_prepare_migrates_survivor_capacity_before_context_validation(self):
+        self.bot.config = ladder_config(
+            gridless_allocation_mode="survivor", max_active_positions=5,
+        )
+        first = self.bot._prepare_gridless_ladder(
+            1.0, {}, int(0.005 * WEI), now=100
+        )
+        self.bot.config.max_active_positions = 10
+
+        migrated = self.bot._prepare_gridless_ladder(
+            0.9, {}, int(0.010 * WEI), now=200
+        )
+
+        self.assertEqual(migrated.id, first.id)
+        self.assertEqual(migrated.max_levels, 10)
+        self.assertEqual(migrated.funded_count, 10)
+        self.assertEqual(load_plan().max_levels, 10)
 
     def test_indefinite_plan_does_not_expire(self):
         plan = self.bot._prepare_gridless_ladder(1.0, {}, int(0.005 * WEI), now=100)
