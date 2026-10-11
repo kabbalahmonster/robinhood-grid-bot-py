@@ -2,6 +2,10 @@
 
 A production-grade grid trading bot for Robinhood Chain and other EVM networks, implemented in Python using web3.py. Supports SushiSwap, Uniswap API, LI.FI, and 0x swap providers with features like dynamic position sizing, moonbag retention, profit banking to stablecoins, session tracking, and optional fleet-dashboard reporting.
 
+For a standalone, implementation-oriented description suitable as context for
+an AI strategy-development model, see
+[AI strategy capability reference](docs/AI_STRATEGY_CAPABILITY_REFERENCE.md).
+
 ## Features
 
 - **Two Trading Modes**:
