@@ -1178,9 +1178,11 @@ After upgrading a bot whose haircut was already applied, rerun the same
 reconciliation with `--apply --confirm-bot-stopped`; a zero-current-deficit run
 may use the latest matching audit entry for this same receipt verification.
 With `AUTO_RECONCILE_UNRESOLVED_BROADCAST=true`, the safety-halted loop performs
-that same zero-deficit recovery automatically. For gridless wallet surplus, it
-also tries the existing receipt-driven buy recovery using the guard's exact
-transaction hash. That path requires a successful configured-wallet
+that same zero-deficit recovery automatically. A receipt-proven managed-token
+outflow is classified as a sell and resumes without a haircut when the remaining
+wallet inventory still fully collateralizes all tracked positions. For gridless
+wallet surplus without a managed-token outflow, it also tries the existing
+receipt-driven buy recovery using the guard's exact transaction hash. That path requires a successful configured-wallet
 transaction, native principal, exact managed-token receipt, confirmed gas
 economics, sufficient unallocated inventory, available position capacity, and
 a verified ledger reload. Exact transaction and receipt reads check every

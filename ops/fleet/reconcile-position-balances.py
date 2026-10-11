@@ -182,23 +182,41 @@ def main():
         audit_path = Path("data/position_balance_reconciliations.json")
         recovered_prior_reconciliation = False
         if args.apply and isinstance(guard, dict) and guard.get("tx_hash"):
+            outgoing_raw = None
             try:
-                audit = json.loads(audit_path.read_text())
-                prior = next(
-                    entry for entry in reversed(audit)
-                    if isinstance(entry, dict)
-                    and entry.get("checkout") == str(checkout)
-                    and entry.get("token_symbol") == config.token_symbol
-                    and int(entry.get("deficit_raw", 0)) > 0
-                )
                 outgoing_raw = verified_outgoing_tokens(
                     wallet, config.token_address, str(guard["tx_hash"]),
                 )
-                if outgoing_raw == int(prior["deficit_raw"]):
+                try:
+                    audit = json.loads(audit_path.read_text())
+                    prior = next(
+                        entry for entry in reversed(audit)
+                        if isinstance(entry, dict)
+                        and entry.get("checkout") == str(checkout)
+                        and entry.get("token_symbol") == config.token_symbol
+                        and int(entry.get("deficit_raw", 0)) > 0
+                    )
+                except (FileNotFoundError, StopIteration, TypeError, ValueError):
+                    prior = None
+                if prior is not None and outgoing_raw == int(prior["deficit_raw"]):
                     archived = wallet.archive_reconciled_broadcast(str(guard["tx_hash"]))
                     result["unresolved_broadcast_match"] = {
                         "tx_hash": str(guard["tx_hash"]), "outgoing_raw": outgoing_raw,
                         "status": "receipt_verified_against_prior_reconciliation",
+                        "archived_path": archived,
+                    }
+                    recovered_prior_reconciliation = bool(archived)
+                elif outgoing_raw > 0:
+                    # A managed-token outflow proves this is a sell, not a buy.
+                    # With no current deficit, every tracked position remains
+                    # fully collateralized by the post-transaction wallet
+                    # balance, so no ledger haircut is required.  Archiving the
+                    # exact guard is safe and avoids routing a successful sell
+                    # through the gridless buy reconciler.
+                    archived = wallet.archive_reconciled_broadcast(str(guard["tx_hash"]))
+                    result["unresolved_broadcast_match"] = {
+                        "tx_hash": str(guard["tx_hash"]), "outgoing_raw": outgoing_raw,
+                        "status": "receipt_verified_sell_inventory_collateralized",
                         "archived_path": archived,
                     }
                     recovered_prior_reconciliation = bool(archived)
@@ -208,6 +226,7 @@ def main():
                     "error": str(exc),
                 }
         if (args.automatic and not recovered_prior_reconciliation
+                and not (isinstance(outgoing_raw, int) and outgoing_raw > 0)
                 and getattr(config, "use_gridless", False)
                 and isinstance(guard, dict) and guard.get("tx_hash")):
             # A successful unresolved gridless buy produces wallet surplus, not
