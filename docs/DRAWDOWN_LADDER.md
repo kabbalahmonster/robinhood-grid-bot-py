@@ -143,8 +143,10 @@ Unfunded triggers already exist in the plan geometry. Funding activates them.
 Frozen drawdown mode retains the original incremental coverage rules. Survivor
 rebuilds its funded future grid every poll: it starts below the lowest current
 open entry, spreads the affordable reservations through the terminal floor,
-and uses more liquid to increase density. Removing liquid reduces the number
-of funded future triggers and spreads the remaining reservations more widely.
+and uses more liquid to increase density. Every non-open capacity slot is
+eligible for that freshly rendered range; a slot's historical rung index never
+strands it above the current boundary. Removing liquid reduces the number of
+funded future triggers and spreads the remaining reservations more widely.
 The lowest open entry is the upper boundary, not another funded endpoint: the
 first future trigger is one complete density interval below it. This prevents
 a successful fill from immediately generating another buy at effectively the
@@ -347,7 +349,8 @@ introduced. The bounded ladder summary also includes:
 
 For Survivor, `funded` and average target size describe only the rendered
 future reservations; `open` is reported separately. `inactive` means a usable
-slot that current liquid capital cannot fund at the configured minimum.
+slot that current liquid capital cannot fund at the configured minimum (or,
+at the terminal floor, cannot be placed into a valid lower price range).
 Active Survivor plans never permanently retire sold slots: they always pass
 through the ordinary cooldown/price-reset guard and return to the future grid.
 The `retired` count is retained to diagnose and automatically recover state

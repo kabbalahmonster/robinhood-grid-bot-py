@@ -419,23 +419,23 @@ class AdaptiveLadderStateTests(unittest.TestCase):
         )
         plan = build_plan(1.0, int(0.1 * WEI), config, now=100)
         positions = {}
-        for index in range(15):
+        # Reproduce the live shape: 13 historical exits occupy old rungs above
+        # the 15 surviving positions, leaving only 72 of the original fixed
+        # prices below the lowest open entry.
+        for index in range(28):
             position_id = str(index)
             principal = plan.amount_for_level(index)
             record_fill(plan, index, principal, position_id, filled_at=101)
-            positions[position_id] = {
-                "cost_wei": principal,
-                "balance": principal,
-                "ladder_id": plan.id,
-                "ladder_level_index": index,
-                "ladder_principal_wei": principal,
-            }
-        for index in range(15, 28):
-            position_id = str(index)
-            record_fill(
-                plan, index, plan.amount_for_level(index), position_id, filled_at=101
-            )
-            mark_exit(plan, index, position_id, exited_at=102, recycle=False)
+            if index < 13:
+                mark_exit(plan, index, position_id, exited_at=102, recycle=False)
+            else:
+                positions[position_id] = {
+                    "cost_wei": int(plan.rungs[index].price * WEI),
+                    "balance": WEI,
+                    "ladder_id": plan.id,
+                    "ladder_level_index": index,
+                    "ladder_principal_wei": principal,
+                }
 
         before = status_payload(plan)
         self.assertEqual(before["levels_funded"], 72)
@@ -458,6 +458,17 @@ class AdaptiveLadderStateTests(unittest.TestCase):
         self.assertEqual(after["levels_retired"], 0)
         self.assertAlmostEqual(after["reserved_eth"], 0.08706)
         self.assertAlmostEqual(after["average_position_eth"], 0.08706 / 85)
+        future_prices = [
+            rung.price for rung in plan.rungs
+            if rung.state in {"ready", "waiting_reset"}
+        ]
+        lowest_open = min(
+            position["cost_wei"] / position["balance"]
+            for position in positions.values()
+        )
+        self.assertEqual(len(future_prices), 85)
+        self.assertTrue(all(price < lowest_open for price in future_prices))
+        self.assertEqual(len(set(future_prices)), 85)
 
     def test_survivor_liquid_rebuilds_future_density_below_lowest_open_position(self):
         config = ladder_config(

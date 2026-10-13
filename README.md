@@ -735,7 +735,9 @@ derives the complete future grid from current spendable settlement balance,
 minimum position size, hard budget cap, and remaining position slots on every
 poll. Open principal does not enter that future allocation: the highest open
 entry supplies the reference and the lowest open entry bounds the first future
-trigger, while deposits and withdrawals expand or contract grid density.
+trigger, while deposits and withdrawals expand or contract grid density. All
+remaining capacity slots are redistributed through that future range; their
+historical rung indices cannot leave funded capacity stranded above it.
 
 ### Gridless Sell Logic
 

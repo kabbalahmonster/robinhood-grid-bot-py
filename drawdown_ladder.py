@@ -293,18 +293,12 @@ def _next_density_index(
 def _survivor_reservation_indices(
     plan: DrawdownLadderPlan,
     count: int,
-    upper_bound_price: Optional[float],
 ) -> list[int]:
     """Spread the live future grid from the lowest open entry to the floor."""
     candidates = [
         rung.index
         for rung in plan.rungs
         if rung.state not in {"open", "retired"}
-        and (
-            upper_bound_price is None
-            or not math.isfinite(upper_bound_price)
-            or rung.price < upper_bound_price
-        )
     ]
     count = min(max(0, int(count)), len(candidates))
     if count == 0:
@@ -316,6 +310,32 @@ def _survivor_reservation_indices(
     # price after every buy, causing clustered catch-up purchases.
     offsets = _initial_indices(len(candidates), count, include_reference_entry=False)
     return [candidates[offset] for offset in offsets]
+
+
+def _survivor_future_prices(
+    plan: DrawdownLadderPlan,
+    count: int,
+    upper_bound_price: Optional[float],
+) -> list[float]:
+    """Render ``count`` future triggers below the live open-position boundary."""
+    if count <= 0:
+        return []
+    upper = (
+        float(upper_bound_price)
+        if upper_bound_price is not None and math.isfinite(upper_bound_price)
+        else plan.reference_price
+    )
+    floor = plan.reference_price * (1 - plan.terminal_drawdown_percent / 100)
+    if not math.isfinite(upper) or upper <= floor:
+        return []
+    if plan.spacing == "log":
+        ratio = floor / upper
+        return [upper * ratio ** (step / count) for step in range(1, count + 1)]
+    drawdown = 1 - floor / upper
+    return [
+        upper * (1 - drawdown * step / count)
+        for step in range(1, count + 1)
+    ]
 
 
 def _position_cost_wei(position: Dict[str, Any]) -> int:
@@ -755,9 +775,14 @@ def rebalance_survivor_funding(
     selected = [
         plan.rungs[index]
         for index in _survivor_reservation_indices(
-            plan, int(funded_slots), upper_bound_price
+            plan, int(funded_slots)
         )
     ]
+    future_prices = _survivor_future_prices(
+        plan, len(selected), upper_bound_price
+    )
+    if len(future_prices) != len(selected):
+        selected = []
 
     # Every usable wei of Survivor liquid belongs to the future grid. More
     # liquid first increases rung count/density, then increases every future
@@ -768,10 +793,11 @@ def rebalance_survivor_funding(
             rung.principal_wei = quotient + (1 if offset < remainder else 0)
 
     timestamp = time.time() if now is None else now
-    for rung in selected:
+    for rung, price in zip(selected, future_prices):
         # A newly rendered Survivor trigger is live immediately, even when the
         # market is already below it. Execution remains one guarded buy per
         # poll. Only a real prior exit can impose the persistent reset guard.
+        rung.price = price
         rung.state = "waiting_reset" if rung.rearm_required else "ready"
 
     after = [
@@ -907,7 +933,11 @@ def eligible_level(plan: DrawdownLadderPlan, current_price: float) -> Optional[i
         for rung in plan.rungs
         if rung.state == "ready" and current_price <= rung.price
     ]
-    return min(crossed) if crossed else None
+    if not crossed:
+        return None
+    if plan.mode == "survivor":
+        return max(crossed, key=lambda index: plan.rungs[index].price)
+    return min(crossed)
 
 
 def reanchor_survivor(
@@ -1101,7 +1131,7 @@ def validate_plan(plan: DrawdownLadderPlan) -> None:
     prices = [rung.price for rung in plan.rungs]
     if any(not math.isfinite(price) or price <= 0 for price in prices):
         raise LadderStateError("ladder levels must be positive and finite")
-    if any(a <= b for a, b in zip(prices, prices[1:])):
+    if plan.mode != "survivor" and any(a <= b for a, b in zip(prices, prices[1:])):
         raise LadderStateError("ladder levels must be strictly descending")
     for index, rung in enumerate(plan.rungs):
         if rung.index != index or rung.state not in RUNG_STATES:
