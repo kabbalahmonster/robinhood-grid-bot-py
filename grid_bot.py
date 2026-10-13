@@ -5712,7 +5712,12 @@ class GridBot:
             # Remove position
             remove_position(pos_id)
             if self._drawdown_ladder_enabled():
-                from drawdown_ladder import load_plan, mark_exit, save_plan
+                from drawdown_ladder import (
+                    load_plan,
+                    mark_exit,
+                    save_plan,
+                    should_recycle_exit,
+                )
 
                 try:
                     plan = load_plan()
@@ -5726,8 +5731,8 @@ class GridBot:
                         level_index,
                         position_id=pos_id,
                         realized_profit_wei=profit_wei,
-                        recycle=(
-                            self.config.gridless_ladder_rearm_policy == "after_exit"
+                        recycle=should_recycle_exit(
+                            plan, self.config.gridless_ladder_rearm_policy
                         ),
                     )
                     save_plan(plan)

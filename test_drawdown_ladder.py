@@ -24,6 +24,7 @@ from drawdown_ladder import (
     refresh_plan_funding,
     resize_plan_capacity,
     save_plan,
+    should_recycle_exit,
     status_payload,
     sync_survivor_state,
     validate_context,
@@ -373,7 +374,7 @@ class AdaptiveLadderStateTests(unittest.TestCase):
             {int(0.002 * WEI)},
         )
 
-    def test_survivor_live_funding_never_resurrects_retired_rung(self):
+    def test_survivor_live_funding_recovers_legacy_retired_rung(self):
         config = ladder_config(
             gridless_allocation_mode="survivor", max_active_positions=3
         )
@@ -385,9 +386,78 @@ class AdaptiveLadderStateTests(unittest.TestCase):
         self.assertTrue(sync_survivor_state(
             plan, {}, int(0.010 * WEI), config, current_price=1.0, now=103
         ))
-        self.assertEqual(plan.rungs[index].state, "retired")
-        self.assertEqual(plan.rungs[index].principal_wei, 0)
-        self.assertEqual(plan.funded_count, 2)
+        self.assertEqual(plan.rungs[index].state, "waiting_reset")
+        self.assertTrue(plan.rungs[index].rearm_required)
+        self.assertGreater(plan.rungs[index].principal_wei, 0)
+        self.assertEqual(plan.funded_count, 3)
+        self.assertTrue(advance_rearms(plan, 1.0, 0, now=103))
+        self.assertEqual(plan.rungs[index].state, "ready")
+
+    def test_survivor_always_recycles_even_with_legacy_never_policy(self):
+        survivor = build_plan(
+            1.0,
+            int(0.003 * WEI),
+            ladder_config(gridless_allocation_mode="survivor"),
+            now=100,
+        )
+        frozen = build_plan(
+            1.0,
+            int(0.003 * WEI),
+            ladder_config(gridless_allocation_mode="drawdown_ladder"),
+            now=100,
+        )
+
+        self.assertTrue(should_recycle_exit(survivor, "never"))
+        self.assertFalse(should_recycle_exit(frozen, "never"))
+        self.assertTrue(should_recycle_exit(frozen, "after_exit"))
+
+    def test_survivor_recovers_all_100_slots_from_live_72_15_13_state(self):
+        config = ladder_config(
+            gridless_allocation_mode="survivor",
+            max_active_positions=100,
+            token_decimals=18,
+        )
+        plan = build_plan(1.0, int(0.1 * WEI), config, now=100)
+        positions = {}
+        for index in range(15):
+            position_id = str(index)
+            principal = plan.amount_for_level(index)
+            record_fill(plan, index, principal, position_id, filled_at=101)
+            positions[position_id] = {
+                "cost_wei": principal,
+                "balance": principal,
+                "ladder_id": plan.id,
+                "ladder_level_index": index,
+                "ladder_principal_wei": principal,
+            }
+        for index in range(15, 28):
+            position_id = str(index)
+            record_fill(
+                plan, index, plan.amount_for_level(index), position_id, filled_at=101
+            )
+            mark_exit(plan, index, position_id, exited_at=102, recycle=False)
+
+        before = status_payload(plan)
+        self.assertEqual(before["levels_funded"], 72)
+        self.assertEqual(before["levels_open"], 15)
+        self.assertEqual(before["levels_retired"], 13)
+
+        self.assertTrue(sync_survivor_state(
+            plan,
+            positions,
+            int(0.08706 * WEI),
+            config,
+            current_price=1.0,
+            now=103,
+        ))
+        self.assertTrue(advance_rearms(plan, 1.0, 0, now=103))
+        after = status_payload(plan)
+        self.assertEqual(after["levels_funded"], 85)
+        self.assertEqual(after["levels_open"], 15)
+        self.assertEqual(after["levels_inactive"], 0)
+        self.assertEqual(after["levels_retired"], 0)
+        self.assertAlmostEqual(after["reserved_eth"], 0.08706)
+        self.assertAlmostEqual(after["average_position_eth"], 0.08706 / 85)
 
     def test_survivor_liquid_rebuilds_future_density_below_lowest_open_position(self):
         config = ladder_config(
@@ -884,6 +954,9 @@ class AdaptiveLadderStateTests(unittest.TestCase):
         self.assertEqual(payload["state_version"], plan.version)
         self.assertEqual(payload["levels_funded"], 2)
         self.assertEqual(payload["levels_reserved"], 2)
+        self.assertEqual(payload["levels_inactive"], 0)
+        self.assertEqual(payload["levels_retired"], 0)
+        self.assertEqual(payload["minimum_position_eth"], 0.001)
         self.assertEqual(payload["next_level_amount_eth"], 0.001)
         self.assertEqual(payload["completed_cycles"], 1)
         self.assertEqual(payload["realized_profit_eth"], 100 / WEI)

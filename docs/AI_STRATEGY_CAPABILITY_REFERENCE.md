@@ -298,11 +298,13 @@ inactive -> ready -> open -> waiting_reset -> ready -> ...
 - `open`: exactly one confirmed position owns the rung.
 - `waiting_reset`: the position exited; cooldown and an observation above the
   trigger are required before another downward entry.
-- `retired`: no future entries, due to expiry/cancellation or a `never` rearm
-  policy.
+- `retired`: no future entries due to expiry/cancellation. Older builds could
+  incorrectly strand active Survivor slots here under a `never` rearm policy;
+  current builds recover them.
 
-`GRIDLESS_LADDER_REARM_POLICY=after_exit` recycles a rung after reset;
-`never` allows one completed trade only.
+Survivor always recycles a rung after reset. For frozen drawdown ladders,
+`GRIDLESS_LADDER_REARM_POLICY=after_exit` recycles and `never` allows one
+completed trade only.
 `GRIDLESS_LADDER_REARM_COOLDOWN_SECONDS` adds a post-exit delay.
 `GRIDLESS_LADDER_EXPIRY_SECONDS` stops new fills after a duration; zero means no
 expiry. `GRIDLESS_LADDER_INCLUDE_REFERENCE_ENTRY` optionally makes the first

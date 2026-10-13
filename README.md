@@ -202,7 +202,7 @@ python grid_bot.py
 | `GRIDLESS_MULTI_ACTION_ROUNDS` | No | false | Opt in to one polling snapshot authorizing independent guarded attempts for every eligible gridless sell, repeated eligible buys, and a buy after a completed sell pass in the same round. Each fill remains a separate transaction and all execution/receipt guards remain active. |
 | `GRIDLESS_LADDER_MAX_BUDGET_ETH` | No | 0 | Optional hard cap on total assigned rung principal; 0 disables the extra cap |
 | `GRIDLESS_LADDER_EXPIRY_SECONDS` | No | 0 | Stop new rung fills after this many seconds; 0 keeps the adaptive field active indefinitely |
-| `GRIDLESS_LADDER_REARM_POLICY` | No | after_exit | `after_exit` recycles each sold rung; `never` retires a rung after its first completed trade |
+| `GRIDLESS_LADDER_REARM_POLICY` | No | after_exit | Frozen drawdown ladders: `after_exit` recycles each sold rung; `never` permits one completed trade. Survivor is always cyclical and ignores `never`. |
 | `GRIDLESS_LADDER_REARM_COOLDOWN_SECONDS` | No | 0 | Minimum delay after a confirmed sell before that rung may reset; price must also move above its trigger first |
 | `GRIDLESS_LADDER_INCLUDE_REFERENCE_ENTRY` | No | false | Make the first rung equal the reference; otherwise every rung is below it |
 

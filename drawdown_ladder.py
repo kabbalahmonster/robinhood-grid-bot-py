@@ -803,6 +803,17 @@ def sync_survivor_state(
     if plan.version != 5:
         raise LadderStateError("unsupported Survivor state version")
 
+    # Survivor is intrinsically cyclical. Older builds allowed the generic
+    # drawdown-ladder `never` rearm policy to strand sold Survivor slots in
+    # `retired`, permanently reducing the bot's capacity. Recover those slots
+    # into the normal post-exit guard before rendering the live future grid.
+    # Expired/cancelled plans never reach this active-state migration.
+    for rung in plan.rungs:
+        if rung.state == "retired":
+            rung.state = "waiting_reset"
+            rung.rearm_required = True
+            changed = True
+
     configured_spacing = str(config.gridless_ladder_spacing)
     configured_terminal = float(config.gridless_ladder_terminal_drawdown_percent)
     configured_reference_entry = bool(config.gridless_ladder_include_reference_entry)
@@ -1014,6 +1025,11 @@ def mark_exit(
     rung.realized_profit_wei += int(realized_profit_wei)
     rung.last_sell_at = time.time() if exited_at is None else exited_at
     validate_plan(plan)
+
+
+def should_recycle_exit(plan: DrawdownLadderPlan, rearm_policy: str) -> bool:
+    """Return whether a confirmed exit remains available for another cycle."""
+    return plan.mode == "survivor" or rearm_policy == "after_exit"
 
 
 def reconcile_confirmed_positions(
@@ -1280,6 +1296,8 @@ def status_payload(plan: Optional[DrawdownLadderPlan]) -> Optional[dict]:
         "levels_adopted": sum(r.adopted_legacy_position for r in plan.rungs),
         "levels_ready": sum(r.state == "ready" for r in plan.rungs),
         "levels_reserved": plan.reserved_count,
+        "levels_inactive": sum(r.state == "inactive" for r in plan.rungs),
+        "levels_retired": sum(r.state == "retired" for r in plan.rungs),
         "completed_cycles": sum(r.exit_count for r in plan.rungs),
         "next_level_price": plan.next_level_price,
         "next_level_amount_eth": (
@@ -1288,6 +1306,7 @@ def status_payload(plan: Optional[DrawdownLadderPlan]) -> Optional[dict]:
         "allocated_budget_eth": plan.allocated_wei / 10**18,
         "deployed_eth": plan.deployed_wei / 10**18,
         "reserved_eth": plan.reserved_wei / 10**18,
+        "minimum_position_eth": plan.minimum_position_wei / 10**18,
         "average_position_eth": (
             plan.reserved_wei / plan.reserved_count / 10**18
             if plan.mode == "survivor" and plan.reserved_count

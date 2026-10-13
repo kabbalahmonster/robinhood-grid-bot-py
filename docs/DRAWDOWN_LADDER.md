@@ -210,13 +210,15 @@ inactive -> ready -> open -> waiting_reset -> ready -> ...
 - `open`: exactly one confirmed position owns the rung.
 - `waiting_reset`: its position sold; the cooldown must elapse and price must
   first be observed above the trigger before another downward crossing can buy.
-- `retired`: expiry, cancellation, or `GRIDLESS_LADDER_REARM_POLICY=never`
-  disables further buys.
+- `retired`: expiry/cancellation disables further buys. Older builds could
+  incorrectly put active Survivor slots here when configured with
+  `GRIDLESS_LADDER_REARM_POLICY=never`; current builds recover them.
 
 The above-trigger reset prevents an immediate rebuy after a stop loss executed
-below the rung. With `after_exit`, normal profitable sells naturally occur
-above their buy trigger, so the rung becomes ready on a subsequent poll and
-waits for price to return downward.
+below the rung. Normal profitable sells naturally occur above their buy
+trigger, so the rung becomes ready on a subsequent poll and waits for price to
+return downward. Survivor always follows this cycle. The `never` policy applies
+only to frozen drawdown ladders.
 
 Selling the last open position does not close the field. With the default zero
 expiry it remains active indefinitely and retains the last confirmed reference
@@ -335,8 +337,8 @@ configuration; no dashboard-only variable or trading behavior change is
 introduced. The bounded ladder summary also includes:
 
 - reference, spacing, terminal drawdown, status, and optional expiry;
-- state version; maximum, funded, reserved, ready, open, and legacy-adopted
-  rung counts;
+- state version; maximum, funded, reserved, ready, open, inactive, retired,
+  and legacy-adopted rung counts;
 - the live amount assigned to the next ladder buy;
 - next highest ready trigger;
 - allocated, deployed, and logically reserved principal;
@@ -344,8 +346,16 @@ introduced. The bounded ladder summary also includes:
 - completed buy/sell cycles and recorded realized rung profit.
 
 For Survivor, `funded` and average target size describe only the rendered
-future reservations; `open` is reported separately. This prevents filled
-positions from being presented as part of the liquid downward grid.
+future reservations; `open` is reported separately. `inactive` means a usable
+slot that current liquid capital cannot fund at the configured minimum.
+Active Survivor plans never permanently retire sold slots: they always pass
+through the ordinary cooldown/price-reset guard and return to the future grid.
+The `retired` count is retained to diagnose and automatically recover state
+written by older builds that incorrectly applied `GRIDLESS_LADDER_REARM_POLICY=never`
+to Survivor. The partition is therefore explicit:
+future reservations + open positions + inactive slots + retired slots equals
+the configured maximum. This prevents filled or historical positions from
+being presented as part of the liquid downward grid.
 
 ## Treasury sweeps and future buys
 
