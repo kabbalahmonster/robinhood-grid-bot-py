@@ -267,6 +267,34 @@ class TestWalletPreflight(unittest.TestCase):
             self.assertTrue(os.path.exists(path))
             self.assertEqual(wallet.unresolved_broadcast["tx_hash"], "0xabc123")
 
+    def test_receipt_proven_replacement_atomically_preserves_superseded_hash(self):
+        wallet = self.make_wallet()
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "unresolved_broadcast.json")
+            wallet.unresolved_broadcast_path = path
+            wallet.unresolved_broadcast = {"tx_hash": "0xold", "nonce": 328}
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump(wallet.unresolved_broadcast, handle)
+
+            self.assertTrue(wallet.replace_unresolved_broadcast_hash(
+                "0xOLD", "0xnew",
+            ))
+
+            with open(path, encoding="utf-8") as handle:
+                persisted = json.load(handle)
+            self.assertEqual(persisted["tx_hash"], "0xnew")
+            self.assertEqual(persisted["superseded_tx_hash"], "0xold")
+            self.assertIn("replacement_discovered_at_unix", persisted)
+
+    def test_stale_replacement_attempt_preserves_current_guard(self):
+        wallet = self.make_wallet()
+        wallet.unresolved_broadcast = {"tx_hash": "0xcurrent"}
+
+        self.assertFalse(wallet.replace_unresolved_broadcast_hash(
+            "0xstale", "0xreplacement",
+        ))
+        self.assertEqual(wallet.unresolved_broadcast, {"tx_hash": "0xcurrent"})
+
     def test_unsubmitted_guard_records_state_and_archives_after_recovery(self):
         wallet = self.make_wallet()
         with tempfile.TemporaryDirectory() as directory:

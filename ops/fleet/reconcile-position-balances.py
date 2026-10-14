@@ -8,11 +8,20 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from web3 import Web3
+
 
 POSITION_FILES = (Path("data/positions.json"), Path("data/gridless_positions.json"))
 TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 PRE_SELL_BALANCE_GUARD = "pre-sell-balance-unavailable"
 POSITION_BALANCE_GUARD = "position-balance-mismatch"
+REPLACEMENT_LOOKBACK_SECONDS = 300
+REPLACEMENT_LOOKAHEAD_SECONDS = 7200
+REPLACEMENT_LOG_BLOCK_CHUNK = 50_000
+
+
+class ExactTransactionAbsent(ValueError):
+    """The guarded hash has neither a transaction nor receipt on any RPC."""
 
 
 def _hex(value):
@@ -38,6 +47,10 @@ def verified_outgoing_tokens(wallet, token_address, tx_hash):
           else wallet.w3.eth.get_transaction(tx_hash))
     receipt = (receipt_finder(tx_hash) if callable(receipt_finder)
                else wallet.w3.eth.get_transaction_receipt(tx_hash))
+    if tx is None and receipt is None:
+        raise ExactTransactionAbsent(
+            "exact transaction and receipt are absent across all RPC endpoints"
+        )
     if tx is None or receipt is None:
         raise ValueError("exact transaction or receipt is absent across all RPC endpoints")
     if _int(receipt.get("status", 0)) != 1:
@@ -54,6 +67,126 @@ def verified_outgoing_tokens(wallet, token_address, tx_hash):
             continue
         total += _int(entry.get("data", 0))
     return total
+
+
+def block_at_or_after_timestamp(w3, timestamp):
+    """Find the first available block whose timestamp is at least ``timestamp``."""
+    latest = w3.eth.get_block("latest")
+    high = _int(latest["number"])
+    if _int(latest["timestamp"]) < timestamp:
+        return high + 1
+    low = 0
+    while low < high:
+        middle = (low + high) // 2
+        block = w3.eth.get_block(middle)
+        if _int(block["timestamp"]) < timestamp:
+            low = middle + 1
+        else:
+            high = middle
+    return low
+
+
+def discover_replacement_sell(wallet, config, guard):
+    """Find one successful same-nonce replacement through token outflow logs.
+
+    This intentionally handles sells only: a managed-token Transfer emitted
+    from the configured wallet provides a narrow candidate set without relying
+    on explorer indexing.  Every candidate is then checked against the durable
+    transaction fingerprint before its receipt is trusted.
+    """
+    if not isinstance(guard, dict):
+        raise ValueError("replacement discovery requires a valid guard")
+    try:
+        nonce = _int(guard["nonce"])
+        recorded_at = _int(guard["recorded_at_unix"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("guard lacks nonce or recording time") from exc
+    guarded_wallet = str(guard.get("wallet") or "").lower()
+    if guarded_wallet != wallet.address.lower():
+        raise ValueError("guard wallet does not match the configured wallet")
+    guarded_chain = guard.get("chain_id")
+    if guarded_chain is not None and _int(guarded_chain) != int(config.chain_id):
+        raise ValueError("guard chain does not match the configured chain")
+
+    start_block = block_at_or_after_timestamp(
+        wallet.w3, max(0, recorded_at - REPLACEMENT_LOOKBACK_SECONDS),
+    )
+    end_block = block_at_or_after_timestamp(
+        wallet.w3, recorded_at + REPLACEMENT_LOOKAHEAD_SECONDS,
+    )
+    latest_block = _int(wallet.w3.eth.get_block("latest")["number"])
+    end_block = min(end_block, latest_block)
+    if start_block > end_block:
+        raise ValueError("replacement search window has no mined blocks yet")
+
+    wallet_topic = "0x" + wallet.address.lower().removeprefix("0x").rjust(64, "0")
+    token_address = Web3.to_checksum_address(config.token_address)
+    transaction_hashes = set()
+    for first in range(start_block, end_block + 1, REPLACEMENT_LOG_BLOCK_CHUNK):
+        last = min(end_block, first + REPLACEMENT_LOG_BLOCK_CHUNK - 1)
+        logs = wallet.w3.eth.get_logs({
+            "fromBlock": first,
+            "toBlock": last,
+            "address": token_address,
+            "topics": [TRANSFER_TOPIC, wallet_topic],
+        })
+        transaction_hashes.update(
+            _hex(entry["transactionHash"]).lower() for entry in logs
+        )
+
+    transaction_finder = getattr(wallet.w3, "find_transaction", None)
+    candidates = []
+    for tx_hash in sorted(transaction_hashes):
+        tx = (transaction_finder(tx_hash) if callable(transaction_finder)
+              else wallet.w3.eth.get_transaction(tx_hash))
+        if tx is None:
+            continue
+        if str(tx.get("from") or "").lower() != wallet.address.lower():
+            continue
+        if _int(tx.get("nonce", -1)) != nonce:
+            continue
+        guarded_to = str(guard.get("to") or "").lower()
+        if guarded_to and str(tx.get("to") or "").lower() != guarded_to:
+            continue
+        if _int(tx.get("value", 0) or 0) != _int(guard.get("value_wei", 0) or 0):
+            continue
+        outgoing_raw = verified_outgoing_tokens(
+            wallet, config.token_address, tx_hash,
+        )
+        if outgoing_raw > 0:
+            candidates.append((tx_hash, outgoing_raw))
+
+    if len(candidates) != 1:
+        raise ValueError(
+            f"replacement discovery found {len(candidates)} matching successful sells"
+        )
+    return candidates[0]
+
+
+def guarded_outgoing_tokens(wallet, config, guard, allow_replacement=False):
+    """Verify the guarded hash, optionally resolving one proven replacement."""
+    guarded_hash = str(guard["tx_hash"])
+    try:
+        return guarded_hash, verified_outgoing_tokens(
+            wallet, config.token_address, guarded_hash,
+        ), None
+    except ExactTransactionAbsent:
+        if not allow_replacement:
+            raise
+    replacement_hash, outgoing_raw = discover_replacement_sell(
+        wallet, config, guard,
+    )
+    return replacement_hash, outgoing_raw, guarded_hash
+
+
+def adopt_replacement(wallet, old_hash, replacement_hash):
+    """Persist a verified replacement or fail without modifying the guard."""
+    if old_hash is None:
+        return True
+    replacer = getattr(wallet, "replace_unresolved_broadcast_hash", None)
+    if not callable(replacer) or not replacer(old_hash, replacement_hash):
+        raise ValueError("could not atomically persist replacement transaction hash")
+    return True
 
 
 def load_mapping(path):
@@ -183,9 +316,11 @@ def main():
         recovered_prior_reconciliation = False
         if args.apply and isinstance(guard, dict) and guard.get("tx_hash"):
             outgoing_raw = None
+            verified_hash = str(guard["tx_hash"])
+            superseded_hash = None
             try:
-                outgoing_raw = verified_outgoing_tokens(
-                    wallet, config.token_address, str(guard["tx_hash"]),
+                verified_hash, outgoing_raw, superseded_hash = guarded_outgoing_tokens(
+                    wallet, config, guard, allow_replacement=args.automatic,
                 )
                 try:
                     audit = json.loads(audit_path.read_text())
@@ -199,12 +334,15 @@ def main():
                 except (FileNotFoundError, StopIteration, TypeError, ValueError):
                     prior = None
                 if prior is not None and outgoing_raw == int(prior["deficit_raw"]):
-                    archived = wallet.archive_reconciled_broadcast(str(guard["tx_hash"]))
+                    adopt_replacement(wallet, superseded_hash, verified_hash)
+                    archived = wallet.archive_reconciled_broadcast(verified_hash)
                     result["unresolved_broadcast_match"] = {
-                        "tx_hash": str(guard["tx_hash"]), "outgoing_raw": outgoing_raw,
+                        "tx_hash": verified_hash, "outgoing_raw": outgoing_raw,
                         "status": "receipt_verified_against_prior_reconciliation",
                         "archived_path": archived,
                     }
+                    if superseded_hash:
+                        result["unresolved_broadcast_match"]["superseded_tx_hash"] = superseded_hash
                     recovered_prior_reconciliation = bool(archived)
                 elif outgoing_raw > 0:
                     # A managed-token outflow proves this is a sell, not a buy.
@@ -213,12 +351,15 @@ def main():
                     # balance, so no ledger haircut is required.  Archiving the
                     # exact guard is safe and avoids routing a successful sell
                     # through the gridless buy reconciler.
-                    archived = wallet.archive_reconciled_broadcast(str(guard["tx_hash"]))
+                    adopt_replacement(wallet, superseded_hash, verified_hash)
+                    archived = wallet.archive_reconciled_broadcast(verified_hash)
                     result["unresolved_broadcast_match"] = {
-                        "tx_hash": str(guard["tx_hash"]), "outgoing_raw": outgoing_raw,
+                        "tx_hash": verified_hash, "outgoing_raw": outgoing_raw,
                         "status": "receipt_verified_sell_inventory_collateralized",
                         "archived_path": archived,
                     }
+                    if superseded_hash:
+                        result["unresolved_broadcast_match"]["superseded_tx_hash"] = superseded_hash
                     recovered_prior_reconciliation = bool(archived)
             except Exception as exc:
                 result["unresolved_broadcast_match"] = {
@@ -292,13 +433,14 @@ def main():
                 position["balance"] = new_balance
 
     matching_guard_hash = None
+    superseded_guard_hash = None
     guard = getattr(wallet, "unresolved_broadcast", None)
     if (args.apply and isinstance(guard, dict) and guard.get("tx_hash")
             and not position_balance_guard):
         candidate_hash = str(guard["tx_hash"])
         try:
-            outgoing_raw = verified_outgoing_tokens(
-                wallet, config.token_address, candidate_hash,
+            candidate_hash, outgoing_raw, superseded_guard_hash = guarded_outgoing_tokens(
+                wallet, config, guard, allow_replacement=args.automatic,
             )
             if outgoing_raw == deficit_raw:
                 matching_guard_hash = candidate_hash
@@ -306,6 +448,10 @@ def main():
                     "tx_hash": candidate_hash, "outgoing_raw": outgoing_raw,
                     "status": "receipt_verified_exact_deficit",
                 }
+                if superseded_guard_hash:
+                    result["unresolved_broadcast_match"]["superseded_tx_hash"] = (
+                        superseded_guard_hash
+                    )
             else:
                 result["unresolved_broadcast_match"] = {
                     "tx_hash": candidate_hash, "outgoing_raw": outgoing_raw,
@@ -324,6 +470,13 @@ def main():
 
     if args.apply:
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        if matching_guard_hash:
+            # Make the verified replacement durable before changing position
+            # state. If a later write fails, the next run can still resolve the
+            # exact mined hash instead of repeating replacement discovery.
+            adopt_replacement(
+                wallet, superseded_guard_hash, matching_guard_hash,
+            )
         for path, positions in documents.items():
             if not path.exists() or not any(change["file"] == str(path) for change in result["changes"]):
                 continue

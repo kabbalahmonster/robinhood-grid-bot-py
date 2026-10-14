@@ -306,6 +306,36 @@ class Wallet:
         )
         return archived
 
+    def replace_unresolved_broadcast_hash(
+        self, expected_hash: str, replacement_hash: str,
+    ) -> bool:
+        """Atomically adopt a receipt-proven same-nonce replacement hash.
+
+        The caller must verify the replacement transaction and its economic
+        effect before invoking this method.  Requiring the currently recorded
+        hash prevents a stale recovery process from rewriting a newer guard.
+        """
+        record = getattr(self, "unresolved_broadcast", None)
+        if not isinstance(record, dict):
+            return False
+        recorded_hash = str(record.get("tx_hash") or "").strip().lower()
+        expected = str(expected_hash or "").strip().lower()
+        replacement = str(replacement_hash or "").strip().lower()
+        if (not recorded_hash or recorded_hash != expected or not replacement
+                or replacement == expected):
+            return False
+
+        updated = dict(record)
+        updated["superseded_tx_hash"] = str(record["tx_hash"])
+        updated["tx_hash"] = replacement_hash
+        updated["replacement_discovered_at_unix"] = int(time.time())
+        self._persist_transaction_guard(updated)
+        self.logger.warning(
+            "Adopted receipt-proven same-nonce replacement tx=%s superseded=%s",
+            replacement, expected,
+        )
+        return True
+
     def archive_unsubmitted_guard(self, guard_type: str) -> Optional[str]:
         """Archive an explicitly pre-broadcast guard after its check recovers."""
         record = getattr(self, "unresolved_broadcast", None)
