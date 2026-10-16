@@ -4973,22 +4973,68 @@ class GridBot:
 
         successful = 0
         attempted = 0
+        unexpected_failures = 0
         for _priority, pnl, pos_id, snapshot, reason in selected:
             if (getattr(self, "_safety_halted", False)
                     or self.wallet.has_unresolved_broadcast() is True):
                 break
             attempted += 1
             sells_before = int(getattr(self, "session_sells", 0))
-            self._attempt_gridless_sell_candidate(
-                pos_id, snapshot, price, reason, pnl
-            )
+            self._sell_candidate_broadcast_started = False
+            try:
+                self._attempt_gridless_sell_candidate(
+                    pos_id, snapshot, price, reason, pnl
+                )
+            except Exception:
+                # Preserve the legacy one-action failure contract.  Multi-action
+                # rounds may isolate a provider/runtime failure only while the
+                # wallet proves that no broadcast is unresolved and no safety
+                # path has halted trading.  This prevents one pre-broadcast
+                # route failure from suppressing every later snapshotted exit
+                # without ever guessing across an ambiguous transaction.
+                if not multi_action:
+                    raise
+                unexpected_failures += 1
+                broadcast_started = bool(getattr(
+                    self, "_sell_candidate_broadcast_started", False
+                ))
+                unresolved = self.wallet.has_unresolved_broadcast()
+                if (broadcast_started
+                        or getattr(self, "_safety_halted", False)
+                        or unresolved is not False):
+                    if broadcast_started:
+                        # The exception escaped after entering the sell send
+                        # boundary.  Even if a receipt RPC happened to clear
+                        # the unresolved guard, the strategy checkpoint may be
+                        # incomplete, so require restart recovery/audit rather
+                        # than attempting another snapshotted position.
+                        self._safety_halted = True
+                    logger.exception(
+                        "Multi-action sell candidate #%s failed unexpectedly; "
+                        "remaining exits blocked by safety state "
+                        "(broadcast_started=%s halted=%s "
+                        "unresolved_broadcast=%s)",
+                        pos_id,
+                        broadcast_started,
+                        bool(getattr(self, "_safety_halted", False)),
+                        unresolved,
+                    )
+                    break
+                logger.exception(
+                    "Multi-action sell candidate #%s failed unexpectedly "
+                    "before any unresolved broadcast; continuing with the "
+                    "remaining snapshotted exits",
+                    pos_id,
+                )
+                continue
             sells_after = int(getattr(self, "session_sells", 0))
             if sells_after > sells_before:
                 successful += sells_after - sells_before
 
         self._sell_round_attempted = attempted
         self._sell_round_succeeded = successful
-        if multi_action and successful and attempted == len(selected):
+        if (multi_action and successful and not unexpected_failures
+                and attempted == len(selected)):
             # All candidates from the authoritative opening snapshot have had
             # their own guarded attempt. A buy may now use the freshly
             # persisted position and wallet state in this same outer round.
@@ -5594,6 +5640,7 @@ class GridBot:
         attempted_token_balance_before = self._snapshot_sell_token_balance_or_halt(pos_id, sell_tx)
         if attempted_token_balance_before is None:
             return
+        self._sell_candidate_broadcast_started = True
         result = self.wallet._send_transaction(
             sell_tx, on_submitted=self._tournament_submission_callback("sell")
         )

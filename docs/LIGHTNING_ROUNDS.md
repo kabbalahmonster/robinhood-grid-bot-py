@@ -40,6 +40,15 @@ Transactions remain receipt-serialized. Pending-nonce pipelining is intentionall
 out of scope because it requires a durable intent/settlement queue to avoid
 duplicate or phantom position transitions.
 
+Within an enabled multi-action sell pass, an unexpected provider/runtime failure
+may be isolated to one candidate only before the sell broadcast boundary, when
+the wallet explicitly reports no unresolved broadcast and trading is not
+safety-halted. The remaining positions then receive their own guarded attempts.
+Crossing the sell broadcast boundary, any ambiguous broadcast, or any safety
+halt stops the pass; a post-boundary exception additionally safety-halts trading
+for restart recovery. Any unexpected failure keeps the buy lane deferred for
+that round.
+
 ## Safe activation order
 
 First canary the changes that do not alter route choice:

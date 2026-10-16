@@ -101,6 +101,97 @@ class MultiActionRoundTests(unittest.TestCase):
         self.assertTrue(bot._allow_buy_after_sell_this_cycle)
         self.assertFalse(bot._sell_has_cycle_priority())
 
+    def test_multi_action_isolates_prebroadcast_candidate_exception(self):
+        bot = make_bot(True)
+
+        def attempt(position_id, *_args):
+            if position_id == "2":
+                raise RuntimeError("final gas simulation failed")
+            bot.session_sells += 1
+
+        bot._attempt_gridless_sell_candidate = MagicMock(side_effect=attempt)
+
+        with patch("gridless.load_positions", return_value=POSITIONS):
+            bot._check_sells_gridless(1.0, PNLS)
+
+        self.assertEqual(
+            [call.args[0] for call in bot._attempt_gridless_sell_candidate.call_args_list],
+            ["2", "1"],
+        )
+        self.assertEqual(bot._sell_round_attempted, 2)
+        self.assertEqual(bot._sell_round_succeeded, 1)
+        self.assertFalse(bot._allow_buy_after_sell_this_cycle)
+        self.assertTrue(bot._sell_has_cycle_priority())
+
+    def test_multi_action_exception_stops_on_unresolved_broadcast(self):
+        bot = make_bot(True)
+        states = iter([False, True])
+        bot.wallet = SimpleNamespace(
+            has_unresolved_broadcast=lambda: next(states, True)
+        )
+        bot._attempt_gridless_sell_candidate = MagicMock(
+            side_effect=RuntimeError("receipt unavailable")
+        )
+
+        with patch("gridless.load_positions", return_value=POSITIONS):
+            bot._check_sells_gridless(1.0, PNLS)
+
+        bot._attempt_gridless_sell_candidate.assert_called_once()
+        self.assertEqual(bot._sell_round_attempted, 1)
+        self.assertEqual(bot._sell_round_succeeded, 0)
+        self.assertFalse(bot._allow_buy_after_sell_this_cycle)
+
+    def test_multi_action_exception_stops_when_safety_halted(self):
+        bot = make_bot(True)
+
+        def halt_and_fail(*_args):
+            bot._safety_halted = True
+            raise RuntimeError("sell balance changed unexpectedly")
+
+        bot._attempt_gridless_sell_candidate = MagicMock(
+            side_effect=halt_and_fail
+        )
+
+        with patch("gridless.load_positions", return_value=POSITIONS):
+            bot._check_sells_gridless(1.0, PNLS)
+
+        bot._attempt_gridless_sell_candidate.assert_called_once()
+        self.assertEqual(bot._sell_round_attempted, 1)
+        self.assertEqual(bot._sell_round_succeeded, 0)
+        self.assertFalse(bot._allow_buy_after_sell_this_cycle)
+
+    def test_multi_action_exception_after_broadcast_boundary_halts(self):
+        bot = make_bot(True)
+
+        def broadcast_and_fail(*_args):
+            bot._sell_candidate_broadcast_started = True
+            raise RuntimeError("post-submit checkpoint failed")
+
+        bot._attempt_gridless_sell_candidate = MagicMock(
+            side_effect=broadcast_and_fail
+        )
+
+        with patch("gridless.load_positions", return_value=POSITIONS):
+            bot._check_sells_gridless(1.0, PNLS)
+
+        bot._attempt_gridless_sell_candidate.assert_called_once()
+        self.assertTrue(bot._safety_halted)
+        self.assertEqual(bot._sell_round_attempted, 1)
+        self.assertEqual(bot._sell_round_succeeded, 0)
+        self.assertFalse(bot._allow_buy_after_sell_this_cycle)
+
+    def test_legacy_sell_exception_still_propagates(self):
+        bot = make_bot(False)
+        bot._attempt_gridless_sell_candidate = MagicMock(
+            side_effect=RuntimeError("final gas simulation failed")
+        )
+
+        with patch("gridless.load_positions", return_value=POSITIONS):
+            with self.assertRaisesRegex(RuntimeError, "final gas simulation"):
+                bot._check_sells_gridless(1.0, PNLS)
+
+        bot._attempt_gridless_sell_candidate.assert_called_once()
+
     def test_changed_position_is_not_quoted_or_sold(self):
         bot = make_bot(True)
         bot._actionable_quote_with_weth_fallback = MagicMock()
