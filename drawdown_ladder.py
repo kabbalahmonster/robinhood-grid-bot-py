@@ -237,7 +237,7 @@ def migrate_threshold_to_ladder(
 
 def _validate_survivor_transition_context(
     plan: "DrawdownLadderPlan", positions: Dict[str, Dict], config: Any
-) -> None:
+) -> list[int]:
     """Validate identity/accounting while deliberately allowing target mode drift."""
     validate_plan(plan)
     if plan.mode != "survivor":
@@ -249,13 +249,16 @@ def _validate_survivor_transition_context(
         raise LadderStateError("ladder chain does not match this bot")
     if plan.token_address != str(config.token_address).lower():
         raise LadderStateError("ladder token does not match this bot")
-    validate_position_pairing(plan, positions)
+    stale_open_rungs = validate_position_pairing(
+        plan, positions, allow_unpaired_open_rungs=True
+    )
     configured_capacity = int(config.max_active_positions)
     if configured_capacity < len(positions):
         raise LadderStateError(
             f"cannot migrate {len(positions)} Survivor positions to threshold "
             f"with MAX_ACTIVE_POSITIONS={configured_capacity}; increase the cap first"
         )
+    return stale_open_rungs
 
 
 def _positions_without_ladder_provenance(
@@ -422,7 +425,9 @@ def migrate_survivor_to_threshold(
     migration_root: str = ALLOCATION_MIGRATION_DIR,
 ) -> tuple[Dict[str, Dict], Path]:
     """Convert open Survivor lots to ordinary threshold lots with rollback evidence."""
-    _validate_survivor_transition_context(plan, positions, config)
+    stale_open_rungs = _validate_survivor_transition_context(
+        plan, positions, config
+    )
     raw_positions = load_raw_positions_for_migration(positions, positions_path)
     migrated = _positions_without_ladder_provenance(raw_positions)
     expected_payload = _json_bytes(migrated)
@@ -432,6 +437,7 @@ def migrate_survivor_to_threshold(
         manifest_extra={
             "ladder_id": plan.id,
             "expected_positions_sha256": _sha256(expected_payload),
+            "discarded_stale_open_rungs": stale_open_rungs,
         },
     )
     _atomic_bytes(backup_dir / "threshold_positions.json", expected_payload)
@@ -1633,9 +1639,18 @@ def validate_context(
 
 
 def validate_position_pairing(
-    plan: DrawdownLadderPlan, positions: Dict[str, Dict]
-) -> None:
-    """Validate the two-file position/rung invariant without config checks."""
+    plan: DrawdownLadderPlan,
+    positions: Dict[str, Dict],
+    *,
+    allow_unpaired_open_rungs: bool = False,
+) -> list[int]:
+    """Validate position-to-rung accounting and return ladder-only open rungs.
+
+    Continuing ladder operation requires exact pairing in both directions.
+    Survivor-to-threshold migration may deliberately allow ladder-only open
+    records left behind by confirmed sells performed after the configured mode
+    changed, because threshold inventory is defined by the position ledger.
+    """
     seen = set()
     for position_id, position in positions.items():
         if position.get("ladder_id") != plan.id:
@@ -1664,13 +1679,14 @@ def validate_position_pairing(
             )
     open_indices = {rung.index for rung in plan.rungs if rung.state == "open"}
     missing = sorted(open_indices - seen)
-    if missing:
+    if missing and not allow_unpaired_open_rungs:
         rendered = ", ".join(str(index) for index in missing)
         raise LadderStateError(
             "persisted open rung(s) " + rendered
             + " have no matching position; ladder and positions must be reset "
               "or restored together"
         )
+    return missing
 
 
 def expire_plan(plan: DrawdownLadderPlan) -> None:

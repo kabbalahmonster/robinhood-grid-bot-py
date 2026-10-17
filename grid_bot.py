@@ -3380,6 +3380,17 @@ class GridBot:
                 )
                 positions.clear()
                 positions.update(migrated)
+                manifest = json.loads(
+                    (backup_dir / "manifest.json").read_text(encoding="utf-8")
+                )
+                stale_open_rungs = manifest.get("discarded_stale_open_rungs", [])
+                if stale_open_rungs:
+                    logger.warning(
+                        "Discarded %d stale Survivor open-rung records during "
+                        "threshold migration: %s",
+                        len(stale_open_rungs),
+                        ", ".join(map(str, stale_open_rungs)),
+                    )
                 logger.warning(
                     "Automatically migrated %d Survivor positions to threshold; "
                     "removed ladder %s after paired backup at %s",

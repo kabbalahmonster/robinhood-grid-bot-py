@@ -31,6 +31,7 @@ from drawdown_ladder import (
     status_payload,
     sync_survivor_state,
     validate_context,
+    validate_position_pairing,
 )
 from grid_bot import GridBot
 from config import load_config
@@ -1142,6 +1143,44 @@ class AdaptiveLadderBotTests(unittest.TestCase):
         migrated = gridless.load_positions()
         self.assertEqual(migrated["0"]["cost_wei"], original["0"]["cost_wei"])
         self.assertEqual(migrated["0"]["balance"], original["0"]["balance"])
+
+    def test_survivor_to_threshold_discards_stale_ladder_only_open_rungs(self):
+        plan, original, positions = self._persist_open_survivor()
+        stale = plan.rungs[4]
+        stale.state = "open"
+        stale.position_id = "already-sold"
+        stale.open_principal_wei = stale.principal_wei
+        stale.open_entry_kind = "ladder"
+        stale.fill_count = 1
+        save_plan(plan)
+        self.bot.config.gridless_allocation_mode = "threshold"
+
+        result = self.bot._reconcile_gridless_allocation_mode(
+            0.05, positions, int(0.004 * WEI)
+        )
+
+        self.assertIsNone(result)
+        self.assertIsNone(load_plan())
+        migrated = gridless.load_positions()
+        self.assertEqual(migrated["0"]["cost_wei"], original["0"]["cost_wei"])
+        manifests = list(Path("data/allocation-migrations").glob("*/manifest.json"))
+        self.assertEqual(len(manifests), 1)
+        manifest = json.loads(manifests[0].read_text())
+        self.assertEqual(manifest["discarded_stale_open_rungs"], [4])
+
+    def test_normal_survivor_validation_still_rejects_ladder_only_open_rungs(self):
+        plan, _original, positions = self._persist_open_survivor()
+        stale = plan.rungs[4]
+        stale.state = "open"
+        stale.position_id = "missing-position"
+        stale.open_principal_wei = stale.principal_wei
+        stale.open_entry_kind = "ladder"
+        stale.fill_count = 1
+
+        with self.assertRaisesRegex(
+            LadderStateError, "persisted open rung.s. 4 have no matching position"
+        ):
+            validate_position_pairing(plan, positions)
 
     def test_survivor_to_threshold_rejects_capacity_below_open_count(self):
         plan, _original, positions = self._persist_open_survivor()
