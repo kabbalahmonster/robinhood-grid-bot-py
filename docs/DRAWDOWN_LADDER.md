@@ -59,13 +59,21 @@ If positions exist but no ladder exists, the first ladder-mode poll maps those
 positions into a compatible versioned plan and adds exact rung provenance.
 Frozen-reference plans remain v2; live survivor plans use v5. Existing v3/v4
 Survivor state is explicitly migrated from its matching persisted open
-positions on the first poll; no market estimate is used. Plans cannot be
-silently reinterpreted between modes. The loader still refuses old v1 one-shot state,
+positions on the first poll; no market estimate is used. Switching a stopped
+bot between `survivor` and `threshold` is automatic on its first fresh-price
+cycle. Threshold positions are deterministically adopted into Survivor;
+Survivor positions retain their IDs, balances, cost bases, deferred sell gas,
+and reconciliation evidence while ladder-only provenance is removed. The
+paired pre-transition files and a manifest are retained under
+`data/allocation-migrations/`. Survivor-to-threshold writes the threshold
+ledger before removing the ladder and resumes that exact transaction after a
+crash. Identity, capacity, minimum-principal, or paired-accounting ambiguity
+still fails closed. Frozen `drawdown_ladder` state is not automatically
+converted to threshold. The loader still refuses old v1 one-shot state,
 partial/foreign ladder provenance,
 malformed positions, or more open positions than `MAX_ACTIVE_POSITIONS`.
-Archive `data/gridless_ladder.json` together with
-`data/gridless_positions.json` before any manual migration; never delete only
-one side of an active strategy.
+Manual state surgery remains unsafe: never delete only one side of an active
+strategy. Restore both files from the same allocation-migration backup.
 
 Because Survivor geometry is derived state, changes to terminal drawdown,
 linear/log spacing, or reference-entry inclusion are also regenerated and

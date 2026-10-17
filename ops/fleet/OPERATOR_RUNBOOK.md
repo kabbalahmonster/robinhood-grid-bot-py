@@ -246,6 +246,17 @@ trigger is below the current market. A provenance mismatch or unsupported old
 ladder is a safety stop; restore the paired backup or perform an explicit
 migration rather than deleting one state file.
 
+For current Survivor bots, switching only
+`GRIDLESS_ALLOCATION_MODE=threshold` and restarting performs a guarded automatic
+transition on the first fresh-price cycle. The reverse threshold-to-Survivor
+switch is automatic as well. Confirm the log names the migrated position count
+and `data/allocation-migrations/...` backup, then confirm the dashboard strategy
+mode. Do not remove either live state file by hand. To roll back state, stop the
+bot and restore both `gridless_positions.json` and `gridless_ladder.json` from
+the same migration directory; a missing ladder backup means the source was
+threshold and must remain absent. Frozen `drawdown_ladder` plans and any
+identity/accounting mismatch still require explicit operator review.
+
 ## Position-balance reconciliation
 
 Set `AUTO_RECONCILE_UNRESOLVED_BROADCAST=true` in a bot's `.env` to let its

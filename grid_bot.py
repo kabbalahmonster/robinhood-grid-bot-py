@@ -3351,6 +3351,57 @@ class GridBot:
             self.config, "gridless_allocation_mode", "threshold"
         )).lower() in {"drawdown_ladder", "survivor"}
 
+    def _reconcile_gridless_allocation_mode(
+        self, price, positions, spendable_balance_wei
+    ):
+        """Complete any safe configured allocation-mode transition before trading."""
+        from drawdown_ladder import (
+            LadderStateError,
+            load_plan,
+            migrate_survivor_to_threshold,
+            recover_allocation_migration,
+        )
+
+        mode = str(getattr(
+            self.config, "gridless_allocation_mode", "threshold"
+        )).lower()
+        if mode == "threshold":
+            recovered = recover_allocation_migration()
+            if recovered is not None:
+                positions.clear()
+                positions.update(recovered)
+                logger.warning(
+                    "Completed interrupted Survivor-to-threshold allocation migration"
+                )
+            plan = load_plan()
+            if plan is not None:
+                migrated, backup_dir = migrate_survivor_to_threshold(
+                    plan, positions, self.config
+                )
+                positions.clear()
+                positions.update(migrated)
+                logger.warning(
+                    "Automatically migrated %d Survivor positions to threshold; "
+                    "removed ladder %s after paired backup at %s",
+                    len(positions), plan.id, backup_dir,
+                )
+            provenance = [
+                position_id for position_id, position in positions.items()
+                if any(key.startswith("ladder_") for key in position)
+            ]
+            if provenance:
+                raise LadderStateError(
+                    "threshold positions retain ladder provenance without a "
+                    "recoverable ladder migration: " + ", ".join(provenance)
+                )
+            return None
+
+        if mode in {"drawdown_ladder", "survivor"}:
+            return self._prepare_gridless_ladder(
+                price, positions, spendable_balance_wei
+            )
+        raise LadderStateError(f"unsupported gridless allocation mode {mode}")
+
     def _prepare_gridless_ladder(self, price, positions, spendable_balance_wei, now=None):
         """Load, recover, resize, and recycle the adaptive entry ladder."""
         from drawdown_ladder import (
@@ -3360,6 +3411,9 @@ class GridBot:
             build_plan,
             expire_plan,
             load_plan,
+            load_raw_positions_for_migration,
+            migrate_threshold_to_ladder,
+            recover_threshold_to_ladder_migration,
             reconcile_adoption_provenance,
             reconcile_confirmed_positions,
             refresh_plan_funding,
@@ -3370,32 +3424,48 @@ class GridBot:
         )
 
         now = time.time() if now is None else now
+        recovered_backup = recover_threshold_to_ladder_migration(
+            str(getattr(
+                self.config, "gridless_allocation_mode", "drawdown_ladder"
+            ))
+        )
+        if recovered_backup is not None:
+            from gridless import load_positions
+
+            recovered_positions = load_positions()
+            positions.clear()
+            positions.update(recovered_positions)
+            logger.warning(
+                "Completed interrupted threshold-to-%s allocation migration "
+                "from %s",
+                self.config.gridless_allocation_mode, recovered_backup,
+            )
         plan = load_plan()
         if plan is None:
             if positions:
-                from gridless import save_positions
-
+                source_positions = load_raw_positions_for_migration(
+                    positions, "data/gridless_positions.json"
+                )
                 plan, adopted_positions = adopt_legacy_positions(
-                    positions,
+                    source_positions,
                     spendable_balance_wei,
                     self.config,
                     current_price=price,
                     now=now,
                 )
-                # Ladder-first is intentional: restart can prove and finish the
-                # position-provenance half if the second atomic rename fails.
-                save_plan(plan)
-                save_positions(adopted_positions)
+                backup_dir = migrate_threshold_to_ladder(
+                    plan, adopted_positions
+                )
                 positions.clear()
                 positions.update(adopted_positions)
                 logger.warning(
                     "Adopted %d legacy gridless positions into adaptive %s "
                     "drawdown ladder %s: reference=%.10f, funded=%d/%d, "
-                    "terminal=-%.2f%%",
+                    "terminal=-%.2f%%, backup=%s",
                     len(positions), plan.spacing, plan.id, plan.reference_price,
                     (plan.reserved_count if plan.mode == "survivor"
                      else plan.funded_count), plan.max_levels,
-                    plan.terminal_drawdown_percent,
+                    plan.terminal_drawdown_percent, backup_dir,
                 )
                 return plan
             plan = build_plan(price, spendable_balance_wei, self.config, now)
@@ -6997,6 +7067,18 @@ class GridBot:
         if price is None:
             logger.warning("Could not get a fresh %s-side net price", pnl_polling_mode)
             return
+
+        if use_gridless:
+            spendable_balance = (
+                max(0, eth_bal - getattr(self.config, "eth_gas_reserve", 0.001))
+                if getattr(self.config, "use_eth_trading", False)
+                else weth_bal
+            )
+            self._reconcile_gridless_allocation_mode(
+                price,
+                gridless_positions,
+                int(Decimal(str(spendable_balance)) * Decimal(10**18)),
+            )
         
         # Check for compact/debug round telemetry. Normal INFO operation is
         # deliberately silent between actionable events.

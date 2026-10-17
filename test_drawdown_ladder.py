@@ -4,6 +4,7 @@ import json
 import os
 import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -12,6 +13,8 @@ from drawdown_ladder import (
     advance_rearms,
     anchor_survivor_bootstrap,
     adopt_legacy_positions,
+    migrate_survivor_to_threshold,
+    recover_allocation_migration,
     build_plan,
     eligible_level,
     generate_levels,
@@ -1060,6 +1063,7 @@ class AdaptiveLadderBotTests(unittest.TestCase):
     def test_open_positions_without_plan_are_adopted(self):
         self.bot.config.token_decimals = 18
         positions = {"0": {"cost_wei": int(0.001 * WEI), "balance": int(0.01 * WEI)}}
+        gridless.save_positions(positions)
         plan = self.bot._prepare_gridless_ladder(
             0.05, positions, int(0.01 * WEI), now=100
         )
@@ -1067,6 +1071,194 @@ class AdaptiveLadderBotTests(unittest.TestCase):
         self.assertEqual(plan.funded_count, 11)
         self.assertEqual(positions["0"]["ladder_id"], plan.id)
         validate_context(plan, positions, self.bot.config)
+
+    def _persist_open_survivor(self):
+        self.bot.config = ladder_config(
+            gridless_allocation_mode="survivor",
+            max_active_positions=5,
+            token_decimals=18,
+        )
+        original = {
+            "0": {
+                "cost_wei": int(0.001 * WEI),
+                "balance": int(0.01 * WEI),
+                "deferred_sell_gas_wei": 123,
+                "future_position_field": {"preserve": True},
+            }
+        }
+        plan, adopted = adopt_legacy_positions(
+            original, int(0.004 * WEI), self.bot.config,
+            current_price=0.05, now=100,
+        )
+        save_plan(plan)
+        gridless.save_positions(adopted)
+        return plan, original, adopted
+
+    def test_survivor_to_threshold_is_automatic_and_backed_up(self):
+        plan, original, positions = self._persist_open_survivor()
+        self.bot.config.gridless_allocation_mode = "threshold"
+
+        result = self.bot._reconcile_gridless_allocation_mode(
+            0.05, positions, int(0.004 * WEI)
+        )
+
+        self.assertIsNone(result)
+        self.assertIsNone(load_plan())
+        normalized = gridless.load_positions()
+        self.assertEqual(normalized["0"]["cost_wei"], original["0"]["cost_wei"])
+        self.assertEqual(normalized["0"]["balance"], original["0"]["balance"])
+        self.assertEqual(
+            normalized["0"]["deferred_sell_gas_wei"],
+            original["0"]["deferred_sell_gas_wei"],
+        )
+        raw_positions = json.loads(
+            Path("data/gridless_positions.json").read_text()
+        )
+        self.assertEqual(
+            raw_positions["0"]["future_position_field"], {"preserve": True}
+        )
+        backups = list(Path("data/allocation-migrations").glob(
+            "*.survivor-to-threshold"
+        ))
+        self.assertEqual(len(backups), 1)
+        manifest = json.loads((backups[0] / "manifest.json").read_text())
+        self.assertEqual(manifest["status"], "complete")
+        self.assertEqual(manifest["ladder_id"], plan.id)
+        self.assertTrue((backups[0] / "gridless_ladder.json").exists())
+        self.assertTrue((backups[0] / "gridless_positions.json").exists())
+
+    def test_interrupted_survivor_to_threshold_finishes_on_restart(self):
+        plan, original, adopted = self._persist_open_survivor()
+        self.bot.config.gridless_allocation_mode = "threshold"
+        real_unlink = Path.unlink
+
+        def interrupt_ladder_unlink(path, *args, **kwargs):
+            if path.name == "gridless_ladder.json":
+                raise OSError("simulated power loss")
+            return real_unlink(path, *args, **kwargs)
+
+        with patch.object(Path, "unlink", interrupt_ladder_unlink):
+            with self.assertRaisesRegex(OSError, "power loss"):
+                migrate_survivor_to_threshold(
+                    plan, adopted, self.bot.config
+                )
+
+        self.assertTrue(Path("data/gridless_ladder.json").exists())
+        normalized = gridless.load_positions()
+        self.assertEqual(normalized["0"]["cost_wei"], original["0"]["cost_wei"])
+        self.assertEqual(normalized["0"]["balance"], original["0"]["balance"])
+        recovered = recover_allocation_migration()
+        self.assertEqual(recovered, original)
+        self.assertFalse(Path("data/gridless_ladder.json").exists())
+        manifest_paths = list(Path("data/allocation-migrations").glob(
+            "*/manifest.json"
+        ))
+        self.assertEqual(len(manifest_paths), 1)
+        self.assertEqual(
+            json.loads(manifest_paths[0].read_text())["status"], "complete"
+        )
+
+    def test_threshold_can_switch_back_to_survivor_without_losing_lots(self):
+        _plan, original, positions = self._persist_open_survivor()
+        self.bot.config.gridless_allocation_mode = "threshold"
+        self.bot._reconcile_gridless_allocation_mode(
+            0.05, positions, int(0.004 * WEI)
+        )
+        self.bot.config.gridless_allocation_mode = "survivor"
+
+        survivor = self.bot._reconcile_gridless_allocation_mode(
+            0.05, positions, int(0.004 * WEI)
+        )
+
+        self.assertEqual(survivor.mode, "survivor")
+        self.assertEqual(positions["0"]["cost_wei"], original["0"]["cost_wei"])
+        self.assertEqual(positions["0"]["balance"], original["0"]["balance"])
+        self.assertEqual(
+            positions["0"]["deferred_sell_gas_wei"],
+            original["0"]["deferred_sell_gas_wei"],
+        )
+        self.assertEqual(
+            positions["0"]["future_position_field"],
+            original["0"]["future_position_field"],
+        )
+        validate_context(survivor, positions, self.bot.config)
+        reverse_backups = list(Path("data/allocation-migrations").glob(
+            "*.threshold-to-survivor"
+        ))
+        self.assertEqual(len(reverse_backups), 1)
+        reverse_manifest = json.loads(
+            (reverse_backups[0] / "manifest.json").read_text()
+        )
+        self.assertEqual(reverse_manifest["status"], "complete")
+
+    def test_interrupted_threshold_to_survivor_finishes_on_restart(self):
+        self.bot.config = ladder_config(
+            gridless_allocation_mode="survivor",
+            max_active_positions=5,
+            token_decimals=18,
+        )
+        positions = {
+            "0": {
+                "cost_wei": int(0.001 * WEI),
+                "balance": int(0.01 * WEI),
+                "future_position_field": {"preserve": True},
+            }
+        }
+        gridless.save_positions(positions)
+        import drawdown_ladder
+        real_atomic = drawdown_ladder._atomic_bytes
+
+        def interrupt_position_commit(path, payload):
+            if Path(path) == Path("data/gridless_positions.json"):
+                raise OSError("simulated power loss")
+            return real_atomic(path, payload)
+
+        with patch(
+            "drawdown_ladder._atomic_bytes", side_effect=interrupt_position_commit
+        ):
+            with self.assertRaisesRegex(OSError, "power loss"):
+                self.bot._prepare_gridless_ladder(
+                    0.05, positions, int(0.004 * WEI), now=100
+                )
+
+        self.assertIsNotNone(load_plan())
+        recovered = self.bot._prepare_gridless_ladder(
+            0.05, positions, int(0.004 * WEI), now=101
+        )
+        self.assertEqual(recovered.mode, "survivor")
+        raw = json.loads(Path("data/gridless_positions.json").read_text())
+        self.assertEqual(
+            raw["0"]["future_position_field"], {"preserve": True}
+        )
+        validate_context(recovered, positions, self.bot.config)
+
+    def test_empty_survivor_plan_can_switch_to_threshold(self):
+        self.bot.config = ladder_config(
+            gridless_allocation_mode="survivor", max_active_positions=5
+        )
+        plan = build_plan(1.0, int(0.005 * WEI), self.bot.config, now=100)
+        save_plan(plan)
+        self.bot.config.gridless_allocation_mode = "threshold"
+        positions = {}
+
+        self.bot._reconcile_gridless_allocation_mode(
+            1.0, positions, int(0.005 * WEI)
+        )
+
+        self.assertIsNone(load_plan())
+        self.assertEqual(gridless.load_positions(), {})
+
+    def test_threshold_refuses_frozen_ladder_automatic_conversion(self):
+        plan = build_plan(1.0, int(0.005 * WEI), self.bot.config, now=100)
+        save_plan(plan)
+        self.bot.config.gridless_allocation_mode = "threshold"
+
+        with self.assertRaisesRegex(
+            LadderStateError, "automatically migrate Survivor state only"
+        ):
+            self.bot._reconcile_gridless_allocation_mode(
+                1.0, {}, int(0.005 * WEI)
+            )
 
     def test_execution_price_guard_uses_gap_to_next_occupied_rung(self):
         context = {

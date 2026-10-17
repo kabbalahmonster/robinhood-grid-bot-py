@@ -7,6 +7,7 @@ and grow in principal only after maximum trigger coverage is funded.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -20,6 +21,8 @@ from uuid import uuid4
 
 
 LADDER_FILE = "data/gridless_ladder.json"
+POSITIONS_FILE = "data/gridless_positions.json"
+ALLOCATION_MIGRATION_DIR = "data/allocation-migrations"
 LADDER_VERSION = 5
 SUPPORTED_LADDER_VERSIONS = {2, 3, 4, 5}
 RUNG_STATES = {"inactive", "ready", "open", "waiting_reset", "retired"}
@@ -27,6 +30,418 @@ RUNG_STATES = {"inactive", "ready", "open", "waiting_reset", "retired"}
 
 class LadderStateError(RuntimeError):
     """Raised when persisted ladder state is corrupt or ambiguous."""
+
+
+LADDER_PROVENANCE_FIELDS = frozenset({
+    "ladder_id",
+    "ladder_level_index",
+    "ladder_principal_wei",
+    "ladder_entry_kind",
+    "ladder_fill_price",
+    "ladder_bootstrap_reference",
+})
+
+
+def _json_bytes(value: Any) -> bytes:
+    return (json.dumps(value, indent=2) + "\n").encode("utf-8")
+
+
+def _atomic_bytes(path: Path, payload: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", dir=path.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def _sha256(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _migration_manifest(path: Path, value: dict) -> None:
+    _atomic_bytes(path, _json_bytes(value))
+
+
+def backup_allocation_state(
+    source_mode: str,
+    target_mode: str,
+    *,
+    ladder_path: str = LADDER_FILE,
+    positions_path: str = POSITIONS_FILE,
+    migration_root: str = ALLOCATION_MIGRATION_DIR,
+    manifest_extra: Optional[dict] = None,
+    initial_status: str = "prepared",
+) -> tuple[Path, dict]:
+    """Durably snapshot the paired allocation files before an automatic switch."""
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    backup_dir = Path(migration_root) / (
+        f"{stamp}.{uuid4().hex[:8]}.{source_mode}-to-{target_mode}"
+    )
+    backup_dir.mkdir(parents=True, exist_ok=False)
+    files = {}
+    for name, source in (("positions", Path(positions_path)),
+                         ("ladder", Path(ladder_path))):
+        if not source.exists():
+            files[name] = None
+            continue
+        payload = source.read_bytes()
+        destination = backup_dir / source.name
+        _atomic_bytes(destination, payload)
+        files[name] = {
+            "path": destination.name,
+            "sha256": _sha256(payload),
+            "bytes": len(payload),
+        }
+    manifest = {
+        "schema_version": 1,
+        "source_mode": source_mode,
+        "target_mode": target_mode,
+        "status": initial_status,
+        "created_at": time.time(),
+        "files": files,
+    }
+    if manifest_extra:
+        manifest.update(manifest_extra)
+    _migration_manifest(backup_dir / "manifest.json", manifest)
+    return backup_dir, manifest
+
+
+def _sorted_json_bytes(value: Any) -> bytes:
+    return (json.dumps(value, indent=2, sort_keys=True) + "\n").encode("utf-8")
+
+
+def _pending_migrations(
+    source_mode: str, target_mode: Optional[str], migration_root: str
+) -> list[tuple[Path, dict]]:
+    root = Path(migration_root)
+    if not root.exists():
+        return []
+    pending = []
+    for manifest_path in root.glob("*/manifest.json"):
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise LadderStateError(
+                f"cannot read allocation migration manifest {manifest_path}: {exc}"
+            ) from exc
+        if (manifest.get("status") == "prepared"
+                and manifest.get("source_mode") == source_mode
+                and (target_mode is None
+                     or manifest.get("target_mode") == target_mode)):
+            pending.append((manifest_path.parent, manifest))
+    return pending
+
+
+def recover_threshold_to_ladder_migration(
+    target_mode: str,
+    *,
+    ladder_path: str = LADDER_FILE,
+    positions_path: str = POSITIONS_FILE,
+    migration_root: str = ALLOCATION_MIGRATION_DIR,
+) -> Optional[Path]:
+    """Finish an interrupted threshold adoption from its exact target snapshots."""
+    pending = _pending_migrations("threshold", target_mode, migration_root)
+    if not pending:
+        return None
+    if len(pending) != 1:
+        raise LadderStateError("multiple pending allocation migrations require audit")
+    backup_dir, manifest = pending[0]
+    expected_ladder = backup_dir / "target_ladder.json"
+    expected_positions = backup_dir / "target_positions.json"
+    try:
+        ladder_payload = expected_ladder.read_bytes()
+        positions_payload = expected_positions.read_bytes()
+    except OSError as exc:
+        raise LadderStateError(
+            "threshold adoption target snapshot is incomplete"
+        ) from exc
+    if (_sha256(ladder_payload) != manifest.get("expected_ladder_sha256")
+            or _sha256(positions_payload)
+            != manifest.get("expected_positions_sha256")):
+        raise LadderStateError("threshold adoption target snapshot is corrupt")
+
+    live_ladder = Path(ladder_path)
+    live_positions = Path(positions_path)
+    ladder_hash = _sha256(live_ladder.read_bytes()) if live_ladder.exists() else None
+    if ladder_hash is None:
+        _atomic_bytes(live_ladder, ladder_payload)
+    elif ladder_hash != manifest["expected_ladder_sha256"]:
+        raise LadderStateError(
+            "threshold adoption found unexpected live ladder state"
+        )
+
+    positions_hash = (
+        _sha256(live_positions.read_bytes()) if live_positions.exists() else None
+    )
+    original_hash = (manifest.get("files", {}).get("positions") or {}).get("sha256")
+    if positions_hash == original_hash:
+        _atomic_bytes(live_positions, positions_payload)
+    elif positions_hash != manifest["expected_positions_sha256"]:
+        raise LadderStateError(
+            "threshold adoption found positions changed after backup"
+        )
+
+    manifest["status"] = "complete"
+    manifest["completed_at"] = time.time()
+    _migration_manifest(backup_dir / "manifest.json", manifest)
+    return backup_dir
+
+
+def migrate_threshold_to_ladder(
+    plan: "DrawdownLadderPlan",
+    adopted_positions: Dict[str, Dict],
+    *,
+    ladder_path: str = LADDER_FILE,
+    positions_path: str = POSITIONS_FILE,
+    migration_root: str = ALLOCATION_MIGRATION_DIR,
+) -> Path:
+    """Transactionally install an adopted ladder and its exact position ledger."""
+    validate_plan(plan)
+    ladder_payload = _sorted_json_bytes(plan.to_dict())
+    positions_payload = _json_bytes(adopted_positions)
+    backup_dir, manifest = backup_allocation_state(
+        "threshold", plan.mode, ladder_path=ladder_path,
+        positions_path=positions_path, migration_root=migration_root,
+        manifest_extra={"ladder_id": plan.id}, initial_status="staging",
+    )
+    _atomic_bytes(backup_dir / "target_ladder.json", ladder_payload)
+    _atomic_bytes(backup_dir / "target_positions.json", positions_payload)
+    manifest.update({
+        "status": "prepared",
+        "expected_ladder_sha256": _sha256(ladder_payload),
+        "expected_positions_sha256": _sha256(positions_payload),
+    })
+    _migration_manifest(backup_dir / "manifest.json", manifest)
+    recovered = recover_threshold_to_ladder_migration(
+        plan.mode, ladder_path=ladder_path, positions_path=positions_path,
+        migration_root=migration_root,
+    )
+    if recovered != backup_dir:
+        raise LadderStateError("threshold adoption transaction did not complete")
+    return backup_dir
+
+
+def _validate_survivor_transition_context(
+    plan: "DrawdownLadderPlan", positions: Dict[str, Dict], config: Any
+) -> None:
+    """Validate identity/accounting while deliberately allowing target mode drift."""
+    validate_plan(plan)
+    if plan.mode != "survivor":
+        raise LadderStateError(
+            "threshold can automatically migrate Survivor state only; "
+            f"persisted ladder mode is {plan.mode}"
+        )
+    if plan.chain_id != int(config.chain_id):
+        raise LadderStateError("ladder chain does not match this bot")
+    if plan.token_address != str(config.token_address).lower():
+        raise LadderStateError("ladder token does not match this bot")
+    if plan.max_levels != int(config.max_active_positions):
+        raise LadderStateError(
+            "persisted ladder maximum does not match MAX_ACTIVE_POSITIONS"
+        )
+    if plan.minimum_position_wei != _eth_to_wei(config.gridless_min_position_eth):
+        raise LadderStateError(
+            "persisted ladder minimum does not match GRIDLESS_MIN_POSITION_ETH"
+        )
+    validate_position_pairing(plan, positions)
+
+
+def _positions_without_ladder_provenance(
+    positions: Dict[str, Dict]
+) -> Dict[str, Dict]:
+    migrated = {}
+    for position_id, position in positions.items():
+        migrated[str(position_id)] = {
+            key: value for key, value in position.items()
+            if key not in LADDER_PROVENANCE_FIELDS
+        }
+    return migrated
+
+
+def load_raw_positions_for_migration(
+    positions: Dict[str, Dict], positions_path: str
+) -> Dict[str, Dict]:
+    """Read the exact ledger so migration preserves fields unknown to this build."""
+    path = Path(positions_path)
+    if not path.exists() and not positions:
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise LadderStateError(
+            f"cannot read positions for allocation migration at {path}: {exc}"
+        ) from exc
+    if not isinstance(value, dict) or set(map(str, value)) != set(map(str, positions)):
+        raise LadderStateError(
+            "raw and validated position identities disagree; refusing migration"
+        )
+    for position_id, raw in value.items():
+        if not isinstance(raw, dict):
+            raise LadderStateError(
+                f"raw position {position_id} is not an object"
+            )
+        normalized = positions[str(position_id)]
+        try:
+            raw_cost = int(raw.get("cost_wei", 0) or 0)
+            if raw_cost <= 0 and int(raw.get("cost", 0) or 0) > 0:
+                raw_cost = int(raw["cost"]) * 10**9
+            raw_balance = int(raw.get("balance", 0) or 0)
+        except (TypeError, ValueError) as exc:
+            raise LadderStateError(
+                f"raw position {position_id} accounting is invalid"
+            ) from exc
+        if (raw_cost != int(normalized.get("cost_wei", 0) or 0)
+                or raw_balance != int(normalized.get("balance", 0) or 0)):
+            raise LadderStateError(
+                f"raw position {position_id} accounting disagrees with validated state"
+            )
+        for field in LADDER_PROVENANCE_FIELDS:
+            if raw.get(field) != normalized.get(field):
+                raise LadderStateError(
+                    f"raw position {position_id} {field} disagrees with validated state"
+                )
+    return {str(key): dict(item) for key, item in value.items()}
+
+
+def _complete_survivor_to_threshold(
+    backup_dir: Path,
+    manifest: dict,
+    *,
+    ladder_path: str,
+    positions_path: str,
+) -> Dict[str, Dict]:
+    expected_path = backup_dir / "threshold_positions.json"
+    expected_hash = manifest.get("expected_positions_sha256")
+    if not expected_path.exists():
+        backed_up = manifest.get("files", {}).get("positions") or {}
+        backup_name = backed_up.get("path")
+        if backup_name:
+            try:
+                backup_positions = json.loads(
+                    (backup_dir / backup_name).read_text(encoding="utf-8")
+                )
+            except (OSError, json.JSONDecodeError) as exc:
+                raise LadderStateError(
+                    "allocation migration position backup is unreadable"
+                ) from exc
+        else:
+            backup_positions = {}
+        if not isinstance(backup_positions, dict):
+            raise LadderStateError(
+                "allocation migration position backup is not an object"
+            )
+        reconstructed = _json_bytes(
+            _positions_without_ladder_provenance(backup_positions)
+        )
+        if _sha256(reconstructed) != expected_hash:
+            raise LadderStateError(
+                "allocation migration cannot reconstruct expected positions"
+            )
+        _atomic_bytes(expected_path, reconstructed)
+    expected_payload = expected_path.read_bytes()
+    if not expected_hash or _sha256(expected_payload) != expected_hash:
+        raise LadderStateError("allocation migration expected-position snapshot is corrupt")
+
+    live_positions = Path(positions_path)
+    live_ladder = Path(ladder_path)
+    current_positions_hash = (
+        _sha256(live_positions.read_bytes()) if live_positions.exists() else None
+    )
+    original_positions_hash = (manifest.get("files", {}).get("positions") or {}).get(
+        "sha256"
+    )
+    if current_positions_hash == original_positions_hash:
+        _atomic_bytes(live_positions, expected_payload)
+    elif current_positions_hash != expected_hash:
+        raise LadderStateError(
+            "allocation migration found positions changed after backup; refusing recovery"
+        )
+
+    if live_ladder.exists():
+        original_ladder_hash = (manifest.get("files", {}).get("ladder") or {}).get(
+            "sha256"
+        )
+        if _sha256(live_ladder.read_bytes()) != original_ladder_hash:
+            raise LadderStateError(
+                "allocation migration found ladder changed after backup; refusing recovery"
+            )
+        live_ladder.unlink()
+        directory_fd = os.open(live_ladder.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+
+    manifest["status"] = "complete"
+    manifest["completed_at"] = time.time()
+    _migration_manifest(backup_dir / "manifest.json", manifest)
+    with live_positions.open(encoding="utf-8") as handle:
+        value = json.load(handle)
+    if not isinstance(value, dict):
+        raise LadderStateError("migrated threshold positions are not an object")
+    return value
+
+
+def recover_allocation_migration(
+    *,
+    ladder_path: str = LADDER_FILE,
+    positions_path: str = POSITIONS_FILE,
+    migration_root: str = ALLOCATION_MIGRATION_DIR,
+) -> Optional[Dict[str, Dict]]:
+    """Finish an interrupted Survivor-to-threshold paired-file transaction."""
+    pending = _pending_migrations("survivor", "threshold", migration_root)
+    if not pending:
+        return None
+    if len(pending) != 1:
+        raise LadderStateError("multiple pending allocation migrations require audit")
+    return _complete_survivor_to_threshold(
+        pending[0][0], pending[0][1], ladder_path=ladder_path,
+        positions_path=positions_path,
+    )
+
+
+def migrate_survivor_to_threshold(
+    plan: "DrawdownLadderPlan",
+    positions: Dict[str, Dict],
+    config: Any,
+    *,
+    ladder_path: str = LADDER_FILE,
+    positions_path: str = POSITIONS_FILE,
+    migration_root: str = ALLOCATION_MIGRATION_DIR,
+) -> tuple[Dict[str, Dict], Path]:
+    """Convert open Survivor lots to ordinary threshold lots with rollback evidence."""
+    _validate_survivor_transition_context(plan, positions, config)
+    raw_positions = load_raw_positions_for_migration(positions, positions_path)
+    migrated = _positions_without_ladder_provenance(raw_positions)
+    expected_payload = _json_bytes(migrated)
+    backup_dir, manifest = backup_allocation_state(
+        "survivor", "threshold", ladder_path=ladder_path,
+        positions_path=positions_path, migration_root=migration_root,
+        manifest_extra={
+            "ladder_id": plan.id,
+            "expected_positions_sha256": _sha256(expected_payload),
+        },
+    )
+    _atomic_bytes(backup_dir / "threshold_positions.json", expected_payload)
+    result = _complete_survivor_to_threshold(
+        backup_dir, manifest, ladder_path=ladder_path,
+        positions_path=positions_path,
+    )
+    return result, backup_dir
 
 
 @dataclass

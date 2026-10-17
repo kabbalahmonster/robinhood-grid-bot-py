@@ -203,6 +203,17 @@ python grid_bot.py
 | `GRIDLESS_LADDER_MAX_BUDGET_ETH` | No | 0 | Optional hard cap on total assigned rung principal; 0 disables the extra cap |
 | `GRIDLESS_LADDER_EXPIRY_SECONDS` | No | 0 | Stop new rung fills after this many seconds; 0 keeps the adaptive field active indefinitely |
 | `GRIDLESS_LADDER_REARM_POLICY` | No | after_exit | Frozen drawdown ladders: `after_exit` recycles each sold rung; `never` permits one completed trade. Survivor is always cyclical and ignores `never`. |
+
+Changing a stopped bot between `GRIDLESS_ALLOCATION_MODE=threshold` and
+`survivor` is automatically reconciled on the first fresh-price cycle after
+restart. Open position IDs, balances, cost bases, deferred gas, and other
+non-ladder fields are preserved. Every transition first writes a paired,
+timestamped rollback snapshot under `data/allocation-migrations/`.
+Survivor-to-threshold removes only ladder provenance and then removes the live
+ladder file; an interrupted paired write resumes automatically. Identity,
+capacity, minimum-principal, malformed-state, and ownership mismatches stop the
+cycle without trading. Frozen `drawdown_ladder` state remains a deliberate
+fail-closed exception and is not silently converted to threshold.
 | `GRIDLESS_LADDER_REARM_COOLDOWN_SECONDS` | No | 0 | Minimum delay after a confirmed sell before that rung may reset; price must also move above its trigger first |
 | `GRIDLESS_LADDER_INCLUDE_REFERENCE_ENTRY` | No | false | Make the first rung equal the reference; otherwise every rung is below it |
 
