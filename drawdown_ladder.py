@@ -249,15 +249,13 @@ def _validate_survivor_transition_context(
         raise LadderStateError("ladder chain does not match this bot")
     if plan.token_address != str(config.token_address).lower():
         raise LadderStateError("ladder token does not match this bot")
-    if plan.max_levels != int(config.max_active_positions):
-        raise LadderStateError(
-            "persisted ladder maximum does not match MAX_ACTIVE_POSITIONS"
-        )
-    if plan.minimum_position_wei != _eth_to_wei(config.gridless_min_position_eth):
-        raise LadderStateError(
-            "persisted ladder minimum does not match GRIDLESS_MIN_POSITION_ETH"
-        )
     validate_position_pairing(plan, positions)
+    configured_capacity = int(config.max_active_positions)
+    if configured_capacity < len(positions):
+        raise LadderStateError(
+            f"cannot migrate {len(positions)} Survivor positions to threshold "
+            f"with MAX_ACTIVE_POSITIONS={configured_capacity}; increase the cap first"
+        )
 
 
 def _positions_without_ladder_provenance(

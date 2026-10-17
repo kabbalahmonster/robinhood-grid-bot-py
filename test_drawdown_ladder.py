@@ -1127,6 +1127,37 @@ class AdaptiveLadderBotTests(unittest.TestCase):
         self.assertTrue((backups[0] / "gridless_ladder.json").exists())
         self.assertTrue((backups[0] / "gridless_positions.json").exists())
 
+    def test_survivor_to_threshold_allows_capacity_and_minimum_changes(self):
+        _plan, original, positions = self._persist_open_survivor()
+        self.bot.config.gridless_allocation_mode = "threshold"
+        self.bot.config.max_active_positions = 65
+        self.bot.config.gridless_min_position_eth = 0.002
+
+        result = self.bot._reconcile_gridless_allocation_mode(
+            0.05, positions, int(0.004 * WEI)
+        )
+
+        self.assertIsNone(result)
+        self.assertIsNone(load_plan())
+        migrated = gridless.load_positions()
+        self.assertEqual(migrated["0"]["cost_wei"], original["0"]["cost_wei"])
+        self.assertEqual(migrated["0"]["balance"], original["0"]["balance"])
+
+    def test_survivor_to_threshold_rejects_capacity_below_open_count(self):
+        plan, _original, positions = self._persist_open_survivor()
+        self.bot.config.gridless_allocation_mode = "threshold"
+        self.bot.config.max_active_positions = 0
+
+        with self.assertRaisesRegex(
+            LadderStateError,
+            "cannot migrate 1 Survivor positions to threshold with "
+            "MAX_ACTIVE_POSITIONS=0",
+        ):
+            migrate_survivor_to_threshold(plan, positions, self.bot.config)
+
+        self.assertIsNotNone(load_plan())
+        self.assertFalse(Path("data/allocation-migrations").exists())
+
     def test_interrupted_survivor_to_threshold_finishes_on_restart(self):
         plan, original, adopted = self._persist_open_survivor()
         self.bot.config.gridless_allocation_mode = "threshold"
