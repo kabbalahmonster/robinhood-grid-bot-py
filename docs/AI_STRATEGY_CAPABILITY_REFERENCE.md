@@ -206,7 +206,11 @@ Entry behavior:
   `GRIDLESS_BUY_THRESHOLD`.
 - If `GRIDLESS_LEADING_EDGE=true` and exactly one position exists, also buy
   when that position's authorized buy-side P&L reaches 50% of the configured
-  sell trigger.
+  sell trigger. With multiple positions, the nearest confirmed purchase below
+  market can trigger at the same spacing only while market is inside a bounded
+  gap and another half-sell interval fits before the next purchase above it.
+  Each confirmed fill becomes the next lower anchor, so capacity is filled
+  progressively as price rises rather than all at once.
 - Do not buy at or above `MAX_ACTIVE_POSITIONS`.
 - Enforce `GRIDLESS_BUY_COOLDOWN_SECONDS` after every confirmed buy.
 

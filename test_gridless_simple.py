@@ -147,6 +147,94 @@ class TestShouldBuy(unittest.TestCase):
         should_buy, reason = gridless.should_buy(positions, current_price, config)
         self.assertFalse(should_buy)
 
+    @staticmethod
+    def _position_at(price):
+        return {
+            'cost_wei': int(price * 10**18),
+            'balance': 10**18,
+        }
+
+    def test_threshold_leading_edge_walks_up_a_multi_position_gap(self):
+        config = MagicMock()
+        config.max_active_positions = 16
+        config.gridless_buy_threshold = -10.0
+        config.gridless_sell_threshold = 5.0
+        config.gridless_leading_edge = True
+        config.token_decimals = 18
+        positions = {
+            **{str(i): self._position_at(0.142857 + i * 0.01)
+               for i in range(10)},
+            '10': self._position_at(0.1),
+        }
+
+        should_buy, _ = gridless.should_buy(positions, 0.10249, config)
+        self.assertFalse(should_buy)
+
+        should_buy, reason = gridless.should_buy(positions, 0.1025, config)
+        self.assertTrue(should_buy)
+        self.assertIn("Gap leading edge", reason)
+        self.assertIn("position 10", reason)
+
+        positions['11'] = self._position_at(0.1025)
+        should_buy, reason = gridless.should_buy(
+            positions, 0.1025 * 1.025, config
+        )
+        self.assertTrue(should_buy)
+        self.assertIn("position 11", reason)
+
+    def test_gap_leading_edge_requires_spacing_before_upper_position(self):
+        config = MagicMock()
+        config.max_active_positions = 4
+        config.gridless_buy_threshold = -10.0
+        config.gridless_sell_threshold = 5.0
+        config.gridless_leading_edge = True
+        config.token_decimals = 18
+        positions = {
+            '0': self._position_at(0.1),
+            '1': self._position_at(0.104),
+        }
+
+        should_buy, reason = gridless.should_buy(positions, 0.1025, config)
+        self.assertFalse(should_buy)
+        self.assertIn("above threshold", reason)
+
+    def test_sold_lower_gap_position_does_not_immediately_rebuy(self):
+        config = MagicMock()
+        config.max_active_positions = 16
+        config.gridless_buy_threshold = -10.0
+        config.gridless_sell_threshold = 5.0
+        config.gridless_leading_edge = True
+        config.token_decimals = 18
+        positions_after_sell = {
+            '1': self._position_at(0.1025),
+            '2': self._position_at(0.142857),
+        }
+
+        should_buy, _ = gridless.should_buy(
+            positions_after_sell, 0.105, config
+        )
+        self.assertFalse(should_buy)
+        should_buy, reason = gridless.should_buy(
+            positions_after_sell, 0.1025 * 1.025, config
+        )
+        self.assertTrue(should_buy)
+        self.assertIn("Gap leading edge", reason)
+
+    def test_multi_position_leading_edge_never_expands_above_the_stack(self):
+        config = MagicMock()
+        config.max_active_positions = 4
+        config.gridless_buy_threshold = -10.0
+        config.gridless_sell_threshold = 5.0
+        config.gridless_leading_edge = True
+        config.token_decimals = 18
+        positions = {
+            '0': self._position_at(0.1),
+            '1': self._position_at(0.11),
+        }
+
+        should_buy, _ = gridless.should_buy(positions, 0.12, config)
+        self.assertFalse(should_buy)
+
 
 class TestCapacityWarning(unittest.TestCase):
     """Test dashboard warnings for buys blocked by position capacity."""

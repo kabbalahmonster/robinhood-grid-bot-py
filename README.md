@@ -188,7 +188,7 @@ python grid_bot.py
 | `USE_GRIDLESS` | No | true | Enable gridless trading mode |
 | `GRIDLESS_BUY_THRESHOLD` | No | -10.0 | Buy when top position P&L ≤ this % |
 | `GRIDLESS_SELL_THRESHOLD` | No | 5.0 | Sell when position P&L ≥ this % |
-| `GRIDLESS_LEADING_EDGE` | No | true | Buy into strength at 50% of the sell trigger; legacy threshold mode limits this to one position, while Survivor advances from each highest purchase point |
+| `GRIDLESS_LEADING_EDGE` | No | true | Buy into strength at 50% of the sell trigger; threshold mode also walks through bounded gaps when the same spacing remains on both sides, while Survivor advances from each highest purchase point |
 | `GRIDLESS_STOPLOSS_ENABLED` | No | false | Enable stoploss in gridless mode |
 | `GRIDLESS_STOPLOSS_THRESHOLD` | No | -25.0 | Stoploss trigger % |
 | `GRIDLESS_BUY_COOLDOWN_SECONDS` | No | 0 | Cooldown between gridless buys (0 disables cooldown) |
@@ -734,7 +734,7 @@ MAX_ACTIVE_POSITIONS=6           # Max positions to hold
 Buys are triggered when:
 1. **No positions exist** - Initial buy to start
 2. **Top position P&L ≤ buy_threshold** - Buy the dip
-3. **Leading edge** (optional) - Legacy threshold mode buys into strength with one position; Survivor repeats from the current highest purchase point and rebuilds its ladder from current confirmed positions after buys and sells
+3. **Leading edge** (optional) - Threshold mode buys into strength with one position and can walk upward through a bounded multi-position gap when half-sell spacing remains on both sides of each fill. Survivor repeats from the current highest purchase point and rebuilds its ladder from current confirmed positions after buys and sells
 
 In Survivor, the fresh initial buy executes at the live market and its confirmed
 measured purchase point forms the ladder. Downward ladder rungs are threshold

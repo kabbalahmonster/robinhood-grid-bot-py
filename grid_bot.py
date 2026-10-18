@@ -4572,7 +4572,7 @@ class GridBot:
         is_leading_edge_buy = bool(
             (ladder_context is not None
              and ladder_context.get("entry_kind") == "leading_edge")
-            or (not ladder_mode and "Leading edge" in reason)
+            or (not ladder_mode and "leading edge" in reason.lower())
         )
         self._execute_buy_gridless(
             buy_amount_eth,

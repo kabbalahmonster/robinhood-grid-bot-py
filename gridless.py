@@ -136,6 +136,80 @@ def get_sell_trigger_percent(config: Any) -> float:
     return float(getattr(config, 'gridless_sell_threshold', 5.0))
 
 
+def threshold_gap_leading_edge_trigger(
+        positions: Dict[str, Dict], current_price: float, config: Any,
+        position_pnls: Optional[Dict[str, Dict[str, float]]] = None):
+    """Return a leading-edge trigger that advances through an open price gap.
+
+    The closest confirmed purchase below market is the moving lower anchor and
+    the closest confirmed purchase above market is the upper boundary.  A buy
+    is eligible only after price advances half a sell trigger from the lower
+    anchor and there is another half-trigger of room before the upper boundary.
+    This keeps fills evenly separated and, after a profitable lower position
+    exits, leaves a newer anchor behind instead of immediately dip-rebuying
+    against an old underwater position.
+    """
+    if not getattr(config, "gridless_leading_edge", False):
+        return False, "Leading edge disabled", None
+    if len(positions) < 2:
+        return False, "No bounded position gap exists", None
+    if len(positions) >= int(getattr(config, "max_active_positions", 10)):
+        return False, "Max positions reached", None
+    try:
+        market_price = float(current_price)
+    except (TypeError, ValueError):
+        return False, "Current price is invalid", None
+    if not math.isfinite(market_price) or market_price <= 0:
+        return False, "Current price is invalid", None
+
+    token_decimals = _configured_token_decimals(config)
+    purchase_points = sorted(
+        (price, str(position_id), position)
+        for position_id, position in positions.items()
+        for price in [get_buy_price(position, token_decimals)]
+        if math.isfinite(price) and price > 0
+    )
+    lower = [point for point in purchase_points if point[0] <= market_price]
+    upper = [point for point in purchase_points if point[0] > market_price]
+    if not lower or not upper:
+        return False, "Market is not inside a confirmed position gap", None
+
+    _, lower_id, lower_position = lower[-1]
+    upper_price = upper[0][0]
+    trigger = get_sell_trigger_percent(config) * 0.5
+    room_above = ((upper_price - market_price) / market_price) * 100
+    has_upper_room = room_above > trigger or math.isclose(
+        room_above, trigger, rel_tol=1e-12, abs_tol=1e-9
+    )
+    if not has_upper_room:
+        return (
+            False,
+            f"Gap has only {room_above:.2f}% room above market; "
+            f"needs {trigger}%",
+            lower_id,
+        )
+
+    observed = (position_pnls or {}).get(lower_id, {})
+    candidates = trigger_pnl_candidates(observed, "buy")
+    if not candidates:
+        if (position_pnls is not None
+                and getattr(config, "bidirectional_pnl_enabled", False)):
+            return False, "No fresh gap leading-edge P&L observation", lower_id
+        candidates = [("legacy", calculate_pnl(
+            lower_position, market_price, token_decimals
+        ))]
+    source, pnl = max(candidates, key=lambda item: item[1])
+    crossed = pnl > trigger or math.isclose(
+        pnl, trigger, rel_tol=1e-12, abs_tol=1e-9
+    )
+    reason = (
+        f"Gap leading edge: nearest lower position {lower_id} {source} P&L "
+        f"{pnl:.2f}% {'>' if crossed else '<'}= 50% of sell ({trigger}%); "
+        f"{room_above:.2f}% room to next position"
+    )
+    return crossed, reason, lower_id
+
+
 def survivor_next_leading_edge_price(
         positions: Dict[str, Dict], config: Any) -> Optional[float]:
     """Return the indicative raw-price target for the next Survivor lead buy.
@@ -282,7 +356,8 @@ def should_buy(positions: Dict[str, Dict], current_price: float, config: Any,
     """Check buy rules with leading edge support.
     
     Standard buy: no positions OR (under max AND top_pnl <= buy_threshold)
-    Leading edge: only 1 position AND room for more AND pnl >= 50% of sell_threshold
+    Leading edge: one position, or a bounded multi-position gap with enough
+    room on both sides, at 50% of sell_threshold
     """
     max_active = getattr(config, 'max_active_positions', 10)
     buy_threshold = getattr(config, 'gridless_buy_threshold', -10.0)
@@ -325,6 +400,13 @@ def should_buy(positions: Dict[str, Dict], current_price: float, config: Any,
             leading_pnl, leading_edge_trigger, rel_tol=1e-12, abs_tol=1e-9
         ):
             return (True, f"Leading edge: {leading_source} P&L {leading_pnl:.2f}% >= 50% of sell ({leading_edge_trigger}%)")
+
+    if leading_edge_enabled and len(positions) > 1:
+        gap_triggered, gap_reason, _ = threshold_gap_leading_edge_trigger(
+            positions, current_price, config, position_pnls
+        )
+        if gap_triggered:
+            return True, gap_reason
     
     return (False, f"Top position P&L marks remain above threshold {buy_threshold}%")
 

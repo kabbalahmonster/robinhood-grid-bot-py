@@ -998,6 +998,35 @@ class AdaptiveLadderBotTests(unittest.TestCase):
         self.assertEqual(second.reference_price, 1.0)
         self.assertEqual(second.funded_count, 15)
 
+    def test_threshold_gap_buy_is_executed_as_a_leading_edge(self):
+        self.bot.config = ladder_config(
+            gridless_allocation_mode="threshold",
+            max_active_positions=4,
+            gridless_buy_threshold=-10.0,
+        )
+        self.bot.config.use_eth_trading = True
+        self.bot.config.eth_gas_reserve = 0.001
+        self.bot.config.weth_address = "0x0000000000000000000000000000000000000002"
+        self.bot.wallet = MagicMock()
+        self.bot.wallet.get_eth_balance.return_value = 0.005
+        self.bot._taxed_token_active = MagicMock(return_value=False)
+        self.bot.last_taxed_token_failure_time = 0
+        self.bot.last_buy_time = 0
+        self.bot.gridless_buy_cooldown = 0
+        self.bot._execute_buy_gridless = MagicMock()
+        self.bot._funding_warning = None
+        positions = {
+            "low": {"cost_wei": int(0.1 * WEI), "balance": WEI},
+            "high": {"cost_wei": int(0.14 * WEI), "balance": WEI},
+        }
+
+        with patch("gridless.load_positions", return_value=positions):
+            self.bot._check_buys_gridless(0.1025)
+
+        call = self.bot._execute_buy_gridless.call_args
+        self.assertTrue(call.args[3])
+        self.assertIsNone(call.kwargs["ladder_context"])
+
     def test_prepare_migrates_survivor_capacity_before_context_validation(self):
         self.bot.config = ladder_config(
             gridless_allocation_mode="survivor", max_active_positions=5,
