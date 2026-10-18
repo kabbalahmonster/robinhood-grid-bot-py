@@ -4373,7 +4373,7 @@ class GridBot:
 
     def _check_buys_gridless(self, price, position_pnls=None):
         """Evaluate threshold or persisted drawdown-ladder gridless entries."""
-        from gridless import should_buy, load_positions
+        from gridless import should_buy, load_positions, threshold_gap_status
 
         if self._taxed_token_active():
             failure_cooldown = self.config.taxed_token_failure_cooldown_seconds
@@ -4410,6 +4410,9 @@ class GridBot:
             if not should_buy_flag:
                 logger.debug(f"Gridless: No buy - {reason}")
                 return
+            threshold_status = threshold_gap_status(
+                gridless_positions, price, self.config, position_pnls
+            )
         
         # Get available ETH/WETH
         if getattr(self.config, 'use_eth_trading', False):
@@ -4444,6 +4447,7 @@ class GridBot:
             return
         
         ladder_context = None
+        threshold_context = None
         if ladder_mode:
             from drawdown_ladder import eligible_level
             from gridless import survivor_leading_edge_trigger
@@ -4556,6 +4560,38 @@ class GridBot:
             ) / 100.0
             buy_amount_eth = (trade_balance * tradeable_pct) / available_slots
             buy_amount_wei = int(buy_amount_eth * 10**18)
+            entry_kind = threshold_status.get("decision")
+            if not gridless_positions:
+                entry_kind = "initial"
+            elif entry_kind == "gap_leading_edge":
+                entry_kind = "gap_leading_edge"
+            else:
+                entry_kind = "dip"
+            threshold_context = {
+                "entry_kind": entry_kind,
+                "position_count": len(gridless_positions),
+                "market_price": float(price),
+                "leading_spacing_percent": float(
+                    threshold_status.get("leading_spacing_percent", 0) or 0
+                ),
+                "lower_anchor_position_id": threshold_status.get(
+                    "lower_anchor_position_id"
+                ),
+                "lower_anchor_price": threshold_status.get("lower_anchor_price"),
+                "upper_boundary_position_id": threshold_status.get(
+                    "upper_boundary_position_id"
+                ),
+                "upper_boundary_price": threshold_status.get(
+                    "upper_boundary_price"
+                ),
+                "buy_trigger_source": threshold_status.get("buy_trigger_source"),
+                "buy_trigger_pnl_percent": threshold_status.get(
+                    "buy_trigger_pnl_percent"
+                ),
+                "dip_price_move_percent": threshold_status.get(
+                    "dip_price_move_percent"
+                ),
+            }
         
         logger.info(f"🎯 Gridless buy triggered: {reason}")
         if ladder_mode:
@@ -4572,7 +4608,8 @@ class GridBot:
         is_leading_edge_buy = bool(
             (ladder_context is not None
              and ladder_context.get("entry_kind") == "leading_edge")
-            or (not ladder_mode and "leading edge" in reason.lower())
+            or (threshold_context is not None
+                and threshold_context.get("entry_kind") == "gap_leading_edge")
         )
         self._execute_buy_gridless(
             buy_amount_eth,
@@ -4580,12 +4617,14 @@ class GridBot:
             price,
             is_leading_edge_buy,
             ladder_context=ladder_context,
+            threshold_context=threshold_context,
         )
     
     @_with_tournament_terminal("buy")
     @_with_swap_provider_fallback
     def _execute_buy_gridless(self, buy_amount_eth, buy_amount_wei, price,
-                              is_leading_edge_buy=False, ladder_context=None):
+                              is_leading_edge_buy=False, ladder_context=None,
+                              threshold_context=None):
         """Execute a gridless buy order."""
         from gridless import add_position
         
@@ -4610,6 +4649,15 @@ class GridBot:
         # local variables.  It also makes the dashboard attempt reflect the
         # latest position count if state changed while the quote was prepared.
         available_slots = self._available_gridless_slots(gridless_positions)
+        if threshold_context is not None:
+            expected_count = int(threshold_context.get("position_count", -1))
+            if len(gridless_positions) != expected_count:
+                logger.warning(
+                    "Threshold buy aborted: position count changed after trigger "
+                    "evaluation (%d != %d)",
+                    len(gridless_positions), expected_count,
+                )
+                return
         active_ladder = None
         if ladder_context is not None:
             from drawdown_ladder import load_plan, validate_context
@@ -4718,6 +4766,36 @@ class GridBot:
             "available_slots": available_slots,
             "phase": "initial_quote",
         }
+        if threshold_context is not None:
+            buy_attempt_context.update({
+                "allocation_mode": "threshold",
+                "threshold_entry_kind": threshold_context.get("entry_kind"),
+                "threshold_market_price": threshold_context.get("market_price"),
+                "threshold_anchor_position_id": threshold_context.get(
+                    "lower_anchor_position_id"
+                ),
+                "threshold_anchor_price": threshold_context.get(
+                    "lower_anchor_price"
+                ),
+                "threshold_ceiling_position_id": threshold_context.get(
+                    "upper_boundary_position_id"
+                ),
+                "threshold_ceiling_price": threshold_context.get(
+                    "upper_boundary_price"
+                ),
+                "threshold_spacing_percent": threshold_context.get(
+                    "leading_spacing_percent"
+                ),
+                "buy_trigger_source": threshold_context.get(
+                    "buy_trigger_source"
+                ),
+                "buy_trigger_pnl_percent": threshold_context.get(
+                    "buy_trigger_pnl_percent"
+                ),
+                "dip_price_move_percent": threshold_context.get(
+                    "dip_price_move_percent"
+                ),
+            })
         if ladder_context is not None:
             buy_attempt_context.update({
                 "allocation_mode": "drawdown_ladder",
@@ -4821,6 +4899,37 @@ class GridBot:
         if not self._quote_matches_exact_input(quote, buy_amount_wei):
             logger.error("Buy aborted: executable quote input/output amounts are not exact")
             return
+        if (threshold_context is not None
+                and threshold_context.get("entry_kind") == "gap_leading_edge"):
+            from gridless import threshold_gap_fill_bounds
+
+            quoted_tokens = int(quote.buy_amount or 0) / self.token_unit
+            quoted_principal = int(quote.sell_amount or buy_amount_wei) / 10**18
+            quoted_fill_price = (
+                quoted_principal / quoted_tokens if quoted_tokens > 0 else 0
+            )
+            fill_allowed, minimum_fill, maximum_fill = (
+                threshold_gap_fill_bounds(threshold_context, quoted_fill_price)
+            )
+            if not fill_allowed:
+                self._mark_buy_tournament_aborted(
+                    reason="threshold_gap_execution_outside_bounds",
+                    quoted_fill_price=quoted_fill_price,
+                    minimum_fill_price=minimum_fill,
+                    maximum_fill_price=maximum_fill,
+                    lower_anchor_position_id=threshold_context.get(
+                        "lower_anchor_position_id"
+                    ),
+                    upper_boundary_position_id=threshold_context.get(
+                        "upper_boundary_position_id"
+                    ),
+                )
+                logger.info(
+                    "Threshold gap buy aborted: executable fill %.10f outside "
+                    "guarded range %.10f..%.10f",
+                    quoted_fill_price, minimum_fill, maximum_fill,
+                )
+                return
         if (ladder_context is None
                 or ladder_context.get("entry_kind") != "leading_edge"):
             if not self._ladder_execution_price_allowed(
@@ -4919,6 +5028,18 @@ class GridBot:
                     add_kwargs["ladder_bootstrap_reference"] = bool(
                         ladder_context.get("bootstrap_reference", False)
                     )
+            elif threshold_context is not None:
+                principal_tokens = tokens_received / self.token_unit
+                principal_fill_price = (
+                    (principal_cost_wei / 10**18) / principal_tokens
+                    if principal_tokens > 0 else 0
+                )
+                add_kwargs = {
+                    "threshold_fill_price": principal_fill_price,
+                    "threshold_entry_kind": threshold_context.get(
+                        "entry_kind", "dip"
+                    ),
+                }
             pos_id = add_position(cost_wei, tokens_received, **add_kwargs)
             if ladder_context is not None:
                 from drawdown_ladder import (
@@ -7291,8 +7412,13 @@ class GridBot:
                 positions_data = []
                 capacity_warning = None
                 ladder_status = None
+                threshold_gap = None
                 if use_gridless:
-                    from gridless import load_positions, get_capacity_warning
+                    from gridless import (
+                        get_capacity_warning,
+                        load_positions,
+                        threshold_gap_status,
+                    )
                     gpos = load_positions()
                     active = len(gpos)
                     if (self.session_sells > sells_before_check
@@ -7365,6 +7491,9 @@ class GridBot:
                         capacity_warning = get_capacity_warning(
                             gpos, price, self.config, position_pnls
                         )
+                        threshold_gap = threshold_gap_status(
+                            gpos, price, self.config, position_pnls
+                        )
                     for pos_id, pos in gpos.items():
                         bal = pos.get('balance', 0)
                         if bal > 0:
@@ -7376,13 +7505,22 @@ class GridBot:
                             if tokens > 0 and cost_eth > 0:
                                 buy_price = cost_eth / tokens
                                 pnl = ((price - buy_price) / buy_price * 100)
-                                positions_data.append({
+                                position_data = {
                                     'id': pos_id,
                                     'buy_amount_token': tokens,
                                     'cost_basis': cost_eth,
                                     'pnl': round(pnl, 2),
                                     'timestamp': pos.get('timestamp'),
-                                })
+                                }
+                                if pos.get('threshold_entry_kind'):
+                                    position_data['threshold_entry_kind'] = pos[
+                                        'threshold_entry_kind'
+                                    ]
+                                if float(pos.get('threshold_fill_price', 0) or 0) > 0:
+                                    position_data['threshold_fill_price'] = float(
+                                        pos['threshold_fill_price']
+                                    )
+                                positions_data.append(position_data)
                     self._attach_bidirectional_pnls(
                         positions_data, position_pnls
                     )
@@ -7456,6 +7594,7 @@ class GridBot:
                         self.config, "gridless_allocation_mode", "threshold"
                     ),
                     drawdown_ladder=ladder_status,
+                    threshold_gap=threshold_gap,
                     capacity_warning=capacity_warning,
                     needs_gas=needs_gas,
                     funding_warning=self._funding_warning,

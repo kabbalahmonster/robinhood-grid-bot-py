@@ -235,6 +235,139 @@ class TestShouldBuy(unittest.TestCase):
         should_buy, _ = gridless.should_buy(positions, 0.12, config)
         self.assertFalse(should_buy)
 
+    def test_route_friction_cannot_consume_every_new_slot_at_one_price(self):
+        config = MagicMock()
+        config.max_active_positions = 16
+        config.gridless_buy_threshold = -10.0
+        config.gridless_sell_threshold = 5.0
+        config.gridless_leading_edge = True
+        config.bidirectional_pnl_enabled = True
+        config.token_decimals = 18
+        positions = {
+            **{str(i): self._position_at(0.14 + i * 0.01)
+               for i in range(10)},
+            "10": {
+                **self._position_at(0.102),
+                "threshold_fill_price": 0.1,
+                "threshold_entry_kind": "dip",
+            },
+        }
+        route_friction = {
+            "10": {"buy_trigger_pnls": {"uniswap": -12.0}}
+        }
+
+        should_buy, reason = gridless.should_buy(
+            positions, 0.1, config, route_friction
+        )
+
+        self.assertFalse(should_buy)
+        self.assertIn("price moved only 0.00%", reason)
+
+    def test_gap_spacing_uses_confirmed_fill_not_negative_route_pnl(self):
+        config = MagicMock()
+        config.max_active_positions = 16
+        config.gridless_buy_threshold = -10.0
+        config.gridless_sell_threshold = 5.0
+        config.gridless_leading_edge = True
+        config.bidirectional_pnl_enabled = True
+        config.token_decimals = 18
+        positions = {
+            "10": {
+                **self._position_at(0.102),
+                "threshold_fill_price": 0.1,
+                "threshold_entry_kind": "dip",
+            },
+            "0": self._position_at(0.14),
+        }
+        route_friction = {
+            "10": {"buy_trigger_pnls": {"uniswap": -12.0}}
+        }
+
+        should_buy, reason = gridless.should_buy(
+            positions, 0.1025, config, route_friction
+        )
+
+        self.assertTrue(should_buy)
+        self.assertIn("price move 2.50%", reason)
+
+    def test_real_ten_percent_drop_from_seed_still_allows_dip_buy(self):
+        config = MagicMock()
+        config.max_active_positions = 16
+        config.gridless_buy_threshold = -10.0
+        config.gridless_sell_threshold = 5.0
+        config.gridless_leading_edge = True
+        config.bidirectional_pnl_enabled = True
+        config.token_decimals = 18
+        positions = {
+            "10": {
+                **self._position_at(0.102),
+                "threshold_fill_price": 0.1,
+                "threshold_entry_kind": "dip",
+            },
+            "0": self._position_at(0.14),
+        }
+        route_friction = {
+            "10": {"buy_trigger_pnls": {"uniswap": -20.0}}
+        }
+
+        should_buy, reason = gridless.should_buy(
+            positions, 0.09, config, route_friction
+        )
+
+        self.assertTrue(should_buy)
+        self.assertIn("price spacing confirmed", reason)
+
+    def test_threshold_gap_status_exposes_decision_geometry(self):
+        config = MagicMock()
+        config.max_active_positions = 16
+        config.gridless_buy_threshold = -10.0
+        config.gridless_sell_threshold = 5.0
+        config.gridless_leading_edge = True
+        config.bidirectional_pnl_enabled = True
+        config.token_decimals = 18
+        positions = {
+            "10": {
+                **self._position_at(0.102),
+                "threshold_fill_price": 0.1,
+                "threshold_entry_kind": "dip",
+            },
+            "0": self._position_at(0.14),
+        }
+
+        status = gridless.threshold_gap_status(
+            positions,
+            0.1,
+            config,
+            {"10": {"buy_trigger_pnls": {"uniswap": -12.0}}},
+        )
+
+        self.assertEqual(status["decision"], "dip_spacing_guard")
+        self.assertEqual(status["dip_anchor_position_id"], "10")
+        self.assertEqual(status["upper_boundary_position_id"], "0")
+        self.assertAlmostEqual(status["next_leading_edge_price"], 0.1025)
+        self.assertEqual(status["buy_trigger_source"], "uniswap")
+        self.assertAlmostEqual(status["buy_trigger_pnl_percent"], -12.0)
+
+    def test_executable_gap_fill_must_remain_between_both_guards(self):
+        context = {
+            "lower_anchor_price": 0.1,
+            "upper_boundary_price": 0.14,
+            "leading_spacing_percent": 2.5,
+        }
+
+        allowed, minimum, maximum = gridless.threshold_gap_fill_bounds(
+            context, 0.103
+        )
+        self.assertTrue(allowed)
+        self.assertAlmostEqual(minimum, 0.1025)
+        self.assertAlmostEqual(maximum, 0.14 / 1.025)
+        self.assertFalse(gridless.threshold_gap_fill_bounds(
+            context, 0.102
+        )[0])
+        self.assertFalse(gridless.threshold_gap_fill_bounds(
+            context, 0.137
+        )[0])
+
 
 class TestCapacityWarning(unittest.TestCase):
     """Test dashboard warnings for buys blocked by position capacity."""
@@ -383,6 +516,19 @@ class TestPositionManagement(unittest.TestCase):
         self.assertIn('0', positions)
         self.assertEqual(positions['0']['cost_wei'], 1_000_000_000)
         self.assertEqual(positions['0']['balance'], 10_000_000_000_000_000_000)
+
+    def test_threshold_entry_provenance_survives_round_trip(self):
+        pos_id = gridless.add_position(
+            1_000_000_000,
+            10_000_000_000_000_000_000,
+            threshold_fill_price=0.0000001,
+            threshold_entry_kind='gap_leading_edge',
+        )
+
+        position = gridless.load_positions()[pos_id]
+
+        self.assertEqual(position['threshold_entry_kind'], 'gap_leading_edge')
+        self.assertEqual(position['threshold_fill_price'], 0.0000001)
     
     def test_add_multiple_positions(self):
         """Test adding multiple positions with auto-increment IDs."""

@@ -70,6 +70,22 @@ def get_buy_price(position: Dict[str, int], token_decimals: int = 18) -> float:
     return (cost_wei / 1e18) / (balance / (10 ** token_decimals))
 
 
+def get_threshold_entry_price(position: Dict[str, int],
+                              token_decimals: int = 18) -> float:
+    """Return the confirmed principal-only threshold entry reference.
+
+    New threshold fills persist their measured execution price without buy gas.
+    Legacy positions safely fall back to their economic cost-basis price.
+    """
+    try:
+        fill_price = float(position.get('threshold_fill_price', 0) or 0)
+    except (TypeError, ValueError):
+        fill_price = 0.0
+    if math.isfinite(fill_price) and fill_price > 0:
+        return fill_price
+    return get_buy_price(position, token_decimals)
+
+
 def get_top_position(positions: Dict[str, Dict], token_decimals: int = 18) -> Optional[Tuple[str, Dict]]:
     """Get position with lowest buy price (best position)."""
     if not positions:
@@ -166,7 +182,7 @@ def threshold_gap_leading_edge_trigger(
     purchase_points = sorted(
         (price, str(position_id), position)
         for position_id, position in positions.items()
-        for price in [get_buy_price(position, token_decimals)]
+        for price in [get_threshold_entry_price(position, token_decimals)]
         if math.isfinite(price) and price > 0
     )
     lower = [point for point in purchase_points if point[0] <= market_price]
@@ -174,7 +190,7 @@ def threshold_gap_leading_edge_trigger(
     if not lower or not upper:
         return False, "Market is not inside a confirmed position gap", None
 
-    _, lower_id, lower_position = lower[-1]
+    lower_price, lower_id, _ = lower[-1]
     upper_price = upper[0][0]
     trigger = get_sell_trigger_percent(config) * 0.5
     room_above = ((upper_price - market_price) / market_price) * 100
@@ -189,25 +205,172 @@ def threshold_gap_leading_edge_trigger(
             lower_id,
         )
 
-    observed = (position_pnls or {}).get(lower_id, {})
-    candidates = trigger_pnl_candidates(observed, "buy")
-    if not candidates:
-        if (position_pnls is not None
-                and getattr(config, "bidirectional_pnl_enabled", False)):
-            return False, "No fresh gap leading-edge P&L observation", lower_id
-        candidates = [("legacy", calculate_pnl(
-            lower_position, market_price, token_decimals
-        ))]
-    source, pnl = max(candidates, key=lambda item: item[1])
+    pnl = ((market_price - lower_price) / lower_price) * 100
     crossed = pnl > trigger or math.isclose(
         pnl, trigger, rel_tol=1e-12, abs_tol=1e-9
     )
     reason = (
-        f"Gap leading edge: nearest lower position {lower_id} {source} P&L "
+        f"Gap leading edge: nearest lower position {lower_id} price move "
         f"{pnl:.2f}% {'>' if crossed else '<'}= 50% of sell ({trigger}%); "
         f"{room_above:.2f}% room to next position"
     )
     return crossed, reason, lower_id
+
+
+def threshold_gap_status(positions: Dict[str, Dict], current_price: float,
+                         config: Any,
+                         position_pnls: Optional[Dict[str, Dict[str, float]]] = None
+                         ) -> Dict[str, Any]:
+    """Describe threshold entry authorization and physical price spacing."""
+    max_active = int(getattr(config, 'max_active_positions', 10))
+    buy_threshold = float(getattr(config, 'gridless_buy_threshold', -10.0))
+    spacing = get_sell_trigger_percent(config) * 0.5
+    token_decimals = _configured_token_decimals(config)
+    try:
+        market_price = float(current_price)
+    except (TypeError, ValueError):
+        market_price = 0.0
+    points = sorted(
+        (price, str(position_id))
+        for position_id, position in positions.items()
+        for price in [get_threshold_entry_price(position, token_decimals)]
+        if math.isfinite(price) and price > 0
+    )
+    status: Dict[str, Any] = {
+        "enabled": bool(getattr(config, 'gridless_leading_edge', False)),
+        "eligible": False,
+        "decision": "invalid_market" if market_price <= 0 else "waiting",
+        "reason": "Current price is invalid" if market_price <= 0 else "Waiting for entry spacing",
+        "market_price": market_price,
+        "filled_positions": len(positions),
+        "max_positions": max_active,
+        "remaining_slots": max(0, max_active - len(positions)),
+        "buy_threshold_percent": buy_threshold,
+        "leading_spacing_percent": spacing,
+    }
+    if not points or market_price <= 0:
+        return status
+
+    lowest_price, lowest_id = points[0]
+    dip_move = ((market_price - lowest_price) / lowest_price) * 100
+    status.update({
+        "dip_anchor_position_id": lowest_id,
+        "dip_anchor_price": lowest_price,
+        "dip_price_move_percent": dip_move,
+        "next_dip_price": lowest_price * (1 + buy_threshold / 100),
+    })
+
+    top = get_top_position(positions, token_decimals)
+    candidates = []
+    if top is not None:
+        observed = (position_pnls or {}).get(str(top[0]), {})
+        candidates = trigger_pnl_candidates(observed, "buy")
+        if not candidates and not (
+                position_pnls is not None
+                and getattr(config, 'bidirectional_pnl_enabled', False)):
+            candidates = [("legacy", calculate_pnl(
+                top[1], market_price, token_decimals
+            ))]
+    if candidates:
+        source, route_pnl = min(candidates, key=lambda item: item[1])
+        status.update({
+            "buy_trigger_source": source,
+            "buy_trigger_pnl_percent": route_pnl,
+            "buy_trigger_crossed": route_pnl <= buy_threshold,
+        })
+    else:
+        route_pnl = None
+        status["buy_trigger_crossed"] = False
+
+    lower = [point for point in points if point[0] <= market_price]
+    upper = [point for point in points if point[0] > market_price]
+    if lower:
+        lower_price, lower_id = lower[-1]
+        lead_move = ((market_price - lower_price) / lower_price) * 100
+        status.update({
+            "lower_anchor_position_id": lower_id,
+            "lower_anchor_price": lower_price,
+            "lower_anchor_move_percent": lead_move,
+            "next_leading_edge_price": lower_price * (1 + spacing / 100),
+        })
+    if upper:
+        upper_price, upper_id = upper[0]
+        room_above = ((upper_price - market_price) / market_price) * 100
+        status.update({
+            "upper_boundary_position_id": upper_id,
+            "upper_boundary_price": upper_price,
+            "room_above_percent": room_above,
+            "max_gap_entry_price": upper_price / (1 + spacing / 100),
+        })
+
+    if len(positions) >= max_active:
+        status.update(decision="at_capacity", reason="All position slots are filled")
+        return status
+    if (status["buy_trigger_crossed"]
+            and (not status["enabled"] or len(positions) <= 1
+                 or dip_move <= buy_threshold
+                 or math.isclose(dip_move, buy_threshold,
+                                 rel_tol=1e-12, abs_tol=1e-9))):
+        status.update(
+            eligible=True,
+            decision="dip_buy",
+            reason=(f"Net buy trigger crossed and price moved {dip_move:.2f}% "
+                    f"from dip anchor {lowest_id}"),
+        )
+        return status
+    if (status["enabled"] and len(positions) > 1 and lower and upper):
+        lead_move = float(status["lower_anchor_move_percent"])
+        room_above = float(status["room_above_percent"])
+        lead_crossed = lead_move >= spacing or math.isclose(
+            lead_move, spacing, rel_tol=1e-12, abs_tol=1e-9
+        )
+        room_crossed = room_above >= spacing or math.isclose(
+            room_above, spacing, rel_tol=1e-12, abs_tol=1e-9
+        )
+        if lead_crossed and room_crossed:
+            status.update(
+                eligible=True,
+                decision="gap_leading_edge",
+                reason=(f"Price advanced {lead_move:.2f}% from anchor {lower_id} "
+                        f"with {room_above:.2f}% room below {upper_id}"),
+            )
+            return status
+    if status["buy_trigger_crossed"] and status["enabled"] and len(positions) > 1:
+        status.update(
+            decision="dip_spacing_guard",
+            reason=(f"Net buy trigger crossed, but price moved only {dip_move:.2f}% "
+                    f"from anchor {lowest_id}; needs {buy_threshold:.2f}%"),
+        )
+    elif not lower or not upper:
+        status.update(
+            decision="outside_bounded_gap",
+            reason="Market is not inside a bounded position gap",
+        )
+    else:
+        status.update(
+            decision="waiting_for_leading_edge",
+            reason=(f"Waiting for {spacing:.2f}% rise from the lower anchor and "
+                    f"{spacing:.2f}% room below the upper boundary"),
+        )
+    return status
+
+
+def threshold_gap_fill_bounds(context: Dict[str, Any],
+                              quoted_fill_price: float) -> Tuple[bool, float, float]:
+    """Validate a prospective gap fill against its confirmed neighbours."""
+    lower_price = float(context.get("lower_anchor_price") or 0)
+    upper_price = float(context.get("upper_boundary_price") or 0)
+    spacing = float(context.get("leading_spacing_percent") or 0)
+    minimum_fill = lower_price * (1 + spacing / 100)
+    maximum_fill = upper_price / (1 + spacing / 100)
+    allowed = bool(
+        quoted_fill_price > 0
+        and lower_price > 0
+        and upper_price > 0
+        and quoted_fill_price >= minimum_fill
+        and quoted_fill_price <= maximum_fill
+    )
+    return allowed, minimum_fill, maximum_fill
 
 
 def survivor_next_leading_edge_price(
@@ -383,17 +546,33 @@ def should_buy(positions: Dict[str, Dict], current_price: float, config: Any,
     if not candidates:
         if (position_pnls is not None
                 and getattr(config, 'bidirectional_pnl_enabled', False)):
-            return (False, "No fresh buy-trigger P&L observation")
-        candidates = [("legacy", calculate_pnl(
-            top[1], current_price, token_decimals
-        ))]
-    dip_source, dip_pnl = min(candidates, key=lambda item: item[1])
-    if dip_pnl <= buy_threshold:
-        return (True, f"Top position {dip_source} P&L {dip_pnl:.2f}% <= threshold {buy_threshold}%")
+            candidates = []
+        else:
+            candidates = [("legacy", calculate_pnl(
+                top[1], current_price, token_decimals
+            ))]
+    dip_source, dip_pnl = (
+        min(candidates, key=lambda item: item[1])
+        if candidates else (None, None)
+    )
+    if dip_pnl is not None and dip_pnl <= buy_threshold:
+        if leading_edge_enabled and len(positions) > 1:
+            gap_status = threshold_gap_status(
+                positions, current_price, config, position_pnls
+            )
+            if gap_status["decision"] == "dip_buy":
+                return (
+                    True,
+                    f"Top position {dip_source} P&L {dip_pnl:.2f}% <= "
+                    f"threshold {buy_threshold}%; price spacing confirmed at "
+                    f"{gap_status['dip_price_move_percent']:.2f}%",
+                )
+        else:
+            return (True, f"Top position {dip_source} P&L {dip_pnl:.2f}% <= threshold {buy_threshold}%")
     
     # Leading edge: buy into strength when single position is climbing
     # Trigger at 50% of sell threshold (e.g., if sell=5%, buy at +2.5%)
-    if leading_edge_enabled and len(positions) == 1:
+    if leading_edge_enabled and len(positions) == 1 and candidates:
         leading_edge_trigger = sell_threshold * 0.5
         leading_source, leading_pnl = max(candidates, key=lambda item: item[1])
         if leading_pnl > leading_edge_trigger or math.isclose(
@@ -407,6 +586,15 @@ def should_buy(positions: Dict[str, Dict], current_price: float, config: Any,
         )
         if gap_triggered:
             return True, gap_reason
+
+        gap_status = threshold_gap_status(
+            positions, current_price, config, position_pnls
+        )
+        if gap_status["decision"] == "dip_spacing_guard":
+            return False, gap_status["reason"]
+
+    if not candidates:
+        return (False, "No fresh buy-trigger P&L observation")
     
     return (False, f"Top position P&L marks remain above threshold {buy_threshold}%")
 
@@ -552,6 +740,15 @@ def load_positions() -> Dict[str, Dict[str, int]]:
                     )
                 if v.get('ladder_bootstrap_reference') is True:
                     positions[k]['ladder_bootstrap_reference'] = True
+                if float(v.get('threshold_fill_price', 0) or 0) > 0:
+                    positions[k]['threshold_fill_price'] = float(
+                        v['threshold_fill_price']
+                    )
+                if v.get('threshold_entry_kind') in {
+                        'dip', 'gap_leading_edge', 'initial'}:
+                    positions[k]['threshold_entry_kind'] = str(
+                        v['threshold_entry_kind']
+                    )
         return positions
     except (json.JSONDecodeError, IOError):
         return {}
@@ -572,7 +769,9 @@ def add_position(cost_wei: int, balance: int,
                  ladder_principal_wei: Optional[int] = None,
                  ladder_entry_kind: Optional[str] = None,
                  ladder_fill_price: Optional[float] = None,
-                 ladder_bootstrap_reference: bool = False) -> str:
+                 ladder_bootstrap_reference: bool = False,
+                 threshold_fill_price: Optional[float] = None,
+                 threshold_entry_kind: Optional[str] = None) -> str:
     """Add new position with lowest available ID (fills gaps).
     
     Args:
@@ -588,6 +787,20 @@ def add_position(cost_wei: int, balance: int,
         next_id += 1
     
     position = {'cost_wei': cost_wei, 'balance': balance}
+    if threshold_fill_price is not None or threshold_entry_kind is not None:
+        try:
+            threshold_price = float(threshold_fill_price or 0)
+        except (TypeError, ValueError):
+            threshold_price = 0.0
+        if (not math.isfinite(threshold_price) or threshold_price <= 0
+                or threshold_entry_kind not in {
+                    'dip', 'gap_leading_edge', 'initial'
+                }):
+            raise ValueError("threshold entry provenance must be complete")
+        position.update({
+            'threshold_fill_price': threshold_price,
+            'threshold_entry_kind': threshold_entry_kind,
+        })
     ladder_values = (ladder_id, ladder_level_index, ladder_principal_wei)
     if any(value is not None for value in ladder_values):
         if (not ladder_id or ladder_level_index is None

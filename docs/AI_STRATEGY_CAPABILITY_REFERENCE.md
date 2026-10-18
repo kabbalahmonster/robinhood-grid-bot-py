@@ -209,8 +209,13 @@ Entry behavior:
   sell trigger. With multiple positions, the nearest confirmed purchase below
   market can trigger at the same spacing only while market is inside a bounded
   gap and another half-sell interval fits before the next purchase above it.
-  Each confirmed fill becomes the next lower anchor, so capacity is filled
-  progressively as price rises rather than all at once.
+  Spacing uses the confirmed principal-only fill price, independently of the
+  route-sensitive net buy P&L trigger. A crossed net trigger cannot consume
+  repeated slots without a real configured dip from the newest low anchor.
+  The final executable gap quote must also remain at least one half-sell interval
+  above the lower anchor and below the upper boundary. Each confirmed fill
+  becomes the next lower anchor, so capacity is filled progressively as price
+  rises rather than all at once.
 - Do not buy at or above `MAX_ACTIVE_POSITIONS`.
 - Enforce `GRIDLESS_BUY_COOLDOWN_SECONDS` after every confirmed buy.
 

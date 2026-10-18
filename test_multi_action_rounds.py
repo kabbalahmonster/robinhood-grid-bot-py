@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 
 from grid_bot import GridBot
 from config import load_config
+from gridless import should_buy
 
 
 def make_bot(enabled):
@@ -223,6 +224,44 @@ class MultiActionRoundTests(unittest.TestCase):
 
         self.assertEqual(completed, 2)
         self.assertEqual(bot.check_buys.call_count, 3)
+
+    def test_multi_buy_round_stops_after_one_gap_seed_at_static_price(self):
+        bot = make_bot(True)
+        bot.config.max_active_positions = 16
+        bot.config.gridless_buy_threshold = -10.0
+        bot.config.gridless_leading_edge = True
+        bot.config.token_decimals = 18
+        positions = {
+            str(index): {
+                "cost_wei": int((0.14 + index * 0.01) * 10**18),
+                "balance": 10**18,
+            }
+            for index in range(10)
+        }
+        observed = {
+            "0": {"buy_trigger_pnls": {"uniswap": -30.0}},
+            "10": {"buy_trigger_pnls": {"uniswap": -12.0}},
+        }
+
+        def check(price, supplied):
+            eligible, _ = should_buy(positions, price, bot.config, supplied)
+            if not eligible:
+                return
+            positions["10"] = {
+                "cost_wei": int(0.102 * 10**18),
+                "balance": 10**18,
+                "threshold_fill_price": 0.1,
+                "threshold_entry_kind": "dip",
+            }
+            bot.session_buys += 1
+
+        bot.check_buys = MagicMock(side_effect=check)
+
+        completed = bot._check_buys_for_round(0.1, observed)
+
+        self.assertEqual(completed, 1)
+        self.assertEqual(bot.check_buys.call_count, 2)
+        self.assertEqual(len(positions), 11)
 
     def test_unresolved_broadcast_stops_remaining_actions(self):
         bot = make_bot(True)
