@@ -546,6 +546,19 @@ class TestPositionManagement(unittest.TestCase):
 
         self.assertEqual(position['threshold_entry_kind'], 'gap_leading_edge')
         self.assertEqual(position['threshold_fill_price'], 0.0000001)
+
+    def test_single_position_leading_edge_provenance_survives_round_trip(self):
+        pos_id = gridless.add_position(
+            1_000_000_000,
+            10_000_000_000_000_000_000,
+            threshold_fill_price=0.0000001,
+            threshold_entry_kind='leading_edge',
+        )
+
+        position = gridless.load_positions()[pos_id]
+
+        self.assertEqual(position['threshold_entry_kind'], 'leading_edge')
+        self.assertEqual(position['threshold_fill_price'], 0.0000001)
     
     def test_add_multiple_positions(self):
         """Test adding multiple positions with auto-increment IDs."""

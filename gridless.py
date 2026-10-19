@@ -761,7 +761,7 @@ def load_positions() -> Dict[str, Dict[str, int]]:
                         v['threshold_fill_price']
                     )
                 if v.get('threshold_entry_kind') in {
-                        'dip', 'gap_leading_edge', 'initial'}:
+                        'dip', 'leading_edge', 'gap_leading_edge', 'initial'}:
                     positions[k]['threshold_entry_kind'] = str(
                         v['threshold_entry_kind']
                     )
@@ -810,7 +810,7 @@ def add_position(cost_wei: int, balance: int,
             threshold_price = 0.0
         if (not math.isfinite(threshold_price) or threshold_price <= 0
                 or threshold_entry_kind not in {
-                    'dip', 'gap_leading_edge', 'initial'
+                    'dip', 'leading_edge', 'gap_leading_edge', 'initial'
                 }):
             raise ValueError("threshold entry provenance must be complete")
         position.update({
