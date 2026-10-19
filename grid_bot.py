@@ -1945,19 +1945,16 @@ class GridBot:
             )
         return submitted
 
-    def _mark_buy_tournament_aborted(self, *, reason, market_pnl_percent,
-                                     block_threshold_percent, trigger_threshold_percent):
+    def _mark_buy_tournament_aborted(self, *, reason, **details):
         """Close a selected buy tournament when a later strategy guard vetoes it."""
         comparison = getattr(self, "_route_comparisons", {}).get("buy")
-        abort = {
-            "reason": reason,
-            "market_pnl_percent": round(float(market_pnl_percent), 4),
-            "block_threshold_percent": round(float(block_threshold_percent), 4),
-            "trigger_threshold_percent": round(float(trigger_threshold_percent), 4),
-        }
+        abort = {"reason": reason}
+        for key, value in details.items():
+            abort[key] = round(value, 12) if isinstance(value, float) else value
         if isinstance(comparison, dict):
             self._publish_tournament_transition(
-                "buy", "execution_aborted", execution_abort=abort,
+                "buy", "execution_aborted", terminal_reason=reason,
+                execution_abort=abort,
             )
         self._buy_attempt = {"status": reason, **abort}
 
@@ -4563,9 +4560,7 @@ class GridBot:
             entry_kind = threshold_status.get("decision")
             if not gridless_positions:
                 entry_kind = "initial"
-            elif entry_kind == "gap_leading_edge":
-                entry_kind = "gap_leading_edge"
-            else:
+            elif entry_kind not in {"leading_edge", "gap_leading_edge"}:
                 entry_kind = "dip"
             threshold_context = {
                 "entry_kind": entry_kind,
@@ -4609,7 +4604,9 @@ class GridBot:
             (ladder_context is not None
              and ladder_context.get("entry_kind") == "leading_edge")
             or (threshold_context is not None
-                and threshold_context.get("entry_kind") == "gap_leading_edge")
+                and threshold_context.get("entry_kind") in {
+                    "leading_edge", "gap_leading_edge"
+                })
         )
         self._execute_buy_gridless(
             buy_amount_eth,

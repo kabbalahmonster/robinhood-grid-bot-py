@@ -318,6 +318,22 @@ def threshold_gap_status(positions: Dict[str, Dict], current_price: float,
                     f"from dip anchor {lowest_id}"),
         )
         return status
+    if status["enabled"] and len(positions) == 1 and candidates:
+        leading_source, leading_pnl = max(candidates, key=lambda item: item[1])
+        lead_crossed = leading_pnl >= spacing or math.isclose(
+            leading_pnl, spacing, rel_tol=1e-12, abs_tol=1e-9
+        )
+        if lead_crossed:
+            status.update(
+                eligible=True,
+                decision="leading_edge",
+                reason=(f"Single-position {leading_source} P&L "
+                        f"{leading_pnl:.2f}% reached the {spacing:.2f}% "
+                        "leading edge"),
+                leading_trigger_source=leading_source,
+                leading_trigger_pnl_percent=leading_pnl,
+            )
+            return status
     if (status["enabled"] and len(positions) > 1 and lower and upper):
         lead_move = float(status["lower_anchor_move_percent"])
         room_above = float(status["room_above_percent"])

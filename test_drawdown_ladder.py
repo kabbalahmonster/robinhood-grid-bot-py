@@ -1027,6 +1027,41 @@ class AdaptiveLadderBotTests(unittest.TestCase):
         self.assertTrue(call.args[3])
         self.assertIsNone(call.kwargs["ladder_context"])
 
+    def test_single_position_threshold_buy_is_executed_as_a_leading_edge(self):
+        self.bot.config = ladder_config(
+            gridless_allocation_mode="threshold",
+            max_active_positions=5,
+            gridless_buy_threshold=-10.0,
+            bidirectional_pnl_enabled=True,
+        )
+        self.bot.config.use_eth_trading = True
+        self.bot.config.eth_gas_reserve = 0.001
+        self.bot.config.weth_address = "0x0000000000000000000000000000000000000002"
+        self.bot.wallet = MagicMock()
+        self.bot.wallet.get_eth_balance.return_value = 0.006
+        self.bot._taxed_token_active = MagicMock(return_value=False)
+        self.bot.last_taxed_token_failure_time = 0
+        self.bot.last_buy_time = 0
+        self.bot.gridless_buy_cooldown = 0
+        self.bot._execute_buy_gridless = MagicMock()
+        self.bot._funding_warning = None
+        positions = {
+            "0": {"cost_wei": int(0.1 * WEI), "balance": WEI},
+        }
+
+        with patch("gridless.load_positions", return_value=positions):
+            self.bot._check_buys_gridless(
+                0.11289,
+                {"0": {"buy_trigger_pnls": {"uniswap": 12.89}}},
+            )
+
+        call = self.bot._execute_buy_gridless.call_args
+        self.assertTrue(call.args[3])
+        self.assertEqual(
+            call.kwargs["threshold_context"]["entry_kind"], "leading_edge"
+        )
+        self.assertIsNone(call.kwargs["ladder_context"])
+
     def test_prepare_migrates_survivor_capacity_before_context_validation(self):
         self.bot.config = ladder_config(
             gridless_allocation_mode="survivor", max_active_positions=5,

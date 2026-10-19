@@ -348,6 +348,23 @@ class TestShouldBuy(unittest.TestCase):
         self.assertEqual(status["buy_trigger_source"], "uniswap")
         self.assertAlmostEqual(status["buy_trigger_pnl_percent"], -12.0)
 
+    def test_threshold_status_identifies_single_position_leading_edge(self):
+        config = MagicMock()
+        config.max_active_positions = 5
+        config.gridless_buy_threshold = -10.0
+        config.gridless_sell_threshold = 5.0
+        config.gridless_leading_edge = True
+        config.bidirectional_pnl_enabled = False
+        config.token_decimals = 18
+        positions = {"0": self._position_at(0.1)}
+
+        status = gridless.threshold_gap_status(positions, 0.1025, config)
+
+        self.assertTrue(status["eligible"])
+        self.assertEqual(status["decision"], "leading_edge")
+        self.assertEqual(status["leading_trigger_source"], "legacy")
+        self.assertAlmostEqual(status["leading_trigger_pnl_percent"], 2.5)
+
     def test_executable_gap_fill_must_remain_between_both_guards(self):
         context = {
             "lower_anchor_price": 0.1,

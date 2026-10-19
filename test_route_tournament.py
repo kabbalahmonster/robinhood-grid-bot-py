@@ -912,6 +912,7 @@ def test_buy_strategy_veto_marks_selected_tournament_terminal():
 
     comparison = b._route_comparisons["buy"]
     assert comparison["status"] == "execution_aborted"
+    assert comparison["terminal_reason"] == "buy_trigger_recovered"
     assert comparison["execution_abort"] == {
         "reason": "buy_trigger_recovered",
         "market_pnl_percent": -3.5,
@@ -919,6 +920,31 @@ def test_buy_strategy_veto_marks_selected_tournament_terminal():
         "trigger_threshold_percent": -10.0,
     }
     assert b._buy_attempt["status"] == "buy_trigger_recovered"
+
+
+def test_buy_strategy_veto_accepts_gap_guard_metrics():
+    b = bot("gate")
+    b._route_comparisons = {
+        "buy": {
+            "mode": "execution_preflight", "direction": "buy",
+            "status": "preflight_candidate_selected",
+        }
+    }
+
+    b._mark_buy_tournament_aborted(
+        reason="threshold_gap_execution_outside_bounds",
+        quoted_fill_price=0.103,
+        minimum_fill_price=0.1025,
+        maximum_fill_price=0.136585365854,
+        lower_anchor_position_id="low",
+        upper_boundary_position_id="high",
+    )
+
+    comparison = b._route_comparisons["buy"]
+    assert comparison["status"] == "execution_aborted"
+    assert comparison["terminal_reason"] == "threshold_gap_execution_outside_bounds"
+    assert comparison["execution_abort"]["lower_anchor_position_id"] == "low"
+    assert comparison["execution_abort"]["upper_boundary_position_id"] == "high"
 
 
 def test_exact_approval_fuse_persists_and_blocks_a_second_approval(tmp_path):
