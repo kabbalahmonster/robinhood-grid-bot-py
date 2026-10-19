@@ -63,6 +63,15 @@ class TestDashboardReporter(unittest.TestCase):
         self.assertEqual(reporter._queue[0]["sigil"], reporter._sigil)
 
     @patch("dashboard_reporter.threading.Thread.start")
+    def test_dexscreener_pair_override_is_in_status_payload(self, _start):
+        reporter = DashboardReporter("https://doomdash.ca/api/status")
+        pair = "0x" + "9" * 40
+
+        reporter.report(dexscreener_pair_address=pair)
+
+        self.assertEqual(reporter._queue[0]["dexscreener_pair_address"], pair)
+
+    @patch("dashboard_reporter.threading.Thread.start")
     def test_needs_gas_is_in_status_payload(self, _start):
         reporter = DashboardReporter("https://doomdash.ca/api/status")
         warning = {"balance_eth": 0.00004, "reserve_eth": 0.0002, "shortfall_eth": 0.00016}

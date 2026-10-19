@@ -7613,6 +7613,9 @@ class GridBot:
                     swap_slippage_percent=self._swap_slippage_fraction() * 100,
                     token_symbol=self.config.token_symbol,
                     token_address=self.config.token_address,
+                    dexscreener_pair_address=getattr(
+                        self.config, "dexscreener_pair_address", ""
+                    ),
                     wallet_address=self.wallet.address,
                     display_name=self.config.dashboard_name,
                     group=self.config.dashboard_group,

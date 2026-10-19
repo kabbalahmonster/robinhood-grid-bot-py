@@ -202,6 +202,7 @@ class BotConfig:
     bot_id: str = "grid-bot-1"    # Unique identifier shown on dashboard
     dashboard_name: str = ""      # Optional display name
     dashboard_group: str = ""     # Optional dashboard grouping label
+    dexscreener_pair_address: str = ""  # Optional pair override for DoomDash
     mercury_evocation: bool = True  # Print the Mercury evocation once at bot startup
     auto_reconcile_unresolved_broadcast: bool = False
     auto_reconcile_interval_seconds: int = 30
@@ -351,6 +352,12 @@ class BotConfig:
         
         if not self.token_address or self.token_address == "0x...":
             raise ValueError("TOKEN_ADDRESS is required and must be set")
+
+        if (self.dexscreener_pair_address
+                and not re.fullmatch(r"0x[0-9a-fA-F]{40}", self.dexscreener_pair_address)):
+            raise ValueError(
+                "DEXSCREENER_PAIR_ADDRESS must be a valid EVM pair address or blank"
+            )
         
         # Validate chain ID
         if self.chain_id not in CHAIN_CONFIG:
@@ -734,6 +741,7 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
         bot_id=os.getenv("BOT_ID", os.getenv("TOKEN_SYMBOL", f"grid-bot-{chain_id}")),
         dashboard_name=os.getenv("DASHBOARD_NAME", ""),
         dashboard_group=os.getenv("DASHBOARD_GROUP", ""),
+        dexscreener_pair_address=os.getenv("DEXSCREENER_PAIR_ADDRESS", "").strip(),
         mercury_evocation=os.getenv("MERCURY_EVOCATION", "true").lower() == "true",
         auto_reconcile_unresolved_broadcast=os.getenv(
             "AUTO_RECONCILE_UNRESOLVED_BROADCAST", "false"

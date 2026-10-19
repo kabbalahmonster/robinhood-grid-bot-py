@@ -140,6 +140,7 @@ class DashboardReporter:
         swap_slippage_percent: Optional[float] = None,
         token_symbol: str = "",
         token_address: str = "",
+        dexscreener_pair_address: str = "",
         wallet_address: str = "",
         display_name: str = "",
         group: str = "",
@@ -213,6 +214,7 @@ class DashboardReporter:
             "swap_slippage_percent": swap_slippage_percent,
             "token_symbol": token_symbol,
             "token_address": token_address,
+            "dexscreener_pair_address": dexscreener_pair_address,
             "wallet_address": wallet_address,
             "display_name": display_name,
             "group": group,
@@ -335,6 +337,7 @@ class DashboardReporter:
         swap_slippage_percent: Optional[float] = None,
         token_symbol: str = "",
         token_address: str = "",
+        dexscreener_pair_address: str = "",
         wallet_address: str = "",
         rpc_status: str = "unknown",
     ) -> None:
@@ -379,6 +382,7 @@ class DashboardReporter:
             swap_slippage_percent=swap_slippage_percent,
             token_symbol=token_symbol,
             token_address=token_address,
+            dexscreener_pair_address=dexscreener_pair_address,
             wallet_address=wallet_address,
             rpc_status=rpc_status,
         )
