@@ -54,8 +54,19 @@ def main():
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--allow-add", action="store_true")
     parser.add_argument("--deduplicate", action="store_true")
-    parser.add_argument("assignments", nargs="+")
+    parser.add_argument("--deduplicate-all", action="store_true")
+    parser.add_argument("assignments", nargs="*")
     args = parser.parse_args()
+
+    if args.deduplicate_all:
+        if args.assignments:
+            parser.error("--deduplicate-all cannot be combined with assignments")
+        if args.deduplicate:
+            parser.error("--deduplicate-all cannot be combined with --deduplicate")
+        if args.allow_add:
+            parser.error("--deduplicate-all cannot be combined with --allow-add")
+    elif not args.assignments:
+        parser.error("at least one NAME=VALUE assignment is required")
 
     assignments = dict(parse_assignment(raw) for raw in args.assignments)
     if len(assignments) != len(args.assignments):
@@ -63,6 +74,41 @@ def main():
 
     with open(args.file, "r", encoding="utf-8") as handle:
         lines = handle.readlines()
+
+    if args.deduplicate_all:
+        assignment_pattern = re.compile(
+            r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=.*(?:\r?\n)?$"
+        )
+        occurrences = {}
+        for index, line in enumerate(lines):
+            match = assignment_pattern.match(line)
+            if match:
+                occurrences.setdefault(match.group(1), []).append(index)
+
+        duplicates = {
+            name: indexes for name, indexes in occurrences.items() if len(indexes) > 1
+        }
+        for name, indexes in duplicates.items():
+            print(
+                f"{args.file}: {name}: {len(indexes)} definitions -> "
+                f"keep final definition at line {indexes[-1] + 1}"
+            )
+        if not duplicates:
+            print(f"{args.file}: no duplicate variables found")
+
+        if not args.apply or not duplicates:
+            return
+
+        duplicate_indexes = {
+            index
+            for indexes in duplicates.values()
+            for index in indexes[:-1]
+        }
+        lines = [
+            line for index, line in enumerate(lines) if index not in duplicate_indexes
+        ]
+        write_lines_atomically(args.file, lines)
+        return
 
     found = {name: [] for name in assignments}
     patterns = {
@@ -111,8 +157,12 @@ def main():
     if duplicate_indexes:
         lines = [line for index, line in enumerate(lines) if index not in duplicate_indexes]
 
-    original_mode = stat.S_IMODE(os.stat(args.file).st_mode)
-    directory = os.path.dirname(os.path.abspath(args.file))
+    write_lines_atomically(args.file, lines)
+
+
+def write_lines_atomically(path, lines):
+    original_mode = stat.S_IMODE(os.stat(path).st_mode)
+    directory = os.path.dirname(os.path.abspath(path))
     fd, temp_path = tempfile.mkstemp(prefix=".env.update.", dir=directory, text=True)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -120,7 +170,7 @@ def main():
             handle.flush()
             os.fsync(handle.fileno())
         os.chmod(temp_path, original_mode)
-        os.replace(temp_path, args.file)
+        os.replace(temp_path, path)
     finally:
         if os.path.exists(temp_path):
             os.unlink(temp_path)

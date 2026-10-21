@@ -533,7 +533,7 @@ unless their section explicitly says otherwise.
 | `initialize-bots` | Create bot clones, wallets, configs, and optional membership | `--apply` only |
 | `template-from-bot NAME` | Derive the initialize template from one bot `.env`, with identity fields removed | `--apply --confirm-template-update` only |
 | `fleet-membership` | Add/remove explicit configured bot names | `--apply` only |
-| `update-variable` | Safely update selected bot `.env` values | `--apply` only |
+| `update-variable` | Safely update or deduplicate selected bot `.env` values | `--apply` only |
 | `adjust-positions` | Change capacity without rewriting filled positions | `--apply` only |
 | `pass-positions` | Reallocate whole capacity slots and reserve ETH among fleet bots | `--execute` only |
 | `reconcile-position-balances` | Haircut overstated tracked balances to wallet reality | `--apply` only |
@@ -1897,6 +1897,21 @@ Preview the operation before applying it:
 ops/fleet/update-variable --deduplicate SWAP_PROVIDER=uniswap
 ops/fleet/update-variable --apply --deduplicate SWAP_PROVIDER=uniswap
 ```
+
+To repair every repeated variable without changing any effective values, use
+the standalone `--deduplicate-all` mode. It removes every earlier definition
+and preserves the final definition exactly as written, matching the normal
+last-definition-wins dotenv behavior. It accepts fleet selectors and remains a
+preview unless `--apply` is supplied:
+
+```bash
+ops/fleet/update-variable --only delta --deduplicate-all
+ops/fleet/update-variable --apply --only delta --deduplicate-all
+```
+
+This mode cannot be combined with assignments, `--deduplicate`, or
+`--allow-add`. Running bots retain their already-loaded environment until they
+are restarted.
 
 Preview changing the fleet gas reserve:
 

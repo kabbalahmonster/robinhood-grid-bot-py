@@ -444,7 +444,7 @@ option and safety invariant.
 | `strategy-model` | Generate comparative gridless buy/sell coverage charts, CSV, and JSON | Report files only |
 | `reconcile-position-balances` | Preview/apply an audited proportional haircut when tracked tokens exceed wallet reality | Yes |
 | `fleet-audit` | Reconcile local treasury/liquidation receipts | No |
-| `update-variable` | Preview/atomically change selected `.env` variables | Config only; `--apply` required |
+| `update-variable` | Preview/atomically change or deduplicate selected `.env` variables | Config only; `--apply` required |
 | `adjust-positions` | Preview/add/remove capacity, or freeze selected/all bots at their filled count | Config only; `--apply` required |
 | `pass-positions` | Fairly reallocate whole unused capacity slots and reserve ETH, optionally funding recipients from Treasury first; can stop/restart only involved bots | Broadcast/capacity changes only with all guards |
 | `backup-private-keys` | Validate every configured bot and write one sensitive key backup | Sensitive file output |

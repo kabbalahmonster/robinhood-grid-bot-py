@@ -70,6 +70,52 @@ class TestUpdateVariable(unittest.TestCase):
                 "SWAP_PROVIDER=uniswap\nKEEP=first\nKEEP=second\n",
             )
 
+    def test_deduplicate_all_preview_reports_duplicates_without_writing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            checkouts, config = self._fixture(directory)
+            original = "KEEP=one\nDUP=old\nKEEP=two\nexport DUP = final # retained\n"
+            (checkouts[1] / ".env").write_text(original)
+            result = subprocess.run(
+                [SCRIPT, "--config", config, "--only", "broken", "--deduplicate-all"],
+                text=True, capture_output=True, env={**os.environ, "HOME": directory},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("DUP: 2 definitions -> keep final definition at line 4", result.stdout)
+            self.assertIn("KEEP: 2 definitions -> keep final definition at line 3", result.stdout)
+            self.assertIn("PREVIEW ONLY: no files changed", result.stdout)
+            self.assertEqual((checkouts[1] / ".env").read_text(), original)
+
+    def test_deduplicate_all_apply_keeps_each_final_definition_verbatim(self):
+        with tempfile.TemporaryDirectory() as directory:
+            checkouts, config = self._fixture(directory)
+            (checkouts[1] / ".env").write_text(
+                "# heading\nKEEP=first\nDUP=old\nKEEP=second\n"
+                "export DUP = final # retained\nSINGLE=yes\n"
+            )
+            result = subprocess.run(
+                [
+                    SCRIPT, "--config", config, "--only", "broken", "--apply",
+                    "--deduplicate-all",
+                ],
+                text=True, capture_output=True, env={**os.environ, "HOME": directory},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Updated 1 .env files", result.stdout)
+            self.assertEqual(
+                (checkouts[1] / ".env").read_text(),
+                "# heading\nKEEP=second\nexport DUP = final # retained\nSINGLE=yes\n",
+            )
+
+    def test_deduplicate_all_rejects_assignments(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _, config = self._fixture(directory)
+            result = subprocess.run(
+                [SCRIPT, "--config", config, "--deduplicate-all", "DUP=new"],
+                text=True, capture_output=True, env={**os.environ, "HOME": directory},
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("cannot be combined with NAME=VALUE assignments", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
