@@ -206,16 +206,19 @@ Entry behavior:
   `GRIDLESS_BUY_THRESHOLD`.
 - If `GRIDLESS_LEADING_EDGE=true` and exactly one position exists, also buy
   when that position's authorized buy-side P&L reaches 50% of the configured
-  sell trigger. With multiple positions, the nearest confirmed purchase below
+  sell trigger **and** market has physically advanced the same percentage from
+  its confirmed principal-only fill. With multiple positions, the nearest confirmed purchase below
   market can trigger at the same spacing only while market is inside a bounded
   gap and another half-sell interval fits before the next purchase above it.
   Spacing uses the confirmed principal-only fill price, independently of the
   route-sensitive net buy P&L trigger. A crossed net trigger cannot consume
   repeated slots without a real configured dip from the newest low anchor.
-  The final executable gap quote must also remain at least one half-sell interval
-  above the lower anchor and below the upper boundary. Each confirmed fill
-  becomes the next lower anchor, so capacity is filled progressively as price
-  rises rather than all at once.
+  The final executable quote must also remain at least one half-sell interval
+  above the lower anchor and, for a bounded gap, below the upper boundary. Each
+  confirmed fill consumes every pre-fill P&L observation and becomes the next
+  lower anchor, so a recycled numeric position ID or same-round snapshot cannot
+  authorize another buy. Capacity fills progressively from fresh observations
+  as price rises rather than all at once.
 - Do not buy at or above `MAX_ACTIVE_POSITIONS`.
 - Enforce `GRIDLESS_BUY_COOLDOWN_SECONDS` after every confirmed buy.
 

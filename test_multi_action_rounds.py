@@ -206,24 +206,28 @@ class MultiActionRoundTests(unittest.TestCase):
         bot._actionable_quote_with_weth_fallback.assert_not_called()
         self.assertEqual(bot.session_sells, 0)
 
-    def test_multi_buy_pass_reuses_snapshot_until_first_non_fill(self):
+    def test_multi_buy_pass_consumes_pnl_snapshot_after_first_fill(self):
         bot = make_bot(True)
+        bot._pnl_quotes = {"buy": {"sample": 1}, "sell": {"sample": 2}}
         observed = {"1": {"buy_trigger_pnls": {"buy": -20}}}
         attempts = 0
 
         def check(_price, supplied):
             nonlocal attempts
-            self.assertIs(supplied, observed)
             attempts += 1
-            if attempts <= 2:
+            if attempts == 1:
+                self.assertIs(supplied, observed)
                 bot.session_buys += 1
+            else:
+                self.assertEqual(supplied, {})
 
         bot.check_buys = MagicMock(side_effect=check)
 
         completed = bot._check_buys_for_round(1.0, observed)
 
-        self.assertEqual(completed, 2)
-        self.assertEqual(bot.check_buys.call_count, 3)
+        self.assertEqual(completed, 1)
+        self.assertEqual(bot.check_buys.call_count, 2)
+        self.assertEqual(bot._pnl_quotes, {"buy": None, "sell": None})
 
     def test_multi_buy_round_stops_after_one_gap_seed_at_static_price(self):
         bot = make_bot(True)

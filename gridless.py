@@ -320,16 +320,32 @@ def threshold_gap_status(positions: Dict[str, Dict], current_price: float,
         return status
     if status["enabled"] and len(positions) == 1 and candidates:
         leading_source, leading_pnl = max(candidates, key=lambda item: item[1])
-        lead_crossed = leading_pnl >= spacing or math.isclose(
+        route_crossed = leading_pnl >= spacing or math.isclose(
             leading_pnl, spacing, rel_tol=1e-12, abs_tol=1e-9
         )
-        if lead_crossed:
+        physical_move = float(status.get("lower_anchor_move_percent", 0))
+        physical_crossed = physical_move >= spacing or math.isclose(
+            physical_move, spacing, rel_tol=1e-12, abs_tol=1e-9
+        )
+        if route_crossed and physical_crossed:
             status.update(
                 eligible=True,
                 decision="leading_edge",
                 reason=(f"Single-position {leading_source} P&L "
-                        f"{leading_pnl:.2f}% reached the {spacing:.2f}% "
+                        f"{leading_pnl:.2f}% and confirmed price move "
+                        f"{physical_move:.2f}% reached the {spacing:.2f}% "
                         "leading edge"),
+                leading_trigger_source=leading_source,
+                leading_trigger_pnl_percent=leading_pnl,
+            )
+            return status
+        if route_crossed:
+            status.update(
+                decision="leading_edge_spacing_guard",
+                reason=(f"Single-position {leading_source} P&L "
+                        f"{leading_pnl:.2f}% crossed, but price moved only "
+                        f"{physical_move:.2f}% from the confirmed fill; "
+                        f"needs {spacing:.2f}%"),
                 leading_trigger_source=leading_source,
                 leading_trigger_pnl_percent=leading_pnl,
             )
@@ -387,6 +403,33 @@ def threshold_gap_fill_bounds(context: Dict[str, Any],
         and quoted_fill_price <= maximum_fill
     )
     return allowed, minimum_fill, maximum_fill
+
+
+def threshold_leading_edge_fill_bounds(
+        context: Dict[str, Any],
+        quoted_fill_price: float) -> Tuple[bool, float, Optional[float]]:
+    """Validate a leading fill against its confirmed physical neighbours.
+
+    A single-position leading edge has only a lower anchor. A bounded gap has
+    both a lower anchor and an upper boundary. Route-sensitive P&L may wake
+    the strategy, but it may never replace these principal-only fill bounds.
+    """
+    if context.get("entry_kind") == "gap_leading_edge":
+        allowed, minimum_fill, maximum_fill = threshold_gap_fill_bounds(
+            context, quoted_fill_price
+        )
+        return allowed, minimum_fill, maximum_fill
+
+    lower_price = float(context.get("lower_anchor_price") or 0)
+    spacing = float(context.get("leading_spacing_percent") or 0)
+    minimum_fill = lower_price * (1 + spacing / 100)
+    allowed = bool(
+        quoted_fill_price > 0
+        and lower_price > 0
+        and spacing > 0
+        and quoted_fill_price >= minimum_fill
+    )
+    return allowed, minimum_fill, None
 
 
 def survivor_next_leading_edge_price(
@@ -591,10 +634,34 @@ def should_buy(positions: Dict[str, Dict], current_price: float, config: Any,
     if leading_edge_enabled and len(positions) == 1 and candidates:
         leading_edge_trigger = sell_threshold * 0.5
         leading_source, leading_pnl = max(candidates, key=lambda item: item[1])
-        if leading_pnl > leading_edge_trigger or math.isclose(
+        route_crossed = leading_pnl > leading_edge_trigger or math.isclose(
             leading_pnl, leading_edge_trigger, rel_tol=1e-12, abs_tol=1e-9
-        ):
-            return (True, f"Leading edge: {leading_source} P&L {leading_pnl:.2f}% >= 50% of sell ({leading_edge_trigger}%)")
+        )
+        confirmed_entry = get_threshold_entry_price(top[1], token_decimals)
+        physical_move = (
+            ((current_price - confirmed_entry) / confirmed_entry) * 100
+            if confirmed_entry > 0 else float("-inf")
+        )
+        physical_crossed = (
+            physical_move > leading_edge_trigger
+            or math.isclose(
+                physical_move, leading_edge_trigger,
+                rel_tol=1e-12, abs_tol=1e-9,
+            )
+        )
+        if route_crossed and physical_crossed:
+            return (
+                True,
+                f"Leading edge: {leading_source} P&L {leading_pnl:.2f}% and "
+                f"confirmed price move {physical_move:.2f}% >= 50% of sell "
+                f"({leading_edge_trigger}%)",
+            )
+        if route_crossed:
+            return (
+                False,
+                f"Leading-edge P&L crossed, but confirmed price spacing is "
+                f"only {physical_move:.2f}%; needs {leading_edge_trigger}%",
+            )
 
     if leading_edge_enabled and len(positions) > 1:
         gap_triggered, gap_reason, _ = threshold_gap_leading_edge_trigger(

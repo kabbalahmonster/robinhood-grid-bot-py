@@ -130,6 +130,56 @@ class TestShouldBuy(unittest.TestCase):
         should_buy, reason = gridless.should_buy(positions, current_price, config)
         self.assertTrue(should_buy)
         self.assertIn("Leading edge", reason)
+
+    def test_route_pnl_cannot_bypass_confirmed_leading_edge_spacing(self):
+        config = MagicMock()
+        config.max_active_positions = 5
+        config.gridless_buy_threshold = -10.0
+        config.gridless_sell_threshold = 3.0
+        config.gridless_leading_edge = True
+        config.bidirectional_pnl_enabled = True
+        config.token_decimals = 18
+        positions = {
+            "0": {
+                "cost_wei": int(0.1 * 10**18),
+                "balance": 10**18,
+                "threshold_fill_price": 0.1,
+                "threshold_entry_kind": "initial",
+            }
+        }
+        stale = {"0": {"buy_trigger_pnls": {"buy": 8.0}}}
+
+        eligible, reason = gridless.should_buy(
+            positions, 0.1005, config, stale
+        )
+
+        self.assertFalse(eligible)
+        self.assertIn("confirmed price spacing", reason)
+
+    def test_route_and_confirmed_spacing_must_both_cross(self):
+        config = MagicMock()
+        config.max_active_positions = 5
+        config.gridless_buy_threshold = -10.0
+        config.gridless_sell_threshold = 3.0
+        config.gridless_leading_edge = True
+        config.bidirectional_pnl_enabled = True
+        config.token_decimals = 18
+        positions = {
+            "0": {
+                "cost_wei": int(0.1 * 10**18),
+                "balance": 10**18,
+                "threshold_fill_price": 0.1,
+                "threshold_entry_kind": "initial",
+            }
+        }
+        observed = {"0": {"buy_trigger_pnls": {"buy": 2.0}}}
+
+        eligible, reason = gridless.should_buy(
+            positions, 0.1015, config, observed
+        )
+
+        self.assertTrue(eligible)
+        self.assertIn("confirmed price move 1.50%", reason)
     
     def test_no_leading_edge_when_disabled(self):
         """Should not buy on leading edge when feature disabled."""
@@ -383,6 +433,24 @@ class TestShouldBuy(unittest.TestCase):
         )[0])
         self.assertFalse(gridless.threshold_gap_fill_bounds(
             context, 0.137
+        )[0])
+
+    def test_executable_single_leading_fill_must_clear_lower_guard(self):
+        context = {
+            "entry_kind": "leading_edge",
+            "lower_anchor_price": 0.1,
+            "leading_spacing_percent": 1.5,
+        }
+
+        allowed, minimum, maximum = (
+            gridless.threshold_leading_edge_fill_bounds(context, 0.1015)
+        )
+
+        self.assertTrue(allowed)
+        self.assertAlmostEqual(minimum, 0.1015)
+        self.assertIsNone(maximum)
+        self.assertFalse(gridless.threshold_leading_edge_fill_bounds(
+            context, 0.10149
         )[0])
 
 

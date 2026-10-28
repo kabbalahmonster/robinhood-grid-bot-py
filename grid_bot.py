@@ -4105,7 +4105,12 @@ class GridBot:
         )
 
     def _check_buys_for_round(self, price, position_pnls=None):
-        """Run one or more guarded buys without repeating market observation."""
+        """Run guarded buys, consuming P&L evidence after the first fill.
+
+        Static drawdown geometry may still fill multiple already-crossed rungs.
+        Threshold and Survivor entries require a fresh observation after every
+        confirmed buy, so recycled position IDs cannot inherit stale P&L.
+        """
         multi_action = bool(getattr(
             self.config, "gridless_multi_action_rounds", False
         )) and bool(getattr(self.config, "use_gridless", False))
@@ -4122,6 +4127,15 @@ class GridBot:
             if self.session_buys == before_attempt:
                 break
             completed += self.session_buys - before_attempt
+            # A quote/P&L snapshot describes the positions that existed when it
+            # was sampled. Never attach it to a newly-created position (whose
+            # numeric ID may have just been recycled) or let it authorize a
+            # second leading-edge entry.
+            position_pnls = {}
+            pnl_quotes = getattr(self, "_pnl_quotes", None)
+            if isinstance(pnl_quotes, dict):
+                for side in tuple(pnl_quotes):
+                    pnl_quotes[side] = None
         return completed
 
     def _run_buy_phase(self, price, position_pnls=None):
@@ -4897,8 +4911,10 @@ class GridBot:
             logger.error("Buy aborted: executable quote input/output amounts are not exact")
             return
         if (threshold_context is not None
-                and threshold_context.get("entry_kind") == "gap_leading_edge"):
-            from gridless import threshold_gap_fill_bounds
+                and threshold_context.get("entry_kind") in {
+                    "leading_edge", "gap_leading_edge"
+                }):
+            from gridless import threshold_leading_edge_fill_bounds
 
             quoted_tokens = int(quote.buy_amount or 0) / self.token_unit
             quoted_principal = int(quote.sell_amount or buy_amount_wei) / 10**18
@@ -4906,11 +4922,18 @@ class GridBot:
                 quoted_principal / quoted_tokens if quoted_tokens > 0 else 0
             )
             fill_allowed, minimum_fill, maximum_fill = (
-                threshold_gap_fill_bounds(threshold_context, quoted_fill_price)
+                threshold_leading_edge_fill_bounds(
+                    threshold_context, quoted_fill_price
+                )
             )
             if not fill_allowed:
+                abort_reason = (
+                    "threshold_gap_execution_outside_bounds"
+                    if threshold_context.get("entry_kind") == "gap_leading_edge"
+                    else "threshold_leading_execution_outside_bounds"
+                )
                 self._mark_buy_tournament_aborted(
-                    reason="threshold_gap_execution_outside_bounds",
+                    reason=abort_reason,
                     quoted_fill_price=quoted_fill_price,
                     minimum_fill_price=minimum_fill,
                     maximum_fill_price=maximum_fill,
@@ -4922,9 +4945,11 @@ class GridBot:
                     ),
                 )
                 logger.info(
-                    "Threshold gap buy aborted: executable fill %.10f outside "
-                    "guarded range %.10f..%.10f",
-                    quoted_fill_price, minimum_fill, maximum_fill,
+                    "Threshold leading buy aborted: executable fill %.10f "
+                    "outside guarded range %.10f..%s",
+                    quoted_fill_price, minimum_fill,
+                    (f"{maximum_fill:.10f}"
+                     if maximum_fill is not None else "unbounded"),
                 )
                 return
         if (ladder_context is None
