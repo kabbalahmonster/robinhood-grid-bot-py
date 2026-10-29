@@ -206,6 +206,53 @@ class MultiActionRoundTests(unittest.TestCase):
         bot._actionable_quote_with_weth_fallback.assert_not_called()
         self.assertEqual(bot.session_sells, 0)
 
+    def test_staged_sell_skips_impossible_preapproval_gas_probe(self):
+        bot = make_bot(True)
+        bot.config.token_address = "token"
+        bot.config.zero_x_proxy = "proxy"
+        bot.config.moonbag_percentage = 0
+        bot.config.min_profit_percent = 5
+        bot.config.max_sell_gas_eth = 1
+        bot.trade_token_address = "native"
+        bot.api_client = SimpleNamespace(name="lifi")
+        bot.provider = SimpleNamespace(
+            capabilities=SimpleNamespace(exact_amount_approval=False),
+        )
+        bot.wallet = MagicMock()
+        bot.wallet.check_allowance.return_value = 0
+        bot.wallet.build_token_approval_transaction.return_value = {"gas": 10}
+        bot.wallet.normal_gas_price.return_value = 1
+        bot._wallet_can_cover_sell = MagicMock(return_value=True)
+        bot._queue_route_shadow = MagicMock()
+        quote = SimpleNamespace(
+            success=True,
+            error=None,
+            allowance_target="lifi-router",
+        )
+        quote._tournament_staged_approval = True
+        bot._actionable_quote_with_weth_fallback = MagicMock(
+            return_value=(quote, False),
+        )
+        bot._taxed_quote_return_wei = MagicMock(return_value=1200)
+        bot._sell_quote_consistency_guard = MagicMock(return_value=None)
+        bot._swap_gas_fields = MagicMock(
+            side_effect=AssertionError("swap gas probed before required approval"),
+        )
+        bot._execute_sell_gridless = MagicMock()
+
+        with patch("gridless.load_positions", return_value={"1": POSITIONS["1"]}):
+            bot._attempt_gridless_sell_candidate(
+                "1", POSITIONS["1"], 1.0, "PROFIT (sell): 8.0%", 8
+            )
+
+        bot._swap_gas_fields.assert_not_called()
+        bot.wallet.build_token_approval_transaction.assert_called_once_with(
+            "token", "lifi-router", 2**256 - 1,
+        )
+        bot._execute_sell_gridless.assert_called_once_with(
+            "1", POSITIONS["1"], 1.0, quote,
+        )
+
     def test_multi_buy_pass_consumes_pnl_snapshot_after_first_fill(self):
         bot = make_bot(True)
         bot._pnl_quotes = {"buy": {"sample": 1}, "sell": {"sample": 2}}

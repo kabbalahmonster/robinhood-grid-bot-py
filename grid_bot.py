@@ -5323,13 +5323,6 @@ class GridBot:
 
         quote_provider = self.api_client.name
         quote_return_wei = self._taxed_quote_return_wei(quote)
-        exact_spender = quote.allowance_target or self.config.zero_x_proxy
-        needs_exact_approval = bool(
-            self._provider_requires_exact_approval()
-            and self.wallet.check_allowance(
-                self.config.token_address, exact_spender, use_permit2=False,
-            ) < sell_amount
-        )
         consistency_block = self._sell_quote_consistency_guard(
             pos_id, quote_provider, quote_return_wei,
         )
@@ -5369,19 +5362,40 @@ class GridBot:
                 )
                 return
 
+        # A tournament winner may be intentionally handed off before local
+        # swap simulation because its calldata cannot succeed until allowance
+        # exists.  Treat that staged marker exactly like an exact-approval
+        # provider here: price approval gas, then let _execute_sell_gridless
+        # perform the winner-only approval, refresh the quote, and run the
+        # mandatory final local simulation.  Probing the staged calldata now
+        # deterministically reverts and used to strand profitable LiFi sells.
+        approval_spender = quote.allowance_target or self.config.zero_x_proxy
+        approval_required_before_simulation = bool(
+            self._provider_requires_exact_approval()
+            or getattr(quote, "_tournament_staged_approval", False)
+        )
+        needs_pre_simulation_approval = bool(
+            approval_required_before_simulation
+            and self.wallet.check_allowance(
+                self.config.token_address,
+                approval_spender,
+                use_permit2=False,
+            ) < sell_amount
+        )
+
         # A provider's exact calldata can be valid yet too costly for the sell
         # cap.  Before giving up, make one fresh quote request to its paired
         # provider and allow the route selector to retain only cap-compliant
         # simulated transactions.  This is sell-only and event-driven, never a
         # second quote on ordinary polling.
         probe_gas_limit = probe_gas_price = None
-        if not needs_exact_approval:
+        if not needs_pre_simulation_approval:
             probe_gas_limit, probe_gas_price = self._swap_gas_fields(quote, 300000)
         sell_cap_wei = int(float(getattr(
             self.config, "max_sell_gas_eth",
             getattr(self.config, "max_swap_gas_eth", 0.00004),
         )) * 10**18)
-        if (not needs_exact_approval and not weth_fallback and sell_cap_wei > 0
+        if (not needs_pre_simulation_approval and not weth_fallback and sell_cap_wei > 0
                 and probe_gas_limit * probe_gas_price > sell_cap_wei):
             selected_provider, selected_quote, selection = self._alternate_route_for_gas_cap(
                 self.provider.active, quote,
@@ -5416,9 +5430,11 @@ class GridBot:
         unwrap_projected_wei = 0
         if weth_fallback:
             unwrap_projected_wei = self._project_future_weth_unwrap_gas_wei()
-        if needs_exact_approval:
+        if needs_pre_simulation_approval:
             approval_tx = self.wallet.build_token_approval_transaction(
-                self.config.token_address, exact_spender, int(sell_amount),
+                self.config.token_address,
+                approval_spender,
+                self._provider_approval_amount(sell_amount),
             )
             projected_gas_eth = (
                 int(approval_tx["gas"]) * int(self.wallet.normal_gas_price())
