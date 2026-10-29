@@ -9,6 +9,7 @@ the single RPC_URL exactly as before.
 
 import time
 import logging
+import re
 import threading
 from contextlib import contextmanager
 from copy import deepcopy
@@ -18,6 +19,55 @@ from urllib.parse import urlsplit
 from web3 import Web3
 
 logger = logging.getLogger("grid_bot.rpc")
+
+
+_BASE_FEE_REJECTION_RE = re.compile(
+    r"max fee per gas less than (?:block )?base fee|"
+    r"fee cap less than block base fee|"
+    r"maxfeepergas[^\n]*basefee",
+    re.IGNORECASE,
+)
+_REPORTED_BASE_FEE_RE = re.compile(
+    r"base\s*fee(?:pergas)?\s*[:=]\s*(\d+)|basefee\s*[:=]\s*(\d+)",
+    re.IGNORECASE,
+)
+
+
+def _http_status_code(error: Exception) -> Optional[int]:
+    """Return a real HTTP status without matching arbitrary message digits."""
+    response = getattr(error, "response", None)
+    status = getattr(response, "status_code", None)
+    if status is None:
+        status = getattr(error, "status_code", None)
+    try:
+        return int(status) if status is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_transient_rpc_error(error: Exception, error_str: str) -> bool:
+    """Identify endpoint failures, excluding deterministic transaction errors."""
+    status = _http_status_code(error)
+    if status in {429, 500, 502, 503, 504}:
+        return True
+    return any(marker in error_str for marker in (
+        "connection", "timeout", "rate limit", "too many requests",
+        "internal error", "server error", "bad gateway", "gateway timeout",
+        "service unavailable", "http 429", "http 500", "http 502",
+        "http 503", "http 504", "status code 429", "status code 500",
+        "status code 502", "status code 503", "status code 504",
+    ))
+
+
+def _is_base_fee_rejection(error_str: str) -> bool:
+    return bool(_BASE_FEE_REJECTION_RE.search(error_str))
+
+
+def _reported_base_fee(error_str: str) -> int:
+    match = _REPORTED_BASE_FEE_RE.search(error_str)
+    if not match:
+        return 0
+    return int(next(value for value in match.groups() if value is not None))
 
 # Default public RPC endpoints for Robinhood Chain (chainId 4663)
 DEFAULT_ROBINHOOD_RPCS = [
@@ -412,6 +462,8 @@ class ResilientWeb3:
         attempts_made = 0
         failures = 0
         trace_event = self._trace_event_started(func_name)
+        call_args = args
+        base_fee_retry_done = False
         
         for attempt in range(self.MAX_RETRIES):
             attempts_made += 1
@@ -429,7 +481,7 @@ class ResilientWeb3:
                 for part in func_name.split('.'):
                     obj = getattr(obj, part)
                 
-                result = obj(*args, **kwargs)
+                result = obj(*call_args, **kwargs)
                 
                 # Success — report and return
                 if attempt_url != "unknown":
@@ -444,6 +496,40 @@ class ResilientWeb3:
                 trace_event["failures"] = failures
                 last_error = e
                 error_str = str(e).lower()
+
+                # Some Robinhood RPCs apply a stale/default fee cap while
+                # simulating a transaction that omitted fee fields. If the
+                # node reports a newer base fee, repeat the simulation once on
+                # the same healthy endpoint with a fresh, deliberately buffered
+                # EIP-1559 cap. This is a deterministic transaction-validation
+                # response, not evidence that the endpoint is unhealthy.
+                if (func_name == "eth.estimate_gas" and not base_fee_retry_done
+                        and call_args and isinstance(call_args[0], dict)
+                        and _is_base_fee_rejection(error_str)):
+                    reported_base_fee = _reported_base_fee(error_str)
+                    try:
+                        pending_block = current_w3.eth.get_block("pending")
+                        pending_base_fee = int(pending_block.get("baseFeePerGas", 0) or 0)
+                    except Exception:
+                        pending_base_fee = 0
+                    try:
+                        priority_fee = max(int(current_w3.eth.max_priority_fee), 1_000_000)
+                    except Exception:
+                        priority_fee = 1_000_000
+                    fresh_base_fee = max(reported_base_fee, pending_base_fee)
+                    if fresh_base_fee > 0:
+                        retry_tx = dict(call_args[0])
+                        retry_tx.pop("gasPrice", None)
+                        retry_tx["maxPriorityFeePerGas"] = priority_fee
+                        retry_tx["maxFeePerGas"] = fresh_base_fee * 2 + priority_fee
+                        call_args = (retry_tx, *call_args[1:])
+                        base_fee_retry_done = True
+                        logger.info(
+                            "Retrying gas simulation with refreshed fee cap: "
+                            "base_fee=%s max_fee=%s",
+                            fresh_base_fee, retry_tx["maxFeePerGas"],
+                        )
+                        continue
                 
                 # Check if it's an error worth failing over on. Signed
                 # broadcasts need stricter handling than reads: an ambiguous
@@ -469,18 +555,17 @@ class ResilientWeb3:
                     or "-32601" in error_str
                     or "not supported" in error_str
                 )
-                transient_error = any(x in error_str for x in [
-                    "connection", "timeout", "429", "rate limit",
-                    "too many requests", "503", "502", "500",
-                    "internal error", "server error",
-                ])
+                transient_error = _is_transient_rpc_error(e, error_str)
                 is_retryable = (
                     (transient_error and not transaction_broadcast)
                     or (receipt_lookup and capability_error)
                     or (transaction_broadcast and capability_error)
                 )
                 
-                if attempt_url != "unknown":
+                # Only endpoint/capability failures affect RPC health. Contract
+                # reverts, fee validation, nonce errors, and other deterministic
+                # transaction rejections must not poison a healthy endpoint.
+                if attempt_url != "unknown" and is_retryable:
                     self.rotator.report_failure(attempt_url, e)
                 
                 if not is_retryable:

@@ -5,6 +5,17 @@ from rpc_rotator import ResilientWeb3
 
 
 class TestRPCReceiptFailover(unittest.TestCase):
+    @staticmethod
+    def resilient_with_client(client):
+        client.provider.endpoint_uri = "https://first.invalid"
+        resilient = ResilientWeb3.__new__(ResilientWeb3)
+        resilient.rotator = Mock()
+        resilient.rotator.endpoint_label.return_value = "rpc_1"
+        resilient._w3 = client
+        resilient._current_url = client.provider.endpoint_uri
+        resilient._refresh_connection = Mock()
+        return resilient
+
     def test_candidate_scope_records_only_sanitized_rpc_metadata(self):
         first = Mock()
         first.provider.endpoint_uri = "https://secret-user:key@first.invalid/path"
@@ -106,6 +117,78 @@ class TestRPCReceiptFailover(unittest.TestCase):
 
         with self.assertRaises(TimeoutError):
             resilient._execute_with_failover("eth.send_raw_transaction", b"signed")
+        resilient._refresh_connection.assert_not_called()
+
+    def test_gas_limit_digits_do_not_masquerade_as_http_500(self):
+        first = Mock()
+        first.eth.estimate_gas.side_effect = ValueError(
+            "execution reverted: failed with 50000000 gas"
+        )
+        resilient = self.resilient_with_client(first)
+
+        with self.assertRaises(ValueError):
+            resilient._execute_with_failover("eth.estimate_gas", {"to": "0x2"})
+
+        first.eth.estimate_gas.assert_called_once()
+        resilient.rotator.report_failure.assert_not_called()
+        resilient._refresh_connection.assert_not_called()
+
+    def test_transaction_validation_error_does_not_penalize_endpoint(self):
+        first = Mock()
+        first.eth.estimate_gas.side_effect = ValueError(
+            "execution reverted: insufficient allowance"
+        )
+        resilient = self.resilient_with_client(first)
+
+        with self.assertRaises(ValueError):
+            resilient._execute_with_failover("eth.estimate_gas", {"to": "0x2"})
+
+        resilient.rotator.report_failure.assert_not_called()
+
+    def test_base_fee_rejection_retries_once_with_refreshed_fee_cap(self):
+        first = Mock()
+        first.eth.estimate_gas.side_effect = [
+            ValueError({
+                "code": -32000,
+                "message": (
+                    "max fee per gas less than block base fee: "
+                    "maxFeePerGas: 50000000 baseFee: 75000000"
+                ),
+            }),
+            123456,
+        ]
+        first.eth.get_block.return_value = {"baseFeePerGas": 80_000_000}
+        first.eth.max_priority_fee = 2_000_000
+        resilient = self.resilient_with_client(first)
+
+        result = resilient._execute_with_failover(
+            "eth.estimate_gas", {"from": "0x1", "to": "0x2", "value": 0},
+        )
+
+        self.assertEqual(result, 123456)
+        self.assertEqual(first.eth.estimate_gas.call_count, 2)
+        retry_tx = first.eth.estimate_gas.call_args_list[1].args[0]
+        self.assertNotIn("gasPrice", retry_tx)
+        self.assertEqual(retry_tx["maxPriorityFeePerGas"], 2_000_000)
+        self.assertEqual(retry_tx["maxFeePerGas"], 162_000_000)
+        resilient.rotator.report_failure.assert_not_called()
+        resilient._refresh_connection.assert_not_called()
+
+    def test_base_fee_rejection_retries_at_most_once(self):
+        first = Mock()
+        error = ValueError(
+            "max fee per gas less than block base fee: maxFeePerGas: 1 baseFee: 2"
+        )
+        first.eth.estimate_gas.side_effect = [error, error]
+        first.eth.get_block.return_value = {"baseFeePerGas": 2}
+        first.eth.max_priority_fee = 1_000_000
+        resilient = self.resilient_with_client(first)
+
+        with self.assertRaises(ValueError):
+            resilient._execute_with_failover("eth.estimate_gas", {"to": "0x2"})
+
+        self.assertEqual(first.eth.estimate_gas.call_count, 2)
+        resilient.rotator.report_failure.assert_not_called()
         resilient._refresh_connection.assert_not_called()
 
     @patch("rpc_rotator.time.sleep", return_value=None)
