@@ -140,7 +140,7 @@ class BotConfig:
     minimal_logs: bool
     
     # API Provider Selection
-    swap_provider: str  # Explicit provider: 0x, lifi, uniswap, sushiswap, or umbra
+    swap_provider: str  # Explicit provider: 0x, lifi, uniswap, sushiswap, umbra, or abyss
     swap_fallback_provider: str  # Optional fallback after retryable provider failures
     sushi_api_key: str  # Optional Sushi API key for higher service limits
     use_li_fi: bool  # If True, use LI.FI instead of 0x
@@ -195,6 +195,7 @@ class BotConfig:
     
     # RPC Rotation (optional, defaults to None = single RPC_URL mode)
     rpc_urls: Optional[list] = None  # List of RPC URLs for rotation/failover
+    abyss_api_url: str = "https://api.abyss.trading"  # Robinhood route-candidate API
     
     # Dashboard Reporting (optional — bot works fine without these)
     dashboard_url: str = ""       # e.g. http://localhost:3000
@@ -247,12 +248,14 @@ class BotConfig:
             raise ValueError("ROUTE_TOURNAMENT_MODE=gate requires ROUTE_TOURNAMENT_CANARY=true")
         providers = tuple(getattr(self, "route_tournament_providers", ("uniswap", "sushiswap")))
         settlements = tuple(getattr(self, "route_tournament_settlements", ("native", "weth")))
-        if not providers or any(value not in {"uniswap", "sushiswap", "umbra", "lifi"} for value in providers):
-            raise ValueError("ROUTE_TOURNAMENT_PROVIDERS supports a non-empty comma-separated subset of uniswap,sushiswap,umbra,lifi")
+        if not providers or any(value not in {"uniswap", "sushiswap", "umbra", "lifi", "abyss"} for value in providers):
+            raise ValueError("ROUTE_TOURNAMENT_PROVIDERS supports a non-empty comma-separated subset of uniswap,sushiswap,umbra,lifi,abyss")
         if not settlements or any(value not in {"native", "weth"} for value in settlements):
             raise ValueError("ROUTE_TOURNAMENT_SETTLEMENTS supports a non-empty comma-separated subset of native,weth")
         if "umbra" in providers and self.chain_id != 4663:
             raise ValueError("Umbra tournament routes support Robinhood Chain 4663 only")
+        if "abyss" in providers and self.chain_id != 4663:
+            raise ValueError("Abyss tournament routes support Robinhood Chain 4663 only")
         if "lifi" in providers and not self.li_fi_api_key:
             raise ValueError("LI_FI_API_KEY is required when LI.FI participates in the route tournament")
         for name in ("route_tournament_shadow_timeout_seconds", "route_tournament_gate_timeout_seconds"):
@@ -321,10 +324,12 @@ class BotConfig:
         provider = {"li.fi": "lifi", "li_fi": "lifi", "zero_x": "0x", "zerox": "0x", "sushi": "sushiswap"}.get(provider, provider)
         if not provider:
             provider = "uniswap" if self.use_uniswap_api else ("lifi" if self.use_li_fi else "0x")
-        if provider not in {"0x", "lifi", "uniswap", "sushiswap", "umbra"}:
+        if provider not in {"0x", "lifi", "uniswap", "sushiswap", "umbra", "abyss"}:
             raise ValueError(f"Unsupported SWAP_PROVIDER: {provider}")
         if provider == "umbra" and self.chain_id != 4663:
             raise ValueError("SWAP_PROVIDER=umbra supports Robinhood Chain 4663 only")
+        if provider == "abyss" and self.chain_id != 4663:
+            raise ValueError("SWAP_PROVIDER=abyss supports Robinhood Chain 4663 only")
         if provider == "lifi":
             if not self.li_fi_api_key:
                 raise ValueError("LI_FI_API_KEY is required for the lifi provider")
@@ -339,10 +344,12 @@ class BotConfig:
         fallback_provider = {"li.fi": "lifi", "li_fi": "lifi", "zero_x": "0x", "zerox": "0x", "sushi": "sushiswap"}.get(
             fallback_provider, fallback_provider
         )
-        if fallback_provider not in {"", "0x", "lifi", "uniswap", "sushiswap", "umbra"}:
+        if fallback_provider not in {"", "0x", "lifi", "uniswap", "sushiswap", "umbra", "abyss"}:
             raise ValueError(f"Unsupported SWAP_FALLBACK_PROVIDER: {fallback_provider}")
         if fallback_provider == "umbra" and self.chain_id != 4663:
             raise ValueError("SWAP_FALLBACK_PROVIDER=umbra supports Robinhood Chain 4663 only")
+        if fallback_provider == "abyss" and self.chain_id != 4663:
+            raise ValueError("SWAP_FALLBACK_PROVIDER=abyss supports Robinhood Chain 4663 only")
         if fallback_provider == "lifi" and not self.li_fi_api_key:
             raise ValueError("LI_FI_API_KEY is required for the lifi fallback provider")
         if fallback_provider == "uniswap" and not self.uniswap_api_key:
@@ -621,7 +628,7 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
         route_tournament_canary=os.getenv("ROUTE_TOURNAMENT_CANARY", "false").lower() == "true",
         route_tournament_providers=_parse_csv_choices(
             os.getenv("ROUTE_TOURNAMENT_PROVIDERS", "uniswap,sushiswap"),
-            ("uniswap", "sushiswap", "umbra", "lifi")
+            ("uniswap", "sushiswap", "umbra", "lifi", "abyss")
         ),
         route_tournament_settlements=_parse_csv_choices(
             os.getenv("ROUTE_TOURNAMENT_SETTLEMENTS", "native,weth"), ("native", "weth")
@@ -662,6 +669,7 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
         ),
         swap_fallback_provider=os.getenv("SWAP_FALLBACK_PROVIDER", "sushiswap"),
         sushi_api_key=os.getenv("SUSHI_API_KEY", ""),
+        abyss_api_url=os.getenv("ABYSS_API_URL", "https://api.abyss.trading"),
         use_li_fi=os.getenv("USE_LI_FI", "false").lower() == "true",
         li_fi_api_key=os.getenv("LI_FI_API_KEY", ""),
         li_fi_integrator=os.getenv("LI_FI_INTEGRATOR", ""),

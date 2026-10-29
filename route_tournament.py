@@ -45,6 +45,7 @@ _DEFAULT_EXECUTION_CANDIDATES = frozenset({
 _SUPPORTED_EXECUTION_CANDIDATES = _DEFAULT_EXECUTION_CANDIDATES | frozenset({
     ("umbra", "native"), ("umbra", "weth"),
     ("lifi", "native"), ("lifi", "weth"),
+    ("abyss", "native"), ("abyss", "weth"),
 })
 
 
@@ -485,13 +486,13 @@ def score_candidate(quote, provider, settlement, context, *, allowance_probe=Non
     # at the execution boundary.
     staged_approval = bool(
         require_local_gas and c["direction"] == "sell"
-        and provider in {"sushiswap", "lifi", "umbra"} and spender
+        and provider in {"sushiswap", "lifi", "umbra", "abyss"} and spender
         and allowance is not None and allowance < c["amount"]
         and approval_gas > 0
         and local_gas <= 0 and approval_gas_limit
     )
     if (require_dynamic_setup_gas and c["direction"] == "sell"
-            and provider in {"sushiswap", "lifi", "umbra"} and spender
+            and provider in {"sushiswap", "lifi", "umbra", "abyss"} and spender
             and allowance is not None and allowance < c["amount"]
             and approval_gas and not approval_gas_limit):
         row["rejections"] = ["approval_required_before_local_simulation"]

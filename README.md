@@ -111,7 +111,8 @@ python grid_bot.py
 | `UNISWAP_PROTOCOL_CACHE_TTL_SECONDS` | No | 300 | Seconds to retain protocol-family discovery only; bounded to 30-3600 and never caches quote economics |
 | `UNISWAP_RATE_STATE_FILE` | No | automatic | Optional shared state path; blank derives an owner-only runtime file from the API-key hash |
 | `SUSHI_API_KEY` | No | empty | Optional Sushi portal API key; the public v7 API works without one |
-| `SWAP_PROVIDER` | No | empty | Explicit provider: `0x`, `lifi`, `uniswap`, `sushiswap`, or `umbra`; empty uses legacy flags |
+| `ABYSS_API_URL` | No | https://api.abyss.trading | Abyss route-candidate API; Abyss quoting itself is verified on-chain and Robinhood-only |
+| `SWAP_PROVIDER` | No | empty | Explicit provider: `0x`, `lifi`, `uniswap`, `sushiswap`, `umbra`, or `abyss`; empty uses legacy flags |
 | `SWAP_FALLBACK_PROVIDER` | No | sushiswap | Immediate per-operation fallback after retryable pre-broadcast failures; empty disables fallback |
 | `ROUTE_TOURNAMENT_MODE` | No | off | Route comparison mode: `off`, read-only `shadow`, or guarded one-bot `gate` |
 | `ROUTE_TOURNAMENT_CANARY` | No | false | Explicit safety acknowledgement required by `gate`; not permission for fleet-wide rollout |
@@ -241,7 +242,7 @@ unsupported old ladder state still fail closed.
 Prefer explicit provider selection:
 
 ```dotenv
-SWAP_PROVIDER=sushiswap  # sushiswap, uniswap, lifi, or 0x
+SWAP_PROVIDER=sushiswap  # sushiswap, uniswap, lifi, 0x, umbra, or abyss
 ```
 
 Explicit `SWAP_PROVIDER` takes precedence. `sushi` is accepted as an alias for `sushiswap`. When the setting is empty, backward-compatible selection checks `USE_UNISWAP_API=true`, then `USE_LI_FI=true`, otherwise 0x. The normalized templates currently select Uniswap through the legacy flag and configure Sushi as the fallback. On a retryable primary failure (HTTP 404/408/425/429/5xx, timeout, or connection failure), the current pre-broadcast operation stops and immediately restarts from the beginning with the fallback. A valid regular-sell quote that misses the gas-aware minimum-profit floor also triggers one alternate-provider quote before allowance inspection; that route is selected only if it independently clears both the same profit floor and the sell-gas cap. The next operation gives the configured primary the first opportunity again. This avoids mixing approvals and calldata from different routers inside one transaction flow. When Sushi is primary and the default Sushi fallback value is unchanged, the bot automatically uses Uniswap as the reverse fallback if `UNISWAP_API_KEY` is configured; set `SWAP_FALLBACK_PROVIDER` empty to disable fallback. Sushi uses its v7 quote/swap API and supports an optional `SUSHI_API_KEY`; the other providers require their matching credentials. When Sushi returns HTTP 429, that bot honors `Retry-After` when supplied and otherwise enters a jittered exponential cooldown (30 seconds up to 15 minutes). Requests are skipped locally during the cooldown and a successful response resets the backoff.
@@ -937,7 +938,7 @@ robinhood-grid-bot-py/
 
 **zero_x.py**: Integrates with 0x API for price quotes and swap transactions
 
-**li_fi.py / uniswap_api.py / sushi_api.py**: Alternative swap-provider integrations selected through `.env`. Sushi v7 uses exact-input routing, handles its insufficient-allowance response as a normal approve-and-refresh handshake, and applies per-bot rate-limit cooldowns without blocking the main loop.
+**li_fi.py / uniswap_api.py / sushi_api.py / abyss_api.py**: Alternative swap-provider integrations selected through `.env`. Sushi v7 uses exact-input routing, handles its insufficient-allowance response as a normal approve-and-refresh handshake, and applies per-bot rate-limit cooldowns without blocking the main loop. Abyss uses its official candidate API, verifies output with the on-chain BatchQuoter, and builds only pinned Router V2 calldata.
 
 **swap_provider.py**: Provider registry, factory, and capability adapter. It centralizes provider selection and differences such as taker-required pricing, quote refresh after approval, API-managed approvals, and separate swap-calldata preparation. `grid_bot.py` consumes these capabilities instead of checking provider classes directly.
 
@@ -946,7 +947,7 @@ robinhood-grid-bot-py/
 Prefer the explicit provider setting:
 
 ```dotenv
-SWAP_PROVIDER=sushiswap  # 0x, lifi, uniswap, sushiswap, or umbra
+SWAP_PROVIDER=sushiswap  # 0x, lifi, uniswap, sushiswap, umbra, or abyss
 ```
 
 The older `USE_UNISWAP_API` and `USE_LI_FI` flags remain backward compatible when `SWAP_PROVIDER` is empty. Explicit `SWAP_PROVIDER` takes precedence. Sushi currently supports exact-input swaps, which is the only execution mode used by this bot. Each provider keeps its own quote, approval, slippage, and transaction behavior behind the common capability layer.
@@ -1782,7 +1783,7 @@ The existing same-provider WETH recovery/replay safeguards remain in place.
 
 Each configured provider gets one `get_quote` call per configured settlement,
 with price jitter disabled. `ROUTE_TOURNAMENT_PROVIDERS` accepts a non-empty
-comma-separated subset of `uniswap,sushiswap,umbra,lifi` (`lofi` is accepted
+comma-separated subset of `uniswap,sushiswap,umbra,lifi,abyss` (`lofi` is accepted
 as an alias), while
 `ROUTE_TOURNAMENT_SETTLEMENTS` accepts `native,weth`. The defaults compare all
 four combinations by default; adding Umbra produces six. Setting settlements to `native` halves candidate count and
@@ -1826,6 +1827,15 @@ scored with locally estimated reusable-approval gas; only a winning LI.FI route
 is approved, refreshed, and exactly simulated. Begin with `native` settlement in
 shadow mode: LI.FI adds routing breadth but overlaps underlying DEX liquidity
 and increases provider/RPC traffic.
+
+Abyss is a Robinhood-only, keyless contestant. Its candidate API proposes
+paths, but the deployed BatchQuoter determines output and the pinned Router V2
+(`0xF2a3Afb36768950eb2c7F04583328C09AEC0C366`) is the only execution target.
+Each quote evaluates at most the first 16 ranked paths to stay within public-RPC
+gas caps and the tournament deadline. Final calldata still passes the same
+local simulation, approval staging, gas cap, and net-profit gate as every other
+provider. Enable it with
+`ROUTE_TOURNAMENT_PROVIDERS=uniswap,sushiswap,lifi,abyss`.
 
 Dashboard `buy_attempt.route_comparison` and `sell_attempt.route_comparison`
 contain candidates, fixed rejection codes, provider, settlement, raw quoted

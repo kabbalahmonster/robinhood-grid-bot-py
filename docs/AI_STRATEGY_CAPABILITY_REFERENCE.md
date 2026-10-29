@@ -324,8 +324,8 @@ rung equal to the reference instead of strictly below it.
 
 ## Route and settlement behavior
 
-Primary swap providers are `uniswap`, `sushiswap`, `lifi`, `0x`, and `umbra`.
-Umbra is Robinhood Chain-only. Provider credentials and chain restrictions are
+Primary swap providers are `uniswap`, `sushiswap`, `lifi`, `0x`, `umbra`, and
+`abyss`. Umbra and Abyss are Robinhood Chain-only. Provider credentials and chain restrictions are
 validated at startup.
 
 `SWAP_PROVIDER` selects the primary. `SWAP_FALLBACK_PROVIDER` optionally retries
@@ -364,7 +364,7 @@ With `USE_ETH_TRADING=false`, the strategy spends and receives WETH directly.
 Tournament dimensions:
 
 - `ROUTE_TOURNAMENT_PROVIDERS`: subset of
-  `uniswap,sushiswap,umbra,lifi`.
+  `uniswap,sushiswap,umbra,lifi,abyss`.
 - `ROUTE_TOURNAMENT_SETTLEMENTS`: subset of `native,weth`.
 - shadow and gate deadlines are independently bounded from 1 to 15 seconds.
 - buy score is output units per total principal-plus-gas cost.

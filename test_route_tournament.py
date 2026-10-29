@@ -345,13 +345,14 @@ def test_execution_preflight_stages_unsimulatable_sushi_approval_handshake():
     (275000, 275000, "provisional_provider_gas_pending_post_approval_local_simulation"),
     (0, 300000, "provisional_conservative_gas_pending_post_approval_local_simulation"),
 ])
-def test_execution_preflight_stages_unapproved_lifi_and_umbra_sells(
-        provider_gas, expected_swap, expected_basis):
+@pytest.mark.parametrize("provider", ["lifi", "umbra", "abyss"])
+def test_execution_preflight_stages_unapproved_provider_sells(
+        provider, provider_gas, expected_swap, expected_basis):
     q = quote(gas=provider_gas, allowance_target="spender", to="router", data="0xdead")
     sell_context = context("sell", execution_preflight=True)
     sell_context["min_profit"] = -100
     row = score_candidate(
-        q, "umbra", "native", sell_context,
+        q, provider, "native", sell_context,
         allowance_probe=lambda _token, _spender: 0,
         gas_estimate=0, approval_gas_limit=47000,
         require_local_gas=True, require_dynamic_setup_gas=True,
@@ -1066,6 +1067,8 @@ def test_mode_parsing_and_default(monkeypatch, tmp_path):
         assert load_config().route_tournament_providers == ("uniswap", "sushiswap", "umbra")
         monkeypatch.setenv("ROUTE_TOURNAMENT_PROVIDERS", "uniswap,lofi")
         assert load_config().route_tournament_providers == ("uniswap", "lifi")
+        monkeypatch.setenv("ROUTE_TOURNAMENT_PROVIDERS", "abyss,sushiswap")
+        assert load_config().route_tournament_providers == ("abyss", "sushiswap")
 
 
 def test_native_only_preflight_collects_and_selects_two_candidates(caplog):

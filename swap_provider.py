@@ -239,6 +239,10 @@ PROVIDERS = {
         requires_dynamic_gas=True,
         exact_amount_approval=True,
     )),
+    "abyss": ProviderDefinition("abyss_api", "AbyssAPIClient", ProviderCapabilities(
+        refresh_after_approval=True,
+        requires_dynamic_gas=True,
+    )),
 }
 
 
