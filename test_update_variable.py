@@ -1,4 +1,5 @@
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -23,6 +24,21 @@ class TestUpdateVariable(unittest.TestCase):
         quoted = " ".join(f'"{path}"' for path in checkouts)
         config.write_text(f'FLEET_BOT_DIRS=({quoted})\n')
         return checkouts, config
+
+    def _isolated_script_with_restart_stubs(self, directory):
+        script_dir = Path(directory) / "isolated-ops"
+        script_dir.mkdir()
+        for name in ("update-variable", "fleet-common.sh", "update-env-file.py"):
+            shutil.copy2(SCRIPT.parent / name, script_dir / name)
+        trace = Path(directory) / "restart.args"
+        for command in ("restart-bot", "restart-fleet"):
+            restart = script_dir / command
+            restart.write_text(
+                "#!/usr/bin/env bash\n"
+                f"printf '%s\\n' '{command}' \"$@\" > \"$RESTART_TRACE\"\n"
+            )
+            restart.chmod(0o755)
+        return script_dir / "update-variable", trace
 
     def test_strict_apply_stops_before_writing_any_file(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -115,6 +131,59 @@ class TestUpdateVariable(unittest.TestCase):
             )
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("cannot be combined with NAME=VALUE assignments", result.stderr)
+
+    def test_restart_honors_only_and_exclude_selection(self):
+        cases = (
+            (["--only", "alpha"], ["alpha"]),
+            (["--exclude", "broken,omega"], ["alpha"]),
+        )
+        for selectors, expected_names in cases:
+            with self.subTest(selectors=selectors), tempfile.TemporaryDirectory() as directory:
+                checkouts, config = self._fixture(directory)
+                script, trace = self._isolated_script_with_restart_stubs(directory)
+                result = subprocess.run(
+                    [
+                        script, "--config", config, "--apply", "--restart",
+                        *selectors, "ETH_GAS_RESERVE=0.0005",
+                    ],
+                    text=True,
+                    capture_output=True,
+                    env={**os.environ, "HOME": directory, "RESTART_TRACE": str(trace)},
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(
+                    trace.read_text().splitlines(),
+                    ["restart-bot", *expected_names, "--config", str(config)],
+                )
+                self.assertEqual(
+                    (checkouts[0] / ".env").read_text(),
+                    "ETH_GAS_RESERVE=0.0005\n",
+                )
+                self.assertFalse((checkouts[1] / ".env").exists())
+                self.assertEqual(
+                    (checkouts[2] / ".env").read_text(),
+                    "ETH_GAS_RESERVE=0.001\n",
+                )
+
+    def test_unfiltered_restart_preserves_whole_fleet_behavior(self):
+        with tempfile.TemporaryDirectory() as directory:
+            checkouts, config = self._fixture(directory)
+            (checkouts[1] / ".env").write_text("ETH_GAS_RESERVE=0.001\n")
+            script, trace = self._isolated_script_with_restart_stubs(directory)
+            result = subprocess.run(
+                [
+                    script, "--config", config, "--apply", "--restart",
+                    "ETH_GAS_RESERVE=0.0005",
+                ],
+                text=True,
+                capture_output=True,
+                env={**os.environ, "HOME": directory, "RESTART_TRACE": str(trace)},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                trace.read_text().splitlines(),
+                ["restart-fleet", "--config", str(config)],
+            )
 
 
 if __name__ == "__main__":

@@ -191,9 +191,8 @@ only that bot:
 ```bash
 update-variable --allow-add --only earn \
   ROUTE_TOURNAMENT_MODE=gate ROUTE_TOURNAMENT_CANARY=true
-update-variable --apply --allow-add --only earn \
+update-variable --apply --restart --allow-add --only earn \
   ROUTE_TOURNAMENT_MODE=gate ROUTE_TOURNAMENT_CANARY=true
-restart-bot EARN
 ```
 
 `shadow` collects read-only comparison telemetry; `gate` gives route authority

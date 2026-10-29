@@ -987,11 +987,12 @@ command prints the final names before doing work. Selectors are supported by
 `balance-report` supports the same selectors.
 
 `stop-fleet` and `restart-fleet` remain whole-session operations because tmux
-owns one fleet session. `update-fleet --restart` and
-`update-variable --restart` deliberately reject selectors: update a subset,
-then perform an explicitly reviewed whole-fleet restart separately if needed.
-This prevents a partial maintenance command from unexpectedly recycling every
-bot.
+owns one fleet session. `update-fleet --restart` deliberately rejects
+selectors because it otherwise implies recycling the whole session after a
+partial code update. `update-variable --apply --restart`, however, restarts
+exactly the successfully updated selection through `restart-bot`; unselected
+targets keep running with their existing environment. Without selectors,
+`update-variable --restart` retains its historical whole-fleet restart.
 
 ## Read-only health checks and inventory
 
@@ -1925,6 +1926,14 @@ Review every old/new line, then apply and restart so all processes load it:
 ops/fleet/update-variable --apply --restart ETH_GAS_RESERVE=0.0005
 ```
 
+Selectors scope both the edit and the restart. This updates and restarts only
+`ABYSS`; every other bot keeps running uninterrupted:
+
+```bash
+ops/fleet/update-variable --apply --restart --only abyss \
+  ROUTE_TOURNAMENT_MODE=gate ROUTE_TOURNAMENT_CANARY=true
+```
+
 Multiple assignments may be updated together:
 
 ```bash
@@ -1947,9 +1956,11 @@ ops/fleet/update-variable --apply --allow-add --skip-errors ETH_GAS_RESERVE=0.00
 ```
 
 Skipped bots are named in the summary and receive no backup or edit. An apply
-remains atomic across the valid subset. If combined with `--restart`, the
-normal fleet-wide restart still includes skipped bots, which retain their old
-environment.
+remains atomic across the valid subset. With a selected `--restart`, only valid
+bots that were actually updated are restarted; skipped selected bots retain
+both their old environment and their running process. Without selectors, the
+historical whole-fleet restart remains in effect, including skipped bots that
+retain their old environment.
 
 ### Route-tournament canary rollout
 
