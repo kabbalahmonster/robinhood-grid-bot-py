@@ -253,6 +253,118 @@ class MultiActionRoundTests(unittest.TestCase):
             "1", POSITIONS["1"], 1.0, quote,
         )
 
+    def test_gate_winner_is_not_vetoed_by_cached_provider_change(self):
+        bot = make_bot(True)
+        bot.config.route_tournament_mode = "gate"
+        bot.config.route_tournament_canary = True
+        bot.config.token_address = "token"
+        bot.config.zero_x_proxy = "proxy"
+        bot.config.moonbag_percentage = 0
+        bot.config.min_profit_percent = 5
+        bot.config.max_sell_gas_eth = 1
+        bot.trade_token_address = "native"
+        bot.api_client = SimpleNamespace(name="lifi")
+        bot.provider = SimpleNamespace(
+            active=SimpleNamespace(name="lifi"),
+            capabilities=SimpleNamespace(exact_amount_approval=False),
+        )
+        bot.wallet = MagicMock()
+        bot.wallet.check_allowance.return_value = 0
+        bot.wallet.build_token_approval_transaction.return_value = {"gas": 10}
+        bot.wallet.normal_gas_price.return_value = 1
+        bot._wallet_can_cover_sell = MagicMock(return_value=True)
+        bot._queue_route_shadow = MagicMock()
+        quote = SimpleNamespace(
+            success=True,
+            error=None,
+            allowance_target="lifi-router",
+        )
+        quote._tournament_staged_approval = True
+        bot._actionable_quote_with_weth_fallback = MagicMock(
+            return_value=(quote, False),
+        )
+        bot._taxed_quote_return_wei = MagicMock(return_value=1200)
+        bot._sell_quote_consistency_guard = MagicMock(return_value={
+            "status": "quote_provider_disagreement",
+            "previous_quote_provider": "uniswap",
+            "quote_provider": "lifi",
+            "quote_divergence_percent": 17.53,
+        })
+        bot._best_fresh_sell_route = MagicMock(
+            side_effect=AssertionError("gate authority was reopened"),
+        )
+        bot._execute_sell_gridless = MagicMock()
+
+        with patch("gridless.load_positions", return_value={"1": POSITIONS["1"]}):
+            bot._attempt_gridless_sell_candidate(
+                "1", POSITIONS["1"], 1.0, "PROFIT (sell): 29.0%", 29
+            )
+
+        bot._best_fresh_sell_route.assert_not_called()
+        bot._execute_sell_gridless.assert_called_once_with(
+            "1", POSITIONS["1"], 1.0, quote,
+        )
+
+    def test_final_sell_simulation_failure_is_safe_explicit_abort(self):
+        bot = make_bot(True)
+        bot.config.route_tournament_mode = "gate"
+        bot.config.route_tournament_canary = True
+        bot.config.token_address = "token"
+        bot.config.zero_x_proxy = "proxy"
+        bot.config.moonbag_percentage = 0
+        bot.config.min_profit_percent = 5
+        bot.config.gridless_stoploss_enabled = False
+        bot.config.gridless_stoploss_threshold = -25
+        bot.config.use_eth_trading = True
+        bot.trade_token_address = "native"
+        bot.trade_token_name = "ETH"
+        bot.token_unit = 10**18
+        bot.provider = SimpleNamespace(
+            active=SimpleNamespace(name="lifi"),
+            name="lifi",
+            capabilities=SimpleNamespace(
+                api_managed_approval=False,
+                exact_amount_approval=False,
+                refresh_after_approval=False,
+            ),
+        )
+        bot.api_client = bot.provider
+        bot.wallet = MagicMock()
+        bot.wallet.check_allowance.return_value = 100
+        bot._gridless_sell_terms = MagicMock(return_value=(100, 1000))
+        bot._queue_route_shadow = MagicMock()
+        bot._taxed_quote_return_wei = MagicMock(return_value=2000)
+        bot._minimum_gas_aware_return_wei = MagicMock(return_value=1100)
+        bot._quote_requires_dynamic_gas = MagicMock(return_value=True)
+        bot._quote_matches_exact_input = MagicMock(return_value=True)
+        bot._gas_within_hard_cap = MagicMock(return_value=True)
+        bot._swap_gas_fields = MagicMock(side_effect=[
+            (100, 1), RuntimeError("lifi final gas simulation failed"),
+        ])
+        bot._route_comparisons = {
+            "sell": {
+                "mode": "execution_preflight",
+                "status": "preflight_candidate_selected",
+            }
+        }
+        quote = SimpleNamespace(
+            success=True,
+            error=None,
+            sell_amount=100,
+            buy_amount=2000,
+            allowance_target="lifi-router",
+            weth_fallback=False,
+        )
+
+        with patch("gridless.calculate_pnl", return_value=29):
+            bot._execute_sell_gridless("1", POSITIONS["1"], 1.0, quote)
+
+        self.assertEqual(bot._swap_gas_fields.call_count, 2)
+        bot.wallet._send_transaction.assert_not_called()
+        bot._close_incomplete_tournament.assert_called_once_with(
+            "sell", reason="final_local_gas_simulation_failed", failed=False,
+        )
+
     def test_multi_buy_pass_consumes_pnl_snapshot_after_first_fill(self):
         bot = make_bot(True)
         bot._pnl_quotes = {"buy": {"sample": 1}, "sell": {"sample": 2}}

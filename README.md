@@ -1173,8 +1173,11 @@ settlement are reconciled is `settlement_unresolved`, never a claimed execution
 failure. Every candidate and selected winner logs sanitized classifications,
 status/retry timing, and a non-reversible pair fingerprint so fleet bundles can
 diagnose provider- and pair-specific behavior without exposing provider bodies
-or secrets. These diagnostics do not change route selection, deadlines,
-cooldowns, or fallback.
+or secrets. Pre-broadcast exits also identify the last safe guard boundary
+(for example profit-floor recheck, approval/refresh, final local simulation,
+gas cap, or wallet-balance snapshot) instead of collapsing every early return
+into one generic post-selection reason. These diagnostics do not change route
+selection, deadlines, cooldowns, or fallback.
 Each lifecycle transition is emitted once; in particular, the decision to use
 the baseline path produces one `baseline_fallback` revision rather than a
 second event when baseline execution begins.

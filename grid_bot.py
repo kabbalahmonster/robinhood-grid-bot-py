@@ -117,17 +117,41 @@ def _with_tournament_terminal(direction):
     def decorate(method):
         @wraps(method)
         def wrapped(self, *args, **kwargs):
+            hints = getattr(self, "_route_terminal_hints", None)
+            if hints is None:
+                hints = self._route_terminal_hints = {}
+            stages = getattr(self, "_route_execution_stages", None)
+            if stages is None:
+                stages = self._route_execution_stages = {}
+            hints.pop(direction, None)
+            stages.pop(direction, None)
             try:
                 result = method(self, *args, **kwargs)
             except Exception as exc:
+                hint = hints.pop(direction, None) or {}
+                stage = stages.pop(direction, None)
+                reason = hint.get("reason")
+                if not reason:
+                    reason = "unhandled_" + type(exc).__name__.lower()
+                    if stage:
+                        reason += "_at_" + stage
                 self._close_incomplete_tournament(
                     direction,
-                    reason="unhandled_" + type(exc).__name__.lower(),
-                    failed=True,
+                    reason=reason,
+                    failed=bool(hint.get("failed", True)),
                 )
                 raise
+            hint = hints.pop(direction, None) or {}
+            stage = stages.pop(direction, None)
+            reason = hint.get("reason")
+            if not reason:
+                reason = (
+                    "post_selection_exit_at_" + stage
+                    if stage else "post_selection_exit_without_broadcast"
+                )
             self._close_incomplete_tournament(
-                direction, reason="post_selection_exit_without_broadcast",
+                direction, reason=reason,
+                failed=bool(hint.get("failed", False)),
             )
             return result
         return wrapped
@@ -1880,6 +1904,36 @@ class GridBot:
         return self._publish_tournament_transition(
             direction, terminal_status, terminal_reason=safe_reason,
         )
+
+    def _set_tournament_execution_stage(self, direction, stage):
+        """Remember a safe execution stage for an otherwise-early return.
+
+        The terminal wrapper consumes this marker only when a selected gate
+        round exits before submission.  It does not alter route selection or
+        execution; it replaces an opaque terminal reason with the last guard
+        boundary reached.
+        """
+        safe_stage = re.sub(
+            r"[^a-z0-9_.:-]+", "_", str(stage).lower()
+        ).strip("_")[:64]
+        stages = getattr(self, "_route_execution_stages", None)
+        if stages is None:
+            stages = self._route_execution_stages = {}
+        if safe_stage:
+            stages[direction] = safe_stage
+
+    def _set_tournament_terminal_hint(self, direction, reason, *, failed=False):
+        """Give the terminal wrapper an explicit, non-sensitive exit reason."""
+        safe_reason = re.sub(
+            r"[^a-z0-9_.:-]+", "_", str(reason).lower()
+        ).strip("_")[:96]
+        hints = getattr(self, "_route_terminal_hints", None)
+        if hints is None:
+            hints = self._route_terminal_hints = {}
+        hints[direction] = {
+            "reason": safe_reason or "unknown",
+            "failed": bool(failed),
+        }
 
     def _mark_tournament_settlement_unresolved(self, direction, *, reason, tx_hash=None):
         """Close a confirmed-but-unreconciled execution without claiming economics."""
@@ -5307,12 +5361,14 @@ class GridBot:
         # ran a second tournament after applying the moonbag percentage. That
         # produced a real-looking crown which had no authority to execute.
         sell_amount, sold_cost_wei = self._gridless_sell_terms(pos)
+        self._set_tournament_execution_stage("sell", "selected_quote_revalidation")
         quote, weth_fallback = self._actionable_quote_with_weth_fallback(
             sell_token=self.config.token_address, buy_token=self.trade_token_address,
             sell_amount=sell_amount, direction="sell", sold_cost_wei=sold_cost_wei,
         )
         
         if not quote.success:
+            self._set_tournament_terminal_hint("sell", "selected_quote_unavailable")
             logger.warning(f"Sell candidate #{pos_id} but quote failed: {quote.error}")
             self._observe_token_tax_failure(
                 quote,
@@ -5326,6 +5382,26 @@ class GridBot:
         consistency_block = self._sell_quote_consistency_guard(
             pos_id, quote_provider, quote_return_wei,
         )
+        if consistency_block and not weth_fallback:
+            if getattr(self.config, "route_tournament_mode", "off") == "gate":
+                # The gate winner is already a fresh, exact-input route that
+                # passed bounded provider collection, economic scoring and
+                # local revalidation.  A cached quote from a previous poll is
+                # useful telemetry, but it has no authority to veto or reopen
+                # this tournament decision.  Previously the helper correctly
+                # returned no replacement in gate mode and this caller
+                # misread that as "no executable route", stranding valid
+                # winners whenever the polling provider changed.
+                logger.info(
+                    "Retaining fresh gate winner %s for position #%s despite "
+                    "historical %s signal (%s -> %s, %.2f%% divergence)",
+                    quote_provider, pos_id, consistency_block["status"],
+                    consistency_block["previous_quote_provider"],
+                    quote_provider,
+                    consistency_block["quote_divergence_percent"],
+                )
+                consistency_block = None
+
         if consistency_block and not weth_fallback:
             # A cached quote from the other provider is only an alarm bell,
             # never an execution input.  Compare the current executable quote
@@ -5352,6 +5428,9 @@ class GridBot:
                 )
             else:
                 self._sell_attempt = consistency_block
+                self._set_tournament_terminal_hint(
+                    "sell", "provider_change_refresh_no_executable_route"
+                )
                 logger.warning(
                     "Sell quote provider changed for position #%s (%s -> %s, %.2f%% divergence); "
                     "both-route refresh yielded no cap-compliant executable route",
@@ -5418,6 +5497,7 @@ class GridBot:
                 )
 
         quote_return_wei = self._taxed_quote_return_wei(quote)
+        self._set_tournament_execution_stage("sell", "profit_floor_recheck")
         
         # Check min profit requirement against individual position quote
         # Support both cost_wei (new) and cost (legacy nano-ETH)
@@ -5463,16 +5543,21 @@ class GridBot:
                 "projected_net_profit_eth": round(projected_net_profit_eth, 8),
                 "minimum_profit_eth": round(min_profit_eth, 8),
             }
+            self._set_tournament_terminal_hint(
+                "sell", "post_selection_profit_floor_rejected"
+            )
             return
         
         logger.info(f"🎯 Gridless sell trigger: Position #{pos_id} - {reason}")
+        self._set_tournament_execution_stage("sell", "execution_handoff")
         self._execute_sell_gridless(pos_id, pos, price, quote)
     
     @_with_tournament_terminal("sell")
     def _execute_sell_gridless(self, pos_id, pos, price, pre_fetched_quote=None):
         """Execute a gridless sell order."""
         from gridless import remove_position, calculate_pnl
-        
+
+        self._set_tournament_execution_stage("sell", "position_validation")
         balance = pos.get('balance', 0)
         # Support both cost_wei (new) and cost (legacy nano-ETH)
         cost_wei = pos.get('cost_wei', 0)
@@ -5516,6 +5601,7 @@ class GridBot:
         logger.info(f"   Expected: {expected_eth:.6f} {self.trade_token_name}, Profit: {profit_eth:.6f} ({pnl:+.2f}%)")
         
         quoted_sell_amount = int(getattr(pre_fetched_quote, "sell_amount", 0) or 0)
+        self._set_tournament_execution_stage("sell", "executable_quote")
         if pre_fetched_quote and quoted_sell_amount == sell_amount:
             # The caller already ran the gate and revalidated this exact
             # post-moonbag amount. Reuse it; a second tournament creates a
@@ -5543,11 +5629,13 @@ class GridBot:
             weth_fallback = False
         
         if not quote.success:
+            self._set_tournament_terminal_hint("sell", "executable_quote_failed")
             logger.error(f"Gridless sell quote failed: {quote.error}")
             self._observe_token_tax_failure(quote, direction="sell", position_id=pos_id)
             return
         
         # Validate minimum profit
+        self._set_tournament_execution_stage("sell", "preapproval_profit_floor")
         min_profit = getattr(self.config, 'min_profit_percent', 1.5)
         min_profit_eth = sold_cost_eth * (min_profit / 100)
         unwrap_projected_wei = 0
@@ -5589,17 +5677,29 @@ class GridBot:
         is_stoploss = stoploss_enabled and pnl <= stoploss_threshold
         
         if not is_stoploss and quote_return_eth < min_return_eth:
+            self._set_tournament_terminal_hint(
+                "sell", "post_selection_profit_floor_rejected"
+            )
             logger.warning(f"❌ Sell aborted: Quote ({quote_return_eth:.6f}) < min ({min_return_eth:.6f})")
             return
 
         initial_gas_limit = initial_gas_price = None
         if not needs_exact_approval:
-            initial_gas_limit, initial_gas_price = self._swap_gas_fields(
-                quote, 300000,
-                require_simulation=self._quote_requires_dynamic_gas(quote),
-            )
+            self._set_tournament_execution_stage("sell", "initial_gas_simulation")
+            try:
+                initial_gas_limit, initial_gas_price = self._swap_gas_fields(
+                    quote, 300000,
+                    require_simulation=self._quote_requires_dynamic_gas(quote),
+                )
+            except RuntimeError as exc:
+                self._set_tournament_terminal_hint(
+                    "sell", "initial_local_gas_simulation_failed"
+                )
+                logger.warning("Initial selected sell route simulation failed: %s", exc)
+                return
         if (not needs_exact_approval and not weth_fallback
                 and not self._gas_within_hard_cap(initial_gas_limit, initial_gas_price, "sell")):
+            self._set_tournament_execution_stage("sell", "gas_cap_alternate_route")
             selected_provider, selected_quote, selection = self._alternate_route_for_gas_cap(
                 self.provider.active, quote,
                 sell_token=self.config.token_address,
@@ -5609,6 +5709,9 @@ class GridBot:
                 default_gas=300000,
             )
             if not selection:
+                self._set_tournament_terminal_hint(
+                    "sell", "post_selection_gas_cap_rejected"
+                )
                 return
             self.provider.active = selected_provider
             self.api_client = self.provider
@@ -5620,12 +5723,16 @@ class GridBot:
                 sold_cost_wei, quote, min_profit
             )
             if preapproval_return_wei < preapproval_minimum_wei:
+                self._set_tournament_terminal_hint(
+                    "sell", "alternate_route_profit_floor_rejected"
+                )
                 logger.warning("❌ Alternate sell route failed gas-aware profit floor")
                 return
         
         # Reserve projected unwrap gas in every later profit-floor calculation.
         # Replace it with the confirmed fee after settlement.
         sell_setup_gas_wei = unwrap_projected_wei
+        self._set_tournament_execution_stage("sell", "approval_setup")
         # Providers with API-managed approvals return the required approval txs.
         if self.provider.capabilities.api_managed_approval:
                 # Step 1: Check approval via Uniswap API
@@ -5762,6 +5869,7 @@ class GridBot:
                             return
                 
                 # Step 4: Get fresh quote after approval
+                self._set_tournament_execution_stage("sell", "post_approval_route_refresh")
                 refresh_kwargs = dict(
                     sell_token=self.config.token_address,
                     buy_token=(self.config.weth_address if weth_fallback else self.trade_token_address),
@@ -5785,6 +5893,7 @@ class GridBot:
                 quote = swap_result
         else:
             # Providers without API-managed approvals use standard ERC-20 approval.
+            self._set_tournament_execution_stage("sell", "approval_setup")
             spender = quote.allowance_target or self.config.zero_x_proxy
             if token_allowance is None:
                 token_allowance = self.wallet.check_allowance(
@@ -5817,6 +5926,9 @@ class GridBot:
             
                 # Refresh provider routes after approval when required.
                 if self.provider.capabilities.refresh_after_approval:
+                    self._set_tournament_execution_stage(
+                        "sell", "post_approval_route_refresh"
+                    )
                     quote = self.api_client.refresh_quote(
                         sell_token=self.config.token_address,
                         buy_token=(self.config.weth_address if weth_fallback else self.trade_token_address),
@@ -5830,7 +5942,11 @@ class GridBot:
                     if staged_approval:
                         setattr(quote, "_tournament_staged_approval", True)
 
+        self._set_tournament_execution_stage("sell", "exact_input_validation")
         if not self._quote_matches_exact_input(quote, sell_amount):
+            self._set_tournament_terminal_hint(
+                "sell", "post_refresh_exact_input_mismatch"
+            )
             logger.error("Sell aborted: executable quote input/output amounts are not exact")
             return
 
@@ -5839,11 +5955,24 @@ class GridBot:
         # before broadcast; only an explicit stop-loss may bypass profitability.
         # Fetch Normal gas at the final broadcast boundary. The same exact
         # price is used for both the economic guard and the signed transaction.
-        gas_limit, gas_price = self._swap_gas_fields(
-            quote, 300000,
-            require_simulation=self._quote_requires_dynamic_gas(quote),
-        )
+        self._set_tournament_execution_stage("sell", "final_gas_simulation")
+        try:
+            gas_limit, gas_price = self._swap_gas_fields(
+                quote, 300000,
+                require_simulation=self._quote_requires_dynamic_gas(quote),
+            )
+        except RuntimeError as exc:
+            # A refreshed staged-approval route can still become locally
+            # unexecutable.  This is a safe pre-broadcast rejection, not an
+            # unhandled process failure.  Preserve the approval accounting and
+            # leave the position open for the next poll.
+            self._set_tournament_terminal_hint(
+                "sell", "final_local_gas_simulation_failed"
+            )
+            logger.warning("Final selected sell route simulation failed: %s", exc)
+            return
         if not is_stoploss:
+            self._set_tournament_execution_stage("sell", "final_profit_floor")
             final_return_wei = self._taxed_quote_return_wei(quote)
             final_minimum_wei = self._minimum_gas_aware_return_wei(
                 sold_cost_wei, quote, min_profit,
@@ -5851,6 +5980,9 @@ class GridBot:
                 projected_gas_cost_wei=gas_limit * gas_price,
             )
             if final_return_wei < final_minimum_wei:
+                self._set_tournament_terminal_hint(
+                    "sell", "post_refresh_profit_floor_rejected"
+                )
                 logger.warning(
                     "❌ Sell aborted after route refresh: return %.8f ETH < gas-aware minimum %.8f ETH",
                     final_return_wei / 10**18, final_minimum_wei / 10**18,
@@ -5859,7 +5991,11 @@ class GridBot:
         
         # Execute swap with configurable gas multipliers
         # Use API's gas price estimate if available (more accurate than network average)
+        self._set_tournament_execution_stage("sell", "final_gas_cap")
         if not self._gas_within_hard_cap(gas_limit, gas_price, "sell"):
+            self._set_tournament_terminal_hint(
+                "sell", "post_selection_gas_cap_rejected"
+            )
             return
 
         from web3 import Web3
@@ -5877,10 +6013,15 @@ class GridBot:
             "nonce": self.wallet.w3.eth.get_transaction_count(self.wallet.address),
             "chainId": self.config.chain_id,
         }
+        self._set_tournament_execution_stage("sell", "wallet_balance_snapshot")
         attempted_token_balance_before = self._snapshot_sell_token_balance_or_halt(pos_id, sell_tx)
         if attempted_token_balance_before is None:
+            self._set_tournament_terminal_hint(
+                "sell", "wallet_balance_snapshot_failed"
+            )
             return
         self._sell_candidate_broadcast_started = True
+        self._set_tournament_execution_stage("sell", "broadcast")
         result = self.wallet._send_transaction(
             sell_tx, on_submitted=self._tournament_submission_callback("sell")
         )

@@ -354,6 +354,11 @@ settlement could not be reconciled. Follow the unresolved-broadcast recovery
 procedure; never treat that state as a revert, a completion, or realized profit.
 The no-winner path emits one `baseline_fallback` transition; repeated identical
 fallback revisions indicate mixed/older code or duplicated source records.
+Pre-broadcast abort reasons identify the last safe execution boundary, such as
+profit-floor recheck, approval/route refresh, exact-input validation, final
+local gas simulation, hard gas cap, or wallet-balance snapshot. Treat these as
+guard outcomes; an `unhandled_*_at_<stage>` reason is a code/runtime failure at
+that boundary and should be investigated separately.
 
 All tournament candidates, eligible or rejected, expose only aggregation-safe fields:
 `failure_category`, `provider_error`, `http_status`, `retry_after_seconds`,

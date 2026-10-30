@@ -34,7 +34,7 @@ def test_terminal_wrapper_closes_early_return_and_exception():
 
     early(bot)
     bot._close_incomplete_tournament.assert_called_once_with(
-        "sell", reason="post_selection_exit_without_broadcast"
+        "sell", reason="post_selection_exit_without_broadcast", failed=False
     )
 
     bot._close_incomplete_tournament.reset_mock()
@@ -47,6 +47,41 @@ def test_terminal_wrapper_closes_early_return_and_exception():
         failed(bot)
     bot._close_incomplete_tournament.assert_called_once_with(
         "sell", reason="unhandled_runtimeerror", failed=True
+    )
+
+
+def test_terminal_wrapper_reports_explicit_hint_and_stage_without_changing_result():
+    bot = SimpleNamespace()
+    bot._close_incomplete_tournament = Mock()
+
+    @_with_tournament_terminal("sell")
+    def guarded(self):
+        self._route_execution_stages["sell"] = "final_gas_cap"
+        self._route_terminal_hints["sell"] = {
+            "reason": "post_selection_gas_cap_rejected", "failed": False,
+        }
+        return "guarded"
+
+    assert guarded(bot) == "guarded"
+    bot._close_incomplete_tournament.assert_called_once_with(
+        "sell", reason="post_selection_gas_cap_rejected", failed=False,
+    )
+
+
+def test_terminal_wrapper_adds_last_safe_stage_to_unhandled_exception():
+    bot = SimpleNamespace()
+    bot._close_incomplete_tournament = Mock()
+
+    @_with_tournament_terminal("sell")
+    def failed(self):
+        self._route_execution_stages["sell"] = "post_approval_route_refresh"
+        raise RuntimeError("private provider body")
+
+    with pytest.raises(RuntimeError):
+        failed(bot)
+    bot._close_incomplete_tournament.assert_called_once_with(
+        "sell", reason="unhandled_runtimeerror_at_post_approval_route_refresh",
+        failed=True,
     )
 
 
