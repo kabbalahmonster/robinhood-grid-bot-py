@@ -217,6 +217,16 @@ def resolve_names(specs, bots, label):
     return resolved
 
 
+def resolve_destination_specs(raw_values, bots):
+    specs = parse_specs(raw_values, "--to")
+    all_specs = [item for item in specs if item[0].lower() == "all"]
+    if all_specs:
+        if len(specs) != 1 or all_specs[0][1] is not None:
+            raise ValueError("--to all must be used alone without an exact count")
+        return [(name, None) for name in bots]
+    return resolve_names(specs, bots, "--to")
+
+
 def resolve_source_specs(raw_values, bots, destination_specs):
     if not raw_values:
         return []
@@ -863,7 +873,7 @@ def main(argv=None):
                 if name != TREASURY_SOURCE
             ] + list(listed_plan["destinations"])
         else:
-            destination_specs = resolve_names(parse_specs(args.destinations, "--to"), bot_dirs, "--to")
+            destination_specs = resolve_destination_specs(args.destinations, bot_dirs)
             source_specs = resolve_source_specs(args.sources, bot_dirs, destination_specs)
             if not source_specs and not args.from_treasury:
                 raise ValueError("At least one --from bot or --from-treasury is required")
@@ -890,7 +900,7 @@ def main(argv=None):
             return 0
         plan = journal["plan"]
     else:
-        destination_specs = resolve_names(parse_specs(args.destinations, "--to"), bot_dirs, "--to")
+        destination_specs = resolve_destination_specs(args.destinations, bot_dirs)
         source_specs = resolve_source_specs(args.sources, bot_dirs, destination_specs)
         if not source_specs and not args.from_treasury:
             raise ValueError("At least one --from bot or --from-treasury is required")

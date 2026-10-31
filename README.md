@@ -447,7 +447,7 @@ option and safety invariant.
 | `fleet-audit` | Reconcile local treasury/liquidation receipts | No |
 | `update-variable` | Preview/atomically change or deduplicate selected `.env` variables; `--restart` reloads only updated targets | Config only; `--apply` required |
 | `adjust-positions` | Preview/add/remove capacity, or freeze selected/all bots at their filled count | Config only; `--apply` required |
-| `pass-positions` | Fairly reallocate whole unused capacity slots and reserve ETH, optionally funding recipients from Treasury first; can stop/restart only involved bots | Broadcast/capacity changes only with all guards |
+| `pass-positions` | Fairly reallocate whole unused capacity slots and reserve ETH, optionally funding named recipients or the whole fleet from Treasury first; can stop/restart only involved bots | Broadcast/capacity changes only with all guards |
 | `backup-private-keys` | Validate every configured bot and write one sensitive key backup | Sensitive file output |
 | `fund-bots` | Top selected wallets up to a target ETH balance from a separate treasury signer | Broadcast only with all guards |
 | `usdg-sweep` | Plan or execute fleet USDG transfers | Broadcast only with all guards |

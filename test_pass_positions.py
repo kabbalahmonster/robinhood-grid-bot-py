@@ -190,6 +190,30 @@ class PassPositionsTests(unittest.TestCase):
                 ["all,alpha"], bots, [("beta", None)]
             )
 
+    def test_to_all_expands_entire_fleet_in_order(self):
+        bots = {"alpha": "a", "beta": "b", "gamma": "c"}
+        self.assertEqual(
+            module.resolve_destination_specs(["ALL"], bots),
+            [("alpha", None), ("beta", None), ("gamma", None)],
+        )
+
+    def test_to_all_must_be_used_alone_without_count(self):
+        bots = {"alpha": "a", "beta": "b"}
+        for specs in (["all,alpha"], ["all=1"]):
+            with self.subTest(specs=specs), self.assertRaisesRegex(
+                ValueError, "must be used alone"
+            ):
+                module.resolve_destination_specs(specs, bots)
+
+    def test_named_destinations_keep_existing_resolution_behavior(self):
+        bots = {"alpha": "a", "beta": "b"}
+        self.assertEqual(
+            module.resolve_destination_specs(["BETA=2,alpha"], bots),
+            [("beta", 2), ("alpha", None)],
+        )
+        with self.assertRaisesRegex(ValueError, "Unknown fleet bot"):
+            module.resolve_destination_specs(["missing"], bots)
+
     def test_routes_aggregate_into_at_most_sources_plus_destinations_minus_one(self):
         routes = module.build_routes(
             {"a": 2, "b": 1}, {"x": 1, "y": 2}

@@ -24,7 +24,8 @@ Allocation:
                              before using plain --from bots
   --treasury-env PATH        Treasury signer env (default:
                              $FLEET_TREASURY_ENV or ~/bot-farm/treasury.env)
-  --to SPECS                 Recipients: same syntax as --from
+  --to SPECS                 Recipients: BOT or BOT=COUNT, comma-separated/repeatable;
+                             use all alone for the whole configured fleet
   --positions N|all|available
                              Exact total, or maximum available from the sources
   --reserve N                Keep at least N open slots on every bot donor
@@ -39,6 +40,8 @@ are chosen from least current open capacity. Supplied order breaks ties.
 BOT=COUNT is exact and reserved before Treasury allocation. Treasury-funded
 positions add recipient capacity without reducing any bot's capacity.
 --from all uses every configured fleet bot except those named by --to.
+--to all uses every configured fleet bot as a recipient and is intended for
+Treasury-only funding; ordinary bot donors would overlap and are refused.
 --positions all and --positions available are equivalent and transfer the
 maximum open capacity offered by the selected sources using normal leveling.
 --reserve subtracts a retained open-slot floor before donor leveling;
@@ -77,6 +80,10 @@ Examples:
   # Fund from Treasury first, then level any remainder across bot donors.
   pass-positions --from-treasury --from sarn,prism \
     --to urmom,delta --positions 6 --amount-per-position 0.0015
+
+  # Fund the maximum safe number of new slots across the configured fleet.
+  pass-positions --from-treasury --to all --positions available \
+    --amount-per-position 0.001
 
   # Exact counts mixed with fair remainder allocation.
   pass-positions --from prism=2,sarn,delta --to urmom=1,earn,hookr \

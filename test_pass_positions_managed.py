@@ -203,6 +203,7 @@ class ManagedPassPositionsTests(unittest.TestCase):
         for text in (
             "Allocation:", "Execution:", "Examples:", "Safety model:",
             "--manage-bots", "--resume PLAN_ID", "BOT=COUNT", "--reserve-from",
+            "--to all", "whole configured fleet",
         ):
             with self.subTest(text=text):
                 self.assertIn(text, result.stdout)

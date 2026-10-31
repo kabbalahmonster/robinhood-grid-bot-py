@@ -1437,6 +1437,18 @@ pass-positions \
   --amount-per-position 0.0015
 ```
 
+Use `--to all` by itself to expand the recipient side to every configured
+fleet bot. This is intended for Treasury-only fleet funding because adding bot
+donors would make those bots overlap with the recipient set and is refused:
+
+```bash
+pass-positions \
+  --from-treasury \
+  --to all \
+  --positions available \
+  --amount-per-position 0.001
+```
+
 The signer defaults to `$FLEET_TREASURY_ENV` or
 `~/bot-farm/treasury.env`, matching the Treasury signer used with
 `fund-bots --from-env`; override it with `--treasury-env PATH`. Treasury
