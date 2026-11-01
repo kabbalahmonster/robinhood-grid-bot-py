@@ -4487,9 +4487,7 @@ class GridBot:
         else:
             trade_balance, _ = self.wallet.get_token_balance(self.config.weth_address)
         
-        minimum_trade = (
-            self.config.gridless_min_position_eth if ladder_mode else 0.001
-        )
+        minimum_trade = self.config.gridless_min_position_eth
         if trade_balance < minimum_trade and not ladder_mode:
             logger.warning(f"Gridless: Low {self.trade_token_name} balance: {trade_balance:.6f}")
             self._funding_warning = {

@@ -6,6 +6,31 @@ from grid_bot import GridBot, _dashboard_strategy_mode
 
 
 class GridBotInitialStateTests(unittest.TestCase):
+    @patch("drawdown_ladder.load_plan", return_value=None)
+    @patch("gridless.threshold_gap_status", return_value={})
+    @patch("gridless.should_buy", return_value=(True, "buy threshold reached"))
+    @patch("gridless.load_positions", return_value={})
+    def test_threshold_mode_honors_configured_gridless_minimum(
+        self, _load_positions, _should_buy, _threshold_status, _load_plan
+    ):
+        bot = GridBot.__new__(GridBot)
+        bot.config = SimpleNamespace(
+            gridless_allocation_mode="threshold",
+            gridless_min_position_eth=0.0008,
+            use_eth_trading=True,
+            eth_gas_reserve=0.0005,
+            max_active_positions=0,
+        )
+        bot.wallet = SimpleNamespace(get_eth_balance=lambda: 0.001493)
+        bot.last_buy_time = 0
+        bot.gridless_buy_cooldown = 0
+        bot._funding_warning = None
+        bot._taxed_token_active = MagicMock(return_value=False)
+
+        bot._check_buys_gridless(1.0)
+
+        self.assertIsNone(bot._funding_warning)
+
     def test_survivor_rapid_poll_window_shortens_main_loop_delay(self):
         bot = GridBot.__new__(GridBot)
         bot.config = SimpleNamespace(
