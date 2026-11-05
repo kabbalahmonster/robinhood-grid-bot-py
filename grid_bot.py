@@ -29,6 +29,56 @@ from token_tax_detector import TokenTaxDetector
 MIN_BUY_OBSERVATION_PRINCIPAL_WEI = 10**15  # 0.001 ETH/WETH
 
 
+_ECONOMIC_ROUTE_REJECTIONS = {
+    "input_balance",
+    "native_reserve",
+    "sell_profit_floor",
+    "total_gas_above_cap",
+}
+
+
+def _route_preflight_failure_summary(direction, comparison):
+    """Turn structured candidate rejections into concise operator feedback."""
+    if not isinstance(comparison, dict):
+        return f"no freshly valid {direction} route"
+    candidates = [
+        row for row in comparison.get("candidates", []) if isinstance(row, dict)
+    ]
+    if not candidates:
+        return f"no freshly valid {direction} route (no candidate details)"
+
+    rejection_counts = {}
+    all_rejections = set()
+    every_candidate_rejected = True
+    for row in candidates:
+        rejections = row.get("rejections")
+        if not isinstance(rejections, list) or not rejections:
+            every_candidate_rejected = False
+            continue
+        for reason in set(str(item) for item in rejections if item):
+            rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
+            all_rejections.add(reason)
+
+    total = len(candidates)
+    details = ", ".join(
+        f"{reason} {count}/{total}"
+        for reason, count in sorted(
+            rejection_counts.items(), key=lambda item: (-item[1], item[0])
+        )
+    ) or "rejection details unavailable"
+    expected = comparison.get("expected_candidates")
+    if isinstance(expected, list) and len(expected) > total:
+        details += f", candidate accounting {total}/{len(expected)}"
+
+    economically_ineligible = (
+        every_candidate_rejected
+        and bool(all_rejections)
+        and all_rejections <= _ECONOMIC_ROUTE_REJECTIONS
+    )
+    eligibility = "no economically eligible" if economically_ineligible else "no eligible"
+    return f"{eligibility} {direction} route ({details})"
+
+
 def _dashboard_strategy_mode(config):
     """Return a stable public strategy label without changing strategy behavior."""
     if not getattr(config, "use_gridless", True):
@@ -2244,8 +2294,8 @@ class GridBot:
                 self.provider.active = primary
                 self.api_client = self.provider
             logger.warning(
-                "Tournament preflight found no freshly valid %s route; using baseline provider path",
-                direction,
+                "Tournament preflight found %s; using baseline provider path",
+                _route_preflight_failure_summary(direction, comparison),
             )
             overlapped = self._consume_speculative_fallback(direction, speculative)
             if overlapped is not None:
@@ -3718,6 +3768,57 @@ class GridBot:
         )
         return False
 
+    def _threshold_dip_execution_price_allowed(
+            self, quote, buy_amount_wei, threshold_context):
+        """Revalidate a dip against the lowest confirmed seed's fill price."""
+        if (threshold_context is None
+                or threshold_context.get("entry_kind") != "dip"):
+            return True
+
+        from gridless import threshold_dip_fill_allowed
+
+        executable_output = self._taxed_quote_return_wei(quote)
+        token_output = executable_output / self.token_unit
+        quoted_fill_price = (
+            (int(buy_amount_wei) / 10**18) / token_output
+            if token_output > 0 else 0
+        )
+        buy_threshold = float(getattr(
+            self.config, "gridless_buy_threshold", -10.0
+        ))
+        execution_margin_pct = float(getattr(
+            self.config, "gridless_buy_execution_margin", 50.0
+        ))
+        allowed, maximum_fill = threshold_dip_fill_allowed(
+            threshold_context,
+            quoted_fill_price,
+            buy_threshold,
+            execution_margin_pct,
+        )
+        if allowed:
+            return True
+
+        self._mark_buy_tournament_aborted(
+            reason="threshold_dip_execution_recovered",
+            quoted_fill_price=quoted_fill_price,
+            maximum_fill_price=maximum_fill,
+            dip_anchor_position_id=threshold_context.get(
+                "dip_anchor_position_id"
+            ),
+            dip_anchor_price=threshold_context.get("dip_anchor_price"),
+            trigger_threshold_percent=buy_threshold,
+            execution_margin_percent=execution_margin_pct,
+        )
+        logger.info(
+            "Threshold dip buy aborted: executable worst-case fill %.10f "
+            "exceeds allowed %.10f from confirmed seed %s at %.10f",
+            quoted_fill_price,
+            maximum_fill,
+            threshold_context.get("dip_anchor_position_id"),
+            float(threshold_context.get("dip_anchor_price") or 0),
+        )
+        return False
+
     def _gridless_sell_terms(self, position):
         """Return the exact post-moonbag sell amount and proportional cost."""
         balance = int(position.get("balance", 0) or 0)
@@ -4632,6 +4733,10 @@ class GridBot:
                 "entry_kind": entry_kind,
                 "position_count": len(gridless_positions),
                 "market_price": float(price),
+                "dip_anchor_position_id": threshold_status.get(
+                    "dip_anchor_position_id"
+                ),
+                "dip_anchor_price": threshold_status.get("dip_anchor_price"),
                 "leading_spacing_percent": float(
                     threshold_status.get("leading_spacing_percent", 0) or 0
                 ),
@@ -4961,6 +5066,9 @@ class GridBot:
         
         if not self._quote_matches_exact_input(quote, buy_amount_wei):
             logger.error("Buy aborted: executable quote input/output amounts are not exact")
+            return
+        if not self._threshold_dip_execution_price_allowed(
+                quote, buy_amount_wei, threshold_context):
             return
         if (threshold_context is not None
                 and threshold_context.get("entry_kind") in {

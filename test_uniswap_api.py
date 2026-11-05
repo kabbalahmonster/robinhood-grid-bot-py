@@ -360,6 +360,37 @@ class TestUniswapAPIClient(unittest.TestCase):
         self.assertGreater(post.call_args.kwargs["timeout_seconds"], 0)
         self.assertLessEqual(post.call_args.kwargs["timeout_seconds"], 0.5)
 
+    def test_swap_response_without_nested_quote_reuses_original_without_warning(self):
+        config = SimpleNamespace(
+            uniswap_api_key="test-key", uniswap_permit2_disabled=True,
+            chain_id=4663, anti_mev_jitter=False,
+        )
+        response = SimpleNamespace(
+            status_code=200, text="", headers={},
+            json=lambda: {
+                "swap": {
+                    "to": "0x8e6fd69a77e88ee20ba4b4fbd59dfcda3ec0e98a",
+                    "data": "0xdead", "value": "0x0",
+                },
+            },
+        )
+        original = {
+            "quote": {
+                "input": {"amount": "100"},
+                "output": {"amount": "95"},
+            },
+        }
+        client = UniswapAPIClient(config)
+        with patch.object(client, "_post_json", return_value=response), \
+             self.assertLogs("grid_bot.uniswap_api", level="DEBUG") as logs:
+            result = client.get_swap_transaction(original)
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.sell_amount, 100)
+        self.assertEqual(result.buy_amount, 95)
+        self.assertTrue(any("using original quote amounts" in line for line in logs.output))
+        self.assertFalse(any("WARNING" in line for line in logs.output))
+
     def test_shadow_read_timeout_has_explicit_observation_deadline_error(self):
         config = SimpleNamespace(
             uniswap_api_key="test-key",

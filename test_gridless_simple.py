@@ -428,6 +428,33 @@ class TestShouldBuy(unittest.TestCase):
         self.assertTrue(allowed)
         self.assertAlmostEqual(minimum, 0.1025)
         self.assertAlmostEqual(maximum, 0.14 / 1.025)
+
+    def test_dip_fill_ceiling_uses_confirmed_lowest_seed_and_recovery_margin(self):
+        context = {"dip_anchor_price": 0.1}
+
+        allowed, ceiling = gridless.threshold_dip_fill_allowed(
+            context, 0.0949, -10.0, 50.0
+        )
+        self.assertTrue(allowed)
+        self.assertAlmostEqual(ceiling, 0.095)
+
+        allowed, ceiling = gridless.threshold_dip_fill_allowed(
+            context, 0.099, -10.0, 50.0
+        )
+        self.assertFalse(allowed)
+        self.assertAlmostEqual(ceiling, 0.095)
+
+    def test_dip_fill_ceiling_respects_strict_and_full_recovery_margins(self):
+        context = {"dip_anchor_price": 0.1}
+
+        self.assertAlmostEqual(
+            gridless.threshold_dip_fill_ceiling(context, -10.0, 0.0),
+            0.09,
+        )
+        self.assertAlmostEqual(
+            gridless.threshold_dip_fill_ceiling(context, -10.0, 100.0),
+            0.1,
+        )
         self.assertFalse(gridless.threshold_gap_fill_bounds(
             context, 0.102
         )[0])

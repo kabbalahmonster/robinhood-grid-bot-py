@@ -235,8 +235,10 @@ minimum ordinary threshold trade is 0.001 ETH/WETH.
 
 After a dip trigger, `GRIDLESS_BUY_EXECUTION_MARGIN` limits how far price may
 recover toward zero before execution. For example, with a -10% trigger and a
-50% margin, execution is blocked after recovery above -5%. Leading-edge buys
-do not use this dip-recovery check.
+50% margin, execution is blocked after recovery above -5%. The final executable
+output floor is checked against the lowest confirmed seed, so route friction
+cannot authorize another dip fill beside that seed. Leading-edge buys do not
+use this dip-recovery check.
 
 ### Frozen drawdown ladder allocation
 

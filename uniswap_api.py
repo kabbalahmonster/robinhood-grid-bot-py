@@ -789,9 +789,16 @@ class UniswapAPIClient:
             self.logger.debug(f"Swap response has quote: {bool(quote_info)}, has swap: {bool(swap_data)}")
             
             if not quote_info:
-                self.logger.warning("Uniswap swap response contained no quote")
                 # Fallback: try to use amounts from original quote
                 quote_info = payload.get("quote", {})
+                if quote_info:
+                    self.logger.debug(
+                        "Uniswap swap response omitted quote; using original quote amounts"
+                    )
+                else:
+                    self.logger.warning(
+                        "Uniswap swap response contained no quote and no original quote was available"
+                    )
             
             output_info = quote_info.get("output", {}) if isinstance(quote_info, dict) else {}
             input_info = quote_info.get("input", {}) if isinstance(quote_info, dict) else {}

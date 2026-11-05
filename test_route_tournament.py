@@ -9,7 +9,8 @@ from unittest.mock import Mock, patch
 import pytest
 
 from config import BotConfig, load_config
-from grid_bot import GridBot, _with_swap_provider_fallback, _with_tournament_terminal
+from grid_bot import (GridBot, _route_preflight_failure_summary,
+                      _with_swap_provider_fallback, _with_tournament_terminal)
 from route_tournament import (collect, collect_execution_preflight, score_candidate,
                               snapshot, select_execution_candidate)
 from swap_provider import FallbackSwapProvider
@@ -88,6 +89,39 @@ def test_terminal_wrapper_adds_last_safe_stage_to_unhandled_exception():
 def quote(output=2 * 10**15, gas=300000, **kwargs):
     return QuoteResult(success=True, buy_amount=output, sell_amount=10**15,
                        gas=gas, **kwargs)
+
+
+def test_preflight_failure_summary_explains_economic_rejections():
+    comparison = {
+        "candidate_accounting_complete": True,
+        "candidates": [
+            {"rejections": ["sell_profit_floor"]},
+            {"rejections": ["sell_profit_floor"]},
+            {"rejections": ["sell_profit_floor"]},
+            {"rejections": ["sell_profit_floor"]},
+        ],
+    }
+
+    assert _route_preflight_failure_summary("sell", comparison) == (
+        "no economically eligible sell route (sell_profit_floor 4/4)"
+    )
+
+
+def test_preflight_failure_summary_reports_mixed_and_incomplete_failures():
+    comparison = {
+        "candidate_accounting_complete": False,
+        "expected_candidates": [{}, {}, {}, {}],
+        "candidates": [
+            {"rejections": ["provider_quote_failed"]},
+            {"rejections": ["sell_profit_floor"]},
+            {"rejections": ["provider_quote_failed", "observation_timeout"]},
+        ],
+    }
+
+    assert _route_preflight_failure_summary("sell", comparison) == (
+        "no eligible sell route (provider_quote_failed 2/3, observation_timeout 1/3, "
+        "sell_profit_floor 1/3, candidate accounting 3/4)"
+    )
 
 
 def test_staged_weth_buy_prices_dynamic_wrap_approval_and_swap_gas():
@@ -981,6 +1015,36 @@ def test_buy_strategy_veto_accepts_gap_guard_metrics():
     assert comparison["terminal_reason"] == "threshold_gap_execution_outside_bounds"
     assert comparison["execution_abort"]["lower_anchor_position_id"] == "low"
     assert comparison["execution_abort"]["upper_boundary_position_id"] == "high"
+
+
+def test_threshold_dip_execution_guard_uses_executable_floor_and_seed_ceiling():
+    b = bot("gate")
+    b.config.gridless_buy_threshold = -10.0
+    b.config.gridless_buy_execution_margin = 50.0
+    b.config.slippage_tolerance = 0.5
+    b.token_unit = 10**18
+    b._swap_slippage_fraction = Mock(return_value=0.005)
+    b._mark_buy_tournament_aborted = Mock()
+    context = {
+        "entry_kind": "dip",
+        "dip_anchor_position_id": "7",
+        "dip_anchor_price": 0.1,
+    }
+    principal = 10**18
+
+    allowed_quote = quote(output=int(principal / 0.094))
+    blocked_quote = quote(output=int(principal / 0.098))
+
+    assert b._threshold_dip_execution_price_allowed(
+        allowed_quote, principal, context
+    ) is True
+    assert b._threshold_dip_execution_price_allowed(
+        blocked_quote, principal, context
+    ) is False
+    abort = b._mark_buy_tournament_aborted.call_args.kwargs
+    assert abort["reason"] == "threshold_dip_execution_recovered"
+    assert abort["dip_anchor_position_id"] == "7"
+    assert abort["maximum_fill_price"] == pytest.approx(0.095)
 
 
 def test_exact_approval_fuse_persists_and_blocks_a_second_approval(tmp_path):

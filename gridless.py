@@ -432,6 +432,42 @@ def threshold_leading_edge_fill_bounds(
     return allowed, minimum_fill, None
 
 
+def threshold_dip_fill_ceiling(
+        context: Dict[str, Any], buy_threshold: float,
+        execution_margin_percent: float) -> float:
+    """Return the highest executable fill allowed for a threshold dip.
+
+    The confirmed lowest fill is the stable physical anchor.  The configured
+    margin permits recovery from the threshold price back toward that anchor;
+    it never turns route-friction P&L into permission to refill beside it.
+    """
+    anchor_price = float(context.get("dip_anchor_price") or 0)
+    threshold_price = anchor_price * (1 + float(buy_threshold) / 100)
+    return threshold_price + (
+        (anchor_price - threshold_price)
+        * float(execution_margin_percent) / 100
+    )
+
+
+def threshold_dip_fill_allowed(
+        context: Dict[str, Any], quoted_fill_price: float,
+        buy_threshold: float,
+        execution_margin_percent: float) -> Tuple[bool, float]:
+    """Validate a dip's executable worst-case fill against its lowest seed."""
+    anchor_price = float(context.get("dip_anchor_price") or 0)
+    allowed_ceiling = threshold_dip_fill_ceiling(
+        context, buy_threshold, execution_margin_percent
+    )
+    allowed = bool(
+        quoted_fill_price > 0
+        and anchor_price > 0
+        and float(buy_threshold) < 0
+        and 0 <= float(execution_margin_percent) <= 100
+        and quoted_fill_price <= allowed_ceiling
+    )
+    return allowed, allowed_ceiling
+
+
 def survivor_next_leading_edge_price(
         positions: Dict[str, Dict], config: Any) -> Optional[float]:
     """Return the indicative raw-price target for the next Survivor lead buy.
