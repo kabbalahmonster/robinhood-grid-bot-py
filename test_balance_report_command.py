@@ -29,6 +29,7 @@ class TestBalanceReportCommand(unittest.TestCase):
             "class Eth:\n chain_id=8453\n def get_code(self,address): return b'x'\n"
             "class Wallet:\n"
             " def __init__(self,config): self.address='0x'+'a'*40; self.w3=SimpleNamespace(eth=Eth())\n"
+            " def address_has_code(self,address): return True\n"
             " def get_token_info(self,address):\n"
             "  return SimpleNamespace(symbol='TOK' if address == '0x'+'1'*40 else ('USDG' if address == '0x'+'2'*40 else 'WETH'), decimals=6 if address == '0x'+'2'*40 else 18)\n"
             " def get_token_balance(self,address):\n"

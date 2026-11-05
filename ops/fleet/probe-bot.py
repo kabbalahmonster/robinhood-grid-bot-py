@@ -118,8 +118,8 @@ def main():
                 seen[normalized_address]["roles"].append(role)
                 continue
             try:
-                code = wallet.w3.eth.get_code(address)
-                add_check(result, f"contract_{label}", "pass" if code else "fail", address)
+                has_code = wallet.address_has_code(address)
+                add_check(result, f"contract_{label}", "pass" if has_code else "fail", address)
                 info = wallet.get_token_info(address)
                 balance, raw = wallet.get_token_balance(address)
                 asset = {"role": role, "roles": [role], "label": label,

@@ -20,16 +20,22 @@ class TestFleetProbe(unittest.TestCase):
             "def load_config():\n"
             " return SimpleNamespace(bot_id='alpha', dashboard_name='Alpha', chain_id=8453, "
             "chain_name='Base', swap_fallback_provider='sushiswap', eth_gas_reserve=0.0005, "
-            "token_symbol='TOKEN', token_address='0x'+'1'*40, usdg_address='0x'+'2'*40, "
-            "weth_address='0x'+'3'*40, dashboard_url='', dashboard_api_key='')\n"
+            "token_symbol='TOKEN', token_address='0x'+'a'*40, usdg_address='0x'+'b'*40, "
+            "weth_address='0x'+'c'*40, dashboard_url='', dashboard_api_key='')\n"
         )
         (checkout / "wallet.py").write_text(
             "from types import SimpleNamespace\n"
-            f"class Eth:\n chain_id={actual_chain}\n def get_code(self,address): return b'x'\n"
+            f"class Eth:\n chain_id={actual_chain}\n"
+            " def get_code(self,address):\n"
+            "  if address == address.lower(): raise ValueError('address is not checksummed')\n"
+            "  return b'x'\n"
             "class Wallet:\n"
             " def __init__(self,config): self.address='0x'+'a'*40; self.w3=SimpleNamespace(eth=Eth())\n"
-            " def get_token_info(self,address): return SimpleNamespace(symbol='TOK',decimals=18)\n"
-            " def get_token_balance(self,address): return ('1.25',1250000000000000000)\n"
+            " def address_has_code(self,address): return True\n"
+            " def get_token_info(self,address):\n"
+            "  return SimpleNamespace(symbol='TOK',decimals=18)\n"
+            " def get_token_balance(self,address):\n"
+            "  return ('1.25',1250000000000000000)\n"
             " def get_eth_balance_wei(self): return 2000000000000000\n"
         )
         (checkout / "swap_provider.py").write_text(
