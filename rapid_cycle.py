@@ -18,8 +18,9 @@ import tempfile
 from typing import Any, Optional
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 MODES = {"shadow", "live"}
+ENTRY_STRATEGIES = {"dip", "route_arbitrage"}
 
 
 def _utc_now() -> str:
@@ -35,6 +36,7 @@ class RapidCycleIdentity:
     principal_wei: int
     entry_drop_percent: float
     min_profit_percent: float
+    entry_strategy: str = "dip"
     lookback_samples: int = 12
     min_confidence_samples: int = 2
     max_open_positions: int = 1
@@ -48,6 +50,7 @@ class RapidCycleIdentity:
             "principal_wei": int(self.principal_wei),
             "entry_drop_percent": float(self.entry_drop_percent),
             "min_profit_percent": float(self.min_profit_percent),
+            "entry_strategy": self.entry_strategy,
             "lookback_samples": int(self.lookback_samples),
             "min_confidence_samples": int(self.min_confidence_samples),
             "max_open_positions": int(self.max_open_positions),
@@ -60,6 +63,8 @@ class RapidCycleJournal:
     def __init__(self, path: str | Path, identity: RapidCycleIdentity):
         if identity.mode not in MODES:
             raise ValueError("rapid-cycle journal mode must be shadow or live")
+        if identity.entry_strategy not in ENTRY_STRATEGIES:
+            raise ValueError("rapid-cycle entry_strategy must be dip or route_arbitrage")
         if int(identity.lookback_samples) < 2:
             raise ValueError("rapid-cycle lookback_samples must be at least 2")
         if int(identity.min_confidence_samples) < 1:
@@ -188,7 +193,8 @@ class RapidCycleEngine:
         return self.journal.state
 
     def desired_direction(self) -> Optional[str]:
-        if self.journal.identity.mode == "shadow":
+        if (self.journal.identity.mode == "shadow"
+                and self.journal.identity.entry_strategy == "dip"):
             return "portfolio"
         if self.state["status"] == "action_pending":
             return None
@@ -200,7 +206,8 @@ class RapidCycleEngine:
         return deepcopy(self.state.get("positions") or [])
 
     def has_buy_capacity(self) -> bool:
-        if self.journal.identity.mode == "shadow":
+        if (self.journal.identity.mode == "shadow"
+                and self.journal.identity.entry_strategy == "dip"):
             return len(self.state.get("positions") or []) < self.journal.identity.max_open_positions
         return self.state["status"] == "flat"
 
@@ -243,7 +250,12 @@ class RapidCycleEngine:
             raise ValueError("invalid rapid-cycle buy observation")
         economic_cost = principal + projected_gas_wei
         unit_cost = economic_cost * self.UNIT_SCALE // token_floor_raw
-        samples = int(self.state.get("buy_sample_count", 0)) + 1
+        # This is readiness progress, not a lifetime attempt/failure counter.
+        # Keep it bounded so telemetry can never report nonsense such as 5 / 3.
+        samples = min(
+            int(self.state.get("buy_sample_count", 0)) + 1,
+            self.min_buy_samples,
+        )
         window = [int(value) for value in self.state.get("buy_unit_cost_window", [])]
         window.append(unit_cost)
         window = window[-self.journal.identity.lookback_samples:]
@@ -328,10 +340,16 @@ class RapidCycleEngine:
             "round_trip_confidence_streak": confidence_streak,
             "last_observation": observation,
         })
+        route_arbitrage = self.journal.identity.entry_strategy == "route_arbitrage"
         if (
-            samples < self.min_buy_samples
-            or drop < self.journal.identity.entry_drop_percent
-            or confidence_streak < self.journal.identity.min_confidence_samples
+            confidence_streak < self.journal.identity.min_confidence_samples
+            or (
+                not route_arbitrage
+                and (
+                    samples < self.min_buy_samples
+                    or drop < self.journal.identity.entry_drop_percent
+                )
+            )
         ):
             self.journal.save()
             return None
@@ -341,6 +359,35 @@ class RapidCycleEngine:
             "trigger": observation,
         }
         if self.journal.identity.mode == "shadow":
+            if route_arbitrage:
+                position = {
+                    "kind": "paper",
+                    "position_id": f"paper-{int(self.state.get('next_shadow_position_id', 1))}",
+                    "opened_at": observed_at,
+                    "opened_block": int(block_number),
+                    "token_amount_raw": str(token_floor_raw),
+                    "cost_wei": str(economic_cost),
+                    "buy_provider": provider,
+                    "buy_settlement": settlement,
+                    "buy_observation": observation,
+                }
+                self.state["next_shadow_position_id"] = (
+                    int(self.state.get("next_shadow_position_id", 1)) + 1
+                )
+                self._complete_cycle(
+                    sell_observation=sell_observation,
+                    received_wei=int(projected_net_return),
+                    profit_wei=int(projected_profit),
+                    tx_hash=None,
+                    closed_at=observed_at,
+                    position=position,
+                )
+                return {
+                    **action,
+                    "paper_filled": True,
+                    "position_id": position["position_id"],
+                    "round_trip_completed": True,
+                }
             sequence = int(self.state.get("next_shadow_position_id", 1))
             position = {
                 "kind": "paper",
@@ -499,6 +546,9 @@ class RapidCycleEngine:
                 "completed_cycles": history[-500:],
                 "last_completed_cycle": record,
             })
+            if self.journal.identity.entry_strategy == "route_arbitrage":
+                # Every shot must earn a fresh run of full-route confirmations.
+                self.state["round_trip_confidence_streak"] = 0
         else:
             self.state.update({
                 "status": "flat",

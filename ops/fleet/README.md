@@ -2052,27 +2052,30 @@ Preview and enable shadow on exactly one stopped or monitored bot:
 
 ```bash
 update-variable --allow-add --only TOKEN \
-  RAPID_CYCLE_MODE=shadow RAPID_CYCLE_PRINCIPAL_ETH=0.001 \
+  RAPID_CYCLE_MODE=shadow RAPID_CYCLE_ENTRY_STRATEGY=route_arbitrage \
+  RAPID_CYCLE_PRINCIPAL_ETH=0.001 \
   RAPID_CYCLE_ENTRY_DROP_PERCENT=2 RAPID_CYCLE_MIN_PROFIT_PERCENT=1 \
   RAPID_CYCLE_MIN_CONFIDENCE_SAMPLES=2 \
   RAPID_CYCLE_MAX_OPEN_POSITIONS=10 \
   RAPID_CYCLE_POLL_EVERY_CYCLES=1
 update-variable --apply --restart --allow-add --only TOKEN \
-  RAPID_CYCLE_MODE=shadow RAPID_CYCLE_PRINCIPAL_ETH=0.001 \
+  RAPID_CYCLE_MODE=shadow RAPID_CYCLE_ENTRY_STRATEGY=route_arbitrage \
+  RAPID_CYCLE_PRINCIPAL_ETH=0.001 \
   RAPID_CYCLE_ENTRY_DROP_PERCENT=2 RAPID_CYCLE_MIN_PROFIT_PERCENT=1 \
   RAPID_CYCLE_MIN_CONFIDENCE_SAMPLES=2 \
   RAPID_CYCLE_MAX_OPEN_POSITIONS=10 \
   RAPID_CYCLE_POLL_EVERY_CYCLES=1
 ```
 
-Inspect `data/rapid_cycle_state.json` and logs for up to ten independent open
-paper lots and repeated completed cycles. Every shot requires two consecutive
-complete buy→sell preflights above the net-profit floor; missing or unprofitable
-exits reset confidence without opening a paper position. One open lot is checked
-for exit per observer pass in round-robin order while remaining capacity can
-still admit another qualified shot. Do not interpret a paper cycle as a guaranteed fill:
-its hypothetical buy did not change pool reserves. Version-1 and version-2 journals must be
-archived before starting this version-3 state machine. Prefer the guarded
+Inspect `data/rapid_cycle_state.json` and logs for repeated completed route
+cycles. Every shot requires two consecutive complete buy→sell preflights above
+the net-profit floor; missing or unprofitable exits reset confidence without
+opening a paper position. Route-arbitrage shadow completes both quoted legs in
+one paper record and returns flat immediately. Use the compatibility-default
+`RAPID_CYCLE_ENTRY_STRATEGY=dip` only when deliberately testing the older
+multi-lot price-improvement portfolio. Do not interpret a paper cycle as a guaranteed fill:
+its hypothetical buy did not change pool reserves. Version-1 through version-3 journals must be
+archived before starting this version-4 state machine. Prefer the guarded
 `reset-bot WORM --scope rapid-cycle` preview/apply workflow. Before a live canary,
 stop the selected bot, archive that shadow journal, verify
 `data/gridless_positions.json` is empty, and dedicate the checkout to one

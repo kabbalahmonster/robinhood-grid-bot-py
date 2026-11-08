@@ -126,6 +126,7 @@ python grid_bot.py
 | `RAPID_CYCLE_MODE` | No | off | Executable round-trip experiment: `off`, non-signing `shadow`, or dedicated-bot `live` |
 | `RAPID_CYCLE_CANARY` | No | false | First explicit acknowledgement required by `live` |
 | `RAPID_CYCLE_EXCLUSIVE` | No | false | Confirms the one-slot bot is dedicated to rapid-cycle decisions; required by `live` |
+| `RAPID_CYCLE_ENTRY_STRATEGY` | No | dip | `dip` preserves the warmup/price-improvement portfolio; `route_arbitrage` acts only on consecutive profitable full-route preflights and completes shadow shots immediately |
 | `RAPID_CYCLE_PRINCIPAL_ETH` | No | 0.001 | Exact native/WETH principal sampled and, in live mode, submitted to the guarded buy path |
 | `RAPID_CYCLE_ENTRY_DROP_PERCENT` | No | 2.0 | Required improvement in all-in buy cost per conservative token floor after warmup |
 | `RAPID_CYCLE_MIN_PROFIT_PERCENT` | No | 1.0 | Minimum projected round-trip profit after buy/sell gas and output floors; live must not be below `MIN_PROFIT_PERCENT` |
@@ -1922,15 +1923,25 @@ fresh quote economics; if the cached protocol stops quoting it is discarded.
 
 ## Rapid-cycle executable round-trip experiment
 
-`RAPID_CYCLE_MODE=off` is the compatibility default. While flat, one bounded
-background observer now preflights both legs of every proposed shot: an
+`RAPID_CYCLE_MODE=off` is the compatibility default, and the missing
+`RAPID_CYCLE_ENTRY_STRATEGY` default remains `dip`. While flat, one bounded
+background observer preflights both legs of every proposed shot: an
 exact-principal buy followed by an exact sell of that buy's conservative token
-floor. Entry requires all three gates at once: the configured buy warmup, the
+floor. In `dip`, entry requires all three gates at once: the configured buy warmup, the
 configured improvement in all-in buy cost, and at least
 `RAPID_CYCLE_MIN_CONFIDENCE_SAMPLES` consecutive complete round-trip preflights
 whose sell floor minus both legs' projected gas clears
 `RAPID_CYCLE_MIN_PROFIT_PERCENT`. A missing or unprofitable exit resets the
 confidence streak and cannot open a position.
+
+In `route_arbitrage`, the warmup and price-dip gates are intentionally ignored:
+the opportunity is the conservative cross-route round trip itself. After the
+configured consecutive profitable confirmations, shadow records both quoted
+legs as one completed paper cycle and returns flat immediately. This produces
+repeated fast shots without accumulating stranded paper positions. Entry
+readiness telemetry is capped at its configured target, so it cannot report
+misleading progress such as `5 / 3`. Live remains sequential and separately
+guarded; it is not atomic same-block arbitrage.
 
 In `shadow`, each exit-qualified entry becomes an independent paper lot, up to
 `RAPID_CYCLE_MAX_OPEN_POSITIONS`. Every observer pass checks one open lot for a

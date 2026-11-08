@@ -219,6 +219,7 @@ class BotConfig:
     rapid_cycle_mode: str = "off"
     rapid_cycle_canary: bool = False
     rapid_cycle_exclusive: bool = False
+    rapid_cycle_entry_strategy: str = "dip"
     rapid_cycle_principal_eth: float = 0.001
     rapid_cycle_entry_drop_percent: float = 2.0
     rapid_cycle_min_profit_percent: float = 1.0
@@ -294,6 +295,13 @@ class BotConfig:
         rapid_mode = str(getattr(self, "rapid_cycle_mode", "off")).strip().lower()
         if rapid_mode not in {"off", "shadow", "live"}:
             raise ValueError("RAPID_CYCLE_MODE supports off, shadow, or live")
+        rapid_entry_strategy = str(getattr(
+            self, "rapid_cycle_entry_strategy", "dip"
+        )).strip().lower()
+        if rapid_entry_strategy not in {"dip", "route_arbitrage"}:
+            raise ValueError(
+                "RAPID_CYCLE_ENTRY_STRATEGY supports dip or route_arbitrage"
+            )
         for name, minimum, maximum in (
             ("rapid_cycle_principal_eth", 0.000001, 1000),
             ("rapid_cycle_entry_drop_percent", 0.01, 99),
@@ -730,6 +738,9 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
         rapid_cycle_mode=os.getenv("RAPID_CYCLE_MODE", "off").strip().lower(),
         rapid_cycle_canary=os.getenv("RAPID_CYCLE_CANARY", "false").lower() == "true",
         rapid_cycle_exclusive=os.getenv("RAPID_CYCLE_EXCLUSIVE", "false").lower() == "true",
+        rapid_cycle_entry_strategy=os.getenv(
+            "RAPID_CYCLE_ENTRY_STRATEGY", "dip"
+        ).strip().lower(),
         rapid_cycle_principal_eth=float(os.getenv("RAPID_CYCLE_PRINCIPAL_ETH", "0.001")),
         rapid_cycle_entry_drop_percent=float(os.getenv(
             "RAPID_CYCLE_ENTRY_DROP_PERCENT", "2.0"

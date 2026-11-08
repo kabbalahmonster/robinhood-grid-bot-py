@@ -111,6 +111,42 @@ def test_shadow_hard_caps_ten_open_positions(tmp_path):
     assert engine.shadow_exit_candidate(10)["position_id"] == "paper-1"
 
 
+def test_readiness_samples_are_capped_at_target(tmp_path):
+    rapid_identity = identity(min_confidence_samples=99)
+    engine = RapidCycleEngine(
+        RapidCycleJournal(tmp_path / "samples.json", rapid_identity),
+        min_buy_samples=3,
+    )
+    for block in range(1, 7):
+        assert buy(engine, 1_000_000 + block * 1_000, block) is None
+    assert engine.state["buy_sample_count"] == 3
+
+
+def test_route_arbitrage_ignores_dip_and_completes_profitable_shadow_round_trip(tmp_path):
+    rapid_identity = identity(
+        entry_strategy="route_arbitrage",
+        entry_drop_percent=99,
+        min_confidence_samples=2,
+        max_open_positions=10,
+    )
+    engine = RapidCycleEngine(
+        RapidCycleJournal(tmp_path / "arbitrage.json", rapid_identity),
+        min_buy_samples=3,
+    )
+    assert buy(engine, 1_000_000, 1) is None
+    action = buy(engine, 999_000, 2)
+    assert action["round_trip_completed"] is True
+    assert action["position_id"] == "paper-1"
+    assert engine.state["status"] == "flat"
+    assert engine.state["positions"] == []
+    assert len(engine.state["completed_cycles"]) == 1
+    assert engine.state["completed_cycles"][0]["profit_percent"] == pytest.approx(2.0)
+
+    assert buy(engine, 998_000, 3) is None
+    assert buy(engine, 997_000, 4)["round_trip_completed"] is True
+    assert len(engine.state["completed_cycles"]) == 2
+
+
 def test_shadow_sell_uses_floor_minus_sell_gas_and_records_cycle(tmp_path):
     engine = RapidCycleEngine(RapidCycleJournal(tmp_path / "state.json", identity()))
     buy(engine, 1_000_000, 1)

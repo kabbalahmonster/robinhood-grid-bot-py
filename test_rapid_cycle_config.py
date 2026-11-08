@@ -21,6 +21,7 @@ def test_legacy_environment_defaults_rapid_cycle_off():
     assert config.rapid_cycle_mode == "off"
     assert config.rapid_cycle_canary is False
     assert config.rapid_cycle_exclusive is False
+    assert config.rapid_cycle_entry_strategy == "dip"
     assert config.rapid_cycle_min_confidence_samples == 2
     assert config.rapid_cycle_max_open_positions == 1
 
@@ -63,6 +64,7 @@ def test_live_accepts_only_complete_dedicated_canary_contract():
 
 @pytest.mark.parametrize("name,value", [
     ("RAPID_CYCLE_MODE", "execute"),
+    ("RAPID_CYCLE_ENTRY_STRATEGY", "hope"),
     ("RAPID_CYCLE_ENTRY_DROP_PERCENT", "0"),
     ("RAPID_CYCLE_MIN_BUY_SAMPLES", "1"),
     ("RAPID_CYCLE_LOOKBACK_SAMPLES", "2"),
@@ -96,3 +98,14 @@ def test_live_refuses_multi_position_authority_while_shadow_accepts_it():
     with patch.dict(os.environ, live, clear=True):
         with pytest.raises(ValueError, match="RAPID_CYCLE_MAX_OPEN_POSITIONS=1"):
             load_config()
+
+
+def test_route_arbitrage_strategy_requires_explicit_activation():
+    env = {
+        **BASE_ENV,
+        "RAPID_CYCLE_MODE": "shadow",
+        "RAPID_CYCLE_ENTRY_STRATEGY": "route_arbitrage",
+    }
+    with patch.dict(os.environ, env, clear=True):
+        config = load_config()
+    assert config.rapid_cycle_entry_strategy == "route_arbitrage"

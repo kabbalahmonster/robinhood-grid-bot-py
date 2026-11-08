@@ -1024,6 +1024,7 @@ class GridBot:
                 ) * Decimal(10**18)),
                 entry_drop_percent=self.config.rapid_cycle_entry_drop_percent,
                 min_profit_percent=self.config.rapid_cycle_min_profit_percent,
+                entry_strategy=self.config.rapid_cycle_entry_strategy,
                 lookback_samples=self.config.rapid_cycle_lookback_samples,
                 min_confidence_samples=self.config.rapid_cycle_min_confidence_samples,
                 max_open_positions=self.config.rapid_cycle_max_open_positions,
@@ -1902,6 +1903,7 @@ class GridBot:
 
         result = {
             "mode": identity.mode,
+            "entry_strategy": identity.entry_strategy,
             "status": state.get("status"),
             "principal_eth": eth_from_wei(identity.principal_wei),
             "entry_drop_percent": float(identity.entry_drop_percent),
