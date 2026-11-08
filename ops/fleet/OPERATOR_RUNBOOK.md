@@ -234,10 +234,13 @@ To canary LI.FI, set `LI_FI_API_KEY` and use
 
 Keep `RAPID_CYCLE_MODE=off` fleet-wide. A shadow trial is non-signing but adds
 provider/RPC traffic and writes `data/rapid_cycle_state.json`; run it on one
-token for at least 24 hours and review completed paper cycles, holding time,
-route pairs, timeouts, and rate limits. The paper buy does not mutate pool
-reserves, so shadow results justify only a tiny live canary, never direct fleet
-promotion.
+token for at least 24 hours and review repeated completed paper shots, route
+pairs, confidence resets, timeouts, and rate limits. Each shot must have
+consecutive complete buy→sell preflights clearing the net-profit floor, and
+shadow records that conservative round trip immediately instead of retaining a
+stuck paper position. The paper buy does not mutate pool reserves, so shadow
+results justify only a tiny live canary, never direct fleet promotion. Archive
+version-1 rapid-cycle state before starting the version-2 confidence engine.
 
 Live mode is a dedicated one-position bot mode. Stop the bot, archive the
 shadow journal, confirm gridless positions are empty, apply the complete guarded

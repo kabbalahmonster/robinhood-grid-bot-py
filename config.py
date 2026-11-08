@@ -224,6 +224,7 @@ class BotConfig:
     rapid_cycle_min_profit_percent: float = 1.0
     rapid_cycle_min_buy_samples: int = 3
     rapid_cycle_lookback_samples: int = 12
+    rapid_cycle_min_confidence_samples: int = 2
     rapid_cycle_poll_every_cycles: int = 1
     rapid_cycle_state_file: str = "data/rapid_cycle_state.json"
     bidirectional_pnl_enabled: bool = True
@@ -315,6 +316,10 @@ class BotConfig:
             )
         if int(getattr(self, "rapid_cycle_poll_every_cycles", 1)) < 1:
             raise ValueError("RAPID_CYCLE_POLL_EVERY_CYCLES must be at least 1")
+        if not 1 <= int(getattr(self, "rapid_cycle_min_confidence_samples", 2)) <= 100:
+            raise ValueError(
+                "RAPID_CYCLE_MIN_CONFIDENCE_SAMPLES must be between 1 and 100"
+            )
         if rapid_mode == "live":
             live_requirements = {
                 "RAPID_CYCLE_CANARY=true": bool(getattr(self, "rapid_cycle_canary", False)),
@@ -727,6 +732,9 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
         rapid_cycle_min_buy_samples=int(os.getenv("RAPID_CYCLE_MIN_BUY_SAMPLES", "3")),
         rapid_cycle_lookback_samples=int(os.getenv(
             "RAPID_CYCLE_LOOKBACK_SAMPLES", "12"
+        )),
+        rapid_cycle_min_confidence_samples=int(os.getenv(
+            "RAPID_CYCLE_MIN_CONFIDENCE_SAMPLES", "2"
         )),
         rapid_cycle_poll_every_cycles=int(os.getenv(
             "RAPID_CYCLE_POLL_EVERY_CYCLES", "1"

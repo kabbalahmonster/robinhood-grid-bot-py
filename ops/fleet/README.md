@@ -2051,18 +2051,24 @@ Preview and enable shadow on exactly one stopped or monitored bot:
 update-variable --allow-add --only TOKEN \
   RAPID_CYCLE_MODE=shadow RAPID_CYCLE_PRINCIPAL_ETH=0.001 \
   RAPID_CYCLE_ENTRY_DROP_PERCENT=2 RAPID_CYCLE_MIN_PROFIT_PERCENT=1 \
+  RAPID_CYCLE_MIN_CONFIDENCE_SAMPLES=2 \
   RAPID_CYCLE_POLL_EVERY_CYCLES=1
 update-variable --apply --restart --allow-add --only TOKEN \
   RAPID_CYCLE_MODE=shadow RAPID_CYCLE_PRINCIPAL_ETH=0.001 \
   RAPID_CYCLE_ENTRY_DROP_PERCENT=2 RAPID_CYCLE_MIN_PROFIT_PERCENT=1 \
+  RAPID_CYCLE_MIN_CONFIDENCE_SAMPLES=2 \
   RAPID_CYCLE_POLL_EVERY_CYCLES=1
 ```
 
-Inspect `data/rapid_cycle_state.json` and logs for completed paper cycles. Do
-not interpret a paper cycle as a guaranteed fill: its hypothetical buy did not
-change pool reserves. Before a live canary, stop the selected bot, archive that
-shadow journal, verify `data/gridless_positions.json` is empty, and dedicate the
-checkout to one position. Preview then apply the complete live contract:
+Inspect `data/rapid_cycle_state.json` and logs for repeated completed paper
+cycles. Every shot requires two consecutive complete buy→sell preflights above
+the net-profit floor; missing or unprofitable exits reset confidence without
+opening a paper position. Do not interpret a paper cycle as a guaranteed fill:
+its hypothetical buy did not change pool reserves. Version-1 journals must be
+archived before starting this version-2 state machine. Before a live canary,
+stop the selected bot, archive that shadow journal, verify
+`data/gridless_positions.json` is empty, and dedicate the checkout to one
+position. Preview then apply the complete live contract:
 
 ```bash
 update-variable --allow-add --only TOKEN \
@@ -2070,13 +2076,15 @@ update-variable --allow-add --only TOKEN \
   USE_GRIDLESS=true GRIDLESS_ALLOCATION_MODE=threshold MAX_ACTIVE_POSITIONS=1 \
   MOONBAG_PERCENTAGE=0 GRIDLESS_STOPLOSS_ENABLED=false \
   ROUTE_TOURNAMENT_MODE=gate ROUTE_TOURNAMENT_CANARY=true \
-  POLL_INTERVAL_SECONDS=12 MIN_PROFIT_PERCENT=1 RAPID_CYCLE_MIN_PROFIT_PERCENT=1
+  POLL_INTERVAL_SECONDS=12 MIN_PROFIT_PERCENT=1 RAPID_CYCLE_MIN_PROFIT_PERCENT=1 \
+  RAPID_CYCLE_MIN_CONFIDENCE_SAMPLES=2
 update-variable --apply --allow-add --only TOKEN \
   RAPID_CYCLE_MODE=live RAPID_CYCLE_CANARY=true RAPID_CYCLE_EXCLUSIVE=true \
   USE_GRIDLESS=true GRIDLESS_ALLOCATION_MODE=threshold MAX_ACTIVE_POSITIONS=1 \
   MOONBAG_PERCENTAGE=0 GRIDLESS_STOPLOSS_ENABLED=false \
   ROUTE_TOURNAMENT_MODE=gate ROUTE_TOURNAMENT_CANARY=true \
-  POLL_INTERVAL_SECONDS=12 MIN_PROFIT_PERCENT=1 RAPID_CYCLE_MIN_PROFIT_PERCENT=1
+  POLL_INTERVAL_SECONDS=12 MIN_PROFIT_PERCENT=1 RAPID_CYCLE_MIN_PROFIT_PERCENT=1 \
+  RAPID_CYCLE_MIN_CONFIDENCE_SAMPLES=2
 ```
 
 Run that checkout's `grid_bot.py --check-config`, start only that bot, and

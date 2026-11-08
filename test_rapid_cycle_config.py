@@ -21,6 +21,7 @@ def test_legacy_environment_defaults_rapid_cycle_off():
     assert config.rapid_cycle_mode == "off"
     assert config.rapid_cycle_canary is False
     assert config.rapid_cycle_exclusive is False
+    assert config.rapid_cycle_min_confidence_samples == 2
 
 
 def test_shadow_is_explicit_but_needs_no_execution_acknowledgement():
@@ -65,6 +66,7 @@ def test_live_accepts_only_complete_dedicated_canary_contract():
     ("RAPID_CYCLE_MIN_BUY_SAMPLES", "1"),
     ("RAPID_CYCLE_LOOKBACK_SAMPLES", "2"),
     ("RAPID_CYCLE_POLL_EVERY_CYCLES", "0"),
+    ("RAPID_CYCLE_MIN_CONFIDENCE_SAMPLES", "0"),
 ])
 def test_invalid_rapid_cycle_configuration_is_rejected(name, value):
     env = {**BASE_ENV, "RAPID_CYCLE_MODE": "shadow", name: value}

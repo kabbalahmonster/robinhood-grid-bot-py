@@ -18,7 +18,7 @@ import tempfile
 from typing import Any, Optional
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 MODES = {"shadow", "live"}
 
 
@@ -36,6 +36,7 @@ class RapidCycleIdentity:
     entry_drop_percent: float
     min_profit_percent: float
     lookback_samples: int = 12
+    min_confidence_samples: int = 2
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -47,6 +48,7 @@ class RapidCycleIdentity:
             "entry_drop_percent": float(self.entry_drop_percent),
             "min_profit_percent": float(self.min_profit_percent),
             "lookback_samples": int(self.lookback_samples),
+            "min_confidence_samples": int(self.min_confidence_samples),
         }
 
 
@@ -58,6 +60,8 @@ class RapidCycleJournal:
             raise ValueError("rapid-cycle journal mode must be shadow or live")
         if int(identity.lookback_samples) < 2:
             raise ValueError("rapid-cycle lookback_samples must be at least 2")
+        if int(identity.min_confidence_samples) < 1:
+            raise ValueError("rapid-cycle min_confidence_samples must be at least 1")
         self.path = Path(path)
         self.identity = identity
         self.state = self._load()
@@ -73,6 +77,7 @@ class RapidCycleJournal:
             "buy_sample_count": 0,
             "peak_unit_cost_scaled": None,
             "buy_unit_cost_window": [],
+            "round_trip_confidence_streak": 0,
             "position": None,
             "pending_action": None,
             "completed_cycles": [],
@@ -165,6 +170,11 @@ class RapidCycleEngine:
 
     def observe_buy(self, *, block_number: int, provider: str, settlement: str,
                     token_floor_raw: int, projected_gas_wei: int,
+                    exit_provider: Optional[str] = None,
+                    exit_settlement: Optional[str] = None,
+                    exit_output_floor_wei: Optional[int] = None,
+                    exit_projected_gas_wei: Optional[int] = None,
+                    exit_block_number: Optional[int] = None,
                     observed_at: Optional[str] = None) -> Optional[dict[str, Any]]:
         if self.state["status"] != "flat":
             return None
@@ -193,13 +203,78 @@ class RapidCycleEngine:
             "unit_cost_scaled": str(unit_cost),
             "drop_from_peak_percent": round(drop, 8),
         })
+        exit_ready = (
+            exit_provider is not None
+            and exit_settlement is not None
+            and exit_output_floor_wei is not None
+            and exit_projected_gas_wei is not None
+        )
+        projected_net_return = None
+        projected_profit = None
+        projected_profit_percent = None
+        sell_observation = None
+        if exit_ready:
+            exit_output_floor_wei = int(exit_output_floor_wei)
+            exit_projected_gas_wei = int(exit_projected_gas_wei)
+            if exit_output_floor_wei <= 0 or exit_projected_gas_wei < 0:
+                raise ValueError("invalid rapid-cycle exit-confidence observation")
+            projected_net_return = exit_output_floor_wei - exit_projected_gas_wei
+            projected_profit = projected_net_return - economic_cost
+            projected_profit_percent = (
+                projected_profit * 100 / economic_cost if economic_cost > 0 else -100.0
+            )
+            sell_observation = self._observation(
+                direction="sell",
+                block_number=exit_block_number or block_number,
+                provider=exit_provider,
+                settlement=exit_settlement,
+                amount_in_raw=token_floor_raw,
+                output_floor_raw=exit_output_floor_wei,
+                projected_gas_wei=exit_projected_gas_wei,
+                score_wei=projected_net_return,
+                observed_at=observed_at,
+            )
+            sell_observation.update({
+                "cost_wei": str(economic_cost),
+                "net_return_wei": str(projected_net_return),
+                "projected_profit_wei": str(projected_profit),
+                "projected_profit_percent": round(projected_profit_percent, 8),
+            })
+            observation.update({
+                "exit_provider": exit_provider,
+                "exit_settlement": exit_settlement,
+                "exit_output_floor_wei": str(exit_output_floor_wei),
+                "exit_projected_gas_wei": str(exit_projected_gas_wei),
+                "projected_net_return_wei": str(projected_net_return),
+                "projected_profit_wei": str(projected_profit),
+                "projected_profit_percent": round(projected_profit_percent, 8),
+            })
+        qualified = bool(
+            exit_ready
+            and projected_profit_percent is not None
+            and projected_profit_percent >= self.journal.identity.min_profit_percent
+        )
+        confidence_streak = (
+            int(self.state.get("round_trip_confidence_streak", 0)) + 1
+            if qualified else 0
+        )
+        observation.update({
+            "round_trip_qualified": qualified,
+            "confidence_streak": confidence_streak,
+            "required_confidence_samples": self.journal.identity.min_confidence_samples,
+        })
         self.state.update({
             "buy_sample_count": samples,
             "peak_unit_cost_scaled": str(peak),
             "buy_unit_cost_window": [str(value) for value in window],
+            "round_trip_confidence_streak": confidence_streak,
             "last_observation": observation,
         })
-        if samples < self.min_buy_samples or drop < self.journal.identity.entry_drop_percent:
+        if (
+            samples < self.min_buy_samples
+            or drop < self.journal.identity.entry_drop_percent
+            or confidence_streak < self.journal.identity.min_confidence_samples
+        ):
             self.journal.save()
             return None
         action = {
@@ -222,8 +297,14 @@ class RapidCycleEngine:
                 },
                 "pending_action": None,
             })
-            self.journal.save()
-            return {**action, "paper_filled": True}
+            self._complete_cycle(
+                sell_observation=sell_observation,
+                received_wei=projected_net_return,
+                profit_wei=projected_profit,
+                tx_hash=None,
+                closed_at=observed_at,
+            )
+            return {**action, "paper_filled": True, "round_trip_completed": True}
         self.state.update({"status": "action_pending", "pending_action": action})
         self.journal.save()
         return action
@@ -345,6 +426,7 @@ class RapidCycleEngine:
             "buy_sample_count": 0,
             "peak_unit_cost_scaled": None,
             "buy_unit_cost_window": [],
+            "round_trip_confidence_streak": 0,
             "completed_cycles": history[-500:],
             "last_completed_cycle": record,
         })

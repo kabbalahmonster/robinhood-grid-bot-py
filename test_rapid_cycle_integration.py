@@ -49,13 +49,32 @@ def wait_for_observer(bot):
     assert bot._rapid_cycle_observer_active is False
 
 
+def qualifying_buy(rapid, *, block_number, provider, settlement,
+                   token_floor_raw, projected_gas_wei):
+    economic_cost = rapid.journal.identity.principal_wei + projected_gas_wei
+    exit_gas = 10**12
+    return rapid.observe_buy(
+        block_number=block_number, provider=provider, settlement=settlement,
+        token_floor_raw=token_floor_raw, projected_gas_wei=projected_gas_wei,
+        exit_provider="sushiswap", exit_settlement="native",
+        exit_output_floor_wei=int(economic_cost * 1.02) + exit_gas,
+        exit_projected_gas_wei=exit_gas, exit_block_number=block_number,
+    )
+
+
 def test_shadow_observer_can_paper_fill_but_never_broadcasts(tmp_path):
     bot = bare_bot(tmp_path, "shadow")
     observations = [
         {"block_number": 1, "provider": "uniswap", "settlement": "native",
          "output_floor_raw": 1_000_000, "projected_gas_wei": 10**12},
+        {"block_number": 1, "provider": "sushiswap", "settlement": "native",
+         "output_floor_raw": 1_022_000_000_000_000,
+         "projected_gas_wei": 10**12},
         {"block_number": 2, "provider": "sushiswap", "settlement": "native",
          "output_floor_raw": 1_030_000, "projected_gas_wei": 10**12},
+        {"block_number": 2, "provider": "sushiswap", "settlement": "native",
+         "output_floor_raw": 1_022_000_000_000_000,
+         "projected_gas_wei": 10**12},
     ]
     bot._collect_rapid_cycle_observation = Mock(side_effect=observations)
     bot._dispatch_rapid_cycle_observer()
@@ -63,8 +82,8 @@ def test_shadow_observer_can_paper_fill_but_never_broadcasts(tmp_path):
     bot.round_count += 1
     bot._dispatch_rapid_cycle_observer()
     wait_for_observer(bot)
-    assert bot._rapid_cycle_engine.state["status"] == "open"
-    assert bot._rapid_cycle_engine.state["position"]["kind"] == "paper"
+    assert bot._rapid_cycle_engine.state["status"] == "flat"
+    assert len(bot._rapid_cycle_engine.state["completed_cycles"]) == 1
     bot.wallet._send_transaction.assert_not_called()
 
 
@@ -72,11 +91,11 @@ def test_dashboard_snapshot_exposes_bounded_public_shadow_state(tmp_path):
     bot = bare_bot(tmp_path, "shadow")
     bot.token_unit = 10**6
     rapid = bot._rapid_cycle_engine
-    rapid.observe_buy(
+    qualifying_buy(rapid,
         block_number=1, provider="uniswap", settlement="native",
         token_floor_raw=1_000_000, projected_gas_wei=10**12,
     )
-    rapid.observe_buy(
+    qualifying_buy(rapid,
         block_number=2, provider="sushiswap", settlement="weth",
         token_floor_raw=1_030_000, projected_gas_wei=10**12,
     )
@@ -84,13 +103,12 @@ def test_dashboard_snapshot_exposes_bounded_public_shadow_state(tmp_path):
     snapshot = bot._rapid_cycle_dashboard_snapshot()
 
     assert snapshot["mode"] == "shadow"
-    assert snapshot["status"] == "open"
+    assert snapshot["status"] == "flat"
     assert snapshot["principal_eth"] == 0.001
-    assert snapshot["position"]["kind"] == "paper"
-    assert snapshot["position"]["token_amount"] == 1.03
+    assert snapshot["completed_cycle_count"] == 1
     assert snapshot["last_observation"]["direction"] == "buy"
     assert snapshot["last_observation"]["provider"] == "sushiswap"
-    assert "token_amount_raw" not in snapshot["position"]
+    assert "position" not in snapshot
     assert "identity" not in snapshot
 
 
@@ -143,11 +161,11 @@ def test_observation_uses_read_only_execution_preflight_and_loss_visibility():
 def test_live_buy_signal_is_requoted_through_existing_guarded_execution(tmp_path):
     bot = bare_bot(tmp_path, "live")
     rapid = bot._rapid_cycle_engine
-    rapid.observe_buy(
+    qualifying_buy(rapid,
         block_number=1, provider="uniswap", settlement="native",
         token_floor_raw=1_000_000, projected_gas_wei=10**12,
     )
-    rapid.observe_buy(
+    qualifying_buy(rapid,
         block_number=2, provider="uniswap", settlement="native",
         token_floor_raw=1_030_000, projected_gas_wei=10**12,
     )
@@ -172,11 +190,11 @@ def test_live_buy_signal_is_requoted_through_existing_guarded_execution(tmp_path
 def test_live_rejected_guard_cancels_signal_without_inventing_fill(tmp_path):
     bot = bare_bot(tmp_path, "live")
     rapid = bot._rapid_cycle_engine
-    rapid.observe_buy(
+    qualifying_buy(rapid,
         block_number=1, provider="uniswap", settlement="native",
         token_floor_raw=1_000_000, projected_gas_wei=10**12,
     )
-    rapid.observe_buy(
+    qualifying_buy(rapid,
         block_number=2, provider="uniswap", settlement="native",
         token_floor_raw=1_030_000, projected_gas_wei=10**12,
     )
@@ -225,11 +243,11 @@ def test_live_sell_signal_uses_existing_guarded_sell_and_records_receipt(tmp_pat
 def test_restart_discards_stale_pending_buy_signal_without_execution(tmp_path):
     bot = bare_bot(tmp_path, "live")
     rapid = bot._rapid_cycle_engine
-    rapid.observe_buy(
+    qualifying_buy(rapid,
         block_number=1, provider="uniswap", settlement="native",
         token_floor_raw=1_000_000, projected_gas_wei=10**12,
     )
-    rapid.observe_buy(
+    qualifying_buy(rapid,
         block_number=2, provider="uniswap", settlement="native",
         token_floor_raw=1_030_000, projected_gas_wei=10**12,
     )
@@ -242,11 +260,11 @@ def test_restart_discards_stale_pending_buy_signal_without_execution(tmp_path):
 def test_restart_fails_closed_if_pending_buy_has_durable_position(tmp_path):
     bot = bare_bot(tmp_path, "live")
     rapid = bot._rapid_cycle_engine
-    rapid.observe_buy(
+    qualifying_buy(rapid,
         block_number=1, provider="uniswap", settlement="native",
         token_floor_raw=1_000_000, projected_gas_wei=10**12,
     )
-    rapid.observe_buy(
+    qualifying_buy(rapid,
         block_number=2, provider="uniswap", settlement="native",
         token_floor_raw=1_030_000, projected_gas_wei=10**12,
     )

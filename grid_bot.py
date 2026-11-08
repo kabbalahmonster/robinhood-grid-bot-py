@@ -1025,6 +1025,7 @@ class GridBot:
                 entry_drop_percent=self.config.rapid_cycle_entry_drop_percent,
                 min_profit_percent=self.config.rapid_cycle_min_profit_percent,
                 lookback_samples=self.config.rapid_cycle_lookback_samples,
+                min_confidence_samples=self.config.rapid_cycle_min_confidence_samples,
             )
             self._rapid_cycle_engine = RapidCycleEngine(
                 RapidCycleJournal(self.config.rapid_cycle_state_file, identity),
@@ -1906,7 +1907,11 @@ class GridBot:
             "min_profit_percent": float(identity.min_profit_percent),
             "min_buy_samples": int(engine.min_buy_samples),
             "lookback_samples": int(identity.lookback_samples),
+            "min_confidence_samples": int(identity.min_confidence_samples),
             "buy_sample_count": int(state.get("buy_sample_count", 0) or 0),
+            "confidence_streak": int(
+                state.get("round_trip_confidence_streak", 0) or 0
+            ),
             "completed_cycle_count": len(state.get("completed_cycles") or []),
         }
 
@@ -1917,6 +1922,9 @@ class GridBot:
                     "direction", "block_number", "provider", "settlement",
                     "observed_at", "drop_from_peak_percent",
                     "projected_profit_percent",
+                    "exit_provider", "exit_settlement",
+                    "round_trip_qualified", "confidence_streak",
+                    "required_confidence_samples",
                 ) if key in observation
             }
             projected_gas = eth_from_wei(observation.get("projected_gas_wei"))
@@ -2117,6 +2125,17 @@ class GridBot:
                     if observation is None:
                         logger.info("Rapid cycle buy observation: no complete eligible route")
                         return
+                    exit_observation = self._collect_rapid_cycle_observation(
+                        "sell",
+                        observation["output_floor_raw"],
+                        sold_cost_wei=(
+                            amount + observation["projected_gas_wei"]
+                        ),
+                    )
+                    if exit_observation is None:
+                        logger.info(
+                            "Rapid cycle entry confidence: no complete eligible exit route"
+                        )
                     with self._rapid_cycle_lock:
                         action = engine.observe_buy(
                             block_number=observation["block_number"],
@@ -2124,6 +2143,26 @@ class GridBot:
                             settlement=observation["settlement"],
                             token_floor_raw=observation["output_floor_raw"],
                             projected_gas_wei=observation["projected_gas_wei"],
+                            exit_provider=(
+                                exit_observation["provider"]
+                                if exit_observation else None
+                            ),
+                            exit_settlement=(
+                                exit_observation["settlement"]
+                                if exit_observation else None
+                            ),
+                            exit_output_floor_wei=(
+                                exit_observation["output_floor_raw"]
+                                if exit_observation else None
+                            ),
+                            exit_projected_gas_wei=(
+                                exit_observation["projected_gas_wei"]
+                                if exit_observation else None
+                            ),
+                            exit_block_number=(
+                                exit_observation["block_number"]
+                                if exit_observation else None
+                            ),
                         )
                 else:
                     position = state.get("position") or {}
