@@ -126,6 +126,7 @@ class DashboardReporter:
         entry_allocation_mode: str = "threshold",
         drawdown_ladder: Optional[dict] = None,
         threshold_gap: Optional[dict] = None,
+        rapid_cycle: Optional[dict] = None,
         capacity_warning: Optional[dict] = None,
         needs_gas: Optional[dict] = None,
         funding_warning: Optional[dict] = None,
@@ -200,6 +201,7 @@ class DashboardReporter:
             "entry_allocation_mode": entry_allocation_mode,
             "drawdown_ladder": drawdown_ladder,
             "threshold_gap": threshold_gap,
+            "rapid_cycle": rapid_cycle,
             "capacity_warning": capacity_warning,
             "needs_gas": needs_gas,
             "funding_warning": funding_warning,
@@ -258,7 +260,7 @@ class DashboardReporter:
                     "buy_attempt", "sell_attempt", "buys", "sells",
                     "session_profit_eth", "realized_profit_eth",
                     "realized_profit_periods", "realized_sales",
-                    "trades_history", "events",
+                    "trades_history", "events", "rapid_cycle",
                 ):
                     payload[key] = copy.deepcopy(self._latest_payload.get(key))
                 self._revision += 1

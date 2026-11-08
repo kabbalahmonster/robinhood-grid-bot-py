@@ -1883,6 +1883,93 @@ class GridBot:
         with self._rapid_cycle_lock:
             return engine.journal.snapshot()
 
+    def _rapid_cycle_dashboard_snapshot(self):
+        """Return a bounded public summary of the rapid-cycle journal."""
+        engine = getattr(self, "_rapid_cycle_engine", None)
+        if engine is None:
+            return None
+        with self._rapid_cycle_lock:
+            state = engine.journal.snapshot()
+            identity = engine.journal.identity
+
+        def eth_from_wei(value):
+            try:
+                return int(value) / 10**18
+            except (TypeError, ValueError):
+                return None
+
+        result = {
+            "mode": identity.mode,
+            "status": state.get("status"),
+            "principal_eth": eth_from_wei(identity.principal_wei),
+            "entry_drop_percent": float(identity.entry_drop_percent),
+            "min_profit_percent": float(identity.min_profit_percent),
+            "min_buy_samples": int(engine.min_buy_samples),
+            "lookback_samples": int(identity.lookback_samples),
+            "buy_sample_count": int(state.get("buy_sample_count", 0) or 0),
+            "completed_cycle_count": len(state.get("completed_cycles") or []),
+        }
+
+        observation = state.get("last_observation")
+        if isinstance(observation, dict):
+            public_observation = {
+                key: observation[key] for key in (
+                    "direction", "block_number", "provider", "settlement",
+                    "observed_at", "drop_from_peak_percent",
+                    "projected_profit_percent",
+                ) if key in observation
+            }
+            projected_gas = eth_from_wei(observation.get("projected_gas_wei"))
+            if projected_gas is not None:
+                public_observation["projected_gas_eth"] = projected_gas
+            result["last_observation"] = public_observation
+
+        position = state.get("position")
+        if isinstance(position, dict):
+            public_position = {
+                key: position[key] for key in (
+                    "kind", "opened_at", "buy_provider", "buy_settlement",
+                ) if key in position
+            }
+            try:
+                public_position["token_amount"] = (
+                    int(position["token_amount_raw"]) / self.token_unit
+                )
+            except (KeyError, TypeError, ValueError, ZeroDivisionError):
+                pass
+            cost_eth = eth_from_wei(position.get("cost_wei"))
+            if cost_eth is not None:
+                public_position["cost_eth"] = cost_eth
+            result["position"] = public_position
+
+        pending = state.get("pending_action")
+        if isinstance(pending, dict):
+            result["pending_action"] = {
+                key: pending[key] for key in ("type", "requested_at")
+                if key in pending
+            }
+
+        completed = state.get("last_completed_cycle")
+        if isinstance(completed, dict):
+            public_completed = {
+                key: completed[key] for key in (
+                    "opened_at", "closed_at", "profit_percent",
+                ) if key in completed
+            }
+            profit_eth = eth_from_wei(completed.get("profit_wei"))
+            if profit_eth is not None:
+                public_completed["profit_eth"] = profit_eth
+            buy = completed.get("buy_observation")
+            sell = completed.get("sell_observation")
+            if isinstance(buy, dict):
+                public_completed["buy_provider"] = buy.get("provider")
+                public_completed["buy_settlement"] = buy.get("settlement")
+            if isinstance(sell, dict):
+                public_completed["sell_provider"] = sell.get("provider")
+                public_completed["sell_settlement"] = sell.get("settlement")
+            result["last_completed_cycle"] = public_completed
+        return result
+
     def _collect_rapid_cycle_observation(self, direction, amount, sold_cost_wei=None):
         """Collect one non-authorizing best-route observation for the engine."""
         from route_tournament import collect_execution_preflight, snapshot
@@ -8249,6 +8336,7 @@ class GridBot:
                     ),
                     drawdown_ladder=ladder_status,
                     threshold_gap=threshold_gap,
+                    rapid_cycle=self._rapid_cycle_dashboard_snapshot(),
                     capacity_warning=capacity_warning,
                     needs_gas=needs_gas,
                     funding_warning=self._funding_warning,

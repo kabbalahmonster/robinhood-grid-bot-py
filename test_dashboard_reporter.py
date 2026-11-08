@@ -138,6 +138,20 @@ class TestDashboardReporter(unittest.TestCase):
         self.assertEqual(reporter._queue[0]["threshold_gap"], gap)
 
     @patch("dashboard_reporter.threading.Thread.start")
+    def test_rapid_cycle_state_is_in_status_payload(self, _start):
+        reporter = DashboardReporter("https://doomdash.ca/api/status")
+        rapid = {
+            "mode": "shadow",
+            "status": "open",
+            "principal_eth": 0.001,
+            "position": {"kind": "paper", "cost_eth": 0.00102},
+        }
+
+        reporter.report(rapid_cycle=rapid)
+
+        self.assertEqual(reporter._queue[0]["rapid_cycle"], rapid)
+
+    @patch("dashboard_reporter.threading.Thread.start")
     def test_sell_attempt_is_round_scoped_payload_field(self, _start):
         reporter = DashboardReporter("https://doomdash.ca/api/status")
         attempt = {

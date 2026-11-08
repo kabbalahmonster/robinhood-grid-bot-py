@@ -68,6 +68,32 @@ def test_shadow_observer_can_paper_fill_but_never_broadcasts(tmp_path):
     bot.wallet._send_transaction.assert_not_called()
 
 
+def test_dashboard_snapshot_exposes_bounded_public_shadow_state(tmp_path):
+    bot = bare_bot(tmp_path, "shadow")
+    bot.token_unit = 10**6
+    rapid = bot._rapid_cycle_engine
+    rapid.observe_buy(
+        block_number=1, provider="uniswap", settlement="native",
+        token_floor_raw=1_000_000, projected_gas_wei=10**12,
+    )
+    rapid.observe_buy(
+        block_number=2, provider="sushiswap", settlement="weth",
+        token_floor_raw=1_030_000, projected_gas_wei=10**12,
+    )
+
+    snapshot = bot._rapid_cycle_dashboard_snapshot()
+
+    assert snapshot["mode"] == "shadow"
+    assert snapshot["status"] == "open"
+    assert snapshot["principal_eth"] == 0.001
+    assert snapshot["position"]["kind"] == "paper"
+    assert snapshot["position"]["token_amount"] == 1.03
+    assert snapshot["last_observation"]["direction"] == "buy"
+    assert snapshot["last_observation"]["provider"] == "sushiswap"
+    assert "token_amount_raw" not in snapshot["position"]
+    assert "identity" not in snapshot
+
+
 def test_observation_uses_read_only_execution_preflight_and_loss_visibility():
     bot = GridBot.__new__(GridBot)
     bot.config = SimpleNamespace(

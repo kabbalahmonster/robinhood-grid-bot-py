@@ -1942,6 +1942,13 @@ is evidence for a tiny live canary, not proof that a larger trade will fill.
 Provider traffic and shared rate limits remain real. Use one canary token and a
 12-20 second poll interval rather than enabling this fleet-wide.
 
+When DoomDash reporting is enabled, the bot sends a bounded public
+`rapid_cycle` summary with the mode, state, configured thresholds, paper/live
+position economics, last observation route, and latest completed-cycle result.
+It never sends the journal identity, raw token amounts, calldata, or wallet
+credentials. Dashboards without the matching feature branch safely ignore the
+extra field.
+
 `live` uses the same state machine, but its observer can only leave a pending
 action in the journal. The main bot thread obtains a fresh gate tournament,
 revalidates the exact input, locally simulates calldata, enforces balance,
