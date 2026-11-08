@@ -216,6 +216,16 @@ class BotConfig:
     route_tournament_speculative_fallback_seconds: float = 0.0
     route_tournament_shadow_background: bool = False
     route_tournament_round_route_reuse: bool = False
+    rapid_cycle_mode: str = "off"
+    rapid_cycle_canary: bool = False
+    rapid_cycle_exclusive: bool = False
+    rapid_cycle_principal_eth: float = 0.001
+    rapid_cycle_entry_drop_percent: float = 2.0
+    rapid_cycle_min_profit_percent: float = 1.0
+    rapid_cycle_min_buy_samples: int = 3
+    rapid_cycle_lookback_samples: int = 12
+    rapid_cycle_poll_every_cycles: int = 1
+    rapid_cycle_state_file: str = "data/rapid_cycle_state.json"
     bidirectional_pnl_enabled: bool = True
     pnl_polling_mode: str = "bidirectional"
     pnl_legacy_triggers: Optional[bool] = None
@@ -279,6 +289,62 @@ class BotConfig:
             raise ValueError(
                 "POLL_CADENCE_MODE supports completion_delay or fixed_rate"
             )
+        rapid_mode = str(getattr(self, "rapid_cycle_mode", "off")).strip().lower()
+        if rapid_mode not in {"off", "shadow", "live"}:
+            raise ValueError("RAPID_CYCLE_MODE supports off, shadow, or live")
+        for name, minimum, maximum in (
+            ("rapid_cycle_principal_eth", 0.000001, 1000),
+            ("rapid_cycle_entry_drop_percent", 0.01, 99),
+            ("rapid_cycle_min_profit_percent", 0, 1000),
+        ):
+            value = float(getattr(self, name))
+            if not math.isfinite(value) or not minimum <= value <= maximum:
+                raise ValueError(
+                    f"{name.upper()} must be between {minimum} and {maximum}"
+                )
+        if int(getattr(self, "rapid_cycle_min_buy_samples", 3)) < 2:
+            raise ValueError("RAPID_CYCLE_MIN_BUY_SAMPLES must be at least 2")
+        if not (
+            int(getattr(self, "rapid_cycle_min_buy_samples", 3))
+            <= int(getattr(self, "rapid_cycle_lookback_samples", 12))
+            <= 10000
+        ):
+            raise ValueError(
+                "RAPID_CYCLE_LOOKBACK_SAMPLES must be at least "
+                "RAPID_CYCLE_MIN_BUY_SAMPLES and at most 10000"
+            )
+        if int(getattr(self, "rapid_cycle_poll_every_cycles", 1)) < 1:
+            raise ValueError("RAPID_CYCLE_POLL_EVERY_CYCLES must be at least 1")
+        if rapid_mode == "live":
+            live_requirements = {
+                "RAPID_CYCLE_CANARY=true": bool(getattr(self, "rapid_cycle_canary", False)),
+                "RAPID_CYCLE_EXCLUSIVE=true": bool(getattr(self, "rapid_cycle_exclusive", False)),
+                "USE_GRIDLESS=true": bool(getattr(self, "use_gridless", False)),
+                "GRIDLESS_ALLOCATION_MODE=threshold": (
+                    getattr(self, "gridless_allocation_mode", "threshold") == "threshold"
+                ),
+                "MAX_ACTIVE_POSITIONS=1": int(getattr(self, "max_active_positions", 0)) == 1,
+                "ROUTE_TOURNAMENT_MODE=gate": self.route_tournament_mode == "gate",
+                "ROUTE_TOURNAMENT_CANARY=true": bool(self.route_tournament_canary),
+                "POLL_INTERVAL_SECONDS>=ROUTE_TOURNAMENT_GATE_TIMEOUT_SECONDS": (
+                    int(self.poll_interval_seconds)
+                    >= float(self.route_tournament_gate_timeout_seconds)
+                ),
+                "MOONBAG_PERCENTAGE=0": float(getattr(self, "moonbag_percentage", 0)) == 0,
+                "GRIDLESS_STOPLOSS_ENABLED=false": not bool(
+                    getattr(self, "gridless_stoploss_enabled", False)
+                ),
+                "RAPID_CYCLE_MIN_PROFIT_PERCENT>=MIN_PROFIT_PERCENT": (
+                    float(self.rapid_cycle_min_profit_percent)
+                    >= float(self.min_profit_percent)
+                ),
+            }
+            missing = [label for label, satisfied in live_requirements.items() if not satisfied]
+            if missing:
+                raise ValueError(
+                    "RAPID_CYCLE_MODE=live requires a dedicated guarded bot: "
+                    + ", ".join(missing)
+                )
         quote_timeout = float(getattr(
             self, "bidirectional_pnl_quote_timeout_seconds", 4
         ))
@@ -648,6 +714,26 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
         route_tournament_round_route_reuse=os.getenv(
             "ROUTE_TOURNAMENT_ROUND_ROUTE_REUSE", "false"
         ).lower() == "true",
+        rapid_cycle_mode=os.getenv("RAPID_CYCLE_MODE", "off").strip().lower(),
+        rapid_cycle_canary=os.getenv("RAPID_CYCLE_CANARY", "false").lower() == "true",
+        rapid_cycle_exclusive=os.getenv("RAPID_CYCLE_EXCLUSIVE", "false").lower() == "true",
+        rapid_cycle_principal_eth=float(os.getenv("RAPID_CYCLE_PRINCIPAL_ETH", "0.001")),
+        rapid_cycle_entry_drop_percent=float(os.getenv(
+            "RAPID_CYCLE_ENTRY_DROP_PERCENT", "2.0"
+        )),
+        rapid_cycle_min_profit_percent=float(os.getenv(
+            "RAPID_CYCLE_MIN_PROFIT_PERCENT", "1.0"
+        )),
+        rapid_cycle_min_buy_samples=int(os.getenv("RAPID_CYCLE_MIN_BUY_SAMPLES", "3")),
+        rapid_cycle_lookback_samples=int(os.getenv(
+            "RAPID_CYCLE_LOOKBACK_SAMPLES", "12"
+        )),
+        rapid_cycle_poll_every_cycles=int(os.getenv(
+            "RAPID_CYCLE_POLL_EVERY_CYCLES", "1"
+        )),
+        rapid_cycle_state_file=os.getenv(
+            "RAPID_CYCLE_STATE_FILE", "data/rapid_cycle_state.json"
+        ),
         bidirectional_pnl_enabled=os.getenv(
             "BIDIRECTIONAL_PNL_ENABLED", "true"
         ).lower() == "true",

@@ -123,6 +123,16 @@ python grid_bot.py
 | `ROUTE_TOURNAMENT_SPECULATIVE_FALLBACK_SECONDS` | No | 0 | Opt-in gate canary: start an isolated sell-only baseline quote after this delay while preserving the full tournament deadline; `0` disables |
 | `ROUTE_TOURNAMENT_SHADOW_BACKGROUND` | No | false | Run bounded shadow observation after the trading pass on one daemon worker, coalescing queued work to the latest snapshot per direction so execution never waits for telemetry |
 | `ROUTE_TOURNAMENT_ROUND_ROUTE_REUSE` | No | false | With gate + multi-action rounds, tournament once per direction per round and reuse only its provider/settlement identity; every later fill is freshly quoted, simulated, guarded, broadcast, and reconciled |
+| `RAPID_CYCLE_MODE` | No | off | Executable round-trip experiment: `off`, non-signing `shadow`, or dedicated-bot `live` |
+| `RAPID_CYCLE_CANARY` | No | false | First explicit acknowledgement required by `live` |
+| `RAPID_CYCLE_EXCLUSIVE` | No | false | Confirms the one-slot bot is dedicated to rapid-cycle decisions; required by `live` |
+| `RAPID_CYCLE_PRINCIPAL_ETH` | No | 0.001 | Exact native/WETH principal sampled and, in live mode, submitted to the guarded buy path |
+| `RAPID_CYCLE_ENTRY_DROP_PERCENT` | No | 2.0 | Required improvement in all-in buy cost per conservative token floor after warmup |
+| `RAPID_CYCLE_MIN_PROFIT_PERCENT` | No | 1.0 | Minimum projected round-trip profit after buy/sell gas and output floors; live must not be below `MIN_PROFIT_PERCENT` |
+| `RAPID_CYCLE_MIN_BUY_SAMPLES` | No | 3 | Warmup samples before a lower all-in buy price can open a paper/live cycle; minimum 2 |
+| `RAPID_CYCLE_LOOKBACK_SAMPLES` | No | 12 | Rolling recent buy-cost window used for the entry-drop comparison; must be at least the warmup count |
+| `RAPID_CYCLE_POLL_EVERY_CYCLES` | No | 1 | Run one background buy or sell observation every N bot cycles |
+| `RAPID_CYCLE_STATE_FILE` | No | data/rapid_cycle_state.json | Atomic versioned journal; mode, wallet, token, chain, size, and thresholds are identity-bound |
 | `USE_LI_FI` | No | false | Use LI.FI instead of 0x for swaps |
 | `USE_UNISWAP_API` | No | true | Legacy Uniswap selection used when `SWAP_PROVIDER` is empty |
 | **Token Configuration** ||||
@@ -1907,6 +1917,55 @@ default lifetime is five minutes and is configurable with
 one hour). It avoids repeating protocol discovery, but every tournament obtains
 fresh quote economics; if the cached protocol stops quoting it is discarded.
 `ROUTE_TOURNAMENT_MODE=execute` remains invalid.
+
+## Rapid-cycle executable round-trip experiment
+
+`RAPID_CYCLE_MODE=off` is the compatibility default. `shadow` starts one
+bounded background observer that alternates according to durable state: it
+samples an exact-size buy while flat, then samples the exact conservative token
+floor as a sell while a paper position is open. It opens only after the all-in
+buy cost per token improves by `RAPID_CYCLE_ENTRY_DROP_PERCENT` following at
+least `RAPID_CYCLE_MIN_BUY_SAMPLES` observations. It closes only when the sell
+output floor minus projected sell gas repays principal, projected buy gas, and
+`RAPID_CYCLE_MIN_PROFIT_PERCENT`.
+
+This is a short-cycle sequential strategy, not same-block atomic arbitrage. A
+live buy must confirm and reconcile before later polls may consider its sell;
+the feature never composes two swaps into one transaction or assumes a quoted
+cross-route discrepancy will survive block inclusion.
+
+Shadow never prepares, approves, signs, or broadcasts. It uses independent
+route-tournament clients and persists only `data/rapid_cycle_state.json`; it
+does not write `gridless_positions.json`. A provider quote is still a paper
+observation: the hypothetical buy does not alter pool state, so shadow success
+is evidence for a tiny live canary, not proof that a larger trade will fill.
+Provider traffic and shared rate limits remain real. Use one canary token and a
+12-20 second poll interval rather than enabling this fleet-wide.
+
+`live` uses the same state machine, but its observer can only leave a pending
+action in the journal. The main bot thread obtains a fresh gate tournament,
+revalidates the exact input, locally simulates calldata, enforces balance,
+reserve, gas, slippage/tax, and minimum-profit guards, then uses the existing
+receipt/accounting/unresolved-broadcast path. A rejected fresh route cancels the
+signal without inventing a fill. An ambiguous broadcast retains the durable
+wallet guard and halts as usual.
+
+Live startup is refused unless all of these are true: `RAPID_CYCLE_CANARY=true`,
+`RAPID_CYCLE_EXCLUSIVE=true`, `USE_GRIDLESS=true`, threshold allocation,
+`MAX_ACTIVE_POSITIONS=1`, `MOONBAG_PERCENTAGE=0`, stop-loss disabled,
+`ROUTE_TOURNAMENT_MODE=gate`, and `ROUTE_TOURNAMENT_CANARY=true`. The rapid
+minimum profit must be at least `MIN_PROFIT_PERCENT`, and the poll interval must
+be at least the gate deadline so observers cannot stack. This is a dedicated-bot
+mode: ordinary gridless buy/sell triggers are suppressed, while all existing
+execution and settlement guards remain authoritative.
+
+The journal is schema-versioned and identity-bound. Changing between shadow and
+live—or changing wallet, chain, token, principal, entry drop, profit floor, or
+rolling lookback—
+requires stopping the bot and archiving the journal. Live restart also requires
+the journal position to exactly match the single durable gridless position;
+missing, extra, or mismatched state fails startup closed. Never copy a shadow
+journal into a live checkout.
 
 The shadow and gate deadlines are configurable through
 `ROUTE_TOURNAMENT_SHADOW_TIMEOUT_SECONDS` and

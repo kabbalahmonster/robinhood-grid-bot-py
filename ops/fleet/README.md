@@ -2041,6 +2041,51 @@ Use `shadow` with `ROUTE_TOURNAMENT_CANARY=false` for comparison telemetry
 without tournament route authority. Promote beyond one bot only after a
 monitored window confirms acceptable provider quota and execution behavior.
 
+### Rapid-cycle shadow and live canary
+
+Rapid-cycle mode is separate from route-tournament shadow. It paper-trades a
+stateful buy-to-sell cycle using conservative output floors and projected gas.
+Preview and enable shadow on exactly one stopped or monitored bot:
+
+```bash
+update-variable --allow-add --only TOKEN \
+  RAPID_CYCLE_MODE=shadow RAPID_CYCLE_PRINCIPAL_ETH=0.001 \
+  RAPID_CYCLE_ENTRY_DROP_PERCENT=2 RAPID_CYCLE_MIN_PROFIT_PERCENT=1 \
+  RAPID_CYCLE_POLL_EVERY_CYCLES=1
+update-variable --apply --restart --allow-add --only TOKEN \
+  RAPID_CYCLE_MODE=shadow RAPID_CYCLE_PRINCIPAL_ETH=0.001 \
+  RAPID_CYCLE_ENTRY_DROP_PERCENT=2 RAPID_CYCLE_MIN_PROFIT_PERCENT=1 \
+  RAPID_CYCLE_POLL_EVERY_CYCLES=1
+```
+
+Inspect `data/rapid_cycle_state.json` and logs for completed paper cycles. Do
+not interpret a paper cycle as a guaranteed fill: its hypothetical buy did not
+change pool reserves. Before a live canary, stop the selected bot, archive that
+shadow journal, verify `data/gridless_positions.json` is empty, and dedicate the
+checkout to one position. Preview then apply the complete live contract:
+
+```bash
+update-variable --allow-add --only TOKEN \
+  RAPID_CYCLE_MODE=live RAPID_CYCLE_CANARY=true RAPID_CYCLE_EXCLUSIVE=true \
+  USE_GRIDLESS=true GRIDLESS_ALLOCATION_MODE=threshold MAX_ACTIVE_POSITIONS=1 \
+  MOONBAG_PERCENTAGE=0 GRIDLESS_STOPLOSS_ENABLED=false \
+  ROUTE_TOURNAMENT_MODE=gate ROUTE_TOURNAMENT_CANARY=true \
+  POLL_INTERVAL_SECONDS=12 MIN_PROFIT_PERCENT=1 RAPID_CYCLE_MIN_PROFIT_PERCENT=1
+update-variable --apply --allow-add --only TOKEN \
+  RAPID_CYCLE_MODE=live RAPID_CYCLE_CANARY=true RAPID_CYCLE_EXCLUSIVE=true \
+  USE_GRIDLESS=true GRIDLESS_ALLOCATION_MODE=threshold MAX_ACTIVE_POSITIONS=1 \
+  MOONBAG_PERCENTAGE=0 GRIDLESS_STOPLOSS_ENABLED=false \
+  ROUTE_TOURNAMENT_MODE=gate ROUTE_TOURNAMENT_CANARY=true \
+  POLL_INTERVAL_SECONDS=12 MIN_PROFIT_PERCENT=1 RAPID_CYCLE_MIN_PROFIT_PERCENT=1
+```
+
+Run that checkout's `grid_bot.py --check-config`, start only that bot, and
+monitor every quote, receipt, journal transition, realized return, and provider
+limit. Roll back only while flat: stop the bot, set `RAPID_CYCLE_MODE=off`,
+clear both acknowledgements, archive the rapid journal, and restart. If a live
+position or unresolved broadcast exists, reconcile it first; never discard its
+journal to force a rollback.
+
 Tournament shape is independently configurable: providers are a non-empty
 subset of `uniswap,sushiswap,umbra,lifi`; settlements are a non-empty subset of
 `native,weth`; shadow/gate deadlines default to 4/12 seconds and accept 1-15.

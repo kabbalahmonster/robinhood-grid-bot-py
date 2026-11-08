@@ -230,6 +230,23 @@ To canary LI.FI, set `LI_FI_API_KEY` and use
 `ROUTE_TOURNAMENT_SETTLEMENTS=native` and `ROUTE_TOURNAMENT_MODE=shadow`.
 `lofi` is accepted as an input alias, though documentation uses `lifi`.
 
+## Rapid-cycle experiment
+
+Keep `RAPID_CYCLE_MODE=off` fleet-wide. A shadow trial is non-signing but adds
+provider/RPC traffic and writes `data/rapid_cycle_state.json`; run it on one
+token for at least 24 hours and review completed paper cycles, holding time,
+route pairs, timeouts, and rate limits. The paper buy does not mutate pool
+reserves, so shadow results justify only a tiny live canary, never direct fleet
+promotion.
+
+Live mode is a dedicated one-position bot mode. Stop the bot, archive the
+shadow journal, confirm gridless positions are empty, apply the complete guarded
+profile from the fleet README, run `grid_bot.py --check-config`, then start only
+that bot. Missing acknowledgements, a nonempty/mismatched position journal, an
+unsupported journal schema, or a live profit floor below `MIN_PROFIT_PERCENT`
+must fail closed. During operation, an unresolved broadcast uses the ordinary
+durable halt and must be receipt-reconciled before any restart or rollback.
+
 ## Existing-gridless drawdown canary
 
 An existing gridless bot no longer needs to liquidate before its first

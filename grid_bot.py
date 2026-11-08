@@ -1006,6 +1006,40 @@ class GridBot:
             self.trade_token_name = "WETH"
             logger.info("Trading mode: WETH")
 
+        self._rapid_cycle_lock = threading.Lock()
+        self._rapid_cycle_observer_active = False
+        self._rapid_cycle_engine = None
+        if getattr(self.config, "rapid_cycle_mode", "off") != "off":
+            from rapid_cycle import (
+                RapidCycleEngine, RapidCycleIdentity, RapidCycleJournal,
+            )
+
+            identity = RapidCycleIdentity(
+                mode=self.config.rapid_cycle_mode,
+                chain_id=self.config.chain_id,
+                token_address=self.config.token_address,
+                wallet_address=self.wallet.address,
+                principal_wei=int(Decimal(
+                    str(self.config.rapid_cycle_principal_eth)
+                ) * Decimal(10**18)),
+                entry_drop_percent=self.config.rapid_cycle_entry_drop_percent,
+                min_profit_percent=self.config.rapid_cycle_min_profit_percent,
+                lookback_samples=self.config.rapid_cycle_lookback_samples,
+            )
+            self._rapid_cycle_engine = RapidCycleEngine(
+                RapidCycleJournal(self.config.rapid_cycle_state_file, identity),
+                min_buy_samples=self.config.rapid_cycle_min_buy_samples,
+            )
+            logger.warning(
+                "Rapid cycle %s enabled: principal=%.8f entry_drop=%.2f%% "
+                "minimum_profit=%.2f%% state=%s",
+                self.config.rapid_cycle_mode,
+                self.config.rapid_cycle_principal_eth,
+                self.config.rapid_cycle_entry_drop_percent,
+                self.config.rapid_cycle_min_profit_percent,
+                self.config.rapid_cycle_state_file,
+            )
+
         if self._taxed_token_active():
             source = "declared" if self.config.taxed_token else "auto-detected"
             logger.warning(
@@ -1838,6 +1872,332 @@ class GridBot:
         threading.Thread(
             target=worker, name="route-shadow-observer", daemon=True,
         ).start()
+
+    def _rapid_cycle_live_enabled(self):
+        return getattr(self.config, "rapid_cycle_mode", "off") == "live"
+
+    def _rapid_cycle_state_snapshot(self):
+        engine = getattr(self, "_rapid_cycle_engine", None)
+        if engine is None:
+            return None
+        with self._rapid_cycle_lock:
+            return engine.journal.snapshot()
+
+    def _collect_rapid_cycle_observation(self, direction, amount, sold_cost_wei=None):
+        """Collect one non-authorizing best-route observation for the engine."""
+        from route_tournament import collect_execution_preflight, snapshot
+
+        context = snapshot(self, direction, amount, sold_cost_wei=sold_cost_wei)
+        context.update({
+            "execution_preflight": True,
+            "token_address": self.config.token_address,
+            "trade_token_address": self.trade_token_address,
+            "token_decimals": self.token_decimals,
+        })
+        # Rapid-cycle profitability is evaluated by its versioned engine.  A
+        # very low tournament floor keeps valid loss observations visible; it
+        # never grants execution authority.  Live actions still pass the normal
+        # fresh execution-preflight and configured minimum-profit guards.
+        if direction == "sell":
+            context["min_profit"] = -99.0
+
+        def allowance_probe(token, spender):
+            if direction == "buy":
+                if not token or not spender or token.lower() != self.config.weth_address.lower():
+                    return None
+                return int(self.wallet.check_allowance(
+                    token, spender, use_permit2=False,
+                ))
+            if not token or not spender:
+                return 0
+            return int(self.wallet.check_allowance(token, spender))
+
+        def gas_estimate_provider(quote, settlement):
+            if not getattr(quote, "to", None) or not getattr(quote, "data", None):
+                return 0
+            return int(self.wallet.w3.eth.estimate_gas({
+                "from": Web3.to_checksum_address(self.wallet.address),
+                "to": Web3.to_checksum_address(quote.to),
+                "data": quote.data,
+                "value": self._simulation_value_wei(
+                    quote, direction=direction, settlement=settlement, amount=amount,
+                ),
+            }))
+
+        def conversion_gas_estimate_provider(quote, settlement):
+            conversion = (
+                settlement == "weth" if self.config.use_eth_trading
+                else settlement == "native"
+            )
+            if not conversion:
+                return 0
+            conversion_direction = (
+                "buy" if (direction == "buy") == self.config.use_eth_trading
+                else "sell"
+            )
+            conversion_amount = (
+                int(amount) if conversion_direction == "buy"
+                else int(getattr(quote, "buy_amount", 0) or 0)
+            )
+            if conversion_direction == "sell":
+                return int(self.wallet.estimate_future_weth_withdraw_gas(
+                    self.config.weth_address,
+                ))
+            tx, _ = self._project_weth_operation_gas(
+                conversion_direction, conversion_amount,
+            )
+            return int(tx["gas"])
+
+        def approval_gas_estimate_provider(quote, settlement):
+            spender = getattr(quote, "allowance_target", None)
+            if not spender:
+                return 0
+            token = (
+                self.config.token_address if direction == "sell"
+                else self.config.weth_address
+            )
+            if direction == "buy" and settlement != "weth":
+                return 0
+            allowance = int(self.wallet.check_allowance(
+                token, spender, use_permit2=False,
+            ))
+            if allowance >= int(amount):
+                return 0
+            approval_amount = (
+                int(amount)
+                if getattr(quote, "_tournament_provider", None) == "umbra"
+                else (int(amount) if direction == "buy" else 2**256 - 1)
+            )
+            tx = self.wallet.build_token_approval_transaction(
+                token, spender, approval_amount,
+            )
+            return int(tx["gas"])
+
+        comparison = collect_execution_preflight(
+            self.config, self.wallet.address, context,
+            gas_price_provider=lambda: int(self.wallet.normal_gas_price()),
+            allowance_probe=allowance_probe,
+            gas_estimate_provider=gas_estimate_provider,
+            conversion_gas_estimate_provider=conversion_gas_estimate_provider,
+            approval_gas_estimate_provider=approval_gas_estimate_provider,
+            rpc_trace_scope=getattr(self.wallet.w3, "telemetry_scope", None),
+            max_seconds=float(self.config.route_tournament_gate_timeout_seconds),
+        )
+        winner = comparison.get("selected_hypothetical_winner") or {}
+        row = next((
+            candidate for candidate in comparison.get("candidates", [])
+            if candidate.get("provider") == winner.get("provider")
+            and candidate.get("settlement") == winner.get("settlement")
+            and candidate.get("validation_level") == "quote_only"
+        ), None)
+        if row is None:
+            return None
+        return {
+            "block_number": int(self.wallet.w3.eth.block_number),
+            "provider": row["provider"],
+            "settlement": row["settlement"],
+            "output_floor_raw": int(row["output_floor_raw"]),
+            "projected_gas_wei": int(row["projected_total_gas_wei"]),
+            "projected_net_score": int(row["projected_net_score"]),
+            "tournament_id": comparison.get("tournament_id"),
+        }
+
+    def _dispatch_rapid_cycle_observer(self):
+        """Run at most one read-only observer outside the trading cycle."""
+        engine = getattr(self, "_rapid_cycle_engine", None)
+        if engine is None or getattr(self, "_safety_halted", False):
+            return
+        every = max(1, int(self.config.rapid_cycle_poll_every_cycles))
+        if int(getattr(self, "round_count", 0)) % every:
+            return
+        with self._rapid_cycle_lock:
+            if self._rapid_cycle_observer_active:
+                return
+            direction = engine.desired_direction()
+            state = engine.journal.snapshot()
+            if direction is None:
+                return
+            self._rapid_cycle_observer_active = True
+
+        def worker():
+            try:
+                if direction == "buy":
+                    amount = engine.journal.identity.principal_wei
+                    observation = self._collect_rapid_cycle_observation("buy", amount)
+                    if observation is None:
+                        logger.info("Rapid cycle buy observation: no complete eligible route")
+                        return
+                    with self._rapid_cycle_lock:
+                        action = engine.observe_buy(
+                            block_number=observation["block_number"],
+                            provider=observation["provider"],
+                            settlement=observation["settlement"],
+                            token_floor_raw=observation["output_floor_raw"],
+                            projected_gas_wei=observation["projected_gas_wei"],
+                        )
+                else:
+                    position = state.get("position") or {}
+                    amount = int(position.get("token_amount_raw", 0))
+                    cost = int(position.get("cost_wei", 0))
+                    if amount <= 0 or cost <= 0:
+                        raise RuntimeError("rapid-cycle open position is incomplete")
+                    observation = self._collect_rapid_cycle_observation(
+                        "sell", amount, sold_cost_wei=cost,
+                    )
+                    if observation is None:
+                        logger.info("Rapid cycle sell observation: no complete eligible route")
+                        return
+                    with self._rapid_cycle_lock:
+                        action = engine.observe_sell(
+                            block_number=observation["block_number"],
+                            provider=observation["provider"],
+                            settlement=observation["settlement"],
+                            output_floor_wei=observation["output_floor_raw"],
+                            projected_gas_wei=observation["projected_gas_wei"],
+                        )
+                if action:
+                    logger.warning(
+                        "Rapid cycle %s %s signal: provider=%s settlement=%s%s",
+                        self.config.rapid_cycle_mode, action["type"],
+                        observation["provider"], observation["settlement"],
+                        " (paper fill only)" if action.get("paper_filled") else "",
+                    )
+            except Exception:
+                logger.exception("Rapid cycle observer failed; no transaction was authorized")
+            finally:
+                with self._rapid_cycle_lock:
+                    self._rapid_cycle_observer_active = False
+
+        threading.Thread(
+            target=worker, name="rapid-cycle-observer", daemon=True,
+        ).start()
+
+    def _validate_rapid_cycle_live_state(self):
+        if not self._rapid_cycle_live_enabled():
+            return
+        from gridless import load_positions
+
+        positions = load_positions()
+        with self._rapid_cycle_lock:
+            state = self._rapid_cycle_engine.journal.snapshot()
+            if state["status"] == "action_pending":
+                pending_type = (state.get("pending_action") or {}).get("type")
+                position = state.get("position") or {}
+                if pending_type == "buy":
+                    if positions:
+                        raise RuntimeError(
+                            "rapid-cycle buy was pending at restart but a durable "
+                            "position exists; receipt/accounting reconciliation required"
+                        )
+                    self._rapid_cycle_engine.cancel_pending(
+                        "restart discarded stale non-broadcast buy signal"
+                    )
+                    state = self._rapid_cycle_engine.journal.snapshot()
+                elif pending_type == "sell":
+                    position_id = str(position.get("position_id", ""))
+                    live = positions.get(position_id)
+                    if live is None:
+                        raise RuntimeError(
+                            "rapid-cycle sell was pending at restart but its durable "
+                            "position is missing; receipt/accounting reconciliation required"
+                        )
+                    self._rapid_cycle_engine.cancel_pending(
+                        "restart discarded stale non-broadcast sell signal"
+                    )
+                    state = self._rapid_cycle_engine.journal.snapshot()
+                else:
+                    raise RuntimeError("rapid-cycle pending action type is invalid")
+        if state["status"] == "flat" and positions:
+            raise RuntimeError(
+                "rapid-cycle live journal is flat but gridless positions exist; "
+                "reconcile or archive both before startup"
+            )
+        if state["status"] == "open":
+            position = state.get("position") or {}
+            position_id = str(position.get("position_id", ""))
+            live = positions.get(position_id)
+            if (not position_id or live is None
+                    or int(live.get("balance", 0)) != int(position.get("token_amount_raw", 0))
+                    or int(live.get("cost_wei", 0)) != int(position.get("cost_wei", 0))):
+                raise RuntimeError(
+                    "rapid-cycle live journal does not match the durable gridless position"
+                )
+
+    def _consume_rapid_cycle_live_action(self, price):
+        """Execute a pending signal only through the bot's guarded live paths."""
+        if not self._rapid_cycle_live_enabled():
+            return
+        from gridless import load_positions
+
+        with self._rapid_cycle_lock:
+            state = self._rapid_cycle_engine.journal.snapshot()
+        pending = state.get("pending_action") or {}
+        action = pending.get("type")
+        if state.get("status") != "action_pending" or action not in {"buy", "sell"}:
+            return
+        if self.wallet.has_unresolved_broadcast() or self._safety_halted:
+            return
+        if action == "buy":
+            before = load_positions()
+            if before:
+                raise RuntimeError("rapid-cycle live buy requires an empty dedicated bot")
+            principal = self._rapid_cycle_engine.journal.identity.principal_wei
+            buys_before = self.session_buys
+            self._execute_buy_gridless(
+                principal / 10**18, principal, price,
+                is_leading_edge_buy=True,
+            )
+            after = load_positions()
+            created = sorted(set(after) - set(before))
+            if self.session_buys > buys_before and len(created) == 1:
+                position_id = created[0]
+                position = after[position_id]
+                with self._rapid_cycle_lock:
+                    self._rapid_cycle_engine.confirm_live_buy(
+                        position_id=position_id,
+                        token_amount_raw=int(position["balance"]),
+                        cost_wei=int(position["cost_wei"]),
+                        tx_hash=(self.dashboard_trades[-1].get("tx_hash")
+                                 if self.dashboard_trades else None),
+                    )
+            elif not self.wallet.has_unresolved_broadcast() and not self._safety_halted:
+                with self._rapid_cycle_lock:
+                    self._rapid_cycle_engine.cancel_pending("fresh guarded buy rejected")
+            return
+
+        position = state.get("position") or {}
+        position_id = str(position.get("position_id", ""))
+        live_positions = load_positions()
+        live = live_positions.get(position_id)
+        if live is None:
+            raise RuntimeError("rapid-cycle live sell position is missing")
+        trigger = pending.get("trigger") or {}
+        pnl = float(trigger.get("projected_profit_percent", 0))
+        sells_before = self.session_sells
+        self._attempt_gridless_sell_candidate(
+            position_id, dict(live), price, "RAPID CYCLE executable edge", pnl,
+        )
+        after = load_positions()
+        if self.session_sells > sells_before and position_id not in after:
+            trade = self.dashboard_trades[-1] if self.dashboard_trades else {}
+            comparison = getattr(self, "_route_comparisons", {}).get("sell") or {}
+            final = comparison.get("final") or {}
+            received_wei = int(
+                final.get("measured_proceeds_wei")
+                or Decimal(str(trade.get("eth_amount", 0))) * Decimal(10**18)
+            )
+            profit_wei = int(
+                final.get("realized_profit_wei")
+                or Decimal(str(trade.get("profit_eth", 0))) * Decimal(10**18)
+            )
+            with self._rapid_cycle_lock:
+                self._rapid_cycle_engine.confirm_live_sell(
+                    received_wei=received_wei, profit_wei=profit_wei,
+                    tx_hash=str(trade.get("tx_hash", "confirmed-sell")),
+                )
+        elif not self.wallet.has_unresolved_broadcast() and not self._safety_halted:
+            with self._rapid_cycle_lock:
+                self._rapid_cycle_engine.cancel_pending("fresh guarded sell rejected")
 
     def _attempt_with_route_comparison(self, direction):
         attempt = getattr(self, "_" + direction + "_attempt", None)
@@ -3364,6 +3724,8 @@ class GridBot:
     
     def check_buys(self, price, position_pnls=None):
         """Check for buy opportunities."""
+        if self._rapid_cycle_live_enabled():
+            return
         # Gridless mode
         if getattr(self.config, 'use_gridless', False):
             return self._check_buys_gridless(price, position_pnls)
@@ -3404,6 +3766,8 @@ class GridBot:
     
     def check_sells(self, price, position_pnls=None):
         """Check for sell opportunities."""
+        if self._rapid_cycle_live_enabled():
+            return
         # Gridless mode
         if getattr(self.config, 'use_gridless', False):
             return self._check_sells_gridless(price, position_pnls)
@@ -7658,6 +8022,11 @@ class GridBot:
             
             logger.info("-" * 70)
         
+        # Live rapid-cycle actions are only consumed on the main thread.  The
+        # background observer can request an action but cannot sign, approve,
+        # prepare, or broadcast anything.
+        self._consume_rapid_cycle_live_action(price)
+
         # Check sells before reporting so this round's transient attempt state
         # appears immediately rather than one poll late.
         phase_started = time.perf_counter()
@@ -7948,6 +8317,10 @@ class GridBot:
                 time.perf_counter() - phase_started
             ) * 1000
 
+        # Quote work starts only after the complete trading/reporting pass and
+        # never blocks this cycle. Shared provider rate limits still apply.
+        self._dispatch_rapid_cycle_observer()
+
     def _round_summary_mode(self):
         """Choose compact, verbose-debug, or quiet per-round console output."""
         if getattr(self.config, "compact_mode", False):
@@ -7959,6 +8332,7 @@ class GridBot:
     def run(self):
         """Main bot loop."""
         self.load_positions()
+        self._validate_rapid_cycle_live_state()
 
         invoke_mercury(
             getattr(self.config, "mercury_evocation", True),
