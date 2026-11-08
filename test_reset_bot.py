@@ -15,7 +15,10 @@ class ResetBotTests(unittest.TestCase):
     def make_bot(self, directory):
         bot = Path(directory) / "v4"
         (bot / "data").mkdir(parents=True)
-        (bot / ".env").write_text("PRIVATE_KEY=do-not-touch\nSTATE_FILE=data/custom_positions.json\n")
+        (bot / ".env").write_text(
+            "PRIVATE_KEY=do-not-touch\nSTATE_FILE=data/custom_positions.json\n"
+            "RAPID_CYCLE_STATE_FILE=data/custom_rapid_cycle.json\n"
+        )
         return bot
 
     def test_preview_does_not_change_state(self):
@@ -48,12 +51,17 @@ class ResetBotTests(unittest.TestCase):
             )
             (data / "token_tax_detection.json").write_text('{"seen": true}')
             (data / "treasury_transfers.json").write_text('[{"audit": true}]')
+            (data / "custom_rapid_cycle.json").write_text('{"schema_version": 3}')
             result = subprocess.run(
                 [HELPER, "--bot-dir", bot, "--apply", "--backup-stamp", "test-reset"],
                 text=True, capture_output=True,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual((bot / ".env").read_text(), "PRIVATE_KEY=do-not-touch\nSTATE_FILE=data/custom_positions.json\n")
+            self.assertEqual(
+                (bot / ".env").read_text(),
+                "PRIVATE_KEY=do-not-touch\nSTATE_FILE=data/custom_positions.json\n"
+                "RAPID_CYCLE_STATE_FILE=data/custom_rapid_cycle.json\n",
+            )
             self.assertEqual(json.loads((data / "custom_positions.json").read_text()), {})
             self.assertEqual(json.loads((data / "gridless_positions.json").read_text()), {})
             self.assertFalse((data / "gridless_ladder.json").exists())
@@ -66,6 +74,7 @@ class ResetBotTests(unittest.TestCase):
             self.assertNotEqual(baseline["reset_at"], "2026-01-01T00:00:00+00:00")
             self.assertEqual(json.loads((data / "token_tax_detection.json").read_text()), {})
             self.assertEqual(json.loads((data / "treasury_transfers.json").read_text()), [{"audit": True}])
+            self.assertFalse((data / "custom_rapid_cycle.json").exists())
             self.assertTrue((data / "reset-backups" / "test-reset" / "data" / "custom_positions.json").exists())
             self.assertEqual(
                 (data / "reset-backups" / "test-reset" / "data" / "gridless_ladder.json").read_text(),
@@ -74,6 +83,31 @@ class ResetBotTests(unittest.TestCase):
             self.assertTrue(
                 (data / "reset-backups" / "test-reset" / "data" /
                  "treasury_reporting_baseline.json").exists()
+            )
+            self.assertTrue(
+                (data / "reset-backups" / "test-reset" / "data" /
+                 "custom_rapid_cycle.json").exists()
+            )
+
+    def test_rapid_cycle_scope_archives_only_configured_journal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self.make_bot(directory)
+            data = bot / "data"
+            rapid = data / "custom_rapid_cycle.json"
+            positions = data / "custom_positions.json"
+            rapid.write_text('{"schema_version": 2}')
+            positions.write_text('{"keep": true}')
+            result = subprocess.run(
+                [HELPER, "--bot-dir", bot, "--scope", "rapid-cycle", "--apply",
+                 "--backup-stamp", "rapid-only"],
+                text=True, capture_output=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(rapid.exists())
+            self.assertEqual(json.loads(positions.read_text()), {"keep": True})
+            self.assertTrue(
+                (data / "reset-backups" / "rapid-only" / "data" /
+                 "custom_rapid_cycle.json").exists()
             )
 
     def test_fleet_wrapper_requires_explicit_apply_confirmation(self):

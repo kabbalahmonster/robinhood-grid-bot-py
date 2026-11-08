@@ -132,6 +132,7 @@ python grid_bot.py
 | `RAPID_CYCLE_MIN_BUY_SAMPLES` | No | 3 | Warmup samples before a lower all-in buy price can open a paper/live cycle; minimum 2 |
 | `RAPID_CYCLE_LOOKBACK_SAMPLES` | No | 12 | Rolling recent buy-cost window used for the entry-drop comparison; must be at least the warmup count |
 | `RAPID_CYCLE_MIN_CONFIDENCE_SAMPLES` | No | 2 | Consecutive complete buy→sell preflights that must each clear the configured net-profit floor before entry; 1-100 |
+| `RAPID_CYCLE_MAX_OPEN_POSITIONS` | No | 1 | Hard cap for independent shadow paper lots; 1-100. Live mode remains fail-closed at exactly 1 |
 | `RAPID_CYCLE_POLL_EVERY_CYCLES` | No | 1 | Run one background buy or sell observation every N bot cycles |
 | `RAPID_CYCLE_STATE_FILE` | No | data/rapid_cycle_state.json | Atomic versioned journal; mode, wallet, token, chain, size, and thresholds are identity-bound |
 | `USE_LI_FI` | No | false | Use LI.FI instead of 0x for swaps |
@@ -1931,15 +1932,24 @@ whose sell floor minus both legs' projected gas clears
 `RAPID_CYCLE_MIN_PROFIT_PERCENT`. A missing or unprofitable exit resets the
 confidence streak and cannot open a position.
 
-In `shadow`, an exit-qualified shot is recorded as a completed paper round trip
-from that same conservative preflight, returning the engine to flat immediately.
-It can therefore take repeated independent shots instead of parking forever in
-one hypothetical position. Completion history remains bounded to 500 shots and
-the buy warmup resets after each one. In `live`, a qualifying signal still buys
-only through the fresh guarded execution path; after settlement, the exact
-durable position must obtain another fresh profitable sell preflight before the
-normal guarded sell path can execute it. The entry check materially reduces
-stranding risk but cannot guarantee future liquidity or price.
+In `shadow`, each exit-qualified entry becomes an independent paper lot, up to
+`RAPID_CYCLE_MAX_OPEN_POSITIONS`. Every observer pass checks one open lot for a
+fresh profitable exit in round-robin order and, when capacity remains, may also
+sample one new entry. One stuck lot therefore cannot block other qualified
+shots or monopolize exit checks. Lots retain their own token amount, cost,
+opening route, and close result; completion history remains bounded to 500.
+For the Worm canary, a value of `10` gives ten separately accountable paper
+shots rather than one blended position.
+
+Live mode remains deliberately limited to one position even if the shadow cap
+is higher: startup rejects `RAPID_CYCLE_MAX_OPEN_POSITIONS` other than `1`.
+A qualifying live signal still buys only through the fresh guarded execution
+path; after settlement, the exact durable position must obtain another fresh
+profitable sell preflight before the normal guarded sell path can execute it.
+Multi-position live authority requires a separate canary after shadow evidence,
+because restart reconciliation and real capital-at-risk accounting are stricter
+than paper portfolio tracking. The entry check materially reduces stranding
+risk but cannot guarantee future liquidity or price.
 
 This is a short-cycle sequential strategy, not same-block atomic arbitrage. A
 live buy must confirm and reconcile before later polls may consider its sell;
@@ -1956,8 +1966,8 @@ Provider traffic and shared rate limits remain real. Use one canary token and a
 
 When DoomDash reporting is enabled, the bot sends a bounded public
 `rapid_cycle` summary with the mode, state, configured thresholds and confidence
-streak, paper/live position economics, last buy and proposed exit routes, and
-latest completed-cycle result.
+streak, open/max position count, deployed paper/live cost, the oldest open lot,
+last buy and proposed exit routes, and latest completed-cycle result.
 It never sends the journal identity, raw token amounts, calldata, or wallet
 credentials. Dashboards without the matching feature branch safely ignore the
 extra field.
@@ -1979,11 +1989,11 @@ be at least the gate deadline so observers cannot stack. This is a dedicated-bot
 mode: ordinary gridless buy/sell triggers are suppressed, while all existing
 execution and settlement guards remain authoritative.
 
-The journal is schema-versioned and identity-bound. Version 2 introduces the
-round-trip confidence contract; a version-1 experimental journal must be
-archived and cannot be reinterpreted. Changing between shadow and live—or
+The journal is schema-versioned and identity-bound. Version 3 introduces the
+independent shadow-position portfolio; version-1 and version-2 experimental
+journals must be archived and cannot be reinterpreted. Changing between shadow and live—or
 changing wallet, chain, token, principal, entry drop, profit floor, rolling
-lookback, or confidence sample count—
+lookback, confidence sample count, or open-position cap—
 requires stopping the bot and archiving the journal. Live restart also requires
 the journal position to exactly match the single durable gridless position;
 missing, extra, or mismatched state fails startup closed. Never copy a shadow

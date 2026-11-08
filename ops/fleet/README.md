@@ -609,8 +609,11 @@ The default `all` scope clears classic/gridless position state (including the
 persisted drawdown ladder), dashboard
 trades/events, realized-profit, pending profit-fee accounting, the displayed
 treasury-sent baseline, and token-tax
-learning. Use `--scope positions`, `history`, `accounting`, or `learning` for a
-narrower reset. Position resets forget cost bases: any managed tokens left in
+learning, plus the rapid-cycle journal. Use `--scope positions`, `history`,
+`accounting`, `learning`, or `rapid-cycle` for a narrower reset. The
+`rapid-cycle` scope archives and removes only the configured
+`RAPID_CYCLE_STATE_FILE`, making it the preferred shadow-canary migration path.
+Position resets forget cost bases: any managed tokens left in
 the wallet become untracked, so use this only for a deliberate fresh strategy
 start. The generated backup directory is the rollback source.
 
@@ -2052,20 +2055,25 @@ update-variable --allow-add --only TOKEN \
   RAPID_CYCLE_MODE=shadow RAPID_CYCLE_PRINCIPAL_ETH=0.001 \
   RAPID_CYCLE_ENTRY_DROP_PERCENT=2 RAPID_CYCLE_MIN_PROFIT_PERCENT=1 \
   RAPID_CYCLE_MIN_CONFIDENCE_SAMPLES=2 \
+  RAPID_CYCLE_MAX_OPEN_POSITIONS=10 \
   RAPID_CYCLE_POLL_EVERY_CYCLES=1
 update-variable --apply --restart --allow-add --only TOKEN \
   RAPID_CYCLE_MODE=shadow RAPID_CYCLE_PRINCIPAL_ETH=0.001 \
   RAPID_CYCLE_ENTRY_DROP_PERCENT=2 RAPID_CYCLE_MIN_PROFIT_PERCENT=1 \
   RAPID_CYCLE_MIN_CONFIDENCE_SAMPLES=2 \
+  RAPID_CYCLE_MAX_OPEN_POSITIONS=10 \
   RAPID_CYCLE_POLL_EVERY_CYCLES=1
 ```
 
-Inspect `data/rapid_cycle_state.json` and logs for repeated completed paper
-cycles. Every shot requires two consecutive complete buy→sell preflights above
-the net-profit floor; missing or unprofitable exits reset confidence without
-opening a paper position. Do not interpret a paper cycle as a guaranteed fill:
-its hypothetical buy did not change pool reserves. Version-1 journals must be
-archived before starting this version-2 state machine. Before a live canary,
+Inspect `data/rapid_cycle_state.json` and logs for up to ten independent open
+paper lots and repeated completed cycles. Every shot requires two consecutive
+complete buy→sell preflights above the net-profit floor; missing or unprofitable
+exits reset confidence without opening a paper position. One open lot is checked
+for exit per observer pass in round-robin order while remaining capacity can
+still admit another qualified shot. Do not interpret a paper cycle as a guaranteed fill:
+its hypothetical buy did not change pool reserves. Version-1 and version-2 journals must be
+archived before starting this version-3 state machine. Prefer the guarded
+`reset-bot WORM --scope rapid-cycle` preview/apply workflow. Before a live canary,
 stop the selected bot, archive that shadow journal, verify
 `data/gridless_positions.json` is empty, and dedicate the checkout to one
 position. Preview then apply the complete live contract:
@@ -2077,14 +2085,14 @@ update-variable --allow-add --only TOKEN \
   MOONBAG_PERCENTAGE=0 GRIDLESS_STOPLOSS_ENABLED=false \
   ROUTE_TOURNAMENT_MODE=gate ROUTE_TOURNAMENT_CANARY=true \
   POLL_INTERVAL_SECONDS=12 MIN_PROFIT_PERCENT=1 RAPID_CYCLE_MIN_PROFIT_PERCENT=1 \
-  RAPID_CYCLE_MIN_CONFIDENCE_SAMPLES=2
+  RAPID_CYCLE_MIN_CONFIDENCE_SAMPLES=2 RAPID_CYCLE_MAX_OPEN_POSITIONS=1
 update-variable --apply --allow-add --only TOKEN \
   RAPID_CYCLE_MODE=live RAPID_CYCLE_CANARY=true RAPID_CYCLE_EXCLUSIVE=true \
   USE_GRIDLESS=true GRIDLESS_ALLOCATION_MODE=threshold MAX_ACTIVE_POSITIONS=1 \
   MOONBAG_PERCENTAGE=0 GRIDLESS_STOPLOSS_ENABLED=false \
   ROUTE_TOURNAMENT_MODE=gate ROUTE_TOURNAMENT_CANARY=true \
   POLL_INTERVAL_SECONDS=12 MIN_PROFIT_PERCENT=1 RAPID_CYCLE_MIN_PROFIT_PERCENT=1 \
-  RAPID_CYCLE_MIN_CONFIDENCE_SAMPLES=2
+  RAPID_CYCLE_MIN_CONFIDENCE_SAMPLES=2 RAPID_CYCLE_MAX_OPEN_POSITIONS=1
 ```
 
 Run that checkout's `grid_bot.py --check-config`, start only that bot, and

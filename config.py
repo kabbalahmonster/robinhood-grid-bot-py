@@ -225,6 +225,7 @@ class BotConfig:
     rapid_cycle_min_buy_samples: int = 3
     rapid_cycle_lookback_samples: int = 12
     rapid_cycle_min_confidence_samples: int = 2
+    rapid_cycle_max_open_positions: int = 1
     rapid_cycle_poll_every_cycles: int = 1
     rapid_cycle_state_file: str = "data/rapid_cycle_state.json"
     bidirectional_pnl_enabled: bool = True
@@ -320,6 +321,10 @@ class BotConfig:
             raise ValueError(
                 "RAPID_CYCLE_MIN_CONFIDENCE_SAMPLES must be between 1 and 100"
             )
+        if not 1 <= int(getattr(self, "rapid_cycle_max_open_positions", 1)) <= 100:
+            raise ValueError(
+                "RAPID_CYCLE_MAX_OPEN_POSITIONS must be between 1 and 100"
+            )
         if rapid_mode == "live":
             live_requirements = {
                 "RAPID_CYCLE_CANARY=true": bool(getattr(self, "rapid_cycle_canary", False)),
@@ -329,6 +334,9 @@ class BotConfig:
                     getattr(self, "gridless_allocation_mode", "threshold") == "threshold"
                 ),
                 "MAX_ACTIVE_POSITIONS=1": int(getattr(self, "max_active_positions", 0)) == 1,
+                "RAPID_CYCLE_MAX_OPEN_POSITIONS=1": int(getattr(
+                    self, "rapid_cycle_max_open_positions", 1
+                )) == 1,
                 "ROUTE_TOURNAMENT_MODE=gate": self.route_tournament_mode == "gate",
                 "ROUTE_TOURNAMENT_CANARY=true": bool(self.route_tournament_canary),
                 "POLL_INTERVAL_SECONDS>=ROUTE_TOURNAMENT_GATE_TIMEOUT_SECONDS": (
@@ -735,6 +743,9 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
         )),
         rapid_cycle_min_confidence_samples=int(os.getenv(
             "RAPID_CYCLE_MIN_CONFIDENCE_SAMPLES", "2"
+        )),
+        rapid_cycle_max_open_positions=int(os.getenv(
+            "RAPID_CYCLE_MAX_OPEN_POSITIONS", "1"
         )),
         rapid_cycle_poll_every_cycles=int(os.getenv(
             "RAPID_CYCLE_POLL_EVERY_CYCLES", "1"

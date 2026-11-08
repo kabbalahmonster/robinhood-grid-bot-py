@@ -1026,6 +1026,7 @@ class GridBot:
                 min_profit_percent=self.config.rapid_cycle_min_profit_percent,
                 lookback_samples=self.config.rapid_cycle_lookback_samples,
                 min_confidence_samples=self.config.rapid_cycle_min_confidence_samples,
+                max_open_positions=self.config.rapid_cycle_max_open_positions,
             )
             self._rapid_cycle_engine = RapidCycleEngine(
                 RapidCycleJournal(self.config.rapid_cycle_state_file, identity),
@@ -1908,12 +1909,23 @@ class GridBot:
             "min_buy_samples": int(engine.min_buy_samples),
             "lookback_samples": int(identity.lookback_samples),
             "min_confidence_samples": int(identity.min_confidence_samples),
+            "max_open_positions": int(identity.max_open_positions),
             "buy_sample_count": int(state.get("buy_sample_count", 0) or 0),
             "confidence_streak": int(
                 state.get("round_trip_confidence_streak", 0) or 0
             ),
             "completed_cycle_count": len(state.get("completed_cycles") or []),
         }
+
+        shadow_positions = state.get("positions") or []
+        open_positions = (
+            shadow_positions if identity.mode == "shadow"
+            else ([state["position"]] if isinstance(state.get("position"), dict) else [])
+        )
+        result["open_position_count"] = len(open_positions)
+        result["deployed_eth"] = sum(
+            int(row.get("cost_wei", 0) or 0) for row in open_positions
+        ) / 10**18
 
         observation = state.get("last_observation")
         if isinstance(observation, dict):
@@ -1932,7 +1944,7 @@ class GridBot:
                 public_observation["projected_gas_eth"] = projected_gas
             result["last_observation"] = public_observation
 
-        position = state.get("position")
+        position = open_positions[0] if open_positions else None
         if isinstance(position, dict):
             public_position = {
                 key: position[key] for key in (
@@ -2119,17 +2131,19 @@ class GridBot:
 
         def worker():
             try:
-                if direction == "buy":
+                actions = []
+
+                def observe_entry():
                     amount = engine.journal.identity.principal_wei
-                    observation = self._collect_rapid_cycle_observation("buy", amount)
-                    if observation is None:
+                    buy_observation = self._collect_rapid_cycle_observation("buy", amount)
+                    if buy_observation is None:
                         logger.info("Rapid cycle buy observation: no complete eligible route")
-                        return
+                        return None
                     exit_observation = self._collect_rapid_cycle_observation(
                         "sell",
-                        observation["output_floor_raw"],
+                        buy_observation["output_floor_raw"],
                         sold_cost_wei=(
-                            amount + observation["projected_gas_wei"]
+                            amount + buy_observation["projected_gas_wei"]
                         ),
                     )
                     if exit_observation is None:
@@ -2138,11 +2152,11 @@ class GridBot:
                         )
                     with self._rapid_cycle_lock:
                         action = engine.observe_buy(
-                            block_number=observation["block_number"],
-                            provider=observation["provider"],
-                            settlement=observation["settlement"],
-                            token_floor_raw=observation["output_floor_raw"],
-                            projected_gas_wei=observation["projected_gas_wei"],
+                            block_number=buy_observation["block_number"],
+                            provider=buy_observation["provider"],
+                            settlement=buy_observation["settlement"],
+                            token_floor_raw=buy_observation["output_floor_raw"],
+                            projected_gas_wei=buy_observation["projected_gas_wei"],
                             exit_provider=(
                                 exit_observation["provider"]
                                 if exit_observation else None
@@ -2164,6 +2178,47 @@ class GridBot:
                                 if exit_observation else None
                             ),
                         )
+                    return (action, buy_observation) if action else None
+
+                if direction == "portfolio":
+                    with self._rapid_cycle_lock:
+                        position = engine.shadow_exit_candidate(
+                            int(getattr(self, "round_count", 0))
+                        )
+                    if position:
+                        amount = int(position.get("token_amount_raw", 0))
+                        cost = int(position.get("cost_wei", 0))
+                        if amount <= 0 or cost <= 0:
+                            raise RuntimeError("rapid-cycle paper position is incomplete")
+                        observation = self._collect_rapid_cycle_observation(
+                            "sell", amount, sold_cost_wei=cost,
+                        )
+                        if observation is None:
+                            logger.info(
+                                "Rapid cycle paper exit observation: no complete eligible route"
+                            )
+                        else:
+                            with self._rapid_cycle_lock:
+                                action = engine.observe_sell(
+                                    block_number=observation["block_number"],
+                                    provider=observation["provider"],
+                                    settlement=observation["settlement"],
+                                    output_floor_wei=observation["output_floor_raw"],
+                                    projected_gas_wei=observation["projected_gas_wei"],
+                                    position_id=position.get("position_id"),
+                                )
+                            if action:
+                                actions.append((action, observation))
+                    with self._rapid_cycle_lock:
+                        has_capacity = engine.has_buy_capacity()
+                    if has_capacity:
+                        result = observe_entry()
+                        if result:
+                            actions.append(result)
+                elif direction == "buy":
+                    result = observe_entry()
+                    if result:
+                        actions.append(result)
                 else:
                     position = state.get("position") or {}
                     amount = int(position.get("token_amount_raw", 0))
@@ -2184,7 +2239,9 @@ class GridBot:
                             output_floor_wei=observation["output_floor_raw"],
                             projected_gas_wei=observation["projected_gas_wei"],
                         )
-                if action:
+                    if action:
+                        actions.append((action, observation))
+                for action, observation in actions:
                     logger.warning(
                         "Rapid cycle %s %s signal: provider=%s settlement=%s%s",
                         self.config.rapid_cycle_mode, action["type"],

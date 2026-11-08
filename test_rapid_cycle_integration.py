@@ -75,10 +75,18 @@ def test_shadow_observer_can_paper_fill_but_never_broadcasts(tmp_path):
         {"block_number": 2, "provider": "sushiswap", "settlement": "native",
          "output_floor_raw": 1_022_000_000_000_000,
          "projected_gas_wei": 10**12},
+        {"block_number": 3, "provider": "sushiswap", "settlement": "native",
+         "output_floor_raw": 1_022_000_000_000_000,
+         "projected_gas_wei": 10**12},
+        None,
     ]
     bot._collect_rapid_cycle_observation = Mock(side_effect=observations)
     bot._dispatch_rapid_cycle_observer()
     wait_for_observer(bot)
+    bot.round_count += 1
+    bot._dispatch_rapid_cycle_observer()
+    wait_for_observer(bot)
+    assert bot._rapid_cycle_engine.state["status"] == "open"
     bot.round_count += 1
     bot._dispatch_rapid_cycle_observer()
     wait_for_observer(bot)
@@ -103,12 +111,16 @@ def test_dashboard_snapshot_exposes_bounded_public_shadow_state(tmp_path):
     snapshot = bot._rapid_cycle_dashboard_snapshot()
 
     assert snapshot["mode"] == "shadow"
-    assert snapshot["status"] == "flat"
+    assert snapshot["status"] == "open"
     assert snapshot["principal_eth"] == 0.001
-    assert snapshot["completed_cycle_count"] == 1
+    assert snapshot["completed_cycle_count"] == 0
+    assert snapshot["open_position_count"] == 1
+    assert snapshot["max_open_positions"] == 1
+    assert snapshot["position"]["kind"] == "paper"
+    assert snapshot["position"]["token_amount"] == 1.03
     assert snapshot["last_observation"]["direction"] == "buy"
     assert snapshot["last_observation"]["provider"] == "sushiswap"
-    assert "position" not in snapshot
+    assert "token_amount_raw" not in snapshot["position"]
     assert "identity" not in snapshot
 
 

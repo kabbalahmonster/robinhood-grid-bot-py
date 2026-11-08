@@ -36,6 +36,7 @@ SCOPES = {
     "learning": {
         "data/token_tax_detection.json": {},
     },
+    "rapid-cycle": {},
 }
 
 
@@ -62,6 +63,17 @@ def state_file(bot_dir: Path) -> str:
     return str(candidate)
 
 
+def rapid_cycle_state_file(bot_dir: Path) -> str:
+    value = (
+        dotenv_value(bot_dir / ".env", "RAPID_CYCLE_STATE_FILE")
+        or "data/rapid_cycle_state.json"
+    )
+    candidate = Path(value)
+    if candidate.is_absolute() or ".." in candidate.parts:
+        raise ValueError("RAPID_CYCLE_STATE_FILE must be a relative path inside the bot checkout")
+    return str(candidate)
+
+
 def selected_files(bot_dir: Path, scope: str):
     names = [scope] if scope != "all" else list(SCOPES)
     files = {}
@@ -71,6 +83,8 @@ def selected_files(bot_dir: Path, scope: str):
     if "positions" in names and configured_state != "data/positions.json":
         files.pop("data/positions.json", None)
         files[configured_state] = {}
+    if "rapid-cycle" in names:
+        files[rapid_cycle_state_file(bot_dir)] = REMOVE
     return files
 
 

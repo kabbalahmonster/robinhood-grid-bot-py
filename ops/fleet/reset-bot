@@ -6,19 +6,20 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)"
 source "$SCRIPT_DIR/fleet-common.sh"
 
 usage() { cat <<'EOF'
-Usage: reset-bot NAME [NAME ...] [--scope all|positions|history|accounting|learning] [--apply --confirm-reset] [--restart] [--config PATH]
+Usage: reset-bot NAME [NAME ...] [--scope all|positions|history|accounting|learning|rapid-cycle] [--apply --confirm-reset] [--restart] [--config PATH]
 
 Preview (by default) or reset mutable state for selected intentionally-stopped
 bots. Every changed file is copied to data/reset-backups/<UTC timestamp>/ first.
 
 Scopes:
   all         positions, dashboard histories, realized-profit/fee accounting,
-              and transfer-tax learning (default)
+              transfer-tax learning, and rapid-cycle journal (default)
   positions   configured STATE_FILE plus gridless position and ladder state
   history     dashboard trade and event histories
   accounting  profit totals and pending profit-fee accrual state
               plus the dashboard treasury-reporting baseline
   learning    transfer-tax detection observations
+  rapid-cycle configured RAPID_CYCLE_STATE_FILE only (archive then remove)
 
 The command never reads or changes .env, credentials, code, wallet balances,
 treasury transfer receipts, or liquidation audit records. Position resets can
@@ -30,6 +31,7 @@ Examples:
   reset-bot V4
   stop-bot V4 && reset-bot V4 --apply --confirm-reset --restart
   reset-bot V4 --scope history --apply --confirm-reset
+  reset-bot WORM --scope rapid-cycle --apply --confirm-reset --restart
 EOF
 }
 
@@ -48,7 +50,7 @@ while (($#)); do
 done
 
 (( ${#names[@]} > 0 )) || fleet_die "At least one bot name is required"
-[[ "$scope" =~ ^(all|positions|history|accounting|learning)$ ]] || fleet_die "Invalid --scope: $scope"
+[[ "$scope" =~ ^(all|positions|history|accounting|learning|rapid-cycle)$ ]] || fleet_die "Invalid --scope: $scope"
 (( apply == 0 || confirm == 1 )) || fleet_die "--apply requires --confirm-reset"
 (( restart == 0 || apply == 1 )) || fleet_die "--restart requires --apply"
 

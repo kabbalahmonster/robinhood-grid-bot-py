@@ -18,7 +18,7 @@ import tempfile
 from typing import Any, Optional
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 MODES = {"shadow", "live"}
 
 
@@ -37,6 +37,7 @@ class RapidCycleIdentity:
     min_profit_percent: float
     lookback_samples: int = 12
     min_confidence_samples: int = 2
+    max_open_positions: int = 1
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -49,6 +50,7 @@ class RapidCycleIdentity:
             "min_profit_percent": float(self.min_profit_percent),
             "lookback_samples": int(self.lookback_samples),
             "min_confidence_samples": int(self.min_confidence_samples),
+            "max_open_positions": int(self.max_open_positions),
         }
 
 
@@ -62,6 +64,10 @@ class RapidCycleJournal:
             raise ValueError("rapid-cycle lookback_samples must be at least 2")
         if int(identity.min_confidence_samples) < 1:
             raise ValueError("rapid-cycle min_confidence_samples must be at least 1")
+        if not 1 <= int(identity.max_open_positions) <= 100:
+            raise ValueError("rapid-cycle max_open_positions must be between 1 and 100")
+        if identity.mode == "live" and int(identity.max_open_positions) != 1:
+            raise ValueError("rapid-cycle live mode currently requires max_open_positions=1")
         self.path = Path(path)
         self.identity = identity
         self.state = self._load()
@@ -79,6 +85,8 @@ class RapidCycleJournal:
             "buy_unit_cost_window": [],
             "round_trip_confidence_streak": 0,
             "position": None,
+            "positions": [],
+            "next_shadow_position_id": 1,
             "pending_action": None,
             "completed_cycles": [],
             "last_observation": None,
@@ -102,11 +110,43 @@ class RapidCycleJournal:
         if raw.get("status") not in {"flat", "open", "action_pending"}:
             raise RuntimeError("rapid-cycle journal has an invalid status")
         if raw.get("status") == "open" and not isinstance(raw.get("position"), dict):
-            raise RuntimeError("rapid-cycle open state is missing its position")
+            if not (self.identity.mode == "shadow" and isinstance(raw.get("positions"), list)):
+                raise RuntimeError("rapid-cycle open state is missing its position")
         if raw.get("status") == "action_pending" and not isinstance(
             raw.get("pending_action"), dict
         ):
             raise RuntimeError("rapid-cycle pending state is missing its action")
+        positions = raw.get("positions")
+        if not isinstance(positions, list) or any(not isinstance(row, dict) for row in positions):
+            raise RuntimeError("rapid-cycle journal has invalid shadow positions")
+        if len(positions) > self.identity.max_open_positions:
+            raise RuntimeError("rapid-cycle journal exceeds its open-position cap")
+        position_ids = [row.get("position_id") for row in positions]
+        if (any(not isinstance(value, str) or not value for value in position_ids)
+                or len(set(position_ids)) != len(position_ids)):
+            raise RuntimeError("rapid-cycle shadow position identities are invalid")
+        for row in positions:
+            try:
+                valid_amounts = (
+                    int(row.get("token_amount_raw", 0)) > 0
+                    and int(row.get("cost_wei", 0)) > 0
+                )
+            except (TypeError, ValueError):
+                valid_amounts = False
+            if row.get("kind") != "paper" or not valid_amounts:
+                raise RuntimeError("rapid-cycle shadow position accounting is invalid")
+        next_position_id = raw.get("next_shadow_position_id")
+        if (not isinstance(next_position_id, int) or isinstance(next_position_id, bool)
+                or next_position_id < 1):
+            raise RuntimeError("rapid-cycle next shadow position identity is invalid")
+        if self.identity.mode == "shadow":
+            if raw.get("position") is not None or raw.get("pending_action") is not None:
+                raise RuntimeError("rapid-cycle shadow journal contains live-only state")
+            expected_status = "open" if positions else "flat"
+            if raw.get("status") != expected_status:
+                raise RuntimeError("rapid-cycle shadow status does not match its positions")
+        elif positions:
+            raise RuntimeError("rapid-cycle live journal contains shadow positions")
         return raw
 
     def save(self) -> None:
@@ -148,9 +188,27 @@ class RapidCycleEngine:
         return self.journal.state
 
     def desired_direction(self) -> Optional[str]:
+        if self.journal.identity.mode == "shadow":
+            return "portfolio"
         if self.state["status"] == "action_pending":
             return None
         return "buy" if self.state["status"] == "flat" else "sell"
+
+    def shadow_positions(self) -> list[dict[str, Any]]:
+        if self.journal.identity.mode != "shadow":
+            return []
+        return deepcopy(self.state.get("positions") or [])
+
+    def has_buy_capacity(self) -> bool:
+        if self.journal.identity.mode == "shadow":
+            return len(self.state.get("positions") or []) < self.journal.identity.max_open_positions
+        return self.state["status"] == "flat"
+
+    def shadow_exit_candidate(self, cursor: int = 0) -> Optional[dict[str, Any]]:
+        positions = self.shadow_positions()
+        if not positions:
+            return None
+        return positions[int(cursor) % len(positions)]
 
     @staticmethod
     def _observation(*, direction: str, block_number: int, provider: str,
@@ -176,7 +234,7 @@ class RapidCycleEngine:
                     exit_projected_gas_wei: Optional[int] = None,
                     exit_block_number: Optional[int] = None,
                     observed_at: Optional[str] = None) -> Optional[dict[str, Any]]:
-        if self.state["status"] != "flat":
+        if not self.has_buy_capacity() or self.state["status"] == "action_pending":
             return None
         principal = self.journal.identity.principal_wei
         token_floor_raw = int(token_floor_raw)
@@ -283,28 +341,28 @@ class RapidCycleEngine:
             "trigger": observation,
         }
         if self.journal.identity.mode == "shadow":
+            sequence = int(self.state.get("next_shadow_position_id", 1))
+            position = {
+                "kind": "paper",
+                "position_id": f"paper-{sequence}",
+                "opened_at": observed_at,
+                "opened_block": int(block_number),
+                "token_amount_raw": str(token_floor_raw),
+                "cost_wei": str(economic_cost),
+                "buy_provider": provider,
+                "buy_settlement": settlement,
+                "buy_observation": observation,
+            }
+            positions = list(self.state.get("positions") or [])
+            positions.append(position)
             self.state.update({
                 "status": "open",
-                "position": {
-                    "kind": "paper",
-                    "opened_at": observed_at,
-                    "opened_block": int(block_number),
-                    "token_amount_raw": str(token_floor_raw),
-                    "cost_wei": str(economic_cost),
-                    "buy_provider": provider,
-                    "buy_settlement": settlement,
-                    "buy_observation": observation,
-                },
+                "positions": positions,
+                "next_shadow_position_id": sequence + 1,
                 "pending_action": None,
             })
-            self._complete_cycle(
-                sell_observation=sell_observation,
-                received_wei=projected_net_return,
-                profit_wei=projected_profit,
-                tx_hash=None,
-                closed_at=observed_at,
-            )
-            return {**action, "paper_filled": True, "round_trip_completed": True}
+            self.journal.save()
+            return {**action, "paper_filled": True, "position_id": position["position_id"]}
         self.state.update({"status": "action_pending", "pending_action": action})
         self.journal.save()
         return action
@@ -336,10 +394,18 @@ class RapidCycleEngine:
 
     def observe_sell(self, *, block_number: int, provider: str, settlement: str,
                      output_floor_wei: int, projected_gas_wei: int,
+                     position_id: Optional[str] = None,
                      observed_at: Optional[str] = None) -> Optional[dict[str, Any]]:
         if self.state["status"] != "open":
             return None
-        position = self.state["position"]
+        if self.journal.identity.mode == "shadow":
+            positions = self.state.get("positions") or []
+            position = next((row for row in positions
+                             if row.get("position_id") == position_id), None)
+            if position is None:
+                raise RuntimeError("rapid-cycle shadow sell position is missing")
+        else:
+            position = self.state["position"]
         token_amount = int(position["token_amount_raw"])
         cost = int(position["cost_wei"])
         output_floor_wei = int(output_floor_wei)
@@ -369,6 +435,7 @@ class RapidCycleEngine:
             self._complete_cycle(
                 sell_observation=observation, received_wei=net,
                 profit_wei=profit, tx_hash=None, closed_at=observed_at,
+                position=position,
             )
             return {**action, "paper_filled": True}
         self.state.update({"status": "action_pending", "pending_action": action})
@@ -400,14 +467,16 @@ class RapidCycleEngine:
         self.journal.save()
 
     def _complete_cycle(self, *, sell_observation: dict[str, Any], received_wei: int,
-                        profit_wei: int, tx_hash: Optional[str], closed_at: str) -> None:
-        position = deepcopy(self.state["position"])
+                        profit_wei: int, tx_hash: Optional[str], closed_at: str,
+                        position: Optional[dict[str, Any]] = None) -> None:
+        position = deepcopy(position or self.state["position"])
         record = {
             "mode": self.journal.identity.mode,
             "opened_at": position.get("opened_at"),
             "closed_at": closed_at,
             "cost_wei": position.get("cost_wei"),
             "token_amount_raw": position.get("token_amount_raw"),
+            "position_id": position.get("position_id"),
             "received_wei": str(int(received_wei)),
             "profit_wei": str(int(profit_wei)),
             "profit_percent": round(
@@ -419,15 +488,27 @@ class RapidCycleEngine:
         }
         history = list(self.state.get("completed_cycles") or [])
         history.append(record)
-        self.state.update({
-            "status": "flat",
-            "position": None,
-            "pending_action": None,
-            "buy_sample_count": 0,
-            "peak_unit_cost_scaled": None,
-            "buy_unit_cost_window": [],
-            "round_trip_confidence_streak": 0,
-            "completed_cycles": history[-500:],
-            "last_completed_cycle": record,
-        })
+        if self.journal.identity.mode == "shadow":
+            remaining = [
+                row for row in self.state.get("positions") or []
+                if row.get("position_id") != position.get("position_id")
+            ]
+            self.state.update({
+                "status": "open" if remaining else "flat",
+                "positions": remaining,
+                "completed_cycles": history[-500:],
+                "last_completed_cycle": record,
+            })
+        else:
+            self.state.update({
+                "status": "flat",
+                "position": None,
+                "pending_action": None,
+                "buy_sample_count": 0,
+                "peak_unit_cost_scaled": None,
+                "buy_unit_cost_window": [],
+                "round_trip_confidence_streak": 0,
+                "completed_cycles": history[-500:],
+                "last_completed_cycle": record,
+            })
         self.journal.save()

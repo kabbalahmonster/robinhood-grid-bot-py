@@ -36,18 +36,18 @@ def sell(engine, output, block=4, gas=10**12):
     )
 
 
-def test_shadow_requires_warmup_drop_and_exit_confidence_then_completes_shot(tmp_path):
+def test_shadow_requires_warmup_drop_and_exit_confidence_then_opens_shot(tmp_path):
     engine = RapidCycleEngine(RapidCycleJournal(tmp_path / "state.json", identity()))
     assert buy(engine, 1_000_000, 1) is None
     assert buy(engine, 1_010_000, 2) is None
     action = buy(engine, 1_030_000, 3)
     assert action["type"] == "buy"
     assert action["paper_filled"] is True
-    assert action["round_trip_completed"] is True
-    assert engine.state["status"] == "flat"
+    assert action["position_id"] == "paper-1"
+    assert engine.state["status"] == "open"
     assert engine.state["position"] is None
-    assert engine.state["completed_cycles"][0]["token_amount_raw"] == "1030000"
-    assert json.loads((tmp_path / "state.json").read_text())["status"] == "flat"
+    assert engine.state["positions"][0]["token_amount_raw"] == "1030000"
+    assert json.loads((tmp_path / "state.json").read_text())["status"] == "open"
 
 
 def test_entry_drop_never_opens_without_a_complete_profitable_exit(tmp_path):
@@ -66,33 +66,68 @@ def test_entry_drop_never_opens_without_a_complete_profitable_exit(tmp_path):
 
 
 def test_shadow_can_take_repeated_independent_exit_qualified_shots(tmp_path):
-    engine = RapidCycleEngine(RapidCycleJournal(tmp_path / "state.json", identity()))
+    engine = RapidCycleEngine(RapidCycleJournal(
+        tmp_path / "state.json", identity(max_open_positions=10)
+    ))
     for offset in (0, 3):
         assert buy(engine, 1_000_000, 1 + offset) is None
         assert buy(engine, 1_010_000, 2 + offset) is None
         action = buy(engine, 1_030_000, 3 + offset)
-        assert action["round_trip_completed"] is True
-        assert engine.state["status"] == "flat"
+        assert action["position_id"] == f"paper-{1 + offset // 3}"
+        assert engine.state["status"] == "open"
+    assert len(engine.state["positions"]) == 2
+    for position in list(engine.state["positions"]):
+        cost = int(position["cost_wei"])
+        action = engine.observe_sell(
+            block_number=9, provider="sushiswap", settlement="native",
+            output_floor_wei=int(cost * 1.02) + 10**12,
+            projected_gas_wei=10**12, position_id=position["position_id"],
+        )
+        assert action["paper_filled"] is True
     assert len(engine.state["completed_cycles"]) == 2
+    assert engine.state["positions"] == []
+    assert engine.state["status"] == "flat"
+
+
+def test_shadow_hard_caps_ten_open_positions(tmp_path):
+    rapid_identity = identity(
+        max_open_positions=10, entry_drop_percent=0.01,
+        min_confidence_samples=1,
+    )
+    engine = RapidCycleEngine(
+        RapidCycleJournal(tmp_path / "ten.json", rapid_identity),
+        min_buy_samples=2,
+    )
+    assert buy(engine, 1_000_000, 1) is None
+    for index in range(10):
+        action = buy(engine, 1_010_000 + index * 10_000, 2 + index)
+        assert action["position_id"] == f"paper-{index + 1}"
+    samples_at_cap = engine.state["buy_sample_count"]
+    assert buy(engine, 2_000_000, 20) is None
+    assert len(engine.state["positions"]) == 10
+    assert engine.state["buy_sample_count"] == samples_at_cap
+    assert engine.shadow_exit_candidate(0)["position_id"] == "paper-1"
+    assert engine.shadow_exit_candidate(9)["position_id"] == "paper-10"
+    assert engine.shadow_exit_candidate(10)["position_id"] == "paper-1"
 
 
 def test_shadow_sell_uses_floor_minus_sell_gas_and_records_cycle(tmp_path):
-    rapid_identity = identity(min_confidence_samples=99)
-    engine = RapidCycleEngine(RapidCycleJournal(tmp_path / "state.json", rapid_identity))
+    engine = RapidCycleEngine(RapidCycleJournal(tmp_path / "state.json", identity()))
     buy(engine, 1_000_000, 1)
     buy(engine, 1_010_000, 2)
     buy(engine, 1_030_000, 3)
-    engine.state.update({
-        "status": "open",
-        "position": {
-            "kind": "paper", "opened_at": "2026-01-01T00:00:03+00:00",
-            "token_amount_raw": "1030000", "cost_wei": str(10**15 + 10**12),
-            "buy_observation": engine.state["last_observation"],
-        },
-    })
-    cost = int(engine.state["position"]["cost_wei"])
-    assert sell(engine, cost + 10**12, gas=10**12) is None
-    action = sell(engine, int(cost * 1.02) + 10**12, 5, gas=10**12)
+    position = engine.state["positions"][0]
+    cost = int(position["cost_wei"])
+    assert engine.observe_sell(
+        block_number=4, provider="sushiswap", settlement="native",
+        output_floor_wei=cost + 10**12, projected_gas_wei=10**12,
+        position_id=position["position_id"],
+    ) is None
+    action = engine.observe_sell(
+        block_number=5, provider="sushiswap", settlement="native",
+        output_floor_wei=int(cost * 1.02) + 10**12,
+        projected_gas_wei=10**12, position_id=position["position_id"],
+    )
     assert action["paper_filled"] is True
     assert engine.state["status"] == "flat"
     record = engine.state["completed_cycles"][0]
@@ -170,9 +205,10 @@ def test_corrupt_and_unknown_schema_fail_closed(tmp_path):
         RapidCycleJournal(path, identity())
 
 
-def test_version_one_experimental_journal_requires_explicit_archive(tmp_path):
-    path = tmp_path / "state.json"
-    path.write_text(json.dumps({"schema_version": 1}))
+@pytest.mark.parametrize("version", [1, 2])
+def test_older_experimental_journal_requires_explicit_archive(tmp_path, version):
+    path = tmp_path / f"state-v{version}.json"
+    path.write_text(json.dumps({"schema_version": version}))
     with pytest.raises(RuntimeError, match="archive it"):
         RapidCycleJournal(path, identity())
 
