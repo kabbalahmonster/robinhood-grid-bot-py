@@ -123,7 +123,8 @@ def test_observation_uses_read_only_execution_preflight_and_loss_visibility():
             "candidates": [{
                 "provider": "uniswap", "settlement": "native",
                 "validation_level": "quote_only", "output_floor_raw": "1100",
-                "projected_total_gas_wei": "100", "projected_net_score": "1000",
+                "projected_total_gas_wei": "100",
+                "projected_net_score": "1571949552350724924451463.008",
             }],
         }
 
@@ -134,7 +135,8 @@ def test_observation_uses_read_only_execution_preflight_and_loss_visibility():
     assert result == {
         "block_number": 99, "provider": "uniswap", "settlement": "native",
         "output_floor_raw": 1100, "projected_gas_wei": 100,
-        "projected_net_score": 1000, "tournament_id": "rapid",
+        "projected_net_score": "1571949552350724924451463.008",
+        "tournament_id": "rapid",
     }
 
 

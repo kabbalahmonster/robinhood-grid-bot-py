@@ -2085,7 +2085,10 @@ class GridBot:
             "settlement": row["settlement"],
             "output_floor_raw": int(row["output_floor_raw"]),
             "projected_gas_wei": int(row["projected_total_gas_wei"]),
-            "projected_net_score": int(row["projected_net_score"]),
+            # Buy scores are output-per-all-in-cost ratios and can therefore
+            # be fractional.  Tournament rows deliberately serialize scores
+            # as decimal strings so their precision survives JSON/logging.
+            "projected_net_score": str(Decimal(str(row["projected_net_score"]))),
             "tournament_id": comparison.get("tournament_id"),
         }
 
