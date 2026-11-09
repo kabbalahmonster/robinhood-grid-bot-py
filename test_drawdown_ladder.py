@@ -164,6 +164,41 @@ class DrawdownLadderGeometryTests(unittest.TestCase):
         self.assertEqual(config.survivor_rapid_poll_seconds, 2)
         self.assertEqual(config.survivor_rapid_poll_window_seconds, 45)
 
+    def test_gap_leading_edge_config_inherits_legacy_switch_unless_explicit(self):
+        base = {
+            "PRIVATE_KEY": "0x" + "1" * 64,
+            "RPC_URL": "https://rpc.example.invalid",
+            "CHAIN_ID": "4663",
+            "TOKEN_ADDRESS": "0x" + "2" * 40,
+            "UNISWAP_API_KEY": "test-key",
+        }
+        with patch.dict(
+            os.environ,
+            {**base, "GRIDLESS_LEADING_EDGE": "false"},
+            clear=True,
+        ):
+            config = load_config()
+            self.assertFalse(config.gridless_leading_edge)
+            self.assertFalse(config.gridless_gap_leading_edge)
+        with patch.dict(
+            os.environ,
+            {**base, "GRIDLESS_LEADING_EDGE": "true"},
+            clear=True,
+        ):
+            self.assertTrue(load_config().gridless_gap_leading_edge)
+        with patch.dict(
+            os.environ,
+            {
+                **base,
+                "GRIDLESS_LEADING_EDGE": "true",
+                "GRIDLESS_GAP_LEADING_EDGE": "false",
+            },
+            clear=True,
+        ):
+            config = load_config()
+            self.assertTrue(config.gridless_leading_edge)
+            self.assertFalse(config.gridless_gap_leading_edge)
+
     def test_linear_levels_reach_terminal_drawdown(self):
         levels = generate_levels(1.0, 5, 95, "linear")
         self.assertAlmostEqual(levels[0], 0.81)

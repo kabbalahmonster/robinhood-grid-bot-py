@@ -152,6 +152,14 @@ def get_sell_trigger_percent(config: Any) -> float:
     return float(getattr(config, 'gridless_sell_threshold', 5.0))
 
 
+def gap_leading_edge_enabled(config: Any) -> bool:
+    """Return the bounded-gap switch, inheriting the legacy leading-edge gate."""
+    configured = getattr(config, "gridless_gap_leading_edge", None)
+    if isinstance(configured, bool):
+        return configured
+    return bool(getattr(config, "gridless_leading_edge", False))
+
+
 def threshold_gap_leading_edge_trigger(
         positions: Dict[str, Dict], current_price: float, config: Any,
         position_pnls: Optional[Dict[str, Dict[str, float]]] = None):
@@ -165,8 +173,8 @@ def threshold_gap_leading_edge_trigger(
     exits, leaves a newer anchor behind instead of immediately dip-rebuying
     against an old underwater position.
     """
-    if not getattr(config, "gridless_leading_edge", False):
-        return False, "Leading edge disabled", None
+    if not gap_leading_edge_enabled(config):
+        return False, "Gap leading edge disabled", None
     if len(positions) < 2:
         return False, "No bounded position gap exists", None
     if len(positions) >= int(getattr(config, "max_active_positions", 10)):
@@ -238,6 +246,7 @@ def threshold_gap_status(positions: Dict[str, Dict], current_price: float,
     )
     status: Dict[str, Any] = {
         "enabled": bool(getattr(config, 'gridless_leading_edge', False)),
+        "gap_leading_edge_enabled": gap_leading_edge_enabled(config),
         "eligible": False,
         "decision": "invalid_market" if market_price <= 0 else "waiting",
         "reason": "Current price is invalid" if market_price <= 0 else "Waiting for entry spacing",
@@ -350,7 +359,8 @@ def threshold_gap_status(positions: Dict[str, Dict], current_price: float,
                 leading_trigger_pnl_percent=leading_pnl,
             )
             return status
-    if (status["enabled"] and len(positions) > 1 and lower and upper):
+    if (status["gap_leading_edge_enabled"]
+            and len(positions) > 1 and lower and upper):
         lead_move = float(status["lower_anchor_move_percent"])
         room_above = float(status["room_above_percent"])
         lead_crossed = lead_move >= spacing or math.isclose(
@@ -377,6 +387,11 @@ def threshold_gap_status(positions: Dict[str, Dict], current_price: float,
         status.update(
             decision="outside_bounded_gap",
             reason="Market is not inside a bounded position gap",
+        )
+    elif not status["gap_leading_edge_enabled"]:
+        status.update(
+            decision="gap_leading_edge_disabled",
+            reason="Bounded-gap leading-edge buys are disabled",
         )
     else:
         status.update(
@@ -621,6 +636,7 @@ def should_buy(positions: Dict[str, Dict], current_price: float, config: Any,
     buy_threshold = getattr(config, 'gridless_buy_threshold', -10.0)
     sell_threshold = get_sell_trigger_percent(config)
     leading_edge_enabled = getattr(config, 'gridless_leading_edge', False)
+    gap_leading_enabled = gap_leading_edge_enabled(config)
     token_decimals = _configured_token_decimals(config)
     
     # No positions - initial buy
@@ -699,13 +715,14 @@ def should_buy(positions: Dict[str, Dict], current_price: float, config: Any,
                 f"only {physical_move:.2f}%; needs {leading_edge_trigger}%",
             )
 
-    if leading_edge_enabled and len(positions) > 1:
+    if gap_leading_enabled and len(positions) > 1:
         gap_triggered, gap_reason, _ = threshold_gap_leading_edge_trigger(
             positions, current_price, config, position_pnls
         )
         if gap_triggered:
             return True, gap_reason
 
+    if leading_edge_enabled and len(positions) > 1:
         gap_status = threshold_gap_status(
             positions, current_price, config, position_pnls
         )

@@ -207,9 +207,12 @@ Entry behavior:
 - If `GRIDLESS_LEADING_EDGE=true` and exactly one position exists, also buy
   when that position's authorized buy-side P&L reaches 50% of the configured
   sell trigger **and** market has physically advanced the same percentage from
-  its confirmed principal-only fill. With multiple positions, the nearest confirmed purchase below
-  market can trigger at the same spacing only while market is inside a bounded
-  gap and another half-sell interval fits before the next purchase above it.
+  its confirmed principal-only fill. With multiple positions and
+  `GRIDLESS_GAP_LEADING_EDGE=true`, the nearest confirmed purchase below market
+  can trigger at the same spacing only while market is inside a bounded gap and
+  another half-sell interval fits before the next purchase above it. The gap
+  switch defaults to the value of `GRIDLESS_LEADING_EDGE` when omitted; setting
+  only the gap switch false preserves ordinary leading-edge entries.
   Spacing uses the confirmed principal-only fill price, independently of the
   route-sensitive net buy P&L trigger. A crossed net trigger cannot consume
   repeated slots without a real configured dip from the newest low anchor.
@@ -460,7 +463,7 @@ do not relax the sale's minimum-profit accounting.
 |---|---|---|
 | Trading engine | classic grid, gridless | `USE_GRIDLESS` |
 | Gridless allocation | threshold, frozen drawdown ladder, Survivor | `GRIDLESS_ALLOCATION_MODE` |
-| Entry direction | dips; optional strength/leading-edge entries | `GRIDLESS_BUY_THRESHOLD`, `GRIDLESS_LEADING_EDGE` |
+| Entry direction | dips; optional strength/leading-edge entries and independently switchable bounded-gap fills | `GRIDLESS_BUY_THRESHOLD`, `GRIDLESS_LEADING_EDGE`, `GRIDLESS_GAP_LEADING_EDGE` |
 | Exit direction | profit target; optional stop loss | `GRIDLESS_SELL_THRESHOLD`, `GRIDLESS_STOPLOSS_*` |
 | Position sizing | classic/threshold balance divided across slots; adaptive ladder reservations | `TRADEABLE_BALANCE_PERCENT`, ladder controls |
 | Capacity | fixed maximum concurrent positions | `MAX_ACTIVE_POSITIONS` |

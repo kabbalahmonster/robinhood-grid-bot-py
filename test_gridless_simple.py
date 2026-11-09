@@ -232,6 +232,32 @@ class TestShouldBuy(unittest.TestCase):
         self.assertTrue(should_buy)
         self.assertIn("position 11", reason)
 
+    def test_gap_leading_edge_can_be_disabled_without_disabling_leading_edge(self):
+        config = MagicMock()
+        config.max_active_positions = 4
+        config.gridless_buy_threshold = -10.0
+        config.gridless_sell_threshold = 5.0
+        config.gridless_leading_edge = True
+        config.gridless_gap_leading_edge = False
+        config.token_decimals = 18
+        positions = {
+            '0': self._position_at(0.1),
+            '1': self._position_at(0.142857),
+        }
+
+        should_buy, reason = gridless.should_buy(positions, 0.1025, config)
+        self.assertFalse(should_buy)
+        self.assertNotIn("Gap leading edge:", reason)
+        status = gridless.threshold_gap_status(positions, 0.1025, config)
+        self.assertFalse(status["gap_leading_edge_enabled"])
+        self.assertEqual(status["decision"], "gap_leading_edge_disabled")
+
+        should_buy, reason = gridless.should_buy(
+            {'0': self._position_at(0.1)}, 0.1025, config
+        )
+        self.assertTrue(should_buy)
+        self.assertIn("Leading edge:", reason)
+
     def test_gap_leading_edge_requires_spacing_before_upper_position(self):
         config = MagicMock()
         config.max_active_positions = 4

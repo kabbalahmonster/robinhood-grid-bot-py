@@ -203,7 +203,8 @@ python grid_bot.py
 | `USE_GRIDLESS` | No | true | Enable gridless trading mode |
 | `GRIDLESS_BUY_THRESHOLD` | No | -10.0 | Buy when top position P&L ≤ this % |
 | `GRIDLESS_SELL_THRESHOLD` | No | 5.0 | Sell when position P&L ≥ this % |
-| `GRIDLESS_LEADING_EDGE` | No | true | Buy into strength at 50% of the sell trigger; threshold mode also walks through bounded gaps when the same spacing remains on both sides, while Survivor advances from each highest purchase point |
+| `GRIDLESS_LEADING_EDGE` | No | true | Buy into strength at 50% of the sell trigger; in threshold mode this controls the initial single-position continuation, while Survivor advances from each highest purchase point |
+| `GRIDLESS_GAP_LEADING_EDGE` | No | value of `GRIDLESS_LEADING_EDGE` | In threshold mode, walk through bounded gaps when the same spacing remains on both sides; set false to preserve ordinary leading edge without consuming slots inside old gaps |
 | `GRIDLESS_STOPLOSS_ENABLED` | No | false | Enable stoploss in gridless mode |
 | `GRIDLESS_STOPLOSS_THRESHOLD` | No | -25.0 | Stoploss trigger % |
 | `GRIDLESS_BUY_COOLDOWN_SECONDS` | No | 0 | Cooldown between gridless buys (0 disables cooldown) |

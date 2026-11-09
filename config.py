@@ -165,6 +165,7 @@ class BotConfig:
     gridless_stoploss_enabled: bool  # Enable stoploss sells
     gridless_multi_action_rounds: bool  # Allow multiple guarded fills per polling round
     gridless_leading_edge: bool  # Enable leading edge buys (buy into strength)
+    gridless_gap_leading_edge: bool  # Enable bounded-gap leading-edge buys
     gridless_allocation_mode: str  # threshold, drawdown_ladder, or survivor
     gridless_min_position_eth: float
     gridless_ladder_terminal_drawdown_percent: float
@@ -809,6 +810,10 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
             "GRIDLESS_MULTI_ACTION_ROUNDS", "false"
         ).lower() == "true",
         gridless_leading_edge=os.getenv("GRIDLESS_LEADING_EDGE", "true").lower() == "true",
+        gridless_gap_leading_edge=os.getenv(
+            "GRIDLESS_GAP_LEADING_EDGE",
+            os.getenv("GRIDLESS_LEADING_EDGE", "true"),
+        ).lower() == "true",
         gridless_allocation_mode=os.getenv(
             "GRIDLESS_ALLOCATION_MODE", "threshold"
         ).strip().lower(),
