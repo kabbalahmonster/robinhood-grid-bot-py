@@ -308,6 +308,33 @@ If the isolated helper archives a legacy guard whose recorded error proves a
 definitive pre-broadcast rejection, the parent clears its stale in-memory halt
 only after finding an archive containing that exact transaction hash.
 
+If an outcome-unknown signed hash remains absent after 15 minutes and both the
+latest and pending wallet nonce still equal its recorded nonce, preview a
+deliberate same-nonce cancellation:
+
+```bash
+cancel-unresolved-broadcast --only BOTNAME
+```
+
+Review the wallet, original hash, nonce, guarded destination/value, cancellation
+gas price, and maximum fee. Then stop only that bot and repeat with the exact
+hash printed by the preview:
+
+```bash
+stop-bot BOTNAME
+cancel-unresolved-broadcast --only BOTNAME --execute \
+  --confirm-bot-stopped --confirm-tx-hash 0xFULL_GUARDED_HASH
+start-bot BOTNAME
+```
+
+The tool sends only a zero-value self-transfer, persists its cancellation hash
+before broadcast, and archives the original guard only after a successful
+receipt. A visible original transaction, consumed/known-pending nonce, young or
+incomplete guard, insufficient gas balance, RPC uncertainty, failed receipt,
+or fingerprint mismatch remains halted. If confirmation was interrupted, rerun
+the same execute command: it only finalizes the already-recorded cancellation
+after proving its exact receipt and never broadcasts it again automatically.
+
 When `fleet-doctor`, inventory, or bot logs show tracked managed-token balances
 above the wallet's on-chain balance, preview the repair before stopping:
 

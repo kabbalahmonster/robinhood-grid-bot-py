@@ -122,6 +122,7 @@ sudo apt install tmux git python3 python3-venv
      ops/fleet/fleet-audit \
      ops/fleet/dashboard-remove ops/fleet/initialize-bots \
      ops/fleet/reconcile-position-balances ops/fleet/reconcile-position-balances.py \
+     ops/fleet/cancel-unresolved-broadcast ops/fleet/cancel-unresolved-broadcast.py \
      ops/fleet/initialize-bot-env.py ops/fleet/fleet-watch \
      ops/fleet/fleet-watch.py ops/fleet/strategy-model
    ```
@@ -168,6 +169,7 @@ sudo apt install tmux git python3 python3-venv
    ln -sf "$PWD/ops/fleet/fleet-git-status" "$HOME/bin/fleet-git-status"
    ln -sf "$PWD/ops/fleet/balance-report" "$HOME/bin/balance-report"
    ln -sf "$PWD/ops/fleet/fleet-audit" "$HOME/bin/fleet-audit"
+   ln -sf "$PWD/ops/fleet/cancel-unresolved-broadcast" "$HOME/bin/cancel-unresolved-broadcast"
    ln -sf "$PWD/ops/fleet/dashboard-remove" "$HOME/bin/dashboard-remove"
    ln -sf "$PWD/ops/fleet/initialize-bots" "$HOME/bin/initialize-bots"
    ln -sf "$PWD/ops/fleet/template-from-bot" "$HOME/bin/template-from-bot"
@@ -523,6 +525,7 @@ unless their section explicitly says otherwise.
 | `fleet-audit` | Reconcile local treasury/liquidation audit records | No |
 | `cleanup-logs` | Preview or delete aged bot log files by fleet selection | `--apply` only |
 | `bundle-logs` | Merge selected-bot logs (all rotations with `--since`) into one redacted report | Writes one report file |
+| `cancel-unresolved-broadcast --only NAME` | Preview or explicitly cancel one old absent ambiguous broadcast at the same nonce | No by default; gas-only broadcast with confirmations |
 | `start-fleet` / `stop-fleet` / `restart-fleet` | Manage the configured tmux fleet | Processes only |
 | `start-bot NAME` / `stop-bot NAMES...` / `restart-bot NAMES...` | Durably start, stop, or cleanly restart selected bots | Processes/state marker |
 | `reset-bot NAMES...` | Preview or reset selected stopped bots' mutable strategy state with backups | `--apply --confirm-reset` only |
@@ -1193,6 +1196,36 @@ a verified ledger reload. Exact transaction and receipt reads check every
 configured RPC endpoint. Missing exact-hash evidence remains halted without a
 rebroadcast, and repeated failures back off exponentially to 30 minutes. It
 resumes only after the exact guard is archived.
+
+### Cancelling an absent ambiguous broadcast
+
+When a signed outcome-unknown hash has remained absent across every configured
+RPC for at least 15 minutes, and both the latest and pending wallet nonce still
+equal the guard's nonce, preview a deliberate nonce cancellation for one bot:
+
+```bash
+cancel-unresolved-broadcast --only abyss
+```
+
+This is never automatic. Review the original hash/fingerprint, nonce, wallet,
+cancellation gas price, and maximum fee. Stop only the selected bot, then bind
+execution to the full reviewed hash:
+
+```bash
+stop-bot abyss
+cancel-unresolved-broadcast --only abyss --execute \
+  --confirm-bot-stopped --confirm-tx-hash 0xFULL_GUARDED_HASH
+start-bot abyss
+```
+
+The cancellation is a zero-value self-transfer using the guarded nonce. Its
+hash is written into the existing guard before broadcast, so a lost RPC reply
+cannot authorize a blind retry. The original guard is archived as
+`.cancelled.*` only after the exact successful cancellation receipt. Rerunning
+the same execute command after an interrupted confirmation only verifies and
+finalizes the recorded cancellation. Visible original transactions,
+latest/pending nonce mismatches, incomplete or young guards, insufficient gas,
+failed receipts, and fingerprint mismatches remain fail-closed.
 
 The repair is deliberately one-way and conservative:
 

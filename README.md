@@ -445,6 +445,7 @@ option and safety invariant.
 | `restart-stopped [--only NAMES] [--exclude NAMES]` | Start intentionally stopped bots while leaving unselected and running bots unchanged | Processes/state marker |
 | `cleanup-logs --older-than AGE` | Preview or delete old logs for the whole fleet, selected bots, or all except selected bots | Log files only |
 | `bundle-logs` | Merge selected bots' logs into one redacted analysis file; `--since` spans current and rotated files | Writes one report file |
+| `cancel-unresolved-broadcast --only NAME` | Preview or explicitly replace one old absent ambiguous broadcast with a same-nonce zero-value self-transfer | No by default; gas-only broadcast with confirmations |
 | `update-bot NAME` | List/switch branches, fast-forward one checkout, and restart it only when already running | Git/processes |
 | `update-fleet` | Preflight and fast-forward checkouts without tracked changes; optional restart | Git/processes |
 | `update-all` | Update operations and bots, optionally switching all to `--branch`; `--leave-stopped` preserves downtime | Git/processes/state marker |
@@ -1299,6 +1300,7 @@ Common failures:
 - Check token approvals haven't expired
 - If `data/unresolved_broadcast.json` exists, stop the bot and verify its recorded transaction on-chain; never delete the guard or retry the trade blindly
 - `AUTO_RECONCILE_UNRESOLVED_BROADCAST=true` (the Robinhood template default) keeps the process alive but trading safety-paused while it checks the exact transaction and receipt across every configured RPC endpoint. A successful wallet-sent managed-token outflow is classified as a sell, never sent through buy recovery. If the recorded hash is absent, the reconciler searches managed-token outflow logs around the guard time for exactly one successful transaction with the same wallet, nonce, destination, and value. It adopts that replacement only when its verified outflow also satisfies the normal deficit/audit checks, preserving the original hash as `superseded_tx_hash`. The bot resumes when the proven outflow exactly matches the current deficit or a prior repair audit, or when the post-transaction wallet still fully collateralizes all tracked inventory and no haircut is needed. Successful buys still require the strict gridless buy reconciler. Pending/reverted transactions, ambiguous or fingerprint-mismatched replacements, RPC failures, and corrupt evidence remain paused for manual recovery. Failed checks back off exponentially from `AUTO_RECONCILE_INTERVAL_SECONDS` to 30 minutes instead of hammering RPCs every poll.
+- If an old hash is absent everywhere but its nonce is still unused, preview `cancel-unresolved-broadcast --only BOTNAME`. The command never runs automatically. Its execute form requires the bot to be durably stopped plus the exact guarded hash, then sends a zero-value self-transfer at the same nonce and archives the original guard only after a successful cancellation receipt. See the fleet operator runbook; never delete the guard to bypass this step.
 
 ### "Position cost seems wrong"
 - Check the transaction on block explorer

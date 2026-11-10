@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+SCRIPT_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)"
+# shellcheck source=fleet-common.sh
+source "$SCRIPT_DIR/fleet-common.sh"
+
+usage() {
+  cat <<'EOF'
+Usage: cancel-unresolved-broadcast --only NAME [--execute]
+       [--confirm-bot-stopped --confirm-tx-hash HASH] [--config PATH]
+
+Preview a same-nonce zero-value self-transfer that supersedes one old signed
+broadcast which is absent across every RPC and whose nonce remains unused.
+Execution is explicit, requires the selected bot to be durably stopped, and
+archives the guard only after the cancellation receipt succeeds.
+EOF
+}
+
+config_path=""; only=""; execute=0; confirmed=0; confirmed_hash=""
+while (($#)); do
+  case "$1" in
+    --config) (($# >= 2)) || fleet_die "--config requires a path"; config_path="$2"; shift 2 ;;
+    --only) (($# >= 2)) || fleet_die "--only requires one name"; only="$2"; shift 2 ;;
+    --execute) execute=1; shift ;;
+    --confirm-bot-stopped) confirmed=1; shift ;;
+    --confirm-tx-hash) (($# >= 2)) || fleet_die "--confirm-tx-hash requires a hash"; confirmed_hash="$2"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) fleet_die "Unknown argument: $1" ;;
+  esac
+done
+[[ -n "$only" ]] || fleet_die "--only NAME is required"
+((execute == 0 || confirmed == 1)) || fleet_die "--execute requires --confirm-bot-stopped"
+[[ $execute == 0 || -n "$confirmed_hash" ]] || fleet_die "--execute requires --confirm-tx-hash"
+
+fleet_load_config "$config_path"
+fleet_apply_selection "$only" ""
+((${#FLEET_BOT_DIRS[@]} == 1)) || fleet_die "Selection must resolve to exactly one bot"
+fleet_validate_bots
+bot_dir="${FLEET_BOT_DIRS[0]}"
+name="$(fleet_bot_name "$bot_dir")"
+if ((execute)) && fleet_bot_should_run "$bot_dir"; then
+  fleet_die "Selected bot is not durably stopped; run stop-bot $name first"
+fi
+python_bin="$(fleet_python_for "$bot_dir")"
+args=()
+if ((execute)); then
+  args+=(--execute --confirm-bot-stopped --confirm-tx-hash "$confirmed_hash")
+fi
+printf '%s unresolved-broadcast cancellation: %s\n' "$name" "$([[ $execute == 1 ]] && printf EXECUTE || printf PREVIEW)"
+exec bash -c 'cd "$1" && exec "$2" "$3" "${@:4}"' bash \
+  "$bot_dir" "$python_bin" "$SCRIPT_DIR/cancel-unresolved-broadcast.py" "${args[@]}"
