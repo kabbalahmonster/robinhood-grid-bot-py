@@ -82,6 +82,53 @@ class MultiActionRoundTests(unittest.TestCase):
         self.assertTrue(bot._sell_priority_this_cycle)
         self.assertFalse(bot._allow_buy_after_sell_this_cycle)
 
+    def test_sell_pretrigger_starts_closest_tournament_inside_focus_margin(self):
+        bot = make_bot(False)
+        bot.config.route_tournament_pretrigger_enabled = True
+        bot.config.route_tournament_mode = "gate"
+        bot.config.route_tournament_canary = True
+        bot.config.gridless_allocation_mode = "threshold"
+        bot.config.pnl_trigger_focus_margin_percent = 2
+        bot.config.min_profit_percent = 4
+        bot._attempt_gridless_sell_candidate = MagicMock()
+        pnls = {
+            "1": {"sell_trigger_pnls": {"legacy": 3.4}},
+            "2": {"sell_trigger_pnls": {"legacy": 4.6}},
+            "3": {"sell_trigger_pnls": {"legacy": 2.9}},
+        }
+
+        with patch("gridless.load_positions", return_value=POSITIONS):
+            bot._check_sells_gridless(1.0, pnls)
+
+        bot._attempt_gridless_sell_candidate.assert_called_once()
+        call = bot._attempt_gridless_sell_candidate.call_args
+        self.assertEqual(call.args[0], "2")
+        self.assertAlmostEqual(call.args[4], 4.6)
+        self.assertTrue(call.kwargs["pretrigger_tournament"])
+        self.assertEqual(call.kwargs["required_profit_percent"], 5)
+
+    def test_sell_pretrigger_is_inactive_outside_margin_or_without_switch(self):
+        for enabled, pnl in ((False, 4.6), (True, 2.9)):
+            with self.subTest(enabled=enabled, pnl=pnl):
+                bot = make_bot(False)
+                bot.config.route_tournament_pretrigger_enabled = enabled
+                bot.config.route_tournament_mode = "gate"
+                bot.config.route_tournament_canary = True
+                bot.config.gridless_allocation_mode = "threshold"
+                bot.config.pnl_trigger_focus_margin_percent = 2
+                bot.config.min_profit_percent = 4
+                bot._attempt_gridless_sell_candidate = MagicMock()
+                observations = {
+                    "1": {"sell_trigger_pnls": {"legacy": pnl}},
+                    "2": {"sell_trigger_pnls": {"legacy": -20}},
+                    "3": {"sell_trigger_pnls": {"legacy": -20}},
+                }
+
+                with patch("gridless.load_positions", return_value=POSITIONS):
+                    bot._check_sells_gridless(1.0, observations)
+
+                bot._attempt_gridless_sell_candidate.assert_not_called()
+
     def test_multi_action_snapshots_and_attempts_every_eligible_sell(self):
         bot = make_bot(True)
 
@@ -204,6 +251,37 @@ class MultiActionRoundTests(unittest.TestCase):
             )
 
         bot._actionable_quote_with_weth_fallback.assert_not_called()
+        self.assertEqual(bot.session_sells, 0)
+
+    def test_sell_pretrigger_requires_threshold_qualified_tournament_without_fallback(self):
+        bot = make_bot(False)
+        bot.config.token_address = "token"
+        bot.trade_token_address = "native"
+        bot._wallet_can_cover_sell = MagicMock(return_value=True)
+        bot._queue_route_shadow = MagicMock()
+        bot._gridless_sell_terms = MagicMock(return_value=(100, 1000))
+        failed_quote = SimpleNamespace(success=False, error="no qualified route")
+        bot._actionable_quote_with_weth_fallback = MagicMock(
+            return_value=(failed_quote, False)
+        )
+
+        with patch("gridless.load_positions", return_value={"1": POSITIONS["1"]}):
+            bot._attempt_gridless_sell_candidate(
+                "1", POSITIONS["1"], 1.0,
+                "PRETRIGGER (legacy): 4.6%", 4.6,
+                pretrigger_tournament=True,
+                required_profit_percent=5,
+            )
+
+        bot._actionable_quote_with_weth_fallback.assert_called_once_with(
+            sell_token="token",
+            buy_token="native",
+            sell_amount=100,
+            direction="sell",
+            sold_cost_wei=1000,
+            candidate_requirements={"min_profit": 5.0},
+            require_qualified_tournament=True,
+        )
         self.assertEqual(bot.session_sells, 0)
 
     def test_staged_sell_skips_impossible_preapproval_gas_probe(self):

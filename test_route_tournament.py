@@ -1918,7 +1918,15 @@ def test_gate_preflight_failure_falls_back_to_normal_provider_path():
     assert b._route_execution_preflight["status"] == "baseline_fallback"
 
 
-def test_pretrigger_gate_never_falls_back_when_no_candidate_meets_trigger():
+@pytest.mark.parametrize(
+    ("direction", "requirements"),
+    [
+        ("buy", {"buy_maximum_fill_price": 0.09}),
+        ("sell", {"min_profit": 5.0}),
+    ],
+)
+def test_pretrigger_gate_never_falls_back_when_no_candidate_meets_trigger(
+        direction, requirements):
     b = bot("gate")
     b.config.use_eth_trading = True
     primary = SimpleNamespace(name="uniswap")
@@ -1933,10 +1941,12 @@ def test_pretrigger_gate_never_falls_back_when_no_candidate_meets_trigger():
     b._set_tournament_terminal_hint = Mock()
 
     quote_result, weth_fallback = b._actionable_quote_with_weth_fallback(
-        sell_token="native", buy_token="token", sell_amount=10**15,
-        direction="buy", candidate_requirements={
-            "buy_maximum_fill_price": 0.09,
-        }, require_qualified_tournament=True,
+        sell_token=("native" if direction == "buy" else "token"),
+        buy_token=("token" if direction == "buy" else "native"),
+        sell_amount=10**15, direction=direction,
+        sold_cost_wei=(10**15 if direction == "sell" else None),
+        candidate_requirements=requirements,
+        require_qualified_tournament=True,
     )
 
     assert quote_result.success is False
@@ -1945,9 +1955,12 @@ def test_pretrigger_gate_never_falls_back_when_no_candidate_meets_trigger():
     router.build_swap_transaction.assert_not_called()
     b._revalidate_selected_route.assert_not_called()
     b._collect_route_execution_preflight.assert_called_once_with(
-        "buy", 10**15, None,
-        candidate_requirements={"buy_maximum_fill_price": 0.09},
+        direction, 10**15, (10**15 if direction == "sell" else None),
+        candidate_requirements=requirements,
         fallback_allowed=False,
+    )
+    b._set_tournament_terminal_hint.assert_called_once_with(
+        direction, "pretrigger_candidate_not_executable"
     )
 
 

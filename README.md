@@ -116,7 +116,7 @@ python grid_bot.py
 | `SWAP_FALLBACK_PROVIDER` | No | sushiswap | Immediate per-operation fallback after retryable pre-broadcast failures; empty disables fallback |
 | `ROUTE_TOURNAMENT_MODE` | No | off | Route comparison mode: `off`, read-only `shadow`, or guarded one-bot `gate` |
 | `ROUTE_TOURNAMENT_CANARY` | No | false | Explicit safety acknowledgement required by `gate`; not permission for fleet-wide rollout |
-| `ROUTE_TOURNAMENT_PRETRIGGER_ENABLED` | No | false | In guarded gate + gridless threshold mode, start buy tournaments when the authorized P&L mark is within `PNL_TRIGGER_FOCUS_MARGIN_PERCENT`; only exact-trigger-qualified conservative fills may execute |
+| `ROUTE_TOURNAMENT_PRETRIGGER_ENABLED` | No | false | In guarded gate + gridless threshold mode, start buy and sell tournaments when an authorized P&L mark is within `PNL_TRIGGER_FOCUS_MARGIN_PERCENT`; only exact-trigger-qualified conservative fills may execute |
 | `ROUTE_TOURNAMENT_PROVIDERS` | No | uniswap,sushiswap | Comma-separated non-empty subset of implemented tournament providers |
 | `ROUTE_TOURNAMENT_SETTLEMENTS` | No | native,weth | Comma-separated non-empty subset; `native` skips WETH candidates |
 | `ROUTE_TOURNAMENT_SHADOW_TIMEOUT_SECONDS` | No | 4 | Absolute shadow round deadline, bounded to 1-15 seconds |
@@ -1910,19 +1910,22 @@ valid exit. A selected winner that later fails a normal final guard is still
 skipped, as it would be with tournament mode off.
 
 `ROUTE_TOURNAMENT_PRETRIGGER_ENABLED=true` is a separate opt-in for gridless
-threshold buys. When the fresh authorized buy mark is within
-`PNL_TRIGGER_FOCUS_MARGIN_PERCENT` of `GRIDLESS_BUY_THRESHOLD`, the bot starts
-the normal guarded gate tournament
-before the polled market mark itself crosses. Every candidate is filtered by
-its conservative output floor: its implied fill must be at or below the exact
-price represented by `GRIDLESS_BUY_THRESHOLD`. If none qualifies, the round
-ends without a baseline fallback, approval, or transaction. A qualifying
-winner is freshly rebuilt and simulated, then the exact fill ceiling, position
-count, balance, gas cap, reserve, broadcast, receipt, and unresolved-settlement
-guards all run again. The ordinary `GRIDLESS_BUY_EXECUTION_MARGIN` does not
-relax this pretrigger fill ceiling. Missing the variable preserves the legacy
-trigger-first behavior. This mode increases provider and RPC traffic for every
-polling round spent inside the approach window, so canary it on one bot first.
+threshold buys and sells. When a fresh authorized mark is within
+`PNL_TRIGGER_FOCUS_MARGIN_PERCENT` of its configured trigger, the bot starts
+the normal guarded gate tournament before that polled mark itself crosses.
+Buy candidates must imply a conservative fill at or below the exact price
+represented by `GRIDLESS_BUY_THRESHOLD`. The closest near-trigger sell
+position is warmed once per cycle, and its candidate must clear the stricter
+of `GRIDLESS_SELL_THRESHOLD` (or the configured minimum-profit trigger) and
+`MIN_PROFIT_PERCENT` after output floors plus projected swap, approval, and
+conversion gas. If none qualifies, the round ends without a baseline fallback,
+approval, or transaction. A qualifying winner is freshly rebuilt and simulated,
+then the same exact threshold, position, balance, gas-cap, reserve, broadcast,
+receipt, and unresolved-settlement guards run again. The ordinary
+`GRIDLESS_BUY_EXECUTION_MARGIN` does not relax the buy ceiling. Missing the
+variable preserves legacy trigger-first behavior on both sides. This mode
+increases provider and RPC traffic for every polling round spent inside either
+approach window, so canary it before broad activation.
 
 Gridless moonbag sells tournament only the exact amount that can execute after
 the configured moonbag retention is deducted. The gate does not crown a

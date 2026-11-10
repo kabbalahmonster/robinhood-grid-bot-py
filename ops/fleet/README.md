@@ -2017,8 +2017,9 @@ update-variable --apply --only earn \
 restart-bot EARN
 ```
 
-To let a threshold-mode canary begin buy tournaments inside the existing P&L
-focus margin, explicitly enable the pretrigger after gate mode is working:
+To let a threshold-mode canary begin buy and sell tournaments inside the
+existing P&L focus margin, explicitly enable the pretrigger after gate mode is
+working:
 
 ```bash
 update-variable --allow-add --only earn \
@@ -2029,12 +2030,14 @@ restart-bot EARN
 ```
 
 The authorized route mark must be inside `PNL_TRIGGER_FOCUS_MARGIN_PERCENT`.
-Only candidates whose conservative fill
-reaches the exact `GRIDLESS_BUY_THRESHOLD` remain eligible; no qualifying
-candidate means no fallback transaction. Disable only this behavior with
-`ROUTE_TOURNAMENT_PRETRIGGER_ENABLED=false`. Expect one full tournament per
-polling round while the bot remains inside the margin, and monitor provider
-quota/429s plus rejection code `buy_trigger_fill_ceiling`.
+Buy candidates must reach the exact `GRIDLESS_BUY_THRESHOLD`. The closest
+near-trigger sell position must clear the stricter of the configured sell
+trigger and `MIN_PROFIT_PERCENT` after conservative output and projected gas.
+No qualifying candidate means no fallback transaction. Disable only this
+behavior with `ROUTE_TOURNAMENT_PRETRIGGER_ENABLED=false`. Expect one full
+tournament per polling round while either side remains inside the margin, and
+monitor provider quota/429s plus `buy_trigger_fill_ceiling` and
+`sell_profit_floor` rejection counts.
 
 If the canary shows repeated 12-second no-winner waits, preview and enable the
 sell-only baseline overlap on that same bot:

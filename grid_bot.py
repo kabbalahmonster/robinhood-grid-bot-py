@@ -2783,10 +2783,11 @@ class GridBot:
                 from zero_x import QuoteResult
                 logger.warning("Tournament gate requested without explicit canary flag; execution skipped")
                 return QuoteResult(success=False, error="tournament gate canary flag required"), False
-            speculative = self._start_speculative_sell_fallback(
-                sell_token=sell_token, buy_token=buy_token,
-                sell_amount=sell_amount, direction=direction,
-            )
+            if not require_qualified_tournament:
+                speculative = self._start_speculative_sell_fallback(
+                    sell_token=sell_token, buy_token=buy_token,
+                    sell_amount=sell_amount, direction=direction,
+                )
             cached = (
                 None if require_qualified_tournament
                 else self._round_route_selection(direction)
@@ -2841,12 +2842,12 @@ class GridBot:
                 reason = (
                     "selected pretrigger candidate failed fresh revalidation"
                     if selection is not None else
-                    "no tournament candidate met the buy trigger"
+                    f"no tournament candidate met the {direction} trigger"
                 )
                 self._set_tournament_terminal_hint(
-                    "buy", "pretrigger_candidate_not_executable"
+                    direction, "pretrigger_candidate_not_executable"
                 )
-                logger.info("Near-trigger buy deferred: %s", reason)
+                logger.info("Near-trigger %s deferred: %s", direction, reason)
                 return QuoteResult(success=False, error=reason), False
 
             # Tournament collection is an extra reliability layer, never a
@@ -5945,8 +5946,30 @@ class GridBot:
         sell_threshold = get_sell_trigger_percent(self.config)
         stoploss_enabled = getattr(self.config, 'gridless_stoploss_enabled', False)
         stoploss_threshold = getattr(self.config, 'gridless_stoploss_threshold', -25.0)
+        pretrigger_enabled = bool(getattr(
+            self.config, "route_tournament_pretrigger_enabled", False
+        ))
+        pretrigger_margin = float(getattr(
+            self.config, "pnl_trigger_focus_margin_percent", 2.0
+        ))
+        pretrigger_enabled = bool(
+            pretrigger_enabled
+            and pretrigger_margin > 0
+            and str(getattr(
+                self.config, "route_tournament_mode", "off"
+            )).lower() == "gate"
+            and bool(getattr(self.config, "route_tournament_canary", False))
+            and str(getattr(
+                self.config, "gridless_allocation_mode", "threshold"
+            )).lower() == "threshold"
+        )
+        pretrigger_profit_percent = max(
+            float(sell_threshold),
+            float(getattr(self.config, "min_profit_percent", 1.5)),
+        )
         
         sell_candidates = {}
+        pretrigger_candidates = []
         
         for pos_id, pos in gridless_positions.items():
             observed = (position_pnls or {}).get(str(pos_id), {})
@@ -5976,18 +5999,43 @@ class GridBot:
                         sell_candidates[str(pos_id)] = (
                             1, pnl, pos, f"PROFIT ({source}): {pnl:.1f}%"
                         )
+                elif (pretrigger_enabled
+                      and sell_threshold - pnl <= pretrigger_margin):
+                    pretrigger_candidates.append((
+                        float(sell_threshold - pnl),
+                        -float(pnl),
+                        str(pos_id),
+                        float(pnl),
+                        pos,
+                        (
+                            f"PRETRIGGER ({source}): {pnl:.1f}% within "
+                            f"{pretrigger_margin:.1f} points of "
+                            f"{sell_threshold:.1f}%"
+                        ),
+                    ))
 
-        if not sell_candidates:
+        if not sell_candidates and not pretrigger_candidates:
             return
 
-        ordered = sorted(
-            (
-                (priority, pnl, pos_id, pos, reason)
-                for pos_id, (priority, pnl, pos, reason)
-                in sell_candidates.items()
-            ),
-            key=lambda item: (item[0], -item[1], item[2]),
-        )
+        pretrigger_attempt = not sell_candidates
+        if pretrigger_attempt:
+            # A near-trigger round is expensive and has no execution authority
+            # unless one conservative route already clears the exact sell
+            # threshold.  Warm only the closest position each cycle.
+            _distance, _neg_pnl, pos_id, pnl, pos, reason = min(
+                pretrigger_candidates,
+                key=lambda item: (item[0], item[1], item[2]),
+            )
+            ordered = [(1, pnl, pos_id, pos, reason)]
+        else:
+            ordered = sorted(
+                (
+                    (priority, pnl, pos_id, pos, reason)
+                    for pos_id, (priority, pnl, pos, reason)
+                    in sell_candidates.items()
+                ),
+                key=lambda item: (item[0], -item[1], item[2]),
+            )
         multi_action = bool(getattr(
             self.config, "gridless_multi_action_rounds", False
         ))
@@ -6010,9 +6058,16 @@ class GridBot:
             sells_before = int(getattr(self, "session_sells", 0))
             self._sell_candidate_broadcast_started = False
             try:
-                self._attempt_gridless_sell_candidate(
-                    pos_id, snapshot, price, reason, pnl
-                )
+                if pretrigger_attempt:
+                    self._attempt_gridless_sell_candidate(
+                        pos_id, snapshot, price, reason, pnl,
+                        pretrigger_tournament=True,
+                        required_profit_percent=pretrigger_profit_percent,
+                    )
+                else:
+                    self._attempt_gridless_sell_candidate(
+                        pos_id, snapshot, price, reason, pnl
+                    )
             except Exception:
                 # Preserve the legacy one-action failure contract.  Multi-action
                 # rounds may isolate a provider/runtime failure only while the
@@ -6071,7 +6126,8 @@ class GridBot:
     @_with_tournament_terminal("sell")
     @_with_swap_provider_fallback
     def _attempt_gridless_sell_candidate(
-            self, pos_id, snapshot, price, reason, pnl_at_check):
+            self, pos_id, snapshot, price, reason, pnl_at_check, *,
+            pretrigger_tournament=False, required_profit_percent=None):
         """Attempt one snapshotted position with per-transaction retry scope."""
         from gridless import load_positions, get_buy_price
 
@@ -6112,12 +6168,25 @@ class GridBot:
         # produced a real-looking crown which had no authority to execute.
         sell_amount, sold_cost_wei = self._gridless_sell_terms(pos)
         self._set_tournament_execution_stage("sell", "selected_quote_revalidation")
+        candidate_requirements = None
+        if pretrigger_tournament:
+            candidate_requirements = {
+                "min_profit": float(required_profit_percent),
+            }
         quote, weth_fallback = self._actionable_quote_with_weth_fallback(
             sell_token=self.config.token_address, buy_token=self.trade_token_address,
             sell_amount=sell_amount, direction="sell", sold_cost_wei=sold_cost_wei,
+            candidate_requirements=candidate_requirements,
+            require_qualified_tournament=bool(pretrigger_tournament),
         )
         
         if not quote.success:
+            if pretrigger_tournament:
+                logger.info(
+                    "Near-trigger sell tournament completed without an "
+                    "executable threshold-qualified candidate"
+                )
+                return
             self._set_tournament_terminal_hint("sell", "selected_quote_unavailable")
             logger.warning(f"Sell candidate #{pos_id} but quote failed: {quote.error}")
             self._observe_token_tax_failure(
@@ -6253,7 +6322,10 @@ class GridBot:
         # Support both cost_wei (new) and cost (legacy nano-ETH)
         cost_wei = sold_cost_wei
         cost_eth = cost_wei / 1e18
-        min_profit = getattr(self.config, 'min_profit_percent', 1.5)
+        min_profit = max(
+            float(getattr(self.config, 'min_profit_percent', 1.5)),
+            float(required_profit_percent or 0),
+        )
         min_profit_eth = cost_eth * (min_profit / 100)
         quote_return_eth = quote_return_wei / 10**18
         quote_profit_eth = quote_return_eth - cost_eth
@@ -6300,10 +6372,18 @@ class GridBot:
         
         logger.info(f"🎯 Gridless sell trigger: Position #{pos_id} - {reason}")
         self._set_tournament_execution_stage("sell", "execution_handoff")
-        self._execute_sell_gridless(pos_id, pos, price, quote)
+        if required_profit_percent is None:
+            self._execute_sell_gridless(pos_id, pos, price, quote)
+        else:
+            self._execute_sell_gridless(
+                pos_id, pos, price, quote,
+                required_profit_percent=required_profit_percent,
+            )
     
     @_with_tournament_terminal("sell")
-    def _execute_sell_gridless(self, pos_id, pos, price, pre_fetched_quote=None):
+    def _execute_sell_gridless(
+            self, pos_id, pos, price, pre_fetched_quote=None, *,
+            required_profit_percent=None):
         """Execute a gridless sell order."""
         from gridless import remove_position, calculate_pnl
 
@@ -6386,7 +6466,10 @@ class GridBot:
         
         # Validate minimum profit
         self._set_tournament_execution_stage("sell", "preapproval_profit_floor")
-        min_profit = getattr(self.config, 'min_profit_percent', 1.5)
+        min_profit = max(
+            float(getattr(self.config, 'min_profit_percent', 1.5)),
+            float(required_profit_percent or 0),
+        )
         min_profit_eth = sold_cost_eth * (min_profit / 100)
         unwrap_projected_wei = 0
         if weth_fallback:

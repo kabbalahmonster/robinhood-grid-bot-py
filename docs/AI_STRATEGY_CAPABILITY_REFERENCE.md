@@ -364,13 +364,14 @@ With `USE_ETH_TRADING=false`, the strategy spends and receives WETH directly.
   revalidated before execution. When no valid winner exists, the bot falls
   back to the ordinary fresh primary/fallback path.
 
-`ROUTE_TOURNAMENT_PRETRIGGER_ENABLED=true` adds an opt-in threshold-buy path
-to `gate`. The authorized buy mark must be inside
-`PNL_TRIGGER_FOCUS_MARGIN_PERCENT`. Candidate conservative fill prices
-must independently reach the exact `GRIDLESS_BUY_THRESHOLD`; a no-winner round
-cannot use baseline fallback. The winner is freshly quoted/simulated and the
-exact ceiling is checked again before any broadcast. Missing/false preserves
-trigger-first behavior.
+`ROUTE_TOURNAMENT_PRETRIGGER_ENABLED=true` adds opt-in threshold buy and sell
+paths to `gate`. The authorized directional mark must be inside
+`PNL_TRIGGER_FOCUS_MARGIN_PERCENT`. Buy candidates must independently reach
+the exact `GRIDLESS_BUY_THRESHOLD`; the closest sell candidate must clear the
+stricter configured sell/minimum-profit threshold after conservative output
+and projected gas. A no-winner round cannot use baseline fallback. The winner
+is freshly quoted/simulated and the exact directional threshold is checked
+again before any broadcast. Missing/false preserves trigger-first behavior.
 
 `execute` is intentionally invalid.
 
