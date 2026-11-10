@@ -2589,7 +2589,9 @@ def test_candidate_log_includes_provider_output_and_score():
 
 def test_pretrigger_buy_candidate_must_meet_exact_fill_ceiling():
     qualifying_context = context("buy", token_decimals=18,
-                                 buy_maximum_fill_price=0.09)
+                                 buy_maximum_fill_price=0.09,
+                                 buy_reference_price=0.1,
+                                 buy_trigger_threshold_percent=-10.0)
     qualifying_context.update(slippage=0, tax=0)
     qualifying = score_candidate(
         quote(output=12 * 10**15), "uniswap", "native",
@@ -2603,9 +2605,13 @@ def test_pretrigger_buy_candidate_must_meet_exact_fill_ceiling():
 
     assert qualifying["validation_level"] == "quote_only"
     assert qualifying["projected_buy_fill_price"] == pytest.approx(1 / 12)
+    assert qualifying["projected_buy_move_percent"] == pytest.approx(-16.6666667)
+    assert qualifying["buy_trigger_threshold_percent"] == -10.0
+    assert qualifying["buy_reference_price"] == 0.1
     assert "buy_trigger_fill_ceiling" not in qualifying["rejections"]
     assert rejected["validation_level"] == "rejected"
     assert rejected["projected_buy_fill_price"] == pytest.approx(0.1)
+    assert rejected["projected_buy_move_percent"] == pytest.approx(0.0)
     assert "buy_trigger_fill_ceiling" in rejected["rejections"]
 
 

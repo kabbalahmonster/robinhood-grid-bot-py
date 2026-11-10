@@ -5419,8 +5419,20 @@ class GridBot:
             and threshold_context.get("pretrigger_tournament")
         )
         candidate_requirements = None
+        if (threshold_context is not None
+                and threshold_context.get("entry_kind") == "dip"
+                and float(threshold_context.get("dip_anchor_price") or 0) > 0):
+            candidate_requirements = {
+                "buy_reference_price": float(
+                    threshold_context["dip_anchor_price"]
+                ),
+                "buy_trigger_threshold_percent": float(getattr(
+                    self.config, "gridless_buy_threshold", -10.0
+                )),
+            }
         if pretrigger_tournament:
             candidate_requirements = {
+                **(candidate_requirements or {}),
                 "buy_maximum_fill_price": float(
                     threshold_context["pretrigger_maximum_fill_price"]
                 ),

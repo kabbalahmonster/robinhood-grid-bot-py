@@ -634,6 +634,33 @@ def score_candidate(quote, provider, settlement, context, *, allowance_probe=Non
     elif c.get("execution_preflight") is not True and c["native_balance"] - total < c["reserve"]:
         row["rejections"].append("native_reserve")
     if c["direction"] == "buy":
+        reference_price = c.get("buy_reference_price")
+        trigger_percent = c.get("buy_trigger_threshold_percent")
+        if reference_price is not None and trigger_percent is not None:
+            try:
+                reference_price = Decimal(str(reference_price))
+                trigger_percent = Decimal(str(trigger_percent))
+                token_unit = Decimal(10) ** int(c.get("token_decimals", 18))
+                projected_fill = (
+                    (Decimal(c["amount"]) / Decimal(10**18))
+                    / (Decimal(floor) / token_unit)
+                    if floor > 0 else Decimal("Infinity")
+                )
+                projected_move = (
+                    (projected_fill / reference_price - 1) * 100
+                    if reference_price > 0 and projected_fill.is_finite()
+                    else Decimal("Infinity")
+                )
+            except (InvalidOperation, TypeError, ValueError, ZeroDivisionError):
+                reference_price = Decimal(0)
+                trigger_percent = Decimal(0)
+                projected_move = Decimal("Infinity")
+            if (reference_price.is_finite() and reference_price > 0
+                    and trigger_percent.is_finite()
+                    and projected_move.is_finite()):
+                row["buy_reference_price"] = float(reference_price)
+                row["projected_buy_move_percent"] = float(projected_move)
+                row["buy_trigger_threshold_percent"] = float(trigger_percent)
         maximum_fill = c.get("buy_maximum_fill_price")
         if maximum_fill is not None:
             try:
