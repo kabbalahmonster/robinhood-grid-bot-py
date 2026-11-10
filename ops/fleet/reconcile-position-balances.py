@@ -179,6 +179,47 @@ def guarded_outgoing_tokens(wallet, config, guard, allow_replacement=False):
     return replacement_hash, outgoing_raw, guarded_hash
 
 
+def verified_reverted_broadcast(wallet, config, guard):
+    """Return the exact hash for a mined, reverted, fingerprint-matched guard."""
+    if not isinstance(guard, dict) or not guard.get("tx_hash"):
+        raise ValueError("reverted-broadcast recovery requires a valid guard")
+    required = ("chain_id", "wallet", "nonce", "to", "value_wei")
+    missing = [key for key in required if guard.get(key) is None]
+    if missing:
+        raise ValueError(
+            "reverted-broadcast guard lacks fingerprint fields: "
+            + ", ".join(missing)
+        )
+
+    tx_hash = str(guard["tx_hash"]).lower()
+    transaction_finder = getattr(wallet.w3, "find_transaction", None)
+    receipt_finder = getattr(wallet.w3, "find_transaction_receipt", None)
+    tx = (transaction_finder(tx_hash) if callable(transaction_finder)
+          else wallet.w3.eth.get_transaction(tx_hash))
+    receipt = (receipt_finder(tx_hash) if callable(receipt_finder)
+               else wallet.w3.eth.get_transaction_receipt(tx_hash))
+    if tx is None or receipt is None:
+        raise ValueError("exact transaction or receipt is absent across all RPC endpoints")
+    if _int(receipt.get("status", -1)) != 0:
+        raise ValueError("unresolved broadcast receipt is not reverted")
+
+    comparisons = (
+        (str(tx.get("from") or "").lower(), str(guard["wallet"]).lower(), "wallet"),
+        (_int(tx.get("chainId", -1)), _int(guard["chain_id"]), "chain"),
+        (_int(tx.get("nonce", -1)), _int(guard["nonce"]), "nonce"),
+        (str(tx.get("to") or "").lower(), str(guard["to"] or "").lower(), "destination"),
+        (_int(tx.get("value", 0) or 0), _int(guard["value_wei"] or 0), "value"),
+    )
+    for observed, recorded, label in comparisons:
+        if observed != recorded:
+            raise ValueError(f"reverted transaction {label} does not match guard")
+    if str(guard["wallet"]).lower() != wallet.address.lower():
+        raise ValueError("guard wallet does not match the configured wallet")
+    if _int(guard["chain_id"]) != int(config.chain_id):
+        raise ValueError("guard chain does not match the configured chain")
+    return tx_hash
+
+
 def adopt_replacement(wallet, old_hash, replacement_hash):
     """Persist a verified replacement or fail without modifying the guard."""
     if old_hash is None:
@@ -366,6 +407,30 @@ def main():
                     "tx_hash": str(guard["tx_hash"]), "status": "verification_failed",
                     "error": str(exc),
                 }
+        if (args.automatic and not recovered_prior_reconciliation
+                and not (isinstance(outgoing_raw, int) and outgoing_raw > 0)
+                and isinstance(guard, dict) and guard.get("tx_hash")):
+            # A mined revert is definitive evidence that the guarded broadcast
+            # changed no chain state.  Require the complete durable fingerprint
+            # before archiving it; unrelated wallet surplus remains unallocated.
+            candidate_hash = str(guard["tx_hash"])
+            try:
+                verified_hash = verified_reverted_broadcast(wallet, config, guard)
+                archived = wallet.archive_reconciled_broadcast(verified_hash)
+                recovered_prior_reconciliation = bool(archived)
+                result["unresolved_broadcast_match"] = {
+                    "tx_hash": verified_hash,
+                    "status": (
+                        "receipt_verified_reverted_no_state_change"
+                        if archived else "reverted_guard_archive_failed"
+                    ),
+                }
+                if archived:
+                    result["unresolved_broadcast_match"]["archived_path"] = archived
+            except Exception:
+                # Successful buys and unresolved receipts continue into the
+                # strict gridless buy reconciler below.
+                pass
         if (args.automatic and not recovered_prior_reconciliation
                 and not (isinstance(outgoing_raw, int) and outgoing_raw > 0)
                 and getattr(config, "use_gridless", False)

@@ -570,6 +570,95 @@ def test_automatic_zero_deficit_recovers_receipt_proven_gridless_buy(
     assert not guard_path.exists()
 
 
+def test_automatic_zero_deficit_archives_fingerprint_matched_revert(
+        monkeypatch, tmp_path, capsys):
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "gridless_positions.json").write_text('{"1":{"balance":100}}')
+    (data / "position_balance_reconciliations.json").write_text("[]")
+    guard = {
+        "tx_hash": TX_HASH,
+        "chain_id": 4663,
+        "wallet": WALLET,
+        "nonce": 713,
+        "to": ROUTER,
+        "value_wei": 1234,
+    }
+    guard_path = data / "unresolved_broadcast.json"
+    guard_path.write_text(json.dumps(guard))
+    transaction = {
+        "from": WALLET, "chainId": 4663, "nonce": 713,
+        "to": ROUTER, "value": 1234,
+    }
+    receipt = {"status": 0, "logs": []}
+
+    class FakeWallet:
+        def __init__(self, _config):
+            self.address = WALLET
+            self.unresolved_broadcast = dict(guard)
+            self.unresolved_broadcast_path = str(guard_path)
+            self.w3 = SimpleNamespace(
+                find_transaction=lambda _tx_hash: transaction,
+                find_transaction_receipt=lambda _tx_hash: receipt,
+            )
+
+        def get_token_balance(self, _token):
+            return 150, 150
+
+        def archive_reconciled_broadcast(self, tx_hash):
+            assert tx_hash == TX_HASH
+            archived = guard_path.with_name(guard_path.name + ".reconciled")
+            guard_path.rename(archived)
+            return str(archived)
+
+    config_module = ModuleType("config")
+    config_module.load_config = lambda: SimpleNamespace(
+        token_address=TOKEN, token_symbol="TOKEN", use_gridless=True,
+        chain_id=4663,
+    )
+    wallet_module = ModuleType("wallet")
+    wallet_module.Wallet = FakeWallet
+    gridless_reconciler_module = ModuleType("gridless_reconciler")
+    gridless_reconciler_module.run_gridless_reconciliation = lambda *_a, **_kw: (
+        pytest.fail("reverted transaction must not enter buy reconciliation")
+    )
+    monkeypatch.setitem(sys.modules, "config", config_module)
+    monkeypatch.setitem(sys.modules, "wallet", wallet_module)
+    monkeypatch.setitem(sys.modules, "gridless_reconciler", gridless_reconciler_module)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "argv", ["reconcile-position-balances", "--automatic"])
+
+    assert reconciler.main() == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["unresolved_broadcast_match"]["status"] == (
+        "receipt_verified_reverted_no_state_change"
+    )
+    assert not guard_path.exists()
+
+
+def test_reverted_broadcast_fingerprint_mismatch_is_rejected():
+    transaction = {
+        "from": WALLET, "chainId": 4663, "nonce": 714,
+        "to": ROUTER, "value": 1234,
+    }
+    wallet = SimpleNamespace(
+        address=WALLET,
+        w3=SimpleNamespace(
+            find_transaction=lambda _tx_hash: transaction,
+            find_transaction_receipt=lambda _tx_hash: {"status": 0},
+        ),
+    )
+    guard = {
+        "tx_hash": TX_HASH, "chain_id": 4663, "wallet": WALLET,
+        "nonce": 713, "to": ROUTER, "value_wei": 1234,
+    }
+
+    with pytest.raises(ValueError, match="nonce does not match"):
+        reconciler.verified_reverted_broadcast(
+            wallet, SimpleNamespace(chain_id=4663), guard,
+        )
+
+
 def test_automatic_gridless_recovery_continues_after_exact_hash_lookup_failure(
         monkeypatch, tmp_path):
     data = tmp_path / "data"
