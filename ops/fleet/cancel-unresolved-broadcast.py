@@ -4,6 +4,7 @@
 import argparse
 import json
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -233,6 +234,9 @@ def main():
     if args.execute and not args.confirm_tx_hash:
         parser.error("--execute requires --confirm-tx-hash")
 
+    # The fleet wrapper executes this helper from the selected bot checkout
+    # while the helper itself may live in the separate operations checkout.
+    sys.path.insert(0, str(Path.cwd().resolve()))
     from config import load_config
     from wallet import Wallet
 
