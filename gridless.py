@@ -420,6 +420,78 @@ def threshold_gap_fill_bounds(context: Dict[str, Any],
     return allowed, minimum_fill, maximum_fill
 
 
+def threshold_dip_pretrigger_status(status: Dict[str, Any], config: Any) -> Dict[str, Any]:
+    """Describe whether a dip is close enough for a guarded route tournament.
+
+    The authorized route mark opens the approach window. Confirmed physical
+    movement remains visible for telemetry, but candidate scoring and final
+    execution enforce spacing with the conservative executable fill itself.
+    """
+    enabled = bool(getattr(
+        config, "route_tournament_pretrigger_enabled", False
+    ))
+    margin = float(getattr(config, "pnl_trigger_focus_margin_percent", 2.0))
+    threshold = float(getattr(config, "gridless_buy_threshold", -10.0))
+    result = {
+        "enabled": enabled,
+        "eligible": False,
+        "margin_percent": margin,
+        "buy_threshold_percent": threshold,
+        "route_distance_percent": None,
+        "physical_distance_percent": None,
+        "maximum_fill_price": None,
+        "reason": "Near-trigger route tournaments are disabled",
+    }
+    if not enabled:
+        return result
+    if (str(getattr(config, "route_tournament_mode", "off")).lower() != "gate"
+            or not bool(getattr(config, "route_tournament_canary", False))):
+        result["reason"] = "Near-trigger route tournaments require guarded gate mode"
+        return result
+    if margin <= 0:
+        result["reason"] = "Near-trigger margin is disabled"
+        return result
+    if int(status.get("remaining_slots", 0) or 0) <= 0:
+        result["reason"] = "No available position slot"
+        return result
+    anchor = float(status.get("dip_anchor_price") or 0)
+    physical_move = status.get("dip_price_move_percent")
+    route_pnl = status.get("buy_trigger_pnl_percent")
+    try:
+        physical_move = float(physical_move)
+        route_pnl = float(route_pnl)
+    except (TypeError, ValueError):
+        result["reason"] = "Fresh route and physical dip observations are required"
+        return result
+    if (not math.isfinite(anchor) or anchor <= 0
+            or not math.isfinite(physical_move)
+            or not math.isfinite(route_pnl)):
+        result["reason"] = "Near-trigger observations are invalid"
+        return result
+    route_distance = max(0.0, route_pnl - threshold)
+    physical_distance = max(0.0, physical_move - threshold)
+    maximum_fill = anchor * (1 + threshold / 100)
+    result.update(
+        route_distance_percent=route_distance,
+        physical_distance_percent=physical_distance,
+        maximum_fill_price=maximum_fill,
+    )
+    if route_distance > margin:
+        result["reason"] = (
+            f"Route mark is {route_distance:.2f} points from the buy trigger; "
+            f"margin is {margin:.2f}"
+        )
+        return result
+    result.update(
+        eligible=True,
+        reason=(
+            f"Route mark is within {margin:.2f} points of the {threshold:.2f}% "
+            "buy trigger; tournament fills must reach the exact threshold"
+        ),
+    )
+    return result
+
+
 def threshold_leading_edge_fill_bounds(
         context: Dict[str, Any],
         quoted_fill_price: float) -> Tuple[bool, float, Optional[float]]:

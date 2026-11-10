@@ -634,6 +634,27 @@ def score_candidate(quote, provider, settlement, context, *, allowance_probe=Non
     elif c.get("execution_preflight") is not True and c["native_balance"] - total < c["reserve"]:
         row["rejections"].append("native_reserve")
     if c["direction"] == "buy":
+        maximum_fill = c.get("buy_maximum_fill_price")
+        if maximum_fill is not None:
+            try:
+                maximum_fill = Decimal(str(maximum_fill))
+                token_unit = Decimal(10) ** int(c.get("token_decimals", 18))
+                projected_fill = (
+                    (Decimal(c["amount"]) / Decimal(10**18))
+                    / (Decimal(floor) / token_unit)
+                    if floor > 0 else Decimal("Infinity")
+                )
+            except (InvalidOperation, TypeError, ValueError, ZeroDivisionError):
+                maximum_fill = Decimal(0)
+                projected_fill = Decimal("Infinity")
+            row["buy_maximum_fill_price"] = float(maximum_fill)
+            row["projected_buy_fill_price"] = (
+                float(projected_fill) if projected_fill.is_finite() else None
+            )
+            if (not maximum_fill.is_finite() or maximum_fill <= 0
+                    or not projected_fill.is_finite()
+                    or projected_fill > maximum_fill):
+                row["rejections"].append("buy_trigger_fill_ceiling")
         if c["trade_balance"] < c["amount"]:
             row["rejections"].append("input_balance")
         score = Decimal(floor) * 10**18 / (c["amount"] + total)

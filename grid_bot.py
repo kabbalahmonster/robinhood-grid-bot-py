@@ -1476,7 +1476,9 @@ class GridBot:
             return self._native_buy_principal_wei(quote, int(amount), weth_fallback=False)
         return int(getattr(quote, "value", 0) or 0)
 
-    def _collect_route_execution_preflight(self, direction, amount, sold_cost_wei=None):
+    def _collect_route_execution_preflight(
+            self, direction, amount, sold_cost_wei=None,
+            candidate_requirements=None, fallback_allowed=True):
         """Read-only, fail-closed candidate collection for a future route gate.
 
         This method deliberately has no execution authority.  It returns only a
@@ -1494,11 +1496,13 @@ class GridBot:
             context = snapshot(self, direction, amount, sold_cost_wei)
             enriched = {
                 **context,
+                **(candidate_requirements or {}),
                 "execution_preflight": True,
                 "tournament_id": lifecycle["tournament_id"],
                 "chain_id": getattr(self.config, "chain_id", ""),
                 "token_address": getattr(self.config, "token_address", ""),
                 "trade_token_address": getattr(self, "trade_token_address", ""),
+                "token_decimals": int(getattr(self, "token_decimals", 18)),
             }
 
             def allowance_probe(token, spender):
@@ -1614,7 +1618,7 @@ class GridBot:
         comparisons[direction] = comparison
         self._route_comparisons = comparisons
         transition_details = {}
-        if selection is None:
+        if selection is None and fallback_allowed:
             transition_details["execution_fallback"] = {
                 "reason": "no_fresh_tournament_candidate",
                 "provider": getattr(
@@ -1623,7 +1627,9 @@ class GridBot:
             }
         self._publish_tournament_transition(
             direction,
-            "preflight_candidate_selected" if selection else "baseline_fallback",
+            ("preflight_candidate_selected" if selection else
+             "baseline_fallback" if fallback_allowed else
+             "pretrigger_no_qualifying_candidate"),
             **transition_details,
         )
         return selection
@@ -2766,8 +2772,10 @@ class GridBot:
         )
         return quote, uses_weth
 
-    def _actionable_quote_with_weth_fallback(self, *, sell_token, buy_token, sell_amount, direction,
-                                             sold_cost_wei=None):
+    def _actionable_quote_with_weth_fallback(
+            self, *, sell_token, buy_token, sell_amount, direction,
+            sold_cost_wei=None, candidate_requirements=None,
+            require_qualified_tournament=False):
         """Build the configured route, falling back to the direct WETH leg in native mode."""
         speculative = None
         if getattr(self.config, "route_tournament_mode", "off") == "gate":
@@ -2779,12 +2787,22 @@ class GridBot:
                 sell_token=sell_token, buy_token=buy_token,
                 sell_amount=sell_amount, direction=direction,
             )
-            cached = self._round_route_selection(direction)
+            cached = (
+                None if require_qualified_tournament
+                else self._round_route_selection(direction)
+            )
             if cached is None:
+                collection_kwargs = {}
+                if (candidate_requirements is not None
+                        or require_qualified_tournament):
+                    collection_kwargs = {
+                        "candidate_requirements": candidate_requirements,
+                        "fallback_allowed": not require_qualified_tournament,
+                    }
                 selection = self._collect_route_execution_preflight(
-                    direction, sell_amount, sold_cost_wei,
+                    direction, sell_amount, sold_cost_wei, **collection_kwargs
                 )
-                if selection is not None:
+                if selection is not None and not require_qualified_tournament:
                     self._remember_round_route_selection(direction, selection)
             else:
                 selection = dict(cached["selection"])
@@ -2817,6 +2835,19 @@ class GridBot:
                     from zero_x import QuoteResult
                     return QuoteResult(success=False, error="tournament route preparation marker unavailable"), False
                 return validated["quote"], validated["weth_fallback"]
+
+            if require_qualified_tournament:
+                from zero_x import QuoteResult
+                reason = (
+                    "selected pretrigger candidate failed fresh revalidation"
+                    if selection is not None else
+                    "no tournament candidate met the buy trigger"
+                )
+                self._set_tournament_terminal_hint(
+                    "buy", "pretrigger_candidate_not_executable"
+                )
+                logger.info("Near-trigger buy deferred: %s", reason)
+                return QuoteResult(success=False, error=reason), False
 
             # Tournament collection is an extra reliability layer, never a
             # reason to make an otherwise normal sell impossible. Its worker
@@ -4341,6 +4372,12 @@ class GridBot:
         execution_margin_pct = float(getattr(
             self.config, "gridless_buy_execution_margin", 50.0
         ))
+        if threshold_context.get("pretrigger_tournament"):
+            # A near-trigger tournament may start before the market crosses,
+            # but its freshly revalidated executable floor must independently
+            # satisfy the exact configured dip. Recovery margin belongs only
+            # to buys whose strategy trigger already crossed normally.
+            execution_margin_pct = 0.0
         allowed, maximum_fill = threshold_dip_fill_allowed(
             threshold_context,
             quoted_fill_price,
@@ -4351,7 +4388,11 @@ class GridBot:
             return True
 
         self._mark_buy_tournament_aborted(
-            reason="threshold_dip_execution_recovered",
+            reason=(
+                "pretrigger_buy_fill_not_qualified"
+                if threshold_context.get("pretrigger_tournament") else
+                "threshold_dip_execution_recovered"
+            ),
             quoted_fill_price=quoted_fill_price,
             maximum_fill_price=maximum_fill,
             dip_anchor_position_id=threshold_context.get(
@@ -5091,7 +5132,12 @@ class GridBot:
 
     def _check_buys_gridless(self, price, position_pnls=None):
         """Evaluate threshold or persisted drawdown-ladder gridless entries."""
-        from gridless import should_buy, load_positions, threshold_gap_status
+        from gridless import (
+            load_positions,
+            should_buy,
+            threshold_dip_pretrigger_status,
+            threshold_gap_status,
+        )
 
         if self._taxed_token_active():
             failure_cooldown = self.config.taxed_token_failure_cooldown_seconds
@@ -5125,12 +5171,21 @@ class GridBot:
             should_buy_flag, reason = should_buy(
                 gridless_positions, price, self.config, position_pnls
             )
-            if not should_buy_flag:
-                logger.debug(f"Gridless: No buy - {reason}")
-                return
             threshold_status = threshold_gap_status(
                 gridless_positions, price, self.config, position_pnls
             )
+            pretrigger_status = threshold_dip_pretrigger_status(
+                threshold_status, self.config
+            )
+            threshold_status["pretrigger"] = pretrigger_status
+            pretrigger_attempt = bool(
+                not should_buy_flag and pretrigger_status["eligible"]
+            )
+            if not should_buy_flag and not pretrigger_attempt:
+                logger.debug(f"Gridless: No buy - {reason}")
+                return
+            if pretrigger_attempt:
+                reason = pretrigger_status["reason"]
         
         # Get available ETH/WETH
         if getattr(self.config, 'use_eth_trading', False):
@@ -5309,6 +5364,15 @@ class GridBot:
                 "dip_price_move_percent": threshold_status.get(
                     "dip_price_move_percent"
                 ),
+                "pretrigger_tournament": bool(pretrigger_attempt),
+                "pretrigger_margin_percent": (
+                    pretrigger_status.get("margin_percent")
+                    if pretrigger_attempt else None
+                ),
+                "pretrigger_maximum_fill_price": (
+                    pretrigger_status.get("maximum_fill_price")
+                    if pretrigger_attempt else None
+                ),
             }
         
         logger.info(f"🎯 Gridless buy triggered: {reason}")
@@ -5349,12 +5413,31 @@ class GridBot:
         from gridless import add_position
         
         # Get quote
+        pretrigger_tournament = bool(
+            threshold_context is not None
+            and threshold_context.get("pretrigger_tournament")
+        )
+        candidate_requirements = None
+        if pretrigger_tournament:
+            candidate_requirements = {
+                "buy_maximum_fill_price": float(
+                    threshold_context["pretrigger_maximum_fill_price"]
+                ),
+            }
         quote, weth_fallback = self._actionable_quote_with_weth_fallback(
             sell_token=self.trade_token_address, buy_token=self.config.token_address,
             sell_amount=buy_amount_wei, direction="buy",
+            candidate_requirements=candidate_requirements,
+            require_qualified_tournament=pretrigger_tournament,
         )
         
         if not quote.success:
+            if pretrigger_tournament:
+                logger.info(
+                    "Near-trigger tournament completed without an executable "
+                    "threshold-qualified candidate"
+                )
+                return
             logger.error(f"Gridless buy quote failed: {quote.error}")
             self._observe_token_tax_failure(quote, direction="buy")
             if self._taxed_token_active():
@@ -5514,6 +5597,15 @@ class GridBot:
                 ),
                 "dip_price_move_percent": threshold_context.get(
                     "dip_price_move_percent"
+                ),
+                "pretrigger_tournament": bool(
+                    threshold_context.get("pretrigger_tournament")
+                ),
+                "pretrigger_margin_percent": threshold_context.get(
+                    "pretrigger_margin_percent"
+                ),
+                "pretrigger_maximum_fill_price": threshold_context.get(
+                    "pretrigger_maximum_fill_price"
                 ),
             })
         if ladder_context is not None:
@@ -8259,6 +8351,7 @@ class GridBot:
                     from gridless import (
                         get_capacity_warning,
                         load_positions,
+                        threshold_dip_pretrigger_status,
                         threshold_gap_status,
                     )
                     gpos = load_positions()
@@ -8335,6 +8428,11 @@ class GridBot:
                         )
                         threshold_gap = threshold_gap_status(
                             gpos, price, self.config, position_pnls
+                        )
+                        threshold_gap["pretrigger"] = (
+                            threshold_dip_pretrigger_status(
+                                threshold_gap, self.config
+                            )
                         )
                     for pos_id, pos in gpos.items():
                         bal = pos.get('balance', 0)

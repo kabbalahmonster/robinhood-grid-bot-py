@@ -6,7 +6,10 @@ import os
 import json
 import tempfile
 import unittest
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
+
+from grid_bot import GridBot
 
 # Import gridless module
 import gridless
@@ -423,6 +426,109 @@ class TestShouldBuy(unittest.TestCase):
         self.assertAlmostEqual(status["next_leading_edge_price"], 0.1025)
         self.assertEqual(status["buy_trigger_source"], "uniswap")
         self.assertAlmostEqual(status["buy_trigger_pnl_percent"], -12.0)
+
+    def test_pretrigger_requires_route_and_physical_dip_inside_margin(self):
+        config = MagicMock()
+        config.route_tournament_pretrigger_enabled = True
+        config.route_tournament_mode = "gate"
+        config.route_tournament_canary = True
+        config.pnl_trigger_focus_margin_percent = 2.0
+        config.gridless_buy_threshold = -10.0
+        status = {
+            "remaining_slots": 8,
+            "dip_anchor_price": 0.1,
+            "dip_price_move_percent": -9.8,
+            "buy_trigger_pnl_percent": -10.29,
+        }
+
+        observed = gridless.threshold_dip_pretrigger_status(status, config)
+
+        self.assertTrue(observed["eligible"])
+        self.assertAlmostEqual(observed["maximum_fill_price"], 0.09)
+        self.assertEqual(observed["route_distance_percent"], 0.0)
+        self.assertAlmostEqual(observed["physical_distance_percent"], 0.2)
+
+        status["buy_trigger_pnl_percent"] = -7.9
+        observed = gridless.threshold_dip_pretrigger_status(status, config)
+        self.assertFalse(observed["eligible"])
+        self.assertIn("Route mark", observed["reason"])
+
+        status["buy_trigger_pnl_percent"] = -9.0
+        status["dip_price_move_percent"] = -7.0
+        observed = gridless.threshold_dip_pretrigger_status(status, config)
+        self.assertTrue(observed["eligible"])
+        self.assertEqual(observed["physical_distance_percent"], 3.0)
+
+    def test_pretrigger_is_backward_compatible_when_switch_is_absent(self):
+        config = SimpleNamespace(
+            pnl_trigger_focus_margin_percent=2.0,
+            gridless_buy_threshold=-10.0,
+        )
+
+        observed = gridless.threshold_dip_pretrigger_status({
+            "remaining_slots": 8,
+            "dip_anchor_price": 0.1,
+            "dip_price_move_percent": -9.8,
+            "buy_trigger_pnl_percent": -10.29,
+        }, config)
+
+        self.assertFalse(observed["enabled"])
+        self.assertFalse(observed["eligible"])
+
+    def test_gridless_check_starts_pretrigger_tournament_for_raeto_geometry(self):
+        bot = GridBot.__new__(GridBot)
+        bot.config = SimpleNamespace(
+            max_active_positions=20,
+            gridless_buy_threshold=-10.0,
+            gridless_sell_threshold=5.0,
+            gridless_leading_edge=True,
+            gridless_gap_leading_edge=False,
+            gridless_allocation_mode="threshold",
+            bidirectional_pnl_enabled=True,
+            token_decimals=18,
+            route_tournament_mode="gate",
+            route_tournament_canary=True,
+            route_tournament_pretrigger_enabled=True,
+            pnl_trigger_focus_margin_percent=2.0,
+            use_eth_trading=False,
+            weth_address="weth",
+            gridless_min_position_eth=0.001,
+            tradeable_balance_percent=100.0,
+        )
+        bot.token_decimals = 18
+        bot.token_unit = 10**18
+        bot.last_buy_time = 0
+        bot.gridless_buy_cooldown = 0
+        bot.trade_token_name = "WETH"
+        bot._taxed_token_active = MagicMock(return_value=False)
+        bot.wallet = MagicMock()
+        bot.wallet.get_token_balance.return_value = (1.0, 10**18)
+        bot._execute_buy_gridless = MagicMock()
+        positions = {
+            "15": {
+                **self._position_at(0.1),
+                "threshold_fill_price": 0.1,
+                "threshold_entry_kind": "dip",
+            },
+            "0": self._position_at(0.14),
+        }
+        observations = {
+            "15": {"buy_trigger_pnls": {"legacy": -10.29}},
+        }
+
+        with patch("gridless.load_positions", return_value=positions), \
+             patch("drawdown_ladder.load_plan", return_value=None):
+            bot._check_buys_gridless(0.0902, observations)
+
+        bot._execute_buy_gridless.assert_called_once()
+        threshold_context = bot._execute_buy_gridless.call_args.kwargs[
+            "threshold_context"
+        ]
+        self.assertTrue(threshold_context["pretrigger_tournament"])
+        self.assertEqual(threshold_context["entry_kind"], "dip")
+        self.assertAlmostEqual(
+            threshold_context["pretrigger_maximum_fill_price"], 0.09
+        )
 
     def test_threshold_status_identifies_single_position_leading_edge(self):
         config = MagicMock()

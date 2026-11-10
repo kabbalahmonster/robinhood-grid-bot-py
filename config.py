@@ -210,6 +210,7 @@ class BotConfig:
     auto_reconcile_interval_seconds: int = 30
     route_tournament_mode: str = "off"
     route_tournament_canary: bool = False
+    route_tournament_pretrigger_enabled: bool = False
     route_tournament_providers: tuple[str, ...] = ("uniswap", "sushiswap")
     route_tournament_settlements: tuple[str, ...] = ("native", "weth")
     route_tournament_shadow_timeout_seconds: float = 4.0
@@ -260,6 +261,24 @@ class BotConfig:
             raise ValueError("ROUTE_TOURNAMENT_MODE supports off, shadow, or gate; execute is intentionally unavailable")
         if self.route_tournament_mode == "gate" and not self.route_tournament_canary:
             raise ValueError("ROUTE_TOURNAMENT_MODE=gate requires ROUTE_TOURNAMENT_CANARY=true")
+        if getattr(self, "route_tournament_pretrigger_enabled", False):
+            requirements = {
+                "ROUTE_TOURNAMENT_MODE=gate": self.route_tournament_mode == "gate",
+                "ROUTE_TOURNAMENT_CANARY=true": bool(self.route_tournament_canary),
+                "USE_GRIDLESS=true": bool(getattr(self, "use_gridless", False)),
+                "GRIDLESS_ALLOCATION_MODE=threshold": str(getattr(
+                    self, "gridless_allocation_mode", "threshold"
+                )).strip().lower() == "threshold",
+                "PNL_TRIGGER_FOCUS_MARGIN_PERCENT>0": float(getattr(
+                    self, "pnl_trigger_focus_margin_percent", 2
+                )) > 0,
+            }
+            missing = [label for label, satisfied in requirements.items() if not satisfied]
+            if missing:
+                raise ValueError(
+                    "ROUTE_TOURNAMENT_PRETRIGGER_ENABLED=true requires "
+                    + ", ".join(missing)
+                )
         providers = tuple(getattr(self, "route_tournament_providers", ("uniswap", "sushiswap")))
         settlements = tuple(getattr(self, "route_tournament_settlements", ("native", "weth")))
         if not providers or any(value not in {"uniswap", "sushiswap", "umbra", "lifi", "abyss"} for value in providers):
@@ -714,6 +733,9 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
         swap_provider=os.getenv("SWAP_PROVIDER", ""),
         route_tournament_mode=os.getenv("ROUTE_TOURNAMENT_MODE", "off").strip().lower(),
         route_tournament_canary=os.getenv("ROUTE_TOURNAMENT_CANARY", "false").lower() == "true",
+        route_tournament_pretrigger_enabled=os.getenv(
+            "ROUTE_TOURNAMENT_PRETRIGGER_ENABLED", "false"
+        ).lower() == "true",
         route_tournament_providers=_parse_csv_choices(
             os.getenv("ROUTE_TOURNAMENT_PROVIDERS", "uniswap,sushiswap"),
             ("uniswap", "sushiswap", "umbra", "lifi", "abyss")

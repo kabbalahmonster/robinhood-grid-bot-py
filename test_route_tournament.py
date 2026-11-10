@@ -1047,6 +1047,35 @@ def test_threshold_dip_execution_guard_uses_executable_floor_and_seed_ceiling():
     assert abort["maximum_fill_price"] == pytest.approx(0.095)
 
 
+def test_pretrigger_execution_guard_allows_no_recovery_past_exact_trigger():
+    b = bot("gate")
+    b.config.gridless_buy_threshold = -10.0
+    b.config.gridless_buy_execution_margin = 50.0
+    b.token_unit = 10**18
+    b._swap_slippage_fraction = Mock(return_value=0.0)
+    b._mark_buy_tournament_aborted = Mock()
+    trigger = {
+        "entry_kind": "dip",
+        "dip_anchor_position_id": "7",
+        "dip_anchor_price": 0.1,
+        "pretrigger_tournament": True,
+    }
+    principal = 10**18
+
+    assert b._threshold_dip_execution_price_allowed(
+        quote(output=int(principal / 0.089)), principal, trigger
+    ) is True
+    assert b._threshold_dip_execution_price_allowed(
+        quote(output=int(principal / 0.091)), principal, trigger
+    ) is False
+    assert b._mark_buy_tournament_aborted.call_args.kwargs["reason"] == (
+        "pretrigger_buy_fill_not_qualified"
+    )
+    assert b._mark_buy_tournament_aborted.call_args.kwargs[
+        "maximum_fill_price"
+    ] == pytest.approx(0.09)
+
+
 def test_exact_approval_fuse_persists_and_blocks_a_second_approval(tmp_path):
     b = bot("gate")
     b.provider = SimpleNamespace(
@@ -1145,7 +1174,9 @@ def test_mode_parsing_and_default(monkeypatch, tmp_path):
     # Avoid loading a checkout/operator .env or requiring live credentials.
     with patch("config.load_dotenv"), patch.object(BotConfig, "validate"):
         monkeypatch.delenv("ROUTE_TOURNAMENT_MODE", raising=False)
+        monkeypatch.delenv("ROUTE_TOURNAMENT_PRETRIGGER_ENABLED", raising=False)
         assert load_config().route_tournament_mode == "off"
+        assert load_config().route_tournament_pretrigger_enabled is False
         monkeypatch.setenv("ROUTE_TOURNAMENT_MODE", " SHADOW ")
         assert load_config().route_tournament_mode == "shadow"
         monkeypatch.setenv("UNISWAP_PROTOCOL_CACHE_TTL_SECONDS", "420")
@@ -1161,6 +1192,8 @@ def test_mode_parsing_and_default(monkeypatch, tmp_path):
         assert configured.route_tournament_shadow_timeout_seconds == 5
         assert configured.route_tournament_gate_timeout_seconds == 7
         assert configured.route_tournament_speculative_fallback_seconds == 5
+        monkeypatch.setenv("ROUTE_TOURNAMENT_PRETRIGGER_ENABLED", "true")
+        assert load_config().route_tournament_pretrigger_enabled is True
 
         monkeypatch.setenv("ROUTE_TOURNAMENT_PROVIDERS", "uniswap,sushiswap,umbra")
         assert load_config().route_tournament_providers == ("uniswap", "sushiswap", "umbra")
@@ -1885,6 +1918,39 @@ def test_gate_preflight_failure_falls_back_to_normal_provider_path():
     assert b._route_execution_preflight["status"] == "baseline_fallback"
 
 
+def test_pretrigger_gate_never_falls_back_when_no_candidate_meets_trigger():
+    b = bot("gate")
+    b.config.use_eth_trading = True
+    primary = SimpleNamespace(name="uniswap")
+    router = SimpleNamespace(
+        primary=primary, active=primary,
+        build_swap_transaction=Mock(),
+    )
+    b.provider = router
+    b.api_client = router
+    b._collect_route_execution_preflight = Mock(return_value=None)
+    b._revalidate_selected_route = Mock()
+    b._set_tournament_terminal_hint = Mock()
+
+    quote_result, weth_fallback = b._actionable_quote_with_weth_fallback(
+        sell_token="native", buy_token="token", sell_amount=10**15,
+        direction="buy", candidate_requirements={
+            "buy_maximum_fill_price": 0.09,
+        }, require_qualified_tournament=True,
+    )
+
+    assert quote_result.success is False
+    assert "no tournament candidate met" in quote_result.error
+    assert weth_fallback is False
+    router.build_swap_transaction.assert_not_called()
+    b._revalidate_selected_route.assert_not_called()
+    b._collect_route_execution_preflight.assert_called_once_with(
+        "buy", 10**15, None,
+        candidate_requirements={"buy_maximum_fill_price": 0.09},
+        fallback_allowed=False,
+    )
+
+
 def test_gate_sell_reuses_isolated_speculative_baseline_after_no_winner():
     b = bot("gate")
     b.config.use_eth_trading = False
@@ -2508,6 +2574,28 @@ def test_candidate_log_includes_provider_output_and_score():
     assert "output_floor_human" in row
 
 
+def test_pretrigger_buy_candidate_must_meet_exact_fill_ceiling():
+    qualifying_context = context("buy", token_decimals=18,
+                                 buy_maximum_fill_price=0.09)
+    qualifying_context.update(slippage=0, tax=0)
+    qualifying = score_candidate(
+        quote(output=12 * 10**15), "uniswap", "native",
+        qualifying_context,
+    )
+    rejected_context = dict(qualifying_context)
+    rejected = score_candidate(
+        quote(output=10 * 10**15), "sushiswap", "native",
+        rejected_context,
+    )
+
+    assert qualifying["validation_level"] == "quote_only"
+    assert qualifying["projected_buy_fill_price"] == pytest.approx(1 / 12)
+    assert "buy_trigger_fill_ceiling" not in qualifying["rejections"]
+    assert rejected["validation_level"] == "rejected"
+    assert rejected["projected_buy_fill_price"] == pytest.approx(0.1)
+    assert "buy_trigger_fill_ceiling" in rejected["rejections"]
+
+
 def test_winner_announcement_log_present(caplog):
     """collect() emits a winner announcement log line with all required fields."""
     import logging
@@ -2562,6 +2650,20 @@ def test_execute_mode_still_fails_closed():
     cfg = BotConfig.__new__(BotConfig)
     cfg.route_tournament_mode = "execute"
     with pytest.raises(ValueError, match="supports off, shadow, or gate"):
+        cfg.validate()
+
+
+def test_pretrigger_activation_requires_guarded_threshold_gate():
+    cfg = BotConfig.__new__(BotConfig)
+    cfg.route_tournament_mode = "off"
+    cfg.route_tournament_canary = False
+    cfg.route_tournament_pretrigger_enabled = True
+    cfg.use_gridless = True
+    cfg.gridless_allocation_mode = "threshold"
+
+    with pytest.raises(
+        ValueError, match="ROUTE_TOURNAMENT_PRETRIGGER_ENABLED=true requires"
+    ):
         cfg.validate()
 
 

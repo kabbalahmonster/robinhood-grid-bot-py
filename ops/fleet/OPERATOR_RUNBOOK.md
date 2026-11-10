@@ -202,6 +202,13 @@ has no valid candidate, the dashboard records `baseline_fallback` and the bot
 uses its normal configured route with all usual safeguards, rather than losing
 an otherwise valid exit to tournament-only availability. Watch latency, 429s,
 timeout rejections, gas, and successful buy/sell receipts before expanding the trial.
+For a threshold-mode buy canary, `ROUTE_TOURNAMENT_PRETRIGGER_ENABLED=true`
+allows gate collection once route P&L is within
+`PNL_TRIGGER_FOCUS_MARGIN_PERCENT`. It never turns proximity into trade
+authority: the conservative candidate fill and freshly rebuilt winner must
+both reach the exact `GRIDLESS_BUY_THRESHOLD`. A no-winner pretrigger round has
+no baseline fallback. Keep it false elsewhere until the canary shows acceptable
+request volume, 429 rate, latency, and confirmed receipts.
 Rollback is `ROUTE_TOURNAMENT_MODE=off` and
 `ROUTE_TOURNAMENT_CANARY=false` on that same bot. See the route-tournament
 section of the main README and the fleet README for accounting and timeout
