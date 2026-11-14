@@ -1189,12 +1189,15 @@ that same zero-deficit recovery automatically. A receipt-proven managed-token
 outflow is classified as a sell and resumes without a haircut when the remaining
 wallet inventory still fully collateralizes all tracked positions. For gridless
 wallet surplus without a managed-token outflow, it also tries the existing
-receipt-driven buy recovery using the guard's exact transaction hash. That path requires a successful configured-wallet
+receipt-driven buy recovery. If the guard's exact hash is absent, it searches
+incoming managed-token transfers in the bounded guard-time window and accepts
+exactly one same-wallet, same-chain, same-nonce, same-destination, same-value
+replacement. That path requires a successful configured-wallet
 transaction, native principal, exact managed-token receipt, confirmed gas
 economics, sufficient unallocated inventory, available position capacity, and
 a verified ledger reload. Exact transaction and receipt reads check every
-configured RPC endpoint. Missing exact-hash evidence remains halted without a
-rebroadcast, and repeated failures back off exponentially to 30 minutes. It
+configured RPC endpoint. Missing exact-hash evidence with no unique proven
+replacement remains halted without a rebroadcast, and repeated failures back off exponentially to 30 minutes. It
 resumes only after the exact guard is archived.
 
 ### Cancelling an absent ambiguous broadcast

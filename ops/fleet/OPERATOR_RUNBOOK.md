@@ -293,7 +293,9 @@ requires either a current deficit exactly matching a successful receipt's
 managed-token outflow from that wallet, or a receipt-proven omitted gridless buy
 matching the active guard. Buy recovery also proves native principal, confirmed
 gas economics, exact token inflow, unallocated inventory, position capacity,
-and the saved ledger before archiving. If an earlier sell repair already applied
+and the saved ledger before archiving. When the saved buy hash is absent, the
+same bounded replacement search requires exactly one matching incoming token
+transfer plus the guard's wallet, chain, nonce, destination, and value. If an earlier sell repair already applied
 the exact haircut, automatic mode may instead verify that same outflow against
 the latest matching local reconciliation audit. A receipt-proven sell also
 resumes without a haircut when the post-transaction wallet still fully
@@ -301,9 +303,10 @@ collateralizes every tracked position. The process remains alive while trading
 is paused. All other cases stay halted. The Robinhood environment template
 enables this recovery by default.
 Exact transaction and receipt reads check every configured RPC endpoint before
-reporting absence. `AUTO_RECONCILE_INTERVAL_SECONDS` is the initial check
+reporting absence unless one unique receipt-proven replacement is found. `AUTO_RECONCILE_INTERVAL_SECONDS` is the initial check
 cadence; consecutive failures back off exponentially to 30 minutes. An exact
-hash absent from every endpoint remains guarded and is never rebroadcast.
+hash absent from every endpoint remains guarded unless one unique replacement
+passes all checks; it is never rebroadcast.
 If the isolated helper archives a legacy guard whose recorded error proves a
 definitive pre-broadcast rejection, the parent clears its stale in-memory halt
 only after finding an archive containing that exact transaction hash.

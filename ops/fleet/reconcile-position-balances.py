@@ -163,6 +163,102 @@ def discover_replacement_sell(wallet, config, guard):
     return candidates[0]
 
 
+def discover_replacement_buy(wallet, config, guard):
+    """Find one successful same-nonce replacement through token inflow logs.
+
+    Incoming managed-token transfers provide a bounded candidate set for an
+    omitted gridless buy. Every candidate must match the durable transaction
+    fingerprint and pass the strict buy receipt/economics verifier before its
+    hash can replace the unresolved one.
+    """
+    if not isinstance(guard, dict):
+        raise ValueError("replacement discovery requires a valid guard")
+    try:
+        nonce = _int(guard["nonce"])
+        recorded_at = _int(guard["recorded_at_unix"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("guard lacks nonce or recording time") from exc
+    guarded_wallet = str(guard.get("wallet") or "").lower()
+    if guarded_wallet != wallet.address.lower():
+        raise ValueError("guard wallet does not match the configured wallet")
+    guarded_chain = guard.get("chain_id")
+    if guarded_chain is not None and _int(guarded_chain) != int(config.chain_id):
+        raise ValueError("guard chain does not match the configured chain")
+
+    start_block = block_at_or_after_timestamp(
+        wallet.w3, max(0, recorded_at - REPLACEMENT_LOOKBACK_SECONDS),
+    )
+    end_block = block_at_or_after_timestamp(
+        wallet.w3, recorded_at + REPLACEMENT_LOOKAHEAD_SECONDS,
+    )
+    latest_block = _int(wallet.w3.eth.get_block("latest")["number"])
+    end_block = min(end_block, latest_block)
+    if start_block > end_block:
+        raise ValueError("replacement search window has no mined blocks yet")
+
+    wallet_topic = "0x" + wallet.address.lower().removeprefix("0x").rjust(64, "0")
+    token_address = Web3.to_checksum_address(config.token_address)
+    transaction_hashes = set()
+    for first in range(start_block, end_block + 1, REPLACEMENT_LOG_BLOCK_CHUNK):
+        last = min(end_block, first + REPLACEMENT_LOG_BLOCK_CHUNK - 1)
+        logs = wallet.w3.eth.get_logs({
+            "fromBlock": first,
+            "toBlock": last,
+            "address": token_address,
+            "topics": [TRANSFER_TOPIC, None, wallet_topic],
+        })
+        transaction_hashes.update(
+            _hex(entry["transactionHash"]).lower() for entry in logs
+        )
+
+    from gridless_reconciler import inspect_buy
+
+    transaction_finder = getattr(wallet.w3, "find_transaction", None)
+    candidates = []
+    for tx_hash in sorted(transaction_hashes):
+        tx = (transaction_finder(tx_hash) if callable(transaction_finder)
+              else wallet.w3.eth.get_transaction(tx_hash))
+        if tx is None:
+            continue
+        if str(tx.get("from") or "").lower() != wallet.address.lower():
+            continue
+        if _int(tx.get("nonce", -1)) != nonce:
+            continue
+        guarded_to = str(guard.get("to") or "").lower()
+        if guarded_to and str(tx.get("to") or "").lower() != guarded_to:
+            continue
+        if _int(tx.get("value", 0) or 0) != _int(guard.get("value_wei", 0) or 0):
+            continue
+        inspect_buy(wallet.w3, tx_hash, config.token_address, wallet.address)
+        candidates.append(tx_hash)
+
+    if len(candidates) != 1:
+        raise ValueError(
+            f"replacement discovery found {len(candidates)} matching successful buys"
+        )
+    return candidates[0]
+
+
+def guarded_gridless_buy_hash(wallet, config, guard, allow_replacement=False):
+    """Return the guarded buy hash, resolving only a fully proven replacement."""
+    guarded_hash = str(guard["tx_hash"])
+    try:
+        transaction_finder = getattr(wallet.w3, "find_transaction", None)
+        receipt_finder = getattr(wallet.w3, "find_transaction_receipt", None)
+        tx = (transaction_finder(guarded_hash) if callable(transaction_finder)
+              else wallet.w3.eth.get_transaction(guarded_hash))
+        receipt = (receipt_finder(guarded_hash) if callable(receipt_finder)
+                   else wallet.w3.eth.get_transaction_receipt(guarded_hash))
+    except Exception:
+        # Preserve the established strict verifier as the authority when this
+        # optional classification read is unavailable. It will either verify
+        # the exact hash through its own failover path or leave the guard intact.
+        return guarded_hash, None
+    if tx is not None or receipt is not None or not allow_replacement:
+        return guarded_hash, None
+    return discover_replacement_buy(wallet, config, guard), guarded_hash
+
+
 def guarded_outgoing_tokens(wallet, config, guard, allow_replacement=False):
     """Verify the guarded hash, optionally resolving one proven replacement."""
     guarded_hash = str(guard["tx_hash"])
@@ -440,8 +536,13 @@ def main():
             # verified buy reconciler so principal, confirmed gas, and exact
             # token inflow become a real position before the guard is removed.
             candidate_hash = str(guard["tx_hash"])
+            superseded_hash = None
             try:
                 from gridless_reconciler import run_gridless_reconciliation
+                candidate_hash, superseded_hash = guarded_gridless_buy_hash(
+                    wallet, config, guard, allow_replacement=True,
+                )
+                adopt_replacement(wallet, superseded_hash, candidate_hash)
                 recovery_code = run_gridless_reconciliation(
                     [candidate_hash], apply=True, safety_halted=True,
                 )
@@ -455,6 +556,10 @@ def main():
                         "tx_hash": candidate_hash,
                         "status": "receipt_verified_gridless_buy",
                     }
+                    if superseded_hash:
+                        result["unresolved_broadcast_match"]["superseded_tx_hash"] = (
+                            superseded_hash
+                        )
                 else:
                     result["unresolved_broadcast_match"] = {
                         "tx_hash": candidate_hash,

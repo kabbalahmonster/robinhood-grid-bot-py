@@ -37,6 +37,16 @@ def transfer_log(amount, sender=WALLET, token=TOKEN):
     }
 
 
+def incoming_transfer_log(amount, recipient=WALLET, token=TOKEN):
+    sender_topic = "0x" + ("cc" * 20).rjust(64, "0")
+    recipient_topic = "0x" + recipient.removeprefix("0x").rjust(64, "0")
+    return {
+        "address": token,
+        "topics": [reconciler.TRANSFER_TOPIC, sender_topic, recipient_topic],
+        "data": hex(amount),
+    }
+
+
 def test_verified_outgoing_tokens_sums_only_managed_token_wallet_outflow():
     receipt = {
         "status": 1,
@@ -148,6 +158,66 @@ def test_replacement_discovery_rejects_transaction_fingerprint_mismatch(monkeypa
 
     with pytest.raises(ValueError, match="found 0 matching successful sells"):
         reconciler.discover_replacement_sell(wallet, config, guard)
+
+
+def test_discovers_same_nonce_replacement_buy_from_transfer_logs(monkeypatch):
+    receipt = {
+        "status": 1, "blockNumber": 200, "gasUsed": 21_000,
+        "effectiveGasPrice": 2, "logs": [incoming_transfer_log(50)],
+    }
+    transaction = {
+        "from": WALLET, "to": ROUTER, "nonce": 328,
+        "value": 1234, "gasPrice": 2,
+    }
+    eth = SimpleNamespace(
+        get_block=lambda _number: {"number": 200, "timestamp": 1_100},
+        get_logs=lambda _params: [{"transactionHash": REPLACEMENT_HASH}],
+        get_transaction=lambda tx_hash: transaction if tx_hash == REPLACEMENT_HASH else None,
+        get_transaction_receipt=lambda tx_hash: receipt if tx_hash == REPLACEMENT_HASH else None,
+    )
+    wallet = SimpleNamespace(
+        address=WALLET,
+        w3=SimpleNamespace(
+            eth=eth, find_transaction=eth.get_transaction,
+            find_transaction_receipt=eth.get_transaction_receipt,
+        ),
+    )
+    config = SimpleNamespace(token_address=TOKEN, chain_id=4663)
+    guard = {
+        "tx_hash": TX_HASH, "recorded_at_unix": 1_000,
+        "chain_id": 4663, "wallet": WALLET, "nonce": 328,
+        "to": ROUTER, "value_wei": 1234,
+    }
+    monkeypatch.setattr(reconciler, "block_at_or_after_timestamp", lambda *_args: 200)
+
+    assert reconciler.discover_replacement_buy(wallet, config, guard) == (
+        REPLACEMENT_HASH
+    )
+
+
+def test_replacement_buy_discovery_rejects_fingerprint_mismatch(monkeypatch):
+    transaction = {
+        "from": WALLET, "to": ROUTER, "nonce": 329, "value": 1234,
+    }
+    eth = SimpleNamespace(
+        get_block=lambda _number: {"number": 200, "timestamp": 1_100},
+        get_logs=lambda _params: [{"transactionHash": REPLACEMENT_HASH}],
+        get_transaction=lambda _tx_hash: transaction,
+    )
+    wallet = SimpleNamespace(
+        address=WALLET,
+        w3=SimpleNamespace(eth=eth, find_transaction=eth.get_transaction),
+    )
+    config = SimpleNamespace(token_address=TOKEN, chain_id=4663)
+    guard = {
+        "tx_hash": TX_HASH, "recorded_at_unix": 1_000,
+        "chain_id": 4663, "wallet": WALLET, "nonce": 328,
+        "to": ROUTER, "value_wei": 1234,
+    }
+    monkeypatch.setattr(reconciler, "block_at_or_after_timestamp", lambda *_args: 200)
+
+    with pytest.raises(ValueError, match="found 0 matching successful buys"):
+        reconciler.discover_replacement_buy(wallet, config, guard)
 
 
 def test_automatic_zero_deficit_recovers_receipt_proven_prior_reconciliation(
@@ -567,6 +637,80 @@ def test_automatic_zero_deficit_recovers_receipt_proven_gridless_buy(
 
     assert reconciler.main() == 0
     assert calls == [([TX_HASH], True, True)]
+    assert not guard_path.exists()
+
+
+def test_automatic_zero_deficit_recovers_replacement_gridless_buy(
+        monkeypatch, tmp_path, capsys):
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "gridless_positions.json").write_text('{"1":{"balance":100}}')
+    (data / "position_balance_reconciliations.json").write_text("[]")
+    guard = {
+        "tx_hash": TX_HASH, "recorded_at_unix": 1_000,
+        "chain_id": 4663, "wallet": WALLET, "nonce": 328,
+        "to": ROUTER, "value_wei": 1234,
+    }
+    guard_path = data / "unresolved_broadcast.json"
+    guard_path.write_text(json.dumps(guard))
+
+    class FakeWallet:
+        def __init__(self, _config):
+            self.address = WALLET
+            self.unresolved_broadcast = dict(guard)
+            self.unresolved_broadcast_path = str(guard_path)
+            self.w3 = SimpleNamespace(
+                find_transaction=lambda _tx_hash: None,
+                find_transaction_receipt=lambda _tx_hash: None,
+            )
+
+        def get_token_balance(self, _token):
+            return 150, 150
+
+        def replace_unresolved_broadcast_hash(self, old_hash, new_hash):
+            assert old_hash == TX_HASH
+            assert new_hash == REPLACEMENT_HASH
+            self.unresolved_broadcast["superseded_tx_hash"] = old_hash
+            self.unresolved_broadcast["tx_hash"] = new_hash
+            guard_path.write_text(json.dumps(self.unresolved_broadcast))
+            return True
+
+    calls = []
+
+    def recover(tx_hashes, *, apply, safety_halted):
+        calls.append((tx_hashes, apply, safety_halted))
+        updated = json.loads(guard_path.read_text())
+        assert updated["tx_hash"] == REPLACEMENT_HASH
+        guard_path.rename(guard_path.with_name(guard_path.name + ".reconciled"))
+        return 0
+
+    config_module = ModuleType("config")
+    config_module.load_config = lambda: SimpleNamespace(
+        token_address=TOKEN, token_symbol="TOKEN", use_gridless=True,
+        chain_id=4663,
+    )
+    wallet_module = ModuleType("wallet")
+    wallet_module.Wallet = FakeWallet
+    gridless_reconciler_module = ModuleType("gridless_reconciler")
+    gridless_reconciler_module.run_gridless_reconciliation = recover
+    monkeypatch.setitem(sys.modules, "config", config_module)
+    monkeypatch.setitem(sys.modules, "wallet", wallet_module)
+    monkeypatch.setitem(sys.modules, "gridless_reconciler", gridless_reconciler_module)
+    monkeypatch.setattr(
+        reconciler, "discover_replacement_buy",
+        lambda _wallet, _config, _guard: REPLACEMENT_HASH,
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "argv", ["reconcile-position-balances", "--automatic"])
+
+    assert reconciler.main() == 0
+    output = json.loads(capsys.readouterr().out)
+    assert calls == [([REPLACEMENT_HASH], True, True)]
+    assert output["unresolved_broadcast_match"] == {
+        "tx_hash": REPLACEMENT_HASH,
+        "status": "receipt_verified_gridless_buy",
+        "superseded_tx_hash": TX_HASH,
+    }
     assert not guard_path.exists()
 
 
