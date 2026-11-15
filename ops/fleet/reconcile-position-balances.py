@@ -612,12 +612,26 @@ def main():
             candidate_hash, outgoing_raw, superseded_guard_hash = guarded_outgoing_tokens(
                 wallet, config, guard, allow_replacement=args.automatic,
             )
-            if outgoing_raw == deficit_raw:
+            if outgoing_raw >= deficit_raw:
                 matching_guard_hash = candidate_hash
                 result["unresolved_broadcast_match"] = {
                     "tx_hash": candidate_hash, "outgoing_raw": outgoing_raw,
-                    "status": "receipt_verified_exact_deficit",
+                    "status": (
+                        "receipt_verified_exact_deficit"
+                        if outgoing_raw == deficit_raw
+                        else "receipt_verified_deficit_after_surplus"
+                    ),
                 }
+                if outgoing_raw > deficit_raw:
+                    # Reconstructing the balance immediately before this exact
+                    # receipt-proven sell yields wallet_raw + outgoing_raw.
+                    # Any amount above tracked_raw was unallocated inventory,
+                    # so the sell consumed that surplus before creating the
+                    # smaller current position deficit.
+                    result["unresolved_broadcast_match"].update({
+                        "pre_sell_wallet_raw": wallet_raw + outgoing_raw,
+                        "surplus_offset_raw": outgoing_raw - deficit_raw,
+                    })
                 if superseded_guard_hash:
                     result["unresolved_broadcast_match"]["superseded_tx_hash"] = (
                         superseded_guard_hash
@@ -626,6 +640,7 @@ def main():
                 result["unresolved_broadcast_match"] = {
                     "tx_hash": candidate_hash, "outgoing_raw": outgoing_raw,
                     "status": "outflow_does_not_match_deficit",
+                    "unexplained_deficit_raw": deficit_raw - outgoing_raw,
                 }
         except Exception as exc:
             result["unresolved_broadcast_match"] = {

@@ -594,6 +594,114 @@ def test_automatic_same_nonce_replacement_haircuts_archives_and_resumes(
     assert not guard_path.exists()
 
 
+def test_automatic_sell_outflow_above_deficit_uses_pre_sale_surplus(
+        monkeypatch, tmp_path, capsys):
+    data = tmp_path / "data"
+    data.mkdir()
+    positions_path = data / "gridless_positions.json"
+    positions_path.write_text(json.dumps({
+        "1": {"balance": 60, "cost": 600},
+        "2": {"balance": 40, "cost": 400},
+    }))
+    guard = {"tx_hash": TX_HASH}
+    guard_path = data / "unresolved_broadcast.json"
+    guard_path.write_text(json.dumps(guard))
+
+    class FakeWallet:
+        def __init__(self, _config):
+            self.address = WALLET
+            self.unresolved_broadcast = dict(guard)
+            self.w3 = wallet_with({
+                "status": 1, "logs": [transfer_log(40)],
+            }).w3
+
+        def get_token_balance(self, _token):
+            return 75, 75
+
+        def archive_reconciled_broadcast(self, tx_hash):
+            assert tx_hash == TX_HASH
+            archived = guard_path.with_name(guard_path.name + ".reconciled")
+            guard_path.replace(archived)
+            return str(archived)
+
+    config_module = ModuleType("config")
+    config_module.load_config = lambda: SimpleNamespace(
+        token_address=TOKEN, token_symbol="TOKEN",
+    )
+    wallet_module = ModuleType("wallet")
+    wallet_module.Wallet = FakeWallet
+    monkeypatch.setitem(sys.modules, "config", config_module)
+    monkeypatch.setitem(sys.modules, "wallet", wallet_module)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "argv", ["reconcile-position-balances", "--automatic"])
+
+    assert reconciler.main() == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["deficit_raw"] == 25
+    assert output["unresolved_broadcast_match"] == {
+        "tx_hash": TX_HASH,
+        "outgoing_raw": 40,
+        "status": "receipt_verified_deficit_after_surplus",
+        "pre_sell_wallet_raw": 115,
+        "surplus_offset_raw": 15,
+        "archived_path": str(guard_path.with_name(guard_path.name + ".reconciled")),
+    }
+    positions = json.loads(positions_path.read_text())
+    assert positions["1"]["balance"] == 45
+    assert positions["2"]["balance"] == 30
+    assert not guard_path.exists()
+
+
+def test_automatic_sell_outflow_below_deficit_stays_halted(
+        monkeypatch, tmp_path, capsys):
+    data = tmp_path / "data"
+    data.mkdir()
+    positions_path = data / "gridless_positions.json"
+    positions_path.write_text('{"1":{"balance":100}}')
+    guard = {"tx_hash": TX_HASH}
+    guard_path = data / "unresolved_broadcast.json"
+    guard_path.write_text(json.dumps(guard))
+
+    class FakeWallet:
+        def __init__(self, _config):
+            self.address = WALLET
+            self.unresolved_broadcast = dict(guard)
+            self.w3 = wallet_with({
+                "status": 1, "logs": [transfer_log(20)],
+            }).w3
+
+        def get_token_balance(self, _token):
+            return 75, 75
+
+        def archive_reconciled_broadcast(self, _tx_hash):
+            raise AssertionError("unexplained deficit must remain guarded")
+
+    config_module = ModuleType("config")
+    config_module.load_config = lambda: SimpleNamespace(
+        token_address=TOKEN, token_symbol="TOKEN",
+    )
+    wallet_module = ModuleType("wallet")
+    wallet_module.Wallet = FakeWallet
+    monkeypatch.setitem(sys.modules, "config", config_module)
+    monkeypatch.setitem(sys.modules, "wallet", wallet_module)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "argv", ["reconcile-position-balances", "--automatic"])
+
+    assert reconciler.main() == 2
+    output = json.loads(capsys.readouterr().out)
+    assert output["unresolved_broadcast_match"] == {
+        "tx_hash": TX_HASH,
+        "outgoing_raw": 20,
+        "status": "outflow_does_not_match_deficit",
+        "unexplained_deficit_raw": 5,
+    }
+    assert output["automatic_reconciliation"] == (
+        "refused_without_exact_receipt_match"
+    )
+    assert json.loads(positions_path.read_text())["1"]["balance"] == 100
+    assert guard_path.exists()
+
+
 def test_automatic_zero_deficit_recovers_receipt_proven_gridless_buy(
         monkeypatch, tmp_path):
     data = tmp_path / "data"
