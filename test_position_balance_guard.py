@@ -140,6 +140,38 @@ class PositionBalanceGuardTests(unittest.TestCase):
         self.assertFalse(bot._attempt_auto_reconcile_unresolved_broadcast())
         self.assertTrue(bot._safety_halted)
 
+    @patch("grid_bot.subprocess.run")
+    def test_auto_reconcile_initial_guard_attempt_halts_before_check(self, run):
+        bot = self.bot(400)
+        bot.config.auto_reconcile_unresolved_broadcast = True
+        bot.config.auto_reconcile_interval_seconds = 30
+        bot.wallet.unresolved_broadcast = {"tx_hash": "0xstartup"}
+        bot.wallet.has_unresolved_broadcast.return_value = True
+        bot.wallet._load_unresolved_broadcast.return_value = bot.wallet.unresolved_broadcast
+        bot._safety_halted = False
+        bot._last_auto_reconcile_attempt = 0
+        run.return_value = subprocess.CompletedProcess(
+            [], 2, stdout='{"status":"pending"}', stderr="",
+        )
+
+        self.assertFalse(bot._attempt_auto_reconcile_unresolved_broadcast())
+
+        self.assertTrue(bot._safety_halted)
+        run.assert_called_once()
+
+    @patch("grid_bot.logger.critical")
+    def test_disabled_auto_reconcile_halts_and_explains_manual_recovery(self, critical):
+        bot = self.bot(400)
+        bot.config.auto_reconcile_unresolved_broadcast = False
+        bot.wallet.unresolved_broadcast = {"tx_hash": "0xmanual"}
+        bot.wallet.has_unresolved_broadcast.return_value = True
+        bot._safety_halted = False
+
+        self.assertFalse(bot._attempt_auto_reconcile_unresolved_broadcast())
+
+        self.assertTrue(bot._safety_halted)
+        self.assertIn("Automatic reconciliation is disabled", critical.call_args.args[0])
+
     @patch("grid_bot.time.monotonic", side_effect=[100, 131, 161])
     @patch("grid_bot.subprocess.run")
     def test_auto_reconcile_failures_back_off_without_clearing_guard(self, run, _clock):

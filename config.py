@@ -206,7 +206,7 @@ class BotConfig:
     dashboard_group: str = ""     # Optional dashboard grouping label
     dexscreener_pair_address: str = ""  # Optional pair override for DoomDash
     mercury_evocation: bool = True  # Print the Mercury evocation once at bot startup
-    auto_reconcile_unresolved_broadcast: bool = False
+    auto_reconcile_unresolved_broadcast: bool = True
     auto_reconcile_interval_seconds: int = 30
     route_tournament_mode: str = "off"
     route_tournament_canary: bool = False
@@ -895,7 +895,7 @@ def load_config(env_file: Optional[str] = None) -> BotConfig:
         dexscreener_pair_address=os.getenv("DEXSCREENER_PAIR_ADDRESS", "").strip(),
         mercury_evocation=os.getenv("MERCURY_EVOCATION", "true").lower() == "true",
         auto_reconcile_unresolved_broadcast=os.getenv(
-            "AUTO_RECONCILE_UNRESOLVED_BROADCAST", "false"
+            "AUTO_RECONCILE_UNRESOLVED_BROADCAST", "true"
         ).lower() == "true",
         auto_reconcile_interval_seconds=int(os.getenv(
             "AUTO_RECONCILE_INTERVAL_SECONDS", "30"

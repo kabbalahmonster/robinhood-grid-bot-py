@@ -7996,11 +7996,21 @@ class GridBot:
 
     def _attempt_auto_reconcile_unresolved_broadcast(self):
         """Fail-closed recovery for a receipt-proven sell position deficit."""
-        if not getattr(self.config, "auto_reconcile_unresolved_broadcast", False):
-            return False
         if not self.wallet.has_unresolved_broadcast():
             self._safety_halted = False
             return True
+        was_halted = bool(getattr(self, "_safety_halted", False))
+        self._safety_halted = True
+        tx_hash = self.wallet.unresolved_broadcast.get("tx_hash", "unknown")
+        if not getattr(self.config, "auto_reconcile_unresolved_broadcast", True):
+            if not was_halted:
+                logger.critical(
+                    "TRADING HALTED: unresolved broadcast tx=%s. Automatic "
+                    "reconciliation is disabled; reconcile it on-chain before "
+                    "clearing data/unresolved_broadcast.json.",
+                    tx_hash,
+                )
+            return False
         now = time.monotonic()
         interval = max(5, int(getattr(
             self.config, "auto_reconcile_interval_seconds", 30
@@ -8010,7 +8020,6 @@ class GridBot:
         if now - self._last_auto_reconcile_attempt < retry_interval:
             return False
         self._last_auto_reconcile_attempt = now
-        tx_hash = self.wallet.unresolved_broadcast.get("tx_hash", "unknown")
         logger.warning(
             "Automatic reconciliation paused trading for unresolved tx=%s", tx_hash,
         )
@@ -8737,7 +8746,8 @@ class GridBot:
                     if previous_start is not None else None
                 )
                 self._main_loop_last_started = cycle_started
-                if getattr(self, "_safety_halted", False):
+                if (self.wallet.has_unresolved_broadcast()
+                        or getattr(self, "_safety_halted", False)):
                     self._attempt_auto_reconcile_unresolved_broadcast()
                 if not getattr(self, "_safety_halted", False):
                     self.run_cycle()
