@@ -2,6 +2,7 @@
 """Preview or apply a conservative proportional position haircut to wallet reality."""
 
 import argparse
+import importlib.util
 import json
 import os
 import sys
@@ -346,6 +347,28 @@ def atomic_json(path, value):
     os.replace(temporary, path)
 
 
+def cancel_absent_broadcast(wallet, config):
+    """Cancel one old, absent, still-unused guarded nonce and return evidence.
+
+    The cancellation helper already owns the strict age, multi-RPC absence,
+    fingerprint, nonce, gas-balance, durable-intent, and receipt checks. Load it
+    as a module here so automatic reconciliation uses exactly the same fail-
+    closed protocol as the operator command instead of duplicating it.
+    """
+    script = Path(__file__).with_name("cancel-unresolved-broadcast.py")
+    spec = importlib.util.spec_from_file_location(
+        "automatic_unresolved_broadcast_cancellation", script,
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError("could not load unresolved-broadcast cancellation helper")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    guard = getattr(wallet, "unresolved_broadcast", None)
+    if not isinstance(guard, dict) or not guard.get("tx_hash"):
+        raise ValueError("no valid unresolved-broadcast guard exists")
+    return module.execute_cancellation(wallet, config, str(guard["tx_hash"]))
+
+
 def recovered_prebroadcast_guard(record):
     """Return a known never-submitted guard once prerequisite RPC reads work."""
     if not isinstance(record, dict):
@@ -570,6 +593,44 @@ def main():
                     "tx_hash": candidate_hash,
                     "status": "gridless_buy_verification_failed",
                     "error": str(exc),
+                }
+        if (args.automatic and not recovered_prior_reconciliation
+                and not (isinstance(outgoing_raw, int) and outgoing_raw > 0)
+                and isinstance(guard, dict) and guard.get("tx_hash")):
+            # The remaining safe automatic case is an old hash absent from
+            # every RPC whose nonce is still unused. Replace it with a signed
+            # zero-value self-transfer. The shared helper refuses young,
+            # visible, pending, consumed, incomplete, or underfunded guards;
+            # it archives only after the cancellation receipt succeeds. If the
+            # submission response is lost, its hash remains durable and a
+            # later reconciliation pass can finalize that exact receipt.
+            candidate_hash = str(guard["tx_hash"])
+            try:
+                cancellation = cancel_absent_broadcast(wallet, config)
+                guard_path = Path(getattr(
+                    wallet, "unresolved_broadcast_path",
+                    "data/unresolved_broadcast.json",
+                ))
+                recovered_prior_reconciliation = not guard_path.exists()
+                result["unresolved_broadcast_match"] = {
+                    "tx_hash": candidate_hash,
+                    "status": (
+                        "receipt_verified_same_nonce_cancellation"
+                        if recovered_prior_reconciliation
+                        else "cancellation_guard_not_archived"
+                    ),
+                    "cancellation_tx_hash": cancellation["cancellation_tx_hash"],
+                }
+                if cancellation.get("archived_path"):
+                    result["unresolved_broadcast_match"]["archived_path"] = (
+                        cancellation["archived_path"]
+                    )
+            except Exception as exc:
+                # Preserve the more specific receipt/replacement diagnosis
+                # above while exposing why dropped-tx cancellation could not
+                # safely take over on this pass.
+                result["automatic_cancellation"] = {
+                    "status": "not_safe", "error": str(exc),
                 }
         print(json.dumps(result, separators=(",", ":")))
         # Automatic recovery used to be excluded from this zero-deficit branch,

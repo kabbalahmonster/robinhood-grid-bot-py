@@ -306,14 +306,16 @@ Exact transaction and receipt reads check every configured RPC endpoint before
 reporting absence unless one unique receipt-proven replacement is found. `AUTO_RECONCILE_INTERVAL_SECONDS` is the initial check
 cadence; consecutive failures back off exponentially to 30 minutes. An exact
 hash absent from every endpoint remains guarded unless one unique replacement
-passes all checks; it is never rebroadcast.
+passes all checks or, after 15 minutes, latest and pending nonce reads both
+prove its nonce is still unused. In that case automatic mode sends a zero-value
+same-nonce self-transfer, persists its hash before broadcast, and resumes only
+after its successful receipt archives the guard.
 If the isolated helper archives a legacy guard whose recorded error proves a
 definitive pre-broadcast rejection, the parent clears its stale in-memory halt
 only after finding an archive containing that exact transaction hash.
 
-If an outcome-unknown signed hash remains absent after 15 minutes and both the
-latest and pending wallet nonce still equal its recorded nonce, preview a
-deliberate same-nonce cancellation:
+To preview the same checks manually, or recover while automatic reconciliation
+is disabled, run:
 
 ```bash
 cancel-unresolved-broadcast --only BOTNAME
