@@ -1200,8 +1200,12 @@ transaction, native principal, exact managed-token receipt, confirmed gas
 economics, sufficient unallocated inventory, available position capacity, and
 a verified ledger reload. Exact transaction and receipt reads check every
 configured RPC endpoint. Missing exact-hash evidence with no unique proven
-replacement remains halted without a rebroadcast, and repeated failures back off exponentially to 30 minutes. It
-resumes only after the exact guard is archived.
+replacement triggers an automatic same-nonce cancellation only after the guard
+is at least 15 minutes old and both latest and pending nonce reads prove the
+nonce unused. The repair uses a live chain-specific gas estimate with 20%
+headroom; an older 21,000-gas attempt that is below the current estimate is
+rebuilt immediately. Other repeated failures back off exponentially to 30
+minutes. Trading resumes only after the exact guard is archived.
 
 ### Cancelling an absent ambiguous broadcast
 
@@ -1213,9 +1217,11 @@ equal the guard's nonce, preview a deliberate nonce cancellation for one bot:
 cancel-unresolved-broadcast --only abyss
 ```
 
-This is never automatic. Review the original hash/fingerprint, nonce, wallet,
-cancellation gas price, and maximum fee. Stop only the selected bot, then bind
-execution to the full reviewed hash:
+Automatic reconciliation runs these checks for safety-halted bots. This command
+remains available for preview or when automatic reconciliation is disabled.
+Review the original hash/fingerprint, nonce, wallet, cancellation gas limit and
+price, and maximum fee. Stop only the selected bot, then bind execution to the
+full reviewed hash:
 
 ```bash
 stop-bot abyss
@@ -1224,12 +1230,13 @@ cancel-unresolved-broadcast --only abyss --execute \
 start-bot abyss
 ```
 
-The cancellation is a zero-value self-transfer using the guarded nonce. Its
+The cancellation is a zero-value self-transfer using the guarded nonce and a
+live chain-specific gas estimate with 20% headroom. Its
 hash is written into the existing guard before broadcast, so a lost RPC reply
-cannot authorize a blind retry. The original guard is archived as
-`.cancelled.*` only after the exact successful cancellation receipt. Rerunning
-the same execute command after an interrupted confirmation only verifies and
-finalizes the recorded cancellation. Visible original transactions,
+cannot authorize a blind retry. A vanished attempt is fee-bumped after three
+minutes; a legacy attempt whose limit is below the live estimate is rebuilt
+immediately. The original guard is archived as `.cancelled.*` only after an
+exact cancellation receipt proves nonce consumption. Visible original transactions,
 latest/pending nonce mismatches, incomplete or young guards, insufficient gas,
 failed receipts, and fingerprint mismatches remain fail-closed.
 

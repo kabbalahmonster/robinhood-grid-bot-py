@@ -13,7 +13,9 @@ from web3 import Web3
 
 MINIMUM_GUARD_AGE_SECONDS = 900
 CANCELLATION_RETRY_SECONDS = 180
-CANCELLATION_GAS = 21_000
+MINIMUM_CANCELLATION_GAS = 21_000
+CANCELLATION_GAS_BUFFER_NUMERATOR = 120
+CANCELLATION_GAS_BUFFER_DENOMINATOR = 100
 MINIMUM_CANCELLATION_GAS_PRICE_WEI = 1_000_000_000
 GAS_BUMP_NUMERATOR = 125
 GAS_BUMP_DENOMINATOR = 100
@@ -33,6 +35,25 @@ def _find_transaction(w3, tx_hash):
 def _find_receipt(w3, tx_hash):
     finder = getattr(w3, "find_transaction_receipt", None)
     return finder(tx_hash) if callable(finder) else w3.eth.get_transaction_receipt(tx_hash)
+
+
+def _estimate_cancellation_gas(wallet, nonce):
+    """Return this chain's live gas estimate for the cancellation transfer."""
+    return int(wallet.w3.eth.estimate_gas({
+        "from": Web3.to_checksum_address(wallet.address),
+        "to": Web3.to_checksum_address(wallet.address),
+        "value": 0,
+        "nonce": nonce,
+    }))
+
+
+def _buffered_cancellation_gas_limit(estimate):
+    """Add headroom to a live estimate without assuming Ethereum semantics."""
+    buffered = (
+        estimate * CANCELLATION_GAS_BUFFER_NUMERATOR
+        + CANCELLATION_GAS_BUFFER_DENOMINATOR - 1
+    ) // CANCELLATION_GAS_BUFFER_DENOMINATOR
+    return max(MINIMUM_CANCELLATION_GAS, buffered)
 
 
 def build_cancellation_plan(wallet, config, now=None):
@@ -82,12 +103,15 @@ def build_cancellation_plan(wallet, config, now=None):
             f"{latest_nonce}/{pending_nonce}; replacement discovery is required"
         )
 
+    gas_limit = _buffered_cancellation_gas_limit(
+        _estimate_cancellation_gas(wallet, nonce)
+    )
     normal_gas_price = int(wallet.normal_gas_price())
     gas_price = max(
         normal_gas_price * 2,
         MINIMUM_CANCELLATION_GAS_PRICE_WEI,
     )
-    maximum_fee_wei = CANCELLATION_GAS * gas_price
+    maximum_fee_wei = gas_limit * gas_price
     balance_wei = int(wallet.get_eth_balance_wei())
     if balance_wei < maximum_fee_wei:
         raise ValueError(
@@ -103,7 +127,7 @@ def build_cancellation_plan(wallet, config, now=None):
         "guarded_value_wei": _int(guard["value_wei"]),
         "latest_nonce": latest_nonce,
         "pending_nonce": pending_nonce,
-        "gas": CANCELLATION_GAS,
+        "gas": gas_limit,
         "gas_price_wei": gas_price,
         "maximum_fee_wei": maximum_fee_wei,
         "wallet_balance_wei": balance_wei,
@@ -199,16 +223,25 @@ def _retry_recorded_cancellation_plan(wallet, config, now=None):
     if transaction is not None:
         raise ValueError("recorded cancellation is still pending")
 
+    nonce = _int(guard["nonce"])
+    estimated_gas = _estimate_cancellation_gas(wallet, nonce)
+    gas_limit = _buffered_cancellation_gas_limit(estimated_gas)
+    previous_gas_limit = _int(
+        guard.get("cancellation_gas_limit", MINIMUM_CANCELLATION_GAS)
+        or MINIMUM_CANCELLATION_GAS
+    )
+    prior_attempt_was_under_gassed = previous_gas_limit < estimated_gas
+
     now = int(time.time() if now is None else now)
     attempted_at = _int(guard.get("cancellation_attempted_at_unix", 0) or 0)
     age_seconds = now - attempted_at
-    if attempted_at <= 0 or age_seconds < CANCELLATION_RETRY_SECONDS:
+    if (attempted_at <= 0 or age_seconds < CANCELLATION_RETRY_SECONDS) \
+            and not prior_attempt_was_under_gassed:
         raise ValueError(
             f"recorded cancellation is only {age_seconds}s old; "
             f"wait at least {CANCELLATION_RETRY_SECONDS}s before fee bump"
         )
 
-    nonce = _int(guard["nonce"])
     latest_nonce = int(wallet.w3.eth.get_transaction_count(wallet.address, "latest"))
     pending_nonce = int(wallet.w3.eth.get_transaction_count(wallet.address, "pending"))
     if latest_nonce != nonce or pending_nonce != nonce:
@@ -226,7 +259,7 @@ def _retry_recorded_cancellation_plan(wallet, config, now=None):
         bumped_gas_price,
         MINIMUM_CANCELLATION_GAS_PRICE_WEI,
     )
-    maximum_fee_wei = CANCELLATION_GAS * gas_price
+    maximum_fee_wei = gas_limit * gas_price
     balance_wei = int(wallet.get_eth_balance_wei())
     if balance_wei < maximum_fee_wei:
         raise ValueError(
@@ -237,11 +270,12 @@ def _retry_recorded_cancellation_plan(wallet, config, now=None):
         "chain_id": _int(guard["chain_id"]),
         "wallet": wallet.address,
         "nonce": nonce,
-        "gas": CANCELLATION_GAS,
+        "gas": gas_limit,
         "gas_price_wei": gas_price,
         "maximum_fee_wei": maximum_fee_wei,
         "wallet_balance_wei": balance_wei,
         "replaces_cancellation_tx_hash": cancellation_hash,
+        "replaces_under_gassed_attempt": prior_attempt_was_under_gassed,
     }
 
 
@@ -272,13 +306,22 @@ def _broadcast_cancellation(wallet, plan):
             "tx_hash": str(previous_hash).lower(),
             "attempted_at_unix": record.get("cancellation_attempted_at_unix"),
             "gas_price_wei": record.get("cancellation_gas_price_wei"),
-            "status": "replaced_after_absence",
+            "gas_limit": record.get(
+                "cancellation_gas_limit", MINIMUM_CANCELLATION_GAS,
+            ),
+            "status": (
+                "replaced_after_insufficient_gas_limit"
+                if plan.get("replaces_under_gassed_attempt")
+                else "replaced_after_absence"
+            ),
         })
     record.update({
         "cancellation_tx_hash": cancellation_hash,
         "cancellation_attempted_at_unix": int(time.time()),
         "cancellation_gas_price_wei": plan["gas_price_wei"],
+        "cancellation_gas_limit": plan["gas"],
         "cancellation_status": "submission_unknown",
+        "cancellation_error": None,
         "cancellation_attempts": attempts,
     })
     wallet._persist_transaction_guard(record)
@@ -288,6 +331,11 @@ def _broadcast_cancellation(wallet, plan):
             raise RuntimeError("RPC returned a different cancellation hash")
         receipt = wallet.w3.eth.wait_for_transaction_receipt(returned, timeout=120)
     except Exception as exc:
+        record = dict(wallet.unresolved_broadcast)
+        record["cancellation_error"] = str(exc)
+        if "intrinsic gas too low" in str(exc).lower():
+            record["cancellation_status"] = "rejected_intrinsic_gas"
+        wallet._persist_transaction_guard(record)
         raise RuntimeError(
             f"cancellation outcome is unknown; guard retained with hash {cancellation_hash}: {exc}"
         ) from exc

@@ -20,6 +20,7 @@ CANCEL_HASH = "0x" + "44" * 32
 def fake_wallet(*, latest=7, pending=7, transaction=None, receipt=None):
     eth = SimpleNamespace(
         get_transaction_count=lambda _address, state: latest if state == "latest" else pending,
+        estimate_gas=lambda _tx: 21_000,
     )
     w3 = SimpleNamespace(
         eth=eth,
@@ -50,7 +51,8 @@ def test_preview_requires_old_absent_hash_and_unused_nonce():
     )
     assert plan["nonce"] == 7
     assert plan["gas_price_wei"] == 1_000_000_000
-    assert plan["maximum_fee_wei"] == 21_000_000_000_000
+    assert plan["gas"] == 25_200
+    assert plan["maximum_fee_wei"] == 25_200_000_000_000
 
 
 @pytest.mark.parametrize("latest,pending", [(8, 8), (7, 8)])
@@ -144,6 +146,23 @@ def test_execute_retains_original_guard_and_cancel_hash_on_rpc_uncertainty(tmp_p
     assert retained["tx_hash"] == HASH
     assert retained["cancellation_tx_hash"] == CANCEL_HASH
     assert retained["cancellation_status"] == "submission_unknown"
+    assert retained["cancellation_error"] == "lost reply"
+
+
+def test_intrinsic_gas_rejection_is_persisted_as_definitive(tmp_path):
+    wallet, path = executable_wallet(
+        tmp_path,
+        submission_error=ValueError({"code": -32000, "message": "intrinsic gas too low"}),
+    )
+
+    with pytest.raises(RuntimeError, match="intrinsic gas too low"):
+        cancel.execute_cancellation(
+            wallet, SimpleNamespace(chain_id=4663), HASH, now=2_000,
+        )
+
+    retained = json.loads(path.read_text())
+    assert retained["cancellation_status"] == "rejected_intrinsic_gas"
+    assert "intrinsic gas too low" in retained["cancellation_error"]
 
 
 def test_recorded_reverted_cancellation_consumes_nonce_and_archives(tmp_path):
@@ -191,7 +210,35 @@ def test_dropped_recorded_cancellation_is_fee_bumped_and_retried(tmp_path):
         "tx_hash": "0x" + "55" * 32,
         "attempted_at_unix": 1_500,
         "gas_price_wei": 1_000_000_000,
+        "gas_limit": 21_000,
         "status": "replaced_after_absence",
+    }]
+
+
+def test_under_gassed_legacy_attempt_is_rebuilt_immediately(tmp_path):
+    wallet, path = executable_wallet(tmp_path)
+    wallet.unresolved_broadcast.update({
+        "cancellation_tx_hash": "0x" + "55" * 32,
+        "cancellation_attempted_at_unix": 1_950,
+        "cancellation_gas_price_wei": 1_000_000_000,
+    })
+    wallet._persist_transaction_guard(wallet.unresolved_broadcast)
+    wallet.w3.find_transaction = lambda _tx_hash: None
+    wallet.w3.find_transaction_receipt = lambda _tx_hash: None
+    wallet.w3.eth.estimate_gas = lambda _tx: 30_000
+
+    result = cancel.execute_cancellation(
+        wallet, SimpleNamespace(chain_id=4663), HASH, now=2_000,
+    )
+
+    assert result["gas"] == 36_000
+    archived = json.loads(Path(result["archived_path"]).read_text())
+    assert archived["cancellation_attempts"] == [{
+        "tx_hash": "0x" + "55" * 32,
+        "attempted_at_unix": 1_950,
+        "gas_price_wei": 1_000_000_000,
+        "gas_limit": 21_000,
+        "status": "replaced_after_insufficient_gas_limit",
     }]
 
 
