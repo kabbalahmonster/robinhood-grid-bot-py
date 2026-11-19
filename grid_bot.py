@@ -7995,12 +7995,19 @@ class GridBot:
                 self._dispatch_route_shadow_background()
 
     def _attempt_auto_reconcile_unresolved_broadcast(self):
-        """Fail-closed recovery for a receipt-proven sell position deficit."""
+        """Drive guarded broadcast recovery until trading can safely resume."""
         if not self.wallet.has_unresolved_broadcast():
             self._safety_halted = False
             return True
         was_halted = bool(getattr(self, "_safety_halted", False))
         self._safety_halted = True
+        # The recovery helper runs in a child process and may advance the
+        # durable guard (for example by recording a cancellation hash). Always
+        # use the latest on-disk state instead of exponentially backing off on
+        # a stale in-memory snapshot.
+        latest_guard = self.wallet._load_unresolved_broadcast()
+        if isinstance(latest_guard, dict):
+            self.wallet.unresolved_broadcast = latest_guard
         tx_hash = self.wallet.unresolved_broadcast.get("tx_hash", "unknown")
         if not getattr(self.config, "auto_reconcile_unresolved_broadcast", True):
             if not was_halted:
@@ -8016,7 +8023,13 @@ class GridBot:
             self.config, "auto_reconcile_interval_seconds", 30
         )))
         failures = max(0, int(getattr(self, "_auto_reconcile_failures", 0)))
-        retry_interval = min(1800, interval * (2 ** min(failures, 6)))
+        repair_in_progress = bool(
+            self.wallet.unresolved_broadcast.get("cancellation_tx_hash")
+        )
+        retry_interval = (
+            interval if repair_in_progress
+            else min(1800, interval * (2 ** min(failures, 6)))
+        )
         if now - self._last_auto_reconcile_attempt < retry_interval:
             return False
         self._last_auto_reconcile_attempt = now
@@ -8028,12 +8041,23 @@ class GridBot:
             result = subprocess.run(
                 [sys.executable, str(script), "--automatic"],
                 cwd=Path(__file__).resolve().parent,
-                text=True, capture_output=True, timeout=max(20, interval), check=False,
+                # Cancellation waits up to 120 seconds for a receipt. Do not
+                # kill the child at the ordinary 30-second polling interval;
+                # that turns a healthy repair into artificial uncertainty.
+                text=True, capture_output=True, timeout=max(150, interval), check=False,
             )
         except (OSError, subprocess.SubprocessError) as exc:
             self._auto_reconcile_failures = failures + 1
-            next_interval = min(
-                1800, interval * (2 ** min(self._auto_reconcile_failures, 6))
+            latest_guard = self.wallet._load_unresolved_broadcast()
+            if isinstance(latest_guard, dict):
+                self.wallet.unresolved_broadcast = latest_guard
+            next_interval = (
+                interval
+                if self.wallet.unresolved_broadcast.get("cancellation_tx_hash")
+                else min(
+                    1800,
+                    interval * (2 ** min(self._auto_reconcile_failures, 6)),
+                )
             )
             logger.error(
                 "Automatic reconciliation check failed closed; retry in %ss: %s",
@@ -8065,10 +8089,17 @@ class GridBot:
                     tx_hash, archive_evidence["reason"],
                 )
                 return True
+            if isinstance(latest_guard, dict):
+                self.wallet.unresolved_broadcast = latest_guard
             detail = (result.stdout or result.stderr or "no detail").strip()
             self._auto_reconcile_failures = failures + 1
-            next_interval = min(
-                1800, interval * (2 ** min(self._auto_reconcile_failures, 6))
+            next_interval = (
+                interval
+                if self.wallet.unresolved_broadcast.get("cancellation_tx_hash")
+                else min(
+                    1800,
+                    interval * (2 ** min(self._auto_reconcile_failures, 6)),
+                )
             )
             logger.warning(
                 "Automatic reconciliation not yet safe; retry in %ss: %s",

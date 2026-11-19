@@ -197,6 +197,32 @@ class PositionBalanceGuardTests(unittest.TestCase):
         self.assertTrue(bot._safety_halted)
         self.assertEqual(bot.wallet.unresolved_broadcast["tx_hash"], "0xambiguous")
 
+    @patch("grid_bot.time.monotonic", side_effect=[100, 131, 162])
+    @patch("grid_bot.subprocess.run")
+    def test_cancellation_in_progress_polls_without_exponential_backoff(self, run, _clock):
+        bot = self.bot(400)
+        bot.config.auto_reconcile_unresolved_broadcast = True
+        bot.config.auto_reconcile_interval_seconds = 30
+        guard = {
+            "tx_hash": "0xambiguous", "cancellation_tx_hash": "0xcancel",
+        }
+        bot.wallet.unresolved_broadcast = guard
+        bot.wallet.has_unresolved_broadcast.return_value = True
+        bot.wallet._load_unresolved_broadcast.return_value = guard
+        bot._safety_halted = True
+        bot._last_auto_reconcile_attempt = 0
+        bot._auto_reconcile_failures = 0
+        run.return_value = subprocess.CompletedProcess(
+            [], 2, stdout='{"status":"cancellation_pending"}', stderr="",
+        )
+
+        self.assertFalse(bot._attempt_auto_reconcile_unresolved_broadcast())
+        self.assertFalse(bot._attempt_auto_reconcile_unresolved_broadcast())
+        self.assertFalse(bot._attempt_auto_reconcile_unresolved_broadcast())
+
+        self.assertEqual(run.call_count, 3)
+        self.assertEqual(run.call_args.kwargs["timeout"], 150)
+
     @patch("grid_bot.subprocess.run")
     def test_auto_reconcile_resumes_from_exact_child_archived_guard(self, run):
         class ArchivedWallet:

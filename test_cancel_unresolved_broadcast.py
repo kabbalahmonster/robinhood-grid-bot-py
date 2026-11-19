@@ -144,3 +144,70 @@ def test_execute_retains_original_guard_and_cancel_hash_on_rpc_uncertainty(tmp_p
     assert retained["tx_hash"] == HASH
     assert retained["cancellation_tx_hash"] == CANCEL_HASH
     assert retained["cancellation_status"] == "submission_unknown"
+
+
+def test_recorded_reverted_cancellation_consumes_nonce_and_archives(tmp_path):
+    wallet, path = executable_wallet(tmp_path)
+    wallet.unresolved_broadcast.update({
+        "cancellation_tx_hash": CANCEL_HASH,
+        "cancellation_attempted_at_unix": 1_500,
+        "cancellation_gas_price_wei": 1_000_000_000,
+    })
+    wallet._persist_transaction_guard(wallet.unresolved_broadcast)
+    wallet.w3.find_transaction = lambda tx_hash: ({
+        "from": WALLET, "to": WALLET, "nonce": 7, "value": 0, "chainId": 4663,
+    } if tx_hash == CANCEL_HASH else None)
+    wallet.w3.find_transaction_receipt = lambda tx_hash: ({
+        "status": 0, "blockNumber": 100,
+    } if tx_hash == CANCEL_HASH else None)
+
+    result = cancel.execute_cancellation(
+        wallet, SimpleNamespace(chain_id=4663), HASH, now=2_000,
+    )
+
+    assert not path.exists()
+    archived = json.loads(Path(result["archived_path"]).read_text())
+    assert archived["cancellation_status"] == "confirmed_nonce_consumed"
+
+
+def test_dropped_recorded_cancellation_is_fee_bumped_and_retried(tmp_path):
+    wallet, path = executable_wallet(tmp_path)
+    wallet.unresolved_broadcast.update({
+        "cancellation_tx_hash": "0x" + "55" * 32,
+        "cancellation_attempted_at_unix": 1_500,
+        "cancellation_gas_price_wei": 1_000_000_000,
+    })
+    wallet._persist_transaction_guard(wallet.unresolved_broadcast)
+    wallet.w3.find_transaction = lambda _tx_hash: None
+    wallet.w3.find_transaction_receipt = lambda _tx_hash: None
+
+    result = cancel.execute_cancellation(
+        wallet, SimpleNamespace(chain_id=4663), HASH, now=2_000,
+    )
+
+    assert result["gas_price_wei"] == 1_250_000_000
+    archived = json.loads(Path(result["archived_path"]).read_text())
+    assert archived["cancellation_attempts"] == [{
+        "tx_hash": "0x" + "55" * 32,
+        "attempted_at_unix": 1_500,
+        "gas_price_wei": 1_000_000_000,
+        "status": "replaced_after_absence",
+    }]
+
+
+def test_recent_dropped_cancellation_waits_before_fee_bump(tmp_path):
+    wallet, path = executable_wallet(tmp_path)
+    wallet.unresolved_broadcast.update({
+        "cancellation_tx_hash": "0x" + "55" * 32,
+        "cancellation_attempted_at_unix": 1_900,
+        "cancellation_gas_price_wei": 1_000_000_000,
+    })
+    wallet._persist_transaction_guard(wallet.unresolved_broadcast)
+    wallet.w3.find_transaction = lambda _tx_hash: None
+    wallet.w3.find_transaction_receipt = lambda _tx_hash: None
+
+    with pytest.raises(ValueError, match="wait at least 180s"):
+        cancel.execute_cancellation(
+            wallet, SimpleNamespace(chain_id=4663), HASH, now=2_000,
+        )
+    assert path.exists()

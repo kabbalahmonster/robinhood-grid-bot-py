@@ -12,8 +12,11 @@ from web3 import Web3
 
 
 MINIMUM_GUARD_AGE_SECONDS = 900
+CANCELLATION_RETRY_SECONDS = 180
 CANCELLATION_GAS = 21_000
 MINIMUM_CANCELLATION_GAS_PRICE_WEI = 1_000_000_000
+GAS_BUMP_NUMERATOR = 125
+GAS_BUMP_DENOMINATOR = 100
 
 
 def _int(value):
@@ -111,11 +114,20 @@ def _archive_cancelled_guard(wallet, plan, cancellation_hash, receipt):
     record = dict(wallet.unresolved_broadcast)
     if str(record.get("tx_hash") or "").lower() != plan["guarded_tx_hash"]:
         raise ValueError("unresolved guard changed during cancellation")
+    if receipt.get("status") is None or receipt.get("blockNumber") is None:
+        raise ValueError("cancellation receipt lacks status or block number")
+    receipt_status = _int(receipt["status"])
+    if receipt_status not in (0, 1):
+        raise ValueError("cancellation receipt has an invalid status")
     record.update({
         "cancellation_tx_hash": cancellation_hash,
         "cancellation_confirmed_at_unix": int(time.time()),
         "cancellation_block_number": _int(receipt.get("blockNumber", 0)),
-        "cancellation_status": "confirmed",
+        # A reverted cancellation still consumes the guarded nonce. That is
+        # enough to prove the original transaction can never settle later.
+        "cancellation_status": (
+            "confirmed" if receipt_status == 1 else "confirmed_nonce_consumed"
+        ),
     })
     wallet._persist_transaction_guard(record)
     path = Path(wallet.unresolved_broadcast_path)
@@ -145,8 +157,6 @@ def finalize_recorded_cancellation(wallet, config, confirm_tx_hash):
     receipt = _find_receipt(wallet.w3, cancellation_hash)
     if tx is None or receipt is None:
         raise ValueError("recorded cancellation is not yet receipt-proven")
-    if _int(receipt.get("status", 0)) != 1:
-        raise ValueError("recorded cancellation did not succeed")
     fingerprint = (
         str(tx.get("from") or "").lower() == wallet.address.lower()
         and str(tx.get("to") or "").lower() == wallet.address.lower()
@@ -168,14 +178,75 @@ def finalize_recorded_cancellation(wallet, config, confirm_tx_hash):
     return {**plan, "cancellation_tx_hash": cancellation_hash, "archived_path": archived}
 
 
-def execute_cancellation(wallet, config, confirm_tx_hash, now=None):
-    """Persist intent, broadcast a zero-value self replacement, and archive on receipt."""
+def _retry_recorded_cancellation_plan(wallet, config, now=None):
+    """Build a higher-fee replacement for a dropped cancellation attempt."""
     guard = getattr(wallet, "unresolved_broadcast", None)
-    if isinstance(guard, dict) and guard.get("cancellation_tx_hash"):
-        return finalize_recorded_cancellation(wallet, config, confirm_tx_hash)
-    plan = build_cancellation_plan(wallet, config, now=now)
-    if str(confirm_tx_hash or "").lower() != plan["guarded_tx_hash"]:
-        raise ValueError("--confirm-tx-hash must exactly match the guarded hash")
+    if not isinstance(guard, dict):
+        raise ValueError("no valid unresolved-broadcast guard exists")
+    if _int(guard.get("chain_id", -1)) != int(config.chain_id):
+        raise ValueError("guard chain does not match configured chain")
+    if str(guard.get("wallet") or "").lower() != wallet.address.lower():
+        raise ValueError("guard wallet does not match configured wallet")
+    guarded_hash = str(guard.get("tx_hash") or "").lower()
+    if (_find_transaction(wallet.w3, guarded_hash) is not None
+            or _find_receipt(wallet.w3, guarded_hash) is not None):
+        raise ValueError("guarded transaction became visible; use receipt reconciliation")
+    cancellation_hash = str(guard.get("cancellation_tx_hash") or "").lower()
+    transaction = _find_transaction(wallet.w3, cancellation_hash)
+    receipt = _find_receipt(wallet.w3, cancellation_hash)
+    if receipt is not None:
+        raise ValueError("recorded cancellation has a receipt; finalize it")
+    if transaction is not None:
+        raise ValueError("recorded cancellation is still pending")
+
+    now = int(time.time() if now is None else now)
+    attempted_at = _int(guard.get("cancellation_attempted_at_unix", 0) or 0)
+    age_seconds = now - attempted_at
+    if attempted_at <= 0 or age_seconds < CANCELLATION_RETRY_SECONDS:
+        raise ValueError(
+            f"recorded cancellation is only {age_seconds}s old; "
+            f"wait at least {CANCELLATION_RETRY_SECONDS}s before fee bump"
+        )
+
+    nonce = _int(guard["nonce"])
+    latest_nonce = int(wallet.w3.eth.get_transaction_count(wallet.address, "latest"))
+    pending_nonce = int(wallet.w3.eth.get_transaction_count(wallet.address, "pending"))
+    if latest_nonce != nonce or pending_nonce != nonce:
+        raise ValueError(
+            f"guard nonce is {nonce}, but latest/pending nonces are "
+            f"{latest_nonce}/{pending_nonce}; replacement discovery is required"
+        )
+
+    previous_gas_price = _int(guard.get("cancellation_gas_price_wei", 0) or 0)
+    bumped_gas_price = (
+        previous_gas_price * GAS_BUMP_NUMERATOR + GAS_BUMP_DENOMINATOR - 1
+    ) // GAS_BUMP_DENOMINATOR
+    gas_price = max(
+        int(wallet.normal_gas_price()) * 2,
+        bumped_gas_price,
+        MINIMUM_CANCELLATION_GAS_PRICE_WEI,
+    )
+    maximum_fee_wei = CANCELLATION_GAS * gas_price
+    balance_wei = int(wallet.get_eth_balance_wei())
+    if balance_wei < maximum_fee_wei:
+        raise ValueError(
+            f"wallet has {balance_wei} wei but cancellation may require {maximum_fee_wei} wei"
+        )
+    return {
+        "guarded_tx_hash": str(guard["tx_hash"]).lower(),
+        "chain_id": _int(guard["chain_id"]),
+        "wallet": wallet.address,
+        "nonce": nonce,
+        "gas": CANCELLATION_GAS,
+        "gas_price_wei": gas_price,
+        "maximum_fee_wei": maximum_fee_wei,
+        "wallet_balance_wei": balance_wei,
+        "replaces_cancellation_tx_hash": cancellation_hash,
+    }
+
+
+def _broadcast_cancellation(wallet, plan):
+    """Persist and submit one cancellation attempt described by ``plan``."""
     transaction = {
         "chainId": plan["chain_id"],
         "nonce": plan["nonce"],
@@ -193,15 +264,22 @@ def execute_cancellation(wallet, config, confirm_tx_hash, now=None):
         signed_hash.hex() if signed_hash is not None else Web3.keccak(raw).hex()
     ).lower()
 
-    # Persist the cancellation identity before the broadcast boundary. If the
-    # RPC response is lost, the original guard remains and the exact cancel hash
-    # can be receipt-checked without ever retrying automatically.
     record = dict(wallet.unresolved_broadcast)
+    previous_hash = record.get("cancellation_tx_hash")
+    attempts = list(record.get("cancellation_attempts") or [])
+    if previous_hash:
+        attempts.append({
+            "tx_hash": str(previous_hash).lower(),
+            "attempted_at_unix": record.get("cancellation_attempted_at_unix"),
+            "gas_price_wei": record.get("cancellation_gas_price_wei"),
+            "status": "replaced_after_absence",
+        })
     record.update({
         "cancellation_tx_hash": cancellation_hash,
         "cancellation_attempted_at_unix": int(time.time()),
         "cancellation_gas_price_wei": plan["gas_price_wei"],
         "cancellation_status": "submission_unknown",
+        "cancellation_attempts": attempts,
     })
     wallet._persist_transaction_guard(record)
     try:
@@ -213,14 +291,29 @@ def execute_cancellation(wallet, config, confirm_tx_hash, now=None):
         raise RuntimeError(
             f"cancellation outcome is unknown; guard retained with hash {cancellation_hash}: {exc}"
         ) from exc
-    if _int(receipt.get("status", 0)) != 1:
-        raise RuntimeError(
-            f"cancellation {cancellation_hash} failed; original guard remains active"
-        )
     archived = _archive_cancelled_guard(
         wallet, plan, cancellation_hash, receipt,
     )
     return {**plan, "cancellation_tx_hash": cancellation_hash, "archived_path": archived}
+
+
+def execute_cancellation(wallet, config, confirm_tx_hash, now=None):
+    """Persist intent, broadcast a zero-value self replacement, and archive on receipt."""
+    guard = getattr(wallet, "unresolved_broadcast", None)
+    if isinstance(guard, dict) and guard.get("cancellation_tx_hash"):
+        try:
+            return finalize_recorded_cancellation(wallet, config, confirm_tx_hash)
+        except ValueError as exc:
+            if "not yet receipt-proven" not in str(exc):
+                raise
+        plan = _retry_recorded_cancellation_plan(wallet, config, now=now)
+        if str(confirm_tx_hash or "").lower() != plan["guarded_tx_hash"]:
+            raise ValueError("--confirm-tx-hash must exactly match the guarded hash")
+        return _broadcast_cancellation(wallet, plan)
+    plan = build_cancellation_plan(wallet, config, now=now)
+    if str(confirm_tx_hash or "").lower() != plan["guarded_tx_hash"]:
+        raise ValueError("--confirm-tx-hash must exactly match the guarded hash")
+    return _broadcast_cancellation(wallet, plan)
 
 
 def main():
