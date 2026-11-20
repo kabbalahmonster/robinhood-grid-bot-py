@@ -28,6 +28,7 @@ def make_bot(enabled):
     bot._safety_halted = False
     bot._sell_priority_this_cycle = False
     bot._allow_buy_after_sell_this_cycle = False
+    bot._sell_round_broadcast_started = False
     bot._pnl_trigger_latches = {"buy": None, "sell": None}
     bot._close_incomplete_tournament = MagicMock()
     return bot
@@ -148,6 +149,45 @@ class MultiActionRoundTests(unittest.TestCase):
         self.assertEqual(bot._sell_round_succeeded, 2)
         self.assertTrue(bot._allow_buy_after_sell_this_cycle)
         self.assertFalse(bot._sell_has_cycle_priority())
+
+    def test_multi_action_releases_pump_buy_after_prebroadcast_sell_rejections(self):
+        bot = make_bot(True)
+        bot._pnl_trigger_latches = {"buy": "legacy", "sell": "legacy"}
+        bot._attempt_gridless_sell_candidate = MagicMock()
+        bot._check_buys_for_round = MagicMock()
+
+        with patch("gridless.load_positions", return_value=POSITIONS):
+            bot._check_sells_gridless(1.0, PNLS)
+        bought = bot._run_buy_phase(1.0, PNLS)
+
+        self.assertEqual(bot._sell_round_attempted, 2)
+        self.assertEqual(bot._sell_round_succeeded, 0)
+        self.assertFalse(bot._sell_round_broadcast_started)
+        self.assertTrue(bot._allow_buy_after_sell_this_cycle)
+        self.assertFalse(bot._sell_has_cycle_priority())
+        bot._check_buys_for_round.assert_called_once_with(1.0, PNLS)
+        self.assertEqual(bought, 0)
+
+    def test_multi_action_failed_sell_broadcast_keeps_buy_deferred(self):
+        bot = make_bot(True)
+
+        def attempted_broadcast(*_args):
+            bot._sell_candidate_broadcast_started = True
+
+        bot._attempt_gridless_sell_candidate = MagicMock(
+            side_effect=attempted_broadcast
+        )
+        bot._check_buys_for_round = MagicMock()
+
+        with patch("gridless.load_positions", return_value=POSITIONS):
+            bot._check_sells_gridless(1.0, PNLS)
+        bot._run_buy_phase(1.0, PNLS)
+
+        self.assertEqual(bot._sell_round_succeeded, 0)
+        self.assertTrue(bot._sell_round_broadcast_started)
+        self.assertFalse(bot._allow_buy_after_sell_this_cycle)
+        self.assertTrue(bot._sell_has_cycle_priority())
+        bot._check_buys_for_round.assert_not_called()
 
     def test_multi_action_isolates_prebroadcast_candidate_exception(self):
         bot = make_bot(True)

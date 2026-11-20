@@ -47,7 +47,11 @@ safety-halted. The remaining positions then receive their own guarded attempts.
 Crossing the sell broadcast boundary, any ambiguous broadcast, or any safety
 halt stops the pass; a post-boundary exception additionally safety-halts trading
 for restart recovery. Any unexpected failure keeps the buy lane deferred for
-that round.
+that round. When the complete selected sell pass returns normally but every
+route is rejected before broadcast, sell priority is released for that round so
+an independently eligible leading-edge or dip buy can execute without waiting
+for another poll. A failed or reverted sell that crossed the broadcast boundary
+does not receive this pre-broadcast release.
 
 ## Safe activation order
 

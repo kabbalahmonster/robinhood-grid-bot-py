@@ -303,10 +303,13 @@ the snapshotted balance, cost basis, and ladder ownership to still match.
 Provider fallback is scoped to that one transaction, so a later failure cannot
 replay an earlier confirmed sell. After every candidate has been handled, at
 least one confirmed sell permits the buy lane to run in the same round against
-fresh wallet, position, and Survivor state. An unresolved broadcast or safety
-halt ends the round immediately. No aggregate swap is created, and route, tax,
-slippage, gas-cap, profit, receipt, reconciliation, and cooldown guards are not
-bypassed.
+fresh wallet, position, and Survivor state. The buy lane also runs when every
+selected sell is conclusively rejected before any broadcast, preventing a
+non-executable exit from starving an independently eligible pump entry. An
+unexpected failure, crossed broadcast boundary without a confirmed sell,
+unresolved broadcast, or safety halt retains sell priority and ends or blocks
+the buy pass. No aggregate swap is created, and route, tax, slippage, gas-cap,
+profit, receipt, reconciliation, and cooldown guards are not bypassed.
 
 For a guarded latency canary, `POLL_CADENCE_MODE=fixed_rate` removes the extra
 post-round delay, and `ROUTE_TOURNAMENT_ROUND_ROUTE_REUSE=true` can reuse only

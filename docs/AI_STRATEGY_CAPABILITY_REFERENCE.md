@@ -192,7 +192,10 @@ sell per round and preserves strict sell-before-buy priority. With it enabled,
 the opening eligibility snapshot may authorize separate guarded attempts for
 every candidate. Each attempt reloads and matches durable position identity,
 gets its own exact quote, transaction, receipt, and reconciliation. A confirmed
-sell pass may then permit buys in the same round.
+sell pass may then permit buys in the same round. If every selected exit is
+conclusively rejected before broadcast, the sell lane also releases priority so
+an independently eligible pump buy can run immediately. Exceptions, safety
+halts, unresolved transactions, and post-broadcast failures keep buys deferred.
 
 ### Threshold allocation
 

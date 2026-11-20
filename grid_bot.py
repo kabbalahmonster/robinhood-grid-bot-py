@@ -6062,6 +6062,7 @@ class GridBot:
         successful = 0
         attempted = 0
         unexpected_failures = 0
+        self._sell_round_broadcast_started = False
         for _priority, pnl, pos_id, snapshot, reason in selected:
             if (getattr(self, "_safety_halted", False)
                     or self.wallet.has_unresolved_broadcast() is True):
@@ -6093,6 +6094,9 @@ class GridBot:
                 broadcast_started = bool(getattr(
                     self, "_sell_candidate_broadcast_started", False
                 ))
+                self._sell_round_broadcast_started = bool(
+                    self._sell_round_broadcast_started or broadcast_started
+                )
                 unresolved = self.wallet.has_unresolved_broadcast()
                 if (broadcast_started
                         or getattr(self, "_safety_halted", False)
@@ -6122,18 +6126,40 @@ class GridBot:
                     pos_id,
                 )
                 continue
+            self._sell_round_broadcast_started = bool(
+                self._sell_round_broadcast_started
+                or getattr(self, "_sell_candidate_broadcast_started", False)
+            )
             sells_after = int(getattr(self, "session_sells", 0))
             if sells_after > sells_before:
                 successful += sells_after - sells_before
 
         self._sell_round_attempted = attempted
         self._sell_round_succeeded = successful
-        if (multi_action and successful and not unexpected_failures
-                and attempted == len(selected)):
-            # All candidates from the authoritative opening snapshot have had
-            # their own guarded attempt. A buy may now use the freshly
-            # persisted position and wallet state in this same outer round.
+        sell_broadcast_started = bool(
+            getattr(self, "_sell_round_broadcast_started", False)
+        )
+        sell_pass_complete = bool(
+            multi_action
+            and not unexpected_failures
+            and attempted == len(selected)
+            and not getattr(self, "_safety_halted", False)
+            and self.wallet.has_unresolved_broadcast() is False
+        )
+        if (sell_pass_complete
+                and (successful or not sell_broadcast_started)):
+            # Every candidate from the authoritative opening snapshot received
+            # its own guarded attempt. A confirmed sell leaves freshly
+            # persisted state; an entirely pre-broadcast rejection leaves
+            # state unchanged and proves there is no executable exit to retain
+            # priority over an independently eligible pump buy. A failed or
+            # ambiguous post-broadcast attempt never releases this gate.
             self._allow_buy_after_sell_this_cycle = True
+            if not successful:
+                logger.info(
+                    "Buy lane released: complete sell pass found no "
+                    "pre-broadcast executable exit"
+                )
 
     @_with_tournament_terminal("sell")
     @_with_swap_provider_fallback
@@ -8142,6 +8168,7 @@ class GridBot:
         self._allow_buy_after_sell_this_cycle = False
         self._sell_round_attempted = 0
         self._sell_round_succeeded = 0
+        self._sell_round_broadcast_started = False
         # Ephemeral by design: a sell attempt must be re-established by this
         # round's quote check or it disappears from the next dashboard report.
         self._sell_attempt = None
