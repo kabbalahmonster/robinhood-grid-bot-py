@@ -317,16 +317,16 @@ def verified_reverted_broadcast(wallet, config, guard):
     return tx_hash
 
 
-def verified_successful_zero_value_without_managed_token_movement(
+def verified_successful_without_managed_token_movement(
         wallet, config, guard):
-    """Return a mined zero-value guard that cannot affect position inventory.
+    """Return a mined setup/native-transfer guard with no position movement.
 
-    Approval and other setup transactions can succeed on-chain after the RPC
-    loses their submission/receipt response.  They have no native principal
-    and no managed-token transfer involving the wallet, so neither the sell nor
-    gridless-buy reconciler can classify them.  Verify the complete durable
-    fingerprint and receipt before allowing the zero-deficit recovery path to
-    archive the guard.
+    Approval/setup transactions and plain native treasury transfers can succeed
+    on-chain after the RPC loses their submission/receipt response.  Neither
+    produces a managed-token transfer, so the sell and gridless-buy reconcilers
+    cannot classify them. Verify the complete durable fingerprint and receipt
+    before allowing the zero-deficit recovery path to archive the guard. A
+    value-bearing contract call remains ambiguous and is refused.
     """
     if not isinstance(guard, dict) or not guard.get("tx_hash"):
         raise ValueError("successful no-movement recovery requires a valid guard")
@@ -363,8 +363,10 @@ def verified_successful_zero_value_without_managed_token_movement(
         raise ValueError("guard wallet does not match the configured wallet")
     if _int(guard["chain_id"]) != int(config.chain_id):
         raise ValueError("guard chain does not match the configured chain")
-    if _int(tx.get("value", 0) or 0) != 0:
-        raise ValueError("successful transaction spent native principal")
+    value_wei = _int(tx.get("value", 0) or 0)
+    input_hex = _hex(tx.get("input", tx.get("data", "0x")) or "0x").lower()
+    if value_wei > 0 and input_hex != "0x":
+        raise ValueError("successful contract call spent native principal")
 
     wallet_topic = "0x" + wallet.address.lower().removeprefix("0x").rjust(64, "0")
     token_address = str(config.token_address).lower()
@@ -664,19 +666,29 @@ def main():
             # transaction already visible on-chain and left trading halted.
             try:
                 verified_hash = (
-                    verified_successful_zero_value_without_managed_token_movement(
+                    verified_successful_without_managed_token_movement(
                         wallet, config, guard,
                     )
                 )
                 archived = wallet.archive_reconciled_broadcast(verified_hash)
                 recovered_prior_reconciliation = bool(archived)
+                native_transfer = _int(guard.get("value_wei", 0) or 0) > 0
                 result["unresolved_broadcast_match"] = {
                     "tx_hash": verified_hash,
                     "status": (
-                        "receipt_verified_success_no_position_movement"
-                        if archived else "successful_no_movement_guard_archive_failed"
+                        (
+                            "receipt_verified_native_transfer_no_position_movement"
+                            if native_transfer
+                            else "receipt_verified_success_no_position_movement"
+                        )
+                        if archived
+                        else "successful_no_movement_guard_archive_failed"
                     ),
                 }
+                if native_transfer:
+                    result["unresolved_broadcast_match"]["value_wei"] = _int(
+                        guard["value_wei"]
+                    )
                 if archived:
                     result["unresolved_broadcast_match"]["archived_path"] = archived
             except Exception:

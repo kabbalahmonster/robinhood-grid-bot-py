@@ -117,25 +117,49 @@ def test_verifies_successful_zero_value_guard_without_wallet_token_movement():
     config = SimpleNamespace(chain_id=4663, token_address=TOKEN)
 
     assert (
-        reconciler.verified_successful_zero_value_without_managed_token_movement(
+        reconciler.verified_successful_without_managed_token_movement(
             wallet, config, guard,
         ) == TX_HASH
     )
 
 
-@pytest.mark.parametrize("tx_value,logs,error", [
-    (1, [], "spent native principal"),
-    (0, [incoming_transfer_log(25)], "moved managed-token inventory"),
-    (0, [transfer_log(25)], "moved managed-token inventory"),
+def test_verifies_successful_plain_native_transfer_without_position_movement():
+    guard = {
+        "tx_hash": TX_HASH, "chain_id": 4663, "wallet": WALLET,
+        "nonce": 328, "to": ROUTER, "value_wei": 1234,
+    }
+    tx = {
+        "from": WALLET, "nonce": 328, "to": ROUTER,
+        "value": 1234, "input": "0x",
+    }
+    wallet = SimpleNamespace(
+        address=WALLET,
+        w3=SimpleNamespace(
+            find_transaction=lambda _tx_hash: tx,
+            find_transaction_receipt=lambda _tx_hash: {"status": 1, "logs": []},
+        ),
+    )
+    config = SimpleNamespace(chain_id=4663, token_address=TOKEN)
+
+    assert reconciler.verified_successful_without_managed_token_movement(
+        wallet, config, guard,
+    ) == TX_HASH
+
+
+@pytest.mark.parametrize("tx_value,tx_input,logs,error", [
+    (1, "0x1234", [], "contract call spent native principal"),
+    (0, "0x1234", [incoming_transfer_log(25)], "moved managed-token inventory"),
+    (0, "0x1234", [transfer_log(25)], "moved managed-token inventory"),
 ])
 def test_successful_no_movement_verifier_rejects_economic_effects(
-        tx_value, logs, error):
+        tx_value, tx_input, logs, error):
     guard = {
         "tx_hash": TX_HASH, "chain_id": 4663, "wallet": WALLET,
         "nonce": 328, "to": ROUTER, "value_wei": tx_value,
     }
     tx = {
-        "from": WALLET, "nonce": 328, "to": ROUTER, "value": tx_value,
+        "from": WALLET, "nonce": 328, "to": ROUTER,
+        "value": tx_value, "input": tx_input,
     }
     wallet = SimpleNamespace(
         address=WALLET,
@@ -149,7 +173,7 @@ def test_successful_no_movement_verifier_rejects_economic_effects(
     config = SimpleNamespace(chain_id=4663, token_address=TOKEN)
 
     with pytest.raises(ValueError, match=error):
-        reconciler.verified_successful_zero_value_without_managed_token_movement(
+        reconciler.verified_successful_without_managed_token_movement(
             wallet, config, guard,
         )
 
@@ -386,7 +410,7 @@ def test_automatic_zero_deficit_recovers_receipt_proven_sell_with_surplus(
     assert not guard_path.exists()
 
 
-def test_automatic_zero_deficit_recovers_successful_approval_like_transaction(
+def test_automatic_zero_deficit_recovers_successful_native_treasury_transfer(
         monkeypatch, tmp_path, capsys):
     data = tmp_path / "data"
     data.mkdir()
@@ -394,12 +418,13 @@ def test_automatic_zero_deficit_recovers_successful_approval_like_transaction(
     (data / "position_balance_reconciliations.json").write_text("[]")
     guard = {
         "tx_hash": TX_HASH, "chain_id": 4663, "wallet": WALLET,
-        "nonce": 328, "to": TOKEN, "value_wei": 0,
+        "nonce": 328, "to": ROUTER, "value_wei": 1234,
     }
     guard_path = data / "unresolved_broadcast.json"
     guard_path.write_text(json.dumps(guard))
     transaction = {
-        "from": WALLET, "nonce": 328, "to": TOKEN, "value": 0,
+        "from": WALLET, "nonce": 328, "to": ROUTER,
+        "value": 1234, "input": "0x",
     }
     receipt = {"status": 1, "logs": []}
 
@@ -450,7 +475,8 @@ def test_automatic_zero_deficit_recovers_successful_approval_like_transaction(
     output = json.loads(capsys.readouterr().out)
     assert output["unresolved_broadcast_match"] == {
         "tx_hash": TX_HASH,
-        "status": "receipt_verified_success_no_position_movement",
+        "status": "receipt_verified_native_transfer_no_position_movement",
+        "value_wei": 1234,
         "archived_path": str(guard_path.with_name(guard_path.name + ".reconciled")),
     }
     assert not guard_path.exists()
