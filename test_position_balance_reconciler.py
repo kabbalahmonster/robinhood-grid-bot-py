@@ -91,6 +91,69 @@ def test_verified_outgoing_tokens_rejects_unproven_transaction(receipt, sender):
         reconciler.verified_outgoing_tokens(wallet_with(receipt, sender), TOKEN, TX_HASH)
 
 
+def test_verifies_successful_zero_value_guard_without_wallet_token_movement():
+    guard = {
+        "tx_hash": TX_HASH, "chain_id": 4663, "wallet": WALLET,
+        "nonce": 328, "to": ROUTER, "value_wei": 0,
+    }
+    tx = {
+        "from": WALLET, "nonce": 328, "to": ROUTER, "value": 0,
+    }
+    receipt = {
+        "status": 1,
+        "logs": [{
+            "address": TOKEN,
+            "topics": ["0x" + "99" * 32],
+            "data": "0x0",
+        }],
+    }
+    wallet = SimpleNamespace(
+        address=WALLET,
+        w3=SimpleNamespace(
+            find_transaction=lambda _tx_hash: tx,
+            find_transaction_receipt=lambda _tx_hash: receipt,
+        ),
+    )
+    config = SimpleNamespace(chain_id=4663, token_address=TOKEN)
+
+    assert (
+        reconciler.verified_successful_zero_value_without_managed_token_movement(
+            wallet, config, guard,
+        ) == TX_HASH
+    )
+
+
+@pytest.mark.parametrize("tx_value,logs,error", [
+    (1, [], "spent native principal"),
+    (0, [incoming_transfer_log(25)], "moved managed-token inventory"),
+    (0, [transfer_log(25)], "moved managed-token inventory"),
+])
+def test_successful_no_movement_verifier_rejects_economic_effects(
+        tx_value, logs, error):
+    guard = {
+        "tx_hash": TX_HASH, "chain_id": 4663, "wallet": WALLET,
+        "nonce": 328, "to": ROUTER, "value_wei": tx_value,
+    }
+    tx = {
+        "from": WALLET, "nonce": 328, "to": ROUTER, "value": tx_value,
+    }
+    wallet = SimpleNamespace(
+        address=WALLET,
+        w3=SimpleNamespace(
+            find_transaction=lambda _tx_hash: tx,
+            find_transaction_receipt=lambda _tx_hash: {
+                "status": 1, "logs": logs,
+            },
+        ),
+    )
+    config = SimpleNamespace(chain_id=4663, token_address=TOKEN)
+
+    with pytest.raises(ValueError, match=error):
+        reconciler.verified_successful_zero_value_without_managed_token_movement(
+            wallet, config, guard,
+        )
+
+
 def test_discovers_same_nonce_replacement_sell_from_transfer_logs(monkeypatch):
     receipt = {"status": 1, "logs": [transfer_log(25)]}
     transaction = {
@@ -319,6 +382,76 @@ def test_automatic_zero_deficit_recovers_receipt_proven_sell_with_surplus(
         "outgoing_raw": 50,
         "status": "receipt_verified_sell_inventory_collateralized",
         "archived_path": str(guard_path.with_suffix(".json.reconciled")),
+    }
+    assert not guard_path.exists()
+
+
+def test_automatic_zero_deficit_recovers_successful_approval_like_transaction(
+        monkeypatch, tmp_path, capsys):
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "gridless_positions.json").write_text('{"1":{"balance":100}}')
+    (data / "position_balance_reconciliations.json").write_text("[]")
+    guard = {
+        "tx_hash": TX_HASH, "chain_id": 4663, "wallet": WALLET,
+        "nonce": 328, "to": TOKEN, "value_wei": 0,
+    }
+    guard_path = data / "unresolved_broadcast.json"
+    guard_path.write_text(json.dumps(guard))
+    transaction = {
+        "from": WALLET, "nonce": 328, "to": TOKEN, "value": 0,
+    }
+    receipt = {"status": 1, "logs": []}
+
+    class FakeWallet:
+        def __init__(self, _config):
+            self.address = WALLET
+            self.unresolved_broadcast = dict(guard)
+            self.unresolved_broadcast_path = str(guard_path)
+            self.w3 = SimpleNamespace(
+                find_transaction=lambda _tx_hash: transaction,
+                find_transaction_receipt=lambda _tx_hash: receipt,
+            )
+
+        def get_token_balance(self, _token):
+            return 100, 100
+
+        def archive_reconciled_broadcast(self, tx_hash):
+            assert tx_hash == TX_HASH
+            archived = guard_path.with_name(guard_path.name + ".reconciled")
+            guard_path.replace(archived)
+            self.unresolved_broadcast = None
+            return str(archived)
+
+    config_module = ModuleType("config")
+    config_module.load_config = lambda: SimpleNamespace(
+        token_address=TOKEN, token_symbol="TOKEN", chain_id=4663,
+        use_gridless=True,
+    )
+    wallet_module = ModuleType("wallet")
+    wallet_module.Wallet = FakeWallet
+    gridless_reconciler_module = ModuleType("gridless_reconciler")
+    gridless_reconciler_module.run_gridless_reconciliation = (
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            ValueError("transaction spent no native ETH principal")
+        )
+    )
+    monkeypatch.setitem(sys.modules, "config", config_module)
+    monkeypatch.setitem(sys.modules, "wallet", wallet_module)
+    monkeypatch.setitem(sys.modules, "gridless_reconciler", gridless_reconciler_module)
+    monkeypatch.setattr(
+        reconciler, "cancel_absent_broadcast",
+        lambda *_args: pytest.fail("visible successful tx must not be cancelled"),
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "argv", ["reconcile-position-balances", "--automatic"])
+
+    assert reconciler.main() == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["unresolved_broadcast_match"] == {
+        "tx_hash": TX_HASH,
+        "status": "receipt_verified_success_no_position_movement",
+        "archived_path": str(guard_path.with_name(guard_path.name + ".reconciled")),
     }
     assert not guard_path.exists()
 
